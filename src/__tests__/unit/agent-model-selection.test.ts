@@ -64,6 +64,26 @@ describe('advertisedAgentModels', () => {
     ]);
   });
 
+  it('a surface override (the portal) wins over the agent entry and the model name, the main model included', async () => {
+    const models = await advertisedAgentModels({
+      config,
+      nameOf,
+      overrides: {
+        main: { label: '  Everyday  ', description: 'for most questions' },
+        fast: { description: 'override text' },
+        smart: { label: 'Deep thinker', description: '   ' },
+        unknown: { label: 'ignored' },
+      },
+    });
+    expect(models).toEqual([
+      { key: 'main', label: 'Everyday', description: 'for most questions', default: true },
+      // the override has no label: the agent's own stays; its description is replaced
+      { key: 'fast', label: 'Fast', description: 'override text', default: false },
+      // a blank override description does not erase anything
+      { key: 'smart', label: 'Deep thinker', default: false },
+    ]);
+  });
+
   it('is absent for an agent with no additional models', async () => {
     expect(await advertisedAgentModels({ config: { modelKey: 'main' }, nameOf })).toBeUndefined();
   });

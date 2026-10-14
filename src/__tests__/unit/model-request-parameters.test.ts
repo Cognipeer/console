@@ -181,7 +181,8 @@ describe('automatic detection — the drop_params equivalent', () => {
   });
 
   it('leaves the non-reasoning gpt-5 variant alone', () => {
-    expect(detectUnsupportedParams('openai', 'gpt-5-chat-latest').params).toEqual([]);
+    // Ordinary sampling stays; only the token field follows the rule (max_completion_tokens).
+    expect(detectUnsupportedParams('openai', 'gpt-5-chat-latest').params).toEqual(['max_tokens']);
   });
 
   it('says nothing about models and drivers it does not know', () => {
@@ -430,7 +431,7 @@ describe('gateway-namespaced model ids', () => {
   it('detects a rule through a vendor/region prefix', () => {
     const bare = detectUnsupportedParams('openai-compatible', 'gpt-5.6-terra', true);
     const namespaced = detectUnsupportedParams('openai-compatible', 'global.openai.gpt-5.6-terra', true);
-    expect(namespaced.ruleId).toBe('openai-gpt-5');
+    expect(namespaced.ruleId).toBe('openai-gpt-5x');
     expect(namespaced.params).toEqual(bare.params);
   });
 
@@ -446,7 +447,7 @@ describe('gateway-namespaced model ids', () => {
 
   it('never splits a dotted version inside the model name itself', () => {
     // `gpt-5.6-terra` must not be peeled down to `6-terra`.
-    expect(detectUnsupportedParams('openai-compatible', 'gpt-5.6-terra', false).ruleId).toBe('openai-gpt-5');
+    expect(detectUnsupportedParams('openai-compatible', 'gpt-5.6-terra', false).ruleId).toBe('openai-gpt-5x');
   });
 
   it('leaves a namespaced model with no rule alone', () => {

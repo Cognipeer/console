@@ -3,15 +3,20 @@
 /**
  * "Additional models" of an agent: further models a caller may pick for a run, next to the
  * main one. The list bounds the choice (an administrator narrows it per person with the
- * list); each row carries the label and description a picker shows.
+ * list); each row is just the model and its reasoning. The name and the "when to choose this
+ * model" text a picker shows are set where the picker lives (the portal); a label or description
+ * already stored on an entry is kept as is.
  */
 
 import { useMemo } from 'react';
-import { Group, MultiSelect, Stack, Text, TextInput } from '@mantine/core';
+import { Group, MultiSelect, Stack, Text } from '@mantine/core';
 import AgentReasoningPicker from './AgentReasoningPicker';
 import type { IAgentAdditionalModel } from '@/lib/database/provider/types.domain';
 
 export const MAX_ADDITIONAL_MODELS = 10;
+
+/** One width for every row's reasoning control, so the column lines up. */
+const REASONING_COLUMN_WIDTH = 170;
 
 export interface AdditionalModelOption {
     key: string;
@@ -35,10 +40,9 @@ export interface AgentAdditionalModelsProps {
         title: string;
         description: string;
         placeholder: string;
-        label: string;
-        labelPlaceholder: string;
-        descriptionLabel: string;
-        descriptionPlaceholder: string;
+        /** Column headers of the rows below the picker. */
+        modelColumn: string;
+        reasoningColumn: string;
     };
 }
 
@@ -53,17 +57,8 @@ export default function AgentAdditionalModels({ value, onChange, models, mainMod
 
     const setSelection = (keys: string[]) => {
         const limited = keys.slice(0, MAX_ADDITIONAL_MODELS);
-        // Keep what was typed for the models that stay; a new one starts empty.
+        // Keep the entries of the models that stay (label / description included); a new one starts empty.
         onChange(limited.map((key) => value.find((entry) => entry.modelKey === key) ?? { modelKey: key }));
-    };
-    const patch = (key: string, change: Partial<IAgentAdditionalModel>) => {
-        onChange(value.map((entry) => {
-            if (entry.modelKey !== key) return entry;
-            const next = { ...entry, ...change };
-            if (!next.label) delete next.label;
-            if (!next.description) delete next.description;
-            return next;
-        }));
     };
     const nameOf = (key: string) => models.find((m) => m.key === key)?.name ?? key;
 
@@ -81,43 +76,46 @@ export default function AgentAdditionalModels({ value, onChange, models, mainMod
                 maxValues={MAX_ADDITIONAL_MODELS}
                 data-testid="agent-additional-models"
             />
-            {value.map((entry) => (
-                <Stack key={entry.modelKey} gap={4} data-testid={`agent-additional-model-${entry.modelKey}`}>
-                    <Group align="flex-end" gap="sm" wrap="wrap">
-                        <Text size="xs" fw={600}>{nameOf(entry.modelKey)}</Text>
+            {value.length > 0 ? (
+                <Stack gap="xs">
+                    <Group gap="sm" wrap="nowrap" data-testid="agent-additional-models-header">
+                        <Text size="xs" c="dimmed" fw={600} style={{ flex: 1, minWidth: 0 }}>{labels.modelColumn}</Text>
                         {driverByProviderKey ? (
-                            <AgentReasoningPicker
-                                model={models.find((m) => m.key === entry.modelKey)}
-                                driverByProviderKey={driverByProviderKey}
-                                value={entry}
-                                onChange={(next) => onChange(value.map((row) => {
-                                    if (row.modelKey !== entry.modelKey) return row;
-                                    const { reasoningEffort: _e, reasoningBudgetTokens: _b, ...rest } = row;
-                                    void _e; void _b;
-                                    return { ...rest, ...next };
-                                }))}
-                                testId={`agent-additional-reasoning-${entry.modelKey}`}
-                            />
+                            <Text size="xs" c="dimmed" fw={600} w={REASONING_COLUMN_WIDTH}>{labels.reasoningColumn}</Text>
                         ) : null}
                     </Group>
-                    <TextInput
-                        size="xs"
-                        aria-label={`${labels.label} ${entry.modelKey}`}
-                        placeholder={labels.labelPlaceholder || nameOf(entry.modelKey)}
-                        value={entry.label ?? ''}
-                        onChange={(event) => patch(entry.modelKey, { label: event.currentTarget.value })}
-                        maxLength={80}
-                    />
-                    <TextInput
-                        size="xs"
-                        aria-label={`${labels.descriptionLabel} ${entry.modelKey}`}
-                        placeholder={labels.descriptionPlaceholder}
-                        value={entry.description ?? ''}
-                        onChange={(event) => patch(entry.modelKey, { description: event.currentTarget.value })}
-                        maxLength={200}
-                    />
+                    {value.map((entry) => (
+                        <Group
+                            key={entry.modelKey}
+                            gap="sm"
+                            wrap="nowrap"
+                            align="flex-start"
+                            data-testid={`agent-additional-model-${entry.modelKey}`}
+                        >
+                            <Text size="sm" truncate style={{ flex: 1, minWidth: 0 }} pt={6} title={nameOf(entry.modelKey)}>
+                                {nameOf(entry.modelKey)}
+                            </Text>
+                            {driverByProviderKey ? (
+                                <div style={{ width: REASONING_COLUMN_WIDTH, flexShrink: 0 }}>
+                                    <AgentReasoningPicker
+                                        compact
+                                        model={models.find((m) => m.key === entry.modelKey)}
+                                        driverByProviderKey={driverByProviderKey}
+                                        value={entry}
+                                        onChange={(next) => onChange(value.map((row) => {
+                                            if (row.modelKey !== entry.modelKey) return row;
+                                            const { reasoningEffort: _e, reasoningBudgetTokens: _b, ...rest } = row;
+                                            void _e; void _b;
+                                            return { ...rest, ...next };
+                                        }))}
+                                        testId={`agent-additional-reasoning-${entry.modelKey}`}
+                                    />
+                                </div>
+                            ) : null}
+                        </Group>
+                    ))}
                 </Stack>
-            ))}
+            ) : null}
         </Stack>
     );
 }

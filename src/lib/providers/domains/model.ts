@@ -68,7 +68,7 @@ export interface NativeTransport {
 
 /** The normalized reasoning value (`unset = send nothing`). */
 export interface NativeReasoning {
-  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
+  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   budgetTokens?: number;
   includeThoughts?: boolean;
 }

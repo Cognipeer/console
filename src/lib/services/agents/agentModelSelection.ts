@@ -110,24 +110,40 @@ export interface AdvertisedAgentModel {
     default: boolean;
 }
 
+/** Per-model name / description a surface (the portal) shows instead of the agent's own; keyed by model key. */
+export type AdvertisedModelOverrides = Record<string, { label?: string; description?: string }>;
+
 /**
  * The `models` field of an agent's info: only when the agent lists additional models; the main model first
  * (`default: true`), and nothing at all when fewer than two remain.
- * `nameOf` gives a model's display name (its label when the agent does not set one).
+ * `nameOf` gives a model's display name. Per model, label and description come from `overrides[key]`
+ * (trimmed, non-empty), then from the agent's own entry, then the model name (no description).
  */
 export async function advertisedAgentModels(input: {
     config: ModelConfig;
     nameOf: (modelKey: string) => Promise<string | undefined>;
+    overrides?: AdvertisedModelOverrides;
 }): Promise<AdvertisedAgentModel[] | undefined> {
     const { config } = input;
     if (!config.modelKey || additionalModelKeys(config).length === 0) return undefined;
-    const out: AdvertisedAgentModel[] = [{ key: config.modelKey, label: (await input.nameOf(config.modelKey)) ?? config.modelKey, default: true }];
+    const pick = (key: string, field: 'label' | 'description', own?: string): string | undefined => {
+        const override = input.overrides?.[key]?.[field];
+        const text = typeof override === 'string' ? override.trim() : '';
+        return text || own?.trim() || undefined;
+    };
+    const mainDescription = pick(config.modelKey, 'description');
+    const out: AdvertisedAgentModel[] = [{
+        key: config.modelKey,
+        label: pick(config.modelKey, 'label') ?? (await input.nameOf(config.modelKey)) ?? config.modelKey,
+        ...(mainDescription ? { description: mainDescription } : {}),
+        default: true,
+    }];
     for (const entry of config.additionalModels ?? []) {
         const key = typeof entry?.modelKey === 'string' ? entry.modelKey.trim() : '';
         if (!key || key === config.modelKey || out.some((m) => m.key === key)) continue;
         if (out.length >= 11) break;
-        const label = entry.label?.trim() || (await input.nameOf(key)) || key;
-        const description = entry.description?.trim();
+        const label = pick(key, 'label', entry.label) ?? (await input.nameOf(key)) ?? key;
+        const description = pick(key, 'description', entry.description);
         out.push({ key, label, ...(description ? { description } : {}), default: false });
     }
     return out.length >= 2 ? out : undefined;

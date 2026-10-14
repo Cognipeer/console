@@ -28,6 +28,41 @@ export class OutputTokenLimitError extends Error {
 
 type ErrorRecord = Record<string, unknown>;
 
+export const MODEL_PARAMETER_UNSUPPORTED_CODE = 'model_parameter_unsupported';
+const MODEL_REQUEST_ERROR_CODES = new Set(['unsupported_parameter', 'unsupported_value', 'model_request_invalid']);
+
+/**
+ * The agent-sdk's `ModelRequestError`: the model answered 400 about a parameter or value the SDK could not
+ * adjust away (after its own retries). Recognised by shape so this module stays free of the SDK.
+ */
+export function isModelRequestError(error: unknown): error is Error & {
+  code: string;
+  param?: string;
+  value?: unknown;
+  supportedValues?: string[];
+  provider?: string;
+  model?: string;
+} {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as unknown as ErrorRecord;
+  return candidate.status === 400
+    && typeof candidate.code === 'string'
+    && MODEL_REQUEST_ERROR_CODES.has(candidate.code)
+    && typeof candidate.model === 'string';
+}
+
+/** A clean 400 for a request setting the model refuses: names the model, the parameter and, when known, what it takes. */
+function normalizeModelRequestError(error: NonNullable<ReturnType<typeof asModelRequestError>>): NormalizedOpenAIError {
+  const supported = error.supportedValues?.length ? ` Supported values: ${error.supportedValues.join(', ')}.` : '';
+  const message = `The model "${error.model}" does not accept this request: ${error.message.replace(/\s+/g, ' ').trim()}${supported}`;
+  const code = error.code === 'model_request_invalid' ? 'model_request_invalid' : MODEL_PARAMETER_UNSUPPORTED_CODE;
+  return normalized(400, message, 'invalid_request_error', code, error.param ?? null);
+}
+
+function asModelRequestError(error: unknown) {
+  return isModelRequestError(error) ? error : undefined;
+}
+
 function asRecord(value: unknown): ErrorRecord | null {
   return value !== null && typeof value === 'object' ? value as ErrorRecord : null;
 }
@@ -155,6 +190,9 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
       'max_completion_tokens',
     );
   }
+
+  const modelRequestError = asModelRequestError(error);
+  if (modelRequestError) return normalizeModelRequestError(modelRequestError);
 
   const records = collectErrorRecords(error);
   const rawMessage = upstreamMessage(error)

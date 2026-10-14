@@ -20,6 +20,7 @@
  */
 
 import type {
+  ModelRuleLearnedEvent,
   BaseProvider,
   ChatCompletionChunk,
   ChatCompletionRequest,
@@ -28,6 +29,7 @@ import type {
   EmbeddingResponse,
   NativeModelOptions,
 } from '@cognipeer/agent-sdk';
+import { createLogger } from '@/lib/core/logger';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { hasExplicitThinking, translateAnthropicThinking } from '@/lib/services/models/reasoning';
@@ -55,7 +57,23 @@ export const OPENAI_SCHEMA_DRIVERS: ReadonlySet<string> = new Set(['openai', 'op
 
 type AnyRecord = Record<string, unknown>;
 
-const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high']);
+const logger = createLogger('native-model-client');
+
+/**
+ * The SDK learned a per-model adjustment from a provider 400 (a parameter to drop, an effort list, a renamed
+ * token field ...) and applies it from now on in this process. Logged so an operator can promote it to the
+ * Model Hub settings or report the model for the shared rule table.
+ */
+export function logModelRuleLearned(event: ModelRuleLearnedEvent): void {
+  logger.info('Model rule learned from a provider error', {
+    provider: event.provider,
+    model: event.model,
+    adjustment: event.adjustment,
+    reason: event.reason,
+  });
+}
+
+const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 /** Any of the reasoning shapes in circulation (legacy `{effort, summary}` included), as the normalized value. */
 export function normalizeNativeReasoning(value: unknown): NativeReasoning | undefined {
@@ -112,22 +130,16 @@ export function buildTransformRequest(input: {
     // `additionalModelRequestFields`), which would otherwise stick.
     let extra: AnyRecord | undefined = request.extra ? structuredClone(request.extra) : undefined;
 
-    // Chat Completions carries reasoning as `reasoning_effort` (its wire name, so a
-    // gateway-namespaced model id keeps it). On the Responses upstream the typed
-    // `reasoning` stays: the provider sends it as `reasoning: {effort, summary}`.
-    if (openAiSchema && !onResponses && request.reasoning) {
-      const { effort } = request.reasoning;
-      if (effort) extra = { ...(extra ?? {}), reasoning_effort: effort };
-      delete request.reasoning;
-    }
+    // The typed `reasoning` stays on the request for both upstream APIs: the SDK maps the effort to
+    // what the model's rule takes (Chat Completions `reasoning_effort`, Responses `reasoning.effort`).
+    // An effort put in `extra` would bypass that mapping.
 
     for (const name of rule.params) {
       const lower = name.toLowerCase();
       const field = STRIPPABLE_FIELDS[lower];
       if (field) delete request[field];
-      // `reasoning` and `reasoning_effort` are one setting to the gateway, and here an
-      // OpenAI-schema effort already sits in `extra` under its wire name: listing only
-      // `reasoning` must still keep it off the wire.
+      // `reasoning` and `reasoning_effort` are one setting to the gateway: listing only
+      // `reasoning` must also keep an effort the operator put in the extra body off the wire.
       const names = lower === 'reasoning' || lower === 'reasoning_effort' ? REASONING_WIRE_NAMES : [lower, name];
       if (extra) for (const key of names) delete extra[key];
       if (lower === 'reasoning' || lower === 'reasoning_effort') delete request.reasoning;
@@ -203,13 +215,9 @@ export function buildNativeOptions(input: {
   // their own reasoning envelope and are left alone.
   const reasoning = driver === 'bedrock' && !/anthropic|claude/i.test(input.modelId) ? undefined : input.reasoning;
   if (reasoning && !((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody))) {
-    if (openAiSchema && resolveUpstreamApi(input.settings) === 'responses') {
-      // Responses: the provider sends `reasoning: {effort, summary}` itself.
-      options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
-    } else if (openAiSchema) {
-      if (reasoning.effort) extra = { ...(extra ?? {}), reasoning_effort: reasoning.effort };
-    } else {
-      options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
+    // The provider turns it into the wire form itself (`reasoning_effort`, `reasoning: {effort, summary}`, thinking).
+    options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
+    if (!openAiSchema) {
       // Thinking tokens come out of `max_tokens`: leave the answer the room the console's
       // rule promises (the SDK's own floor is thinner), and keep a roomy cap as it is.
       if (driver === 'anthropic' || driver === 'bedrock') {
@@ -239,6 +247,7 @@ export function buildProviderConfig(
   return {
     ...spec.provider,
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    onModelRuleLearned: logModelRuleLearned,
     ...(transport?.timeoutMs !== undefined ? { timeoutMs: transport.timeoutMs } : {}),
     ...(maxRetries !== undefined && 'retry' in spec.provider ? { retry: { ...(spec.provider.retry ?? {}), maxRetries } } : {}),
     // The budget was renamed by the operator (`max_tokens` is unsupported):

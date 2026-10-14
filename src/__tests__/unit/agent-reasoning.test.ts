@@ -179,7 +179,7 @@ describe('config validation', () => {
       reasoningEffort: 'ultra' as never,
       reasoningBudgetTokens: -1,
       showReasoning: 'yes' as never,
-      additionalModels: [{ modelKey: 'x', reasoningEffort: 'max' as never }],
+      additionalModels: [{ modelKey: 'x', reasoningEffort: 'ultra' as never }],
     });
     expect(issues.map((issue) => issue.field).sort()).toEqual([
       'additionalModels[0].reasoningEffort',

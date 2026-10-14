@@ -446,6 +446,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
             status: event.status,
             type: event.error.type,
             code: event.error.code ?? undefined,
+            param: event.error.param ?? undefined,
           });
           throw failure;
         }
