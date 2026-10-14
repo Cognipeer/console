@@ -414,7 +414,7 @@ print(f"Uploaded: {file['key']} ({file['size']} bytes)")`;
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function FileBucketDetailPage() {
-  const params = useParams();
+  const params = useParams()!;
   const router = useRouter();
   const { openDocs } = useDocsDrawer();
   const bucketKeyParam = params.bucketKey;

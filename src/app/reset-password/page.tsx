@@ -18,7 +18,7 @@ import { useTranslations } from '@/lib/i18n';
 
 function ResetPasswordContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const token = searchParams.get('token');
   const t = useTranslations('resetPassword');
   const tCommon = useTranslations('common');

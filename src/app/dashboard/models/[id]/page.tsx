@@ -477,7 +477,7 @@ export default function ModelDetailPage() {
 
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   // The editor opens in place (an overlay); `?edit=1` is how old /edit links arrive.
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const [editOpen, setEditOpen] = useState(searchParams.get('edit') === '1');
   // Which section the edit overlay opens at (the Reasoning "Edit" shortcut); the top otherwise.
   const [editSection, setEditSection] = useState<'reasoning' | undefined>(undefined);

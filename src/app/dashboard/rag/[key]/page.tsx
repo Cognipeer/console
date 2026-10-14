@@ -302,7 +302,7 @@ function InlineLoadError({ message, onRetry }: InlineLoadErrorProps) {
 /* ── Page ──────────────────────────────────────────────────────────────── */
 
 export default function RagModuleDetailPage() {
-  const params = useParams();
+  const params = useParams()!;
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const { confirm } = useConfirm();

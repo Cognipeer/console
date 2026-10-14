@@ -107,7 +107,7 @@ const fromIso = (iso: string | null): Date | null => {
 export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
   const t = useTranslations('iamCenter');
   const locale = useLocale();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const errorText = useErrorText();
   const { catalog, index, error: catalogError, reload } = useIamCatalog();
   const labels = useIamLabels(catalog);

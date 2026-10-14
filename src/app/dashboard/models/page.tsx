@@ -211,7 +211,7 @@ export default function ModelsPage() {
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   // Latest request wins for both loaders.
   const modelsRequestRef = useRef(0);
   const dashboardRequestRef = useRef<AbortController | null>(null);

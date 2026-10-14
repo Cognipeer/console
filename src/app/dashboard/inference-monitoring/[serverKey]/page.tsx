@@ -96,7 +96,7 @@ function fmtPct(n: number | undefined | null): string {
 }
 
 export default function InferenceServerDetailPage() {
-  const { serverKey } = useParams<{ serverKey: string }>();
+  const { serverKey } = useParams<{ serverKey: string }>()!;
   const router = useRouter();
   const t = useTranslations('inferenceMonitoring');
   const tConfirm = useTranslations('common.confirm');

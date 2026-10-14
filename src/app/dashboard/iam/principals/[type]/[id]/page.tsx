@@ -8,7 +8,7 @@ import { useIamCapabilities } from '@/components/iam/useIamCapabilities';
 
 /** A person, a group or a token of the IAM center, on a page of its own. */
 function Body() {
-  const params = useParams<{ type: string; id: string }>();
+  const params = useParams<{ type: string; id: string }>()!;
   const { canManage, ready } = useIamCapabilities();
   if (!ready) {
     return (

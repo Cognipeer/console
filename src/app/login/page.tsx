@@ -32,7 +32,7 @@ type SsoDiscovery =
 
 function LoginPageContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const [loading, setLoading] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [sso, setSso] = useState<SsoDiscovery>({ available: false });

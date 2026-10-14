@@ -90,7 +90,7 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
   const tScopes = useTranslations('settings.quotaSection.scopes');
   const tDomains = useTranslations('settings.quotaSection.domains');
   const tConfirm = useTranslations('common.confirm.qos');
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const deleteResource = useDeleteResource();
 
   const { rows, loading, refreshing, error, forbidden, saving, reload, save, setEnabled, remove } = useLimits();

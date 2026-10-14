@@ -6,7 +6,7 @@ import AgentSessionView from '@/components/agents/session/AgentSessionView';
 import LoadingState from '@/components/common/LoadingState';
 
 export default function DashboardAgentSessionPage() {
-  const params = useParams();
+  const params = useParams()!;
   const agentId = params.agentId as string;
   const sessionId = params.sessionId as string;
   // The view reads `?version=` (the version StartSessionModal pinned), and

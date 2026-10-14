@@ -96,7 +96,7 @@ interface RunLogsState {
 export default function VectorMigrationDetailPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const { key } = useParams<{ key: string }>();
+  const { key } = useParams<{ key: string }>()!;
   const router = useRouter();
   const [detail, setDetail] = useState<MigrationDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);

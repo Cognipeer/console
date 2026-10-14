@@ -320,11 +320,11 @@ print(f"Latency: {result['latencyMs']}ms")`;
 // ── Component ────────────────────────────────────────────────────────────
 
 export default function ToolDetailPage() {
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>()!;
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const tabParam = searchParams.get('tab');
   const initialTab = ['overview', 'actions', 'logs', 'usage', 'test'].includes(tabParam ?? '')
     ? (tabParam as string)

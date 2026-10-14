@@ -186,7 +186,7 @@ function formatContextLabel(
 }
 
 export default function MemoryStoreDetailPage() {
-  const params = useParams();
+  const params = useParams()!;
   const router = useRouter();
   const t = useTranslations('memory');
   const tSafe = useTranslations('common.confirm.dataSafety');

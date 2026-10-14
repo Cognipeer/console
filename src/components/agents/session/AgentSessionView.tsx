@@ -218,7 +218,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const router = useRouter();
     const tConfirm = useTranslations('common.confirm');
     const deleteResource = useDeleteResource();
-    const searchParams = useSearchParams();
+    const searchParams = useSearchParams()!;
 
     const [agent, setAgent] = useState<AgentSummary | null>(null);
     const [session, setSession] = useState<SessionRecord | null>(null);

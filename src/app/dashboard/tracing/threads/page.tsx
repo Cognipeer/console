@@ -48,7 +48,7 @@ const DEFAULT_PAGE_SIZE = 25;
 
 export default function TracingThreadsPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const { openDocs } = useDocsDrawer();
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [totalThreads, setTotalThreads] = useState(0);

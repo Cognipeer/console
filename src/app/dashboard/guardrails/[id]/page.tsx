@@ -192,9 +192,9 @@ interface GuardrailFormValues {
 export default function GuardrailDetailPage() {
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>()!;
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const tabParam = searchParams.get('tab');
   const initialTab = resolveTab(tabParam);
   /**
