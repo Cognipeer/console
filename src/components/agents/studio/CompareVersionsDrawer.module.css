@@ -1,0 +1,87 @@
+/*
+ * Compare versions: two equal panes that fill the drawer.
+ *
+ * The drawer's body is a flex column of exactly the available height; the page
+ * never scrolls. The panes row takes whatever is left (min-height: 0 lets it
+ * shrink), each pane is a flex column — header, a transcript that scrolls on
+ * its own, a footer pinned underneath — so the two footers sit on one baseline
+ * however long either answer is.
+ */
+
+.root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-md);
+}
+
+.fixed {
+  flex: 0 0 auto;
+}
+
+.panes {
+  flex: 1 1 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--mantine-spacing-md);
+}
+
+/* Narrow: one pane above the other, each a sensible height; the row scrolls, the page does not. */
+@media (max-width: 52em) {
+  .panes {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: minmax(22rem, 1fr);
+    overflow-y: auto;
+  }
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.transcript {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-sm);
+  /* Room for the scrollbar so text does not jump when it appears. */
+  padding-inline-end: 4px;
+}
+
+.footer {
+  flex: 0 0 auto;
+  margin-top: var(--mantine-spacing-sm);
+  padding-top: var(--mantine-spacing-sm);
+  border-top: 1px solid var(--ds-border-soft, var(--mantine-color-gray-2));
+}
+
+.reasoningButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reasoningBody {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 2px solid var(--mantine-color-violet-2);
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+}

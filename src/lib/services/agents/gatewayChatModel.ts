@@ -83,6 +83,11 @@ export interface GatewayChatModelInput {
   requestReasoning?: NativeAgentReasoning;
   /** false: the agent hides its reasoning, so the provider is not asked for thought text. */
   showReasoning?: boolean;
+  /**
+   * Called with each piece of thought text as the provider streams it, for a caller
+   * that renders reasoning live. Only fires while reasoning is visible; never fails a request.
+   */
+  onReasoning?: (text: string) => void;
   /** The usage row's `route`: tells an agent call apart from a gateway call. */
   route?: string;
   agentKey?: string;
@@ -395,6 +400,9 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
           });
           const blocks = event.reasoningPayload?.blocks;
           const summary = showReasoning ? event.reasoning : undefined;
+          if (summary && input.onReasoning) {
+            try { input.onReasoning(summary); } catch { /* a display callback must not fail the run */ }
+          }
           yield {
             id,
             model: modelName,

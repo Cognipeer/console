@@ -2588,7 +2588,7 @@ export async function buildAgentChatModel(
 }
 
 /** The usage-row side of `buildAgentChatModel`. */
-export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
+export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
 
 /**
  * One tiny completion through exactly the path an agent run uses (the model's
@@ -2968,6 +2968,18 @@ export interface AgentPlaygroundChatRequest {
      */
     onTextChunk?: (text: string) => void;
     /**
+     * Incremental thought text of the model, for an operator view that draws
+     * reasoning live (needs `onTextChunk`, which turns provider streaming on).
+     * Local only: not relayed to another node.
+     */
+    onReasoningChunk?: (text: string) => void;
+    /**
+     * Operator view: ask the provider for the thinking text (Claude: summarized
+     * display) even when the agent hides reasoning from its API responses. The
+     * result carries it; what a Session STORES still follows the agent's setting.
+     */
+    revealReasoning?: boolean;
+    /**
      * Fires when the agent summarizes its context mid-run. Same relay caveat
      * as `onToolEvent`.
      */
@@ -3296,6 +3308,10 @@ async function buildLocalAgentRun(input: {
     modelChoice?: AgentModelChoice;
     /** See `AgentChatRequest.requestReasoning`. */
     requestReasoning?: NormalizedReasoning;
+    /** Operator view: the provider is asked for thought text even when the agent hides it from its API. */
+    revealReasoning?: boolean;
+    /** Thought text as it streams (live view only; see `AgentPlaygroundChatRequest.onReasoningChunk`). */
+    onReasoningChunk?: (text: string) => void;
     db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
     tenantId: string;
@@ -3367,7 +3383,9 @@ async function buildLocalAgentRun(input: {
         ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
         onRouted: (key) => { routedModelKey = key; },
-        ...(agentShowsReasoning(config) ? {} : { showReasoning: false }),
+        // The operator's own view (Compare versions) asks for the thinking text whatever the agent publishes.
+        ...(input.revealReasoning || agentShowsReasoning(config) ? {} : { showReasoning: false }),
+        ...(input.onReasoningChunk ? { onReasoning: input.onReasoningChunk } : {}),
         ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
             ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
             : {}),
@@ -4483,6 +4501,7 @@ export async function executePlaygroundChat(
     const payload = { ...request };
     delete payload.onToolEvent;
     delete payload.onTextChunk;
+    delete payload.onReasoningChunk;
     delete payload.onCompaction;
     delete payload.signal;
     const usage = createRunUsageSink();
@@ -4914,6 +4933,8 @@ async function runPlaygroundChatTurn(
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
+        ...(request.revealReasoning ? { revealReasoning: true } : {}),
+        ...(request.onReasoningChunk ? { onReasoningChunk: request.onReasoningChunk } : {}),
     });
 
     const attached = await assembleMessageAttachments({
