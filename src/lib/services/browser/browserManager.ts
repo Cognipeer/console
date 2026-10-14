@@ -261,12 +261,17 @@ class BrowserManager {
     this.startReaper();
 
     if (this.browserPromise) {
-      const existing = await this.browserPromise;
-      if (existing.isConnected()) return existing;
+      try {
+        const existing = await this.browserPromise;
+        if (existing.isConnected()) return existing;
+      } catch {
+        // A previous launch failed; fall through and retry instead of
+        // re-throwing the cached rejection until the process restarts.
+      }
       this.browserPromise = null;
     }
 
-    this.browserPromise = (async () => {
+    const launchPromise: Promise<PwBrowser> = (async () => {
       let chromium: { launch(opts: Record<string, unknown>): Promise<PwBrowser> };
       try {
         const playwright = await import('playwright');
@@ -327,8 +332,12 @@ class BrowserManager {
         ...(proxy ? { proxy } : {}),
       });
     })();
+    this.browserPromise = launchPromise;
+    launchPromise.catch(() => {
+      if (this.browserPromise === launchPromise) this.browserPromise = null;
+    });
 
-    return this.browserPromise;
+    return launchPromise;
   }
 
   async shutdown(): Promise<void> {

@@ -161,7 +161,17 @@ export class PlaywrightSession {
         return route.continue().catch(() => undefined);
       });
     })();
-    await this.launching;
+    try {
+      await this.launching;
+    } catch (err) {
+      // Don't cache the failure: every later page in this crawl would
+      // otherwise re-throw the same launch error. Release what was started.
+      this.launching = null;
+      await this.browser?.close().catch(() => undefined);
+      this.browser = null;
+      this.context = null;
+      throw err;
+    }
   }
 
   async fetch(url: string, signal?: AbortSignal): Promise<PlaywrightFetchResult> {
