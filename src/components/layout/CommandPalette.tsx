@@ -29,10 +29,12 @@ import {
 } from '@tabler/icons-react';
 import {
   ALL_DASHBOARD_SERVICES,
+  DASHBOARD_SUBPAGES,
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
 import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
+import { useOptionalLauncher } from './launcher/LauncherContext';
 
 /* ──────────────────────────────────────────────────────────────────────
    Public API: <CommandPalette /> mounted globally + openCommandPalette()
@@ -347,6 +349,10 @@ interface CommandPaletteProps {
 export default function CommandPalette({ isTenantAdmin = false }: CommandPaletteProps) {
   const { push: navigate } = useNavigationFeedback();
   const tNav = useTranslations('navigation');
+  // The services the shell offers this person in the active project (roles, groups, policies and
+  // project limits already applied); a service left out there is not worth a result that answers 403.
+  const launcher = useOptionalLauncher();
+  const offered = launcher?.services ?? null;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeGroup, setActiveGroup] = useState<GroupId | 'all'>('all');
@@ -415,10 +421,22 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
   /* ── Static service items ────────────────────────────────────────── */
 
   const services = useMemo<ResultItem[]>(() => {
-    return ALL_DASHBOARD_SERVICES.filter(
-      (s: DashboardServiceDefinition) =>
-        !s.tenantAdminOnly || isTenantAdmin,
-    ).map((s: DashboardServiceDefinition) => {
+    // The shell's own list already judged every service (administration ones included).
+    const candidates: ReadonlyArray<DashboardServiceDefinition> = offered
+      ? offered
+      : ALL_DASHBOARD_SERVICES.filter((s) => !s.tenantAdminOnly || isTenantAdmin);
+    const entries = [
+      ...candidates,
+      // Pages that sit inside another service's sub-nav (Agents → Webhooks) are found by name too,
+      // when the service they sit in is offered and the person may use the service they belong to
+      // (the shell's own judgement; without a shell, administration pages are for tenant admins).
+      ...DASHBOARD_SUBPAGES.filter(
+        (page) =>
+          candidates.some((s) => s.id === page.parent) &&
+          (launcher?.canUseService ? launcher.canUseService(page.service) : isTenantAdmin),
+      ),
+    ];
+    return entries.map((s) => {
       const ServiceIcon = s.icon;
       const label = tNav(s.navLabelKey);
       const description = tNav(s.navDescriptionKey);
@@ -439,7 +457,7 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
           .toLowerCase(),
       };
     });
-  }, [isTenantAdmin, tNav]);
+  }, [isTenantAdmin, launcher, offered, tNav]);
 
   /* ── Dynamic API fetch (debounced) ───────────────────────────────── */
 

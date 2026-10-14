@@ -1,3 +1,6 @@
+import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
+import { rememberSessionModel } from './agent-model-authz';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 /**
  * An agent, answered as an OpenAI chat completion.
@@ -22,6 +25,13 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  */
 
 import { createLogger } from '@/lib/core/logger';
+import {
+    resolveAgentPendingAction,
+    type ApprovalAuthorizer,
+    type ResolveActor,
+    type ResolveOutcome,
+} from '@/lib/services/agents/agentActionResolution';
+import { toClientPendingAction, type ClientPendingAction } from '@/lib/services/agents/clientWire';
 import type { IAgent } from '@/lib/database';
 import { createConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
 import {
@@ -38,6 +48,61 @@ export const AGENT_MODEL_PREFIX = 'agent:';
 export interface OpenAiMessage {
     role?: string;
     content?: unknown;
+    /** `tool` messages: the call this answers (the `id` of a `tool_calls` entry we sent). */
+    tool_call_id?: string;
+    /** Not OpenAI: a `tool` message that reports the tool failing rather than its result. */
+    is_error?: boolean;
+}
+
+/** One entry of an assistant message's `tool_calls`: a client tool the agent wants the caller to run. */
+export interface ChatToolCall {
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+}
+
+/** The client tool calls among an agent's open requests, as chat-completion `tool_calls`. */
+export function toChatToolCalls(actions: ReadonlyArray<ClientPendingAction> | undefined): ChatToolCall[] {
+    return (actions ?? [])
+        .filter((action) => action.kind === 'client_tool' && action.status === 'pending' && typeof action.tool_name === 'string')
+        .map((action) => ({
+            id: action.id,
+            type: 'function' as const,
+            function: { name: String(action.tool_name), arguments: JSON.stringify(action.args ?? {}) },
+        }));
+}
+
+export interface ToolAnswer {
+    callId: string;
+    /** The body of the actions endpoint: `{ output }` or `{ error }`. */
+    body: Record<string, unknown>;
+}
+
+/**
+ * The `tool` messages that close the transcript - the answers to the tool calls
+ * the last reply asked for. Everything before the last assistant message is
+ * history the agent already owns (it keeps its own conversation record).
+ */
+export function extractToolAnswers(messages: OpenAiMessage[] | undefined): ToolAnswer[] {
+    if (!Array.isArray(messages)) return [];
+    let start = messages.length;
+    while (start > 0 && messages[start - 1]?.role === 'tool') start -= 1;
+    const answers: ToolAnswer[] = [];
+    for (const message of messages.slice(start)) {
+        if (typeof message.tool_call_id !== 'string' || message.tool_call_id === '') continue;
+        const text = flattenContent(message.content);
+        if (message.is_error === true) {
+            answers.push({ callId: message.tool_call_id, body: { error: text || 'The tool failed.' } });
+            continue;
+        }
+        let output: unknown = text;
+        // A tool message's content is a string; a caller that returns JSON gets it back as JSON.
+        if (text.startsWith('{') || text.startsWith('[')) {
+            try { output = JSON.parse(text); } catch { output = text; }
+        }
+        answers.push({ callId: message.tool_call_id, body: { output } });
+    }
+    return answers;
 }
 
 /**
@@ -173,7 +238,7 @@ export interface AgentCompletionUsage {
  * precise reason travels in the non-OpenAI `stop_reason` field.
  */
 export function agentFinishReason(stopReason: AgentChatResponse['stop_reason']): 'stop' | 'length' {
-    return stopReason === 'limit' ? 'length' : 'stop';
+    return stopReason === 'limit' || stopReason === 'budget_reached' ? 'length' : 'stop';
 }
 
 /** The OpenAI chat-completion envelope, filled from an agent run. */
@@ -185,7 +250,13 @@ export function toChatCompletion(input: {
     conversationId: string;
     stopReason?: AgentChatResponse['stop_reason'];
     stopDetail?: string;
+    /** Client tools the agent is waiting on: the reply is a `tool_calls` message. */
+    toolCalls?: ChatToolCall[];
+    /** The agent's thinking text, when the agent and the request let it out (`reasoning_content`, as the model gateway names it). */
+    reasoning?: string;
 }) {
+    const calling = (input.toolCalls?.length ?? 0) > 0;
+    const thinking = input.reasoning ? { reasoning_content: input.reasoning } : {};
     return {
         id: input.id,
         object: 'chat.completion' as const,
@@ -193,12 +264,14 @@ export function toChatCompletion(input: {
         model: input.model,
         choices: [{
             index: 0,
-            message: { role: 'assistant' as const, content: input.content },
-            finish_reason: agentFinishReason(input.stopReason),
+            message: calling
+                ? { role: 'assistant' as const, content: input.content || null, ...thinking, tool_calls: input.toolCalls }
+                : { role: 'assistant' as const, content: input.content, ...thinking },
+            finish_reason: calling ? ('tool_calls' as const) : agentFinishReason(input.stopReason),
         }],
         ...(input.usage ? { usage: input.usage } : {}),
         // Not OpenAI fields either: why a run ended without a final answer.
-        ...(input.stopReason && input.stopReason !== 'completed'
+        ...(input.stopReason && input.stopReason !== 'completed' && !calling
             ? { stop_reason: input.stopReason, ...(input.stopDetail ? { stop_detail: input.stopDetail } : {}) }
             : {}),
         // Not an OpenAI field. An agent is stateful and the caller needs the
@@ -213,6 +286,8 @@ export function toChatChunk(input: {
     id: string;
     model: string;
     delta?: string;
+    /** A piece of the agent's thinking text; the chunk then carries `delta.reasoning_content` and no `content`. */
+    reasoning?: string;
     finish?: boolean;
     stopReason?: AgentChatResponse['stop_reason'];
 }) {
@@ -223,10 +298,36 @@ export function toChatChunk(input: {
         model: input.model,
         choices: [{
             index: 0,
-            delta: input.finish ? {} : { content: input.delta ?? '' },
+            delta: input.finish
+                ? {}
+                : input.reasoning !== undefined
+                    ? { reasoning_content: input.reasoning }
+                    : { content: input.delta ?? '' },
             finish_reason: input.finish ? agentFinishReason(input.stopReason) : null,
         }],
     };
+}
+
+/** The closing chunk of a streamed reply that ends in client tool calls. */
+export function toChatToolCallsChunk(input: { id: string; model: string; toolCalls: ChatToolCall[] }) {
+    return {
+        id: input.id,
+        object: 'chat.completion.chunk' as const,
+        created: Math.floor(Date.now() / 1000),
+        model: input.model,
+        choices: [{
+            index: 0,
+            delta: { tool_calls: input.toolCalls.map((call, index) => ({ index, ...call })) },
+            finish_reason: 'tool_calls' as const,
+        }],
+    };
+}
+
+/** Who answers a tool call, and how the engine is asked whether they may. */
+export interface ToolAnswerContext {
+    authorize: ApprovalAuthorizer;
+    actor: ResolveActor;
+    audit?: { ipAddress?: string; userAgent?: string; requestId?: string };
 }
 
 export interface RunAgentCompletionInput {
@@ -239,9 +340,32 @@ export interface RunAgentCompletionInput {
     ctx: AgentCompletionContext;
     /** Present for the streaming form; the deltas go here as they arrive. */
     onTextChunk?: (text: string) => void;
+    /** Present for the streaming form when the caller wants the thinking text too. */
+    onReasoningChunk?: (text: string) => void;
+    /** What answering a client tool call needs (the `tool` messages of the request). */
+    answer?: ToolAnswerContext;
+    /** The agent's model this run uses, resolved and authorized by the route (`agent_model`). */
+    modelChoice?: AgentModelChoice;
+    /** `reasoning_effort` / `reasoning: { effort }` of the request, validated by the route. Lowest rung. */
+    requestReasoning?: NormalizedReasoning;
 }
 
-export async function runAgentCompletion(input: RunAgentCompletionInput): Promise<
+/** Why a request to answer a tool call was refused, as the chat-completions error. */
+function answerRefusal(outcome: ResolveOutcome): { error: string; status: number } | null {
+    switch (outcome.kind) {
+        case 'not_found': return { error: 'tool_call_id does not match an open tool call of this conversation', status: 404 };
+        case 'not_pending': return { error: 'this tool call was already answered or is no longer open', status: 409 };
+        case 'expired': return { error: 'this tool call has expired', status: 410 };
+        case 'forbidden': return { error: outcome.message, status: 403 };
+        case 'unavailable': return { error: 'Authorization is temporarily unavailable', status: 503 };
+        case 'invalid': return { error: outcome.message, status: 400 };
+        case 'busy': return { error: 'another run is active for this conversation', status: 409 };
+        case 'queued': return { error: 'unexpected background continuation', status: 500 };
+        default: return null;
+    }
+}
+
+export type AgentCompletionResult =
     | { error: string; status: number }
     | {
         content: string;
@@ -249,8 +373,25 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         usage?: AgentCompletionUsage;
         stopReason?: AgentChatResponse['stop_reason'];
         stopDetail?: string;
-    }
-> {
+        /** Client tools the agent is waiting on (reply with `tool` messages, `tool_call_id` = `id`). */
+        toolCalls?: ChatToolCall[];
+        /** The agent's thinking text (already empty when the agent hides it). */
+        reasoning?: string;
+    };
+
+function toCompletionUsage(usage: AgentChatResponse['usage'] | undefined): { usage?: AgentCompletionUsage } {
+    // The Responses API names these input/output; chat/completions
+    // names them prompt/completion. Same numbers, different contract.
+    return usage
+        ? { usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.total_tokens } }
+        : {};
+}
+
+export async function runAgentCompletion(input: RunAgentCompletionInput): Promise<AgentCompletionResult> {
+    // The transcript ends in `tool` messages: the answers to the client tool calls the last reply asked for.
+    const toolAnswers = extractToolAnswers(input.messages);
+    if (toolAnswers.length > 0) return answerToolCalls(input, toolAnswers);
+
     const userMessage = extractLastUserMessage(input.messages);
     if (!userMessage) {
         return { error: 'messages must contain at least one user message', status: 400 };
@@ -259,7 +400,12 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx, 'api');
     if ('error' in conversation) return { error: conversation.error, status: 404 };
 
+    // A queued or later turn of this session reads the choice from it.
+    if (input.modelChoice) await rememberSessionModel(input.ctx.tenantDbName, conversation.conversationId, input.modelChoice);
+
     const result = await executeAgentChatExclusive({
+        ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
+        ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
         agentKey: input.agent.key,
         conversationId: conversation.conversationId,
         projectId: input.ctx.projectId,
@@ -270,26 +416,88 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         usePublished: true,
         userId: input.ctx.userId,
         userMessage,
+        // The chat-completions wire has no way to answer an approval: a gated
+        // tool follows the agent's `humanInTheLoop.unattended` setting (deny by
+        // default; `pause` leaves the session waiting in the dashboard).
+        unattended: true,
+        // It does have a way to run a tool: the agent's client tools come back as `tool_calls`.
+        answersClientTools: true,
         ...(input.version !== undefined ? { version: input.version } : {}),
         ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
         ...(input.onTextChunk ? { onTextChunk: input.onTextChunk } : {}),
+        ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}),
     });
 
+    return completionFrom(result, conversation.conversationId);
+}
+
+/** A Responses-shaped agent result as a chat completion: the answer, or the client tools it is waiting on. */
+function completionFrom(result: AgentChatResponse, conversationId: string): AgentCompletionResult {
+    const toolCalls = toChatToolCalls(result.required_action?.actions);
+    const reasoning = extractAnswerReasoning(result);
     return {
         content: extractAnswerText(result),
-        conversationId: conversation.conversationId,
+        ...(reasoning ? { reasoning } : {}),
+        conversationId,
         ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),
         ...(result.stop_detail ? { stopDetail: result.stop_detail } : {}),
-        ...(result.usage ? {
-            // The Responses API names these input/output; chat/completions
-            // names them prompt/completion. Same numbers, different contract.
-            usage: {
-                prompt_tokens: result.usage.input_tokens,
-                completion_tokens: result.usage.output_tokens,
-                total_tokens: result.usage.total_tokens,
-            },
-        } : {}),
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        ...toCompletionUsage(result.usage),
     };
+}
+
+/**
+ * Answers the client tool calls of the last reply and lets the turn go on. Each
+ * `tool` message is the same thing as `POST .../actions/{id}` on the sessions
+ * API (same authorization, same audit), so the two ways of answering cannot
+ * drift apart. The turn continues once the last open call is answered; the
+ * reply is then the final text, or the next `tool_calls`.
+ */
+async function answerToolCalls(input: RunAgentCompletionInput, answers: ToolAnswer[]): Promise<AgentCompletionResult> {
+    if (!input.conversationId) {
+        return { error: 'conversation_id is required to answer a tool call: send the one the reply carried', status: 400 };
+    }
+    if (!input.answer) return { error: 'tool messages are not accepted here', status: 400 };
+    const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx, 'api');
+    if ('error' in conversation) return { error: conversation.error, status: 404 };
+
+    let last: ResolveOutcome | undefined;
+    for (const answer of answers) {
+        last = await resolveAgentPendingAction({
+            tenantDbName: input.ctx.tenantDbName,
+            tenantId: input.ctx.tenantId,
+            projectId: input.ctx.projectId,
+            conversationId: conversation.conversationId,
+            actionId: answer.callId,
+            agentKey: input.agent.key,
+            body: answer.body,
+            actor: input.answer.actor,
+            authorize: input.answer.authorize,
+            mode: 'sync',
+            // This caller cannot answer an approval, but it runs the agent's client tools on the continuation too.
+            unattended: true,
+            answersClientTools: true,
+            ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
+            ...(input.onTextChunk
+                ? { stream: { onTextChunk: input.onTextChunk, ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}) } }
+                : {}),
+            ...(input.answer.audit ? { audit: input.answer.audit } : {}),
+        });
+        const refusal = answerRefusal(last);
+        if (refusal) return refusal;
+    }
+
+    if (last?.kind === 'resumed') return completionFrom(last.response, conversation.conversationId);
+    if (last?.kind === 'pending') {
+        // Other calls of the same reply are still open: ask for the rest.
+        return {
+            content: '',
+            conversationId: conversation.conversationId,
+            toolCalls: toChatToolCalls(last.pendingActions.map(toClientPendingAction)),
+            stopReason: 'requires_action',
+        };
+    }
+    return { error: 'the tool call could not be answered', status: 500 };
 }
 
 /**
@@ -307,5 +515,19 @@ export function extractAnswerText(result: AgentChatResponse): string {
             ? (part as { text: string }).text
             : ''))
         .join('')
+        .trim();
+}
+
+/**
+ * The thinking text of a Responses-shaped result (its `reasoning` items), for
+ * `reasoning_content`. The agent's `showReasoning: false` already left the
+ * item out, so there is nothing to apply again here.
+ */
+export function extractAnswerReasoning(result: AgentChatResponse): string {
+    return (result.output ?? [])
+        .filter((item): item is Extract<typeof item, { type: 'reasoning' }> => item.type === 'reasoning')
+        .flatMap((item) => item.summary ?? [])
+        .map((part) => (typeof part.text === 'string' ? part.text : ''))
+        .join('\n\n')
         .trim();
 }

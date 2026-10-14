@@ -11,16 +11,23 @@ import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
-import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
+import { getRequiredPermissionLevel } from '@/lib/security/rbac';
+import { serviceForRequest } from '@/lib/iam/routeAuthz';
+import { recordRegisteredRoute } from '@/lib/iam/routeRegistry';
+import { CombinedCredentialError, splitCombinedAuthorization } from '@/lib/iam/combinedCredential';
+import { USER_TOKEN_HEADER } from '@/lib/iam/delegationGate';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
-import { rejectInactiveSessionAccount } from './fastify-utils';
-import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
+import { getClientIp, rejectInactiveSessionAccount } from './fastify-utils';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
+import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
+import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
+import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
 import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
@@ -57,6 +64,7 @@ import { clientWebSearchApiPlugin } from './plugins/client-websearch';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
 import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { auditApiPlugin } from './plugins/audit';
+import { webhooksApiPlugin } from './plugins/webhooks';
 import { automationsApiPlugin } from './plugins/automations';
 import { browserApiPlugin } from './plugins/browser';
 import { crawlerApiPlugin } from './plugins/crawler';
@@ -85,10 +93,12 @@ import { memoryApiPlugin } from './plugins/memory';
 import { metricsApiPlugin } from './plugins/metrics';
 import { modelsApiPlugin } from './plugins/models';
 import { groupsApiPlugin } from './plugins/groups';
+import { iamApiPlugin } from './plugins/iam';
 import { promptsApiPlugin } from './plugins/prompts';
 import { skillsApiPlugin } from './plugins/skills';
 import { providersApiPlugin } from './plugins/providers';
 import { projectsApiPlugin } from './plugins/projects';
+import { resourcesApiPlugin } from './plugins/resources';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
 import { rerankerApiPlugin } from './plugins/reranker';
@@ -142,7 +152,8 @@ const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', 
  */
 const SELF_AUTH_API_PREFIXES = ['/api/gpu/agent/', '/api/sandbox/agent/'];
 
-function isSelfAuthApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard. */
+export function isSelfAuthApiPath(pathname: string): boolean {
   return SELF_AUTH_API_PREFIXES.some((path) => pathname.startsWith(path));
 }
 
@@ -152,14 +163,16 @@ function getPathname(url: string | undefined): string {
   return canonicalizeRequestPathname(url);
 }
 
-function isPublicApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard: a `public` route must be covered by this. */
+export function isPublicApiPath(pathname: string): boolean {
   if (PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))) {
     return true;
   }
   return PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
-function isClientApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard. */
+export function isClientApiPath(pathname: string): boolean {
   return CLIENT_API_PREFIXES.some((path) => pathname.startsWith(path));
 }
 
@@ -210,7 +223,11 @@ function unauthorized(
 function getAuditOutcome(
   statusCode: number,
   upstreamForwarded = false,
+  refusedByAuthorization = false,
 ): 'success' | 'failure' | 'denied' {
+  // A refusal because authorization was unavailable (503) is still a refusal of
+  // the caller by us, however it is worded to the client.
+  if (refusedByAuthorization) return 'denied';
   // `denied` means *we* refused the caller. A 401 forwarded from a model
   // provider says our credentials for that provider are wrong, which is an
   // operational failure, not an authorization event.
@@ -224,7 +241,11 @@ function shouldAuditRequest(request: FastifyRequest, statusCode: number): boolea
   if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
     return true;
   }
-  return statusCode === 401 || statusCode === 403;
+  // A request the engine could not decide is audited whatever its method: the
+  // decision id in the response must lead somewhere. So is a call that tried to act for a person and was not let in.
+  return statusCode === 401 || statusCode === 403
+    || request.iamDenial?.code === 'authorization_unavailable'
+    || request.iamDenial?.code === 'delegation_refused';
 }
 
 function getHeaderString(request: FastifyRequest, name: string): string | undefined {
@@ -234,21 +255,43 @@ function getHeaderString(request: FastifyRequest, name: string): string | undefi
   return undefined;
 }
 
-function getClientIp(request: FastifyRequest): string {
-  const forwarded = getHeaderString(request, 'x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0]?.trim() || 'unknown';
-  return getHeaderString(request, 'x-real-ip') ?? request.ip ?? 'unknown';
+/**
+ * Names the decision of a refusal on its 403 (or the 503 of an unavailable
+ * authorization), whatever the error dialect or the layer (route gate or
+ * handler check) that refused (the onSend hook of fastifyApiPlugin); exported
+ * for the gate tests.
+ */
+export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply): void {
+  const decisionId = request.iamDenial?.decisionId ?? request.iamDecisionId;
+  if (!decisionId) return;
+  // A refusal to act for a person is a 401, a 403 or a 503 and always names its decision.
+  if (reply.statusCode === 403
+    || (reply.statusCode === 503 && request.iamDenial?.code === 'authorization_unavailable')
+    || (request.iamDenial?.code === 'delegation_refused' && [401, 403, 503].includes(reply.statusCode))) {
+    reply.header('X-Decision-Id', decisionId);
+  }
 }
 
-function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
+/** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
+export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
-  const service = getPermissionServiceForPath(pathname);
+  // The service of the matched route: an explicit `config.authz` service
+  // declaration, else the path map.
+  const denial = request.iamDenial;
+  // A refusal of the engine is always audited, also when no service is involved
+  // (an undeclared route): it is a security event of the authorization engine.
+  const service = serviceForRequest(request.routeOptions?.config, pathname)
+    ?? (denial ? 'iam' : null);
   if (!service || pathname.startsWith('/api/audit')) {
     return;
   }
 
   const statusCode = reply.statusCode;
   if (!shouldAuditRequest(request, statusCode)) {
+    return;
+  }
+  // Read-only POSTs (compute only) are not administrative events; refusals still are.
+  if (request.routeOptions?.config?.skipAuditOnSuccess === true && statusCode < 400) {
     return;
   }
 
@@ -260,12 +303,38 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
     return;
   }
 
-  const actorUser = request.rbacUser ?? apiToken?.user ?? null;
+  // A call that acts for a person is attributed to that person (the subject) and to the application token (the actor);
+  // a call that tried to and was refused is attributed to the application token alone, never to the account it belongs to.
+  const delegation = apiToken?.delegation;
+  const refusedDelegation = delegation?.state === 'refused';
+  const actorUser = refusedDelegation ? null : (request.rbacUser ?? apiToken?.user ?? null);
   const method = request.method.toUpperCase();
-  const action = getRequiredPermissionLevel(method, service);
+  const action = denial?.code === 'route_not_declared' ? 'security' : getRequiredPermissionLevel(method, service);
   const apiTokenId = apiToken?.tokenRecord?._id
     ? String(apiToken.tokenRecord._id)
     : undefined;
+  // `via` in the metadata the row already has: the person is the subject (actorUserId), the application token the actor
+  // (apiTokenId), and the issuer who vouched for the person says how the call came to act for them.
+  const delegatedIssuer = delegation?.issuer;
+  const metadata: Record<string, unknown> = {
+    ...(delegatedIssuer ? { via: { kind: 'delegated', issuer: delegatedIssuer } } : {}),
+    ...(delegation?.state === 'refused' && delegation.subject ? { delegationSubject: delegation.subject } : {}),
+    ...(denial
+      ? {
+          iamEnforce: true,
+          code: denial.code,
+          ...(denial.decisionId ? { decisionId: denial.decisionId } : {}),
+          ...(denial.service ? { deniedService: denial.service } : {}),
+          ...(denial.required ? { required: denial.required } : {}),
+          ...(denial.action ? { action: denial.action } : {}),
+          ...(denial.projectId ? { contextProjectId: denial.projectId } : {}),
+          // The address the policy engine evaluated (the one a replay must use), not the audit IP.
+          ...(denial.ip ? { contextIp: denial.ip } : {}),
+          ...(denial.reasons?.length ? { reasons: denial.reasons } : {}),
+          ...(denial.policyIds?.length ? { policyIds: denial.policyIds } : {}),
+        }
+      : {}),
+  };
 
   criticalFireAndForget('api-audit-log', () => recordAuditLog(
     { tenantDbName, tenantId },
@@ -276,23 +345,30 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
       actorType: apiToken ? 'api_token' : 'user',
       actorUserId: actorUser?._id
         ? String(actorUser._id)
-        : (apiToken?.tokenRecord.userId ?? sessionHeaders?.['x-user-id']),
+        : refusedDelegation ? undefined : (apiToken?.tokenRecord.userId ?? sessionHeaders?.['x-user-id']),
       apiTokenId,
       event: `${method} ${pathname}`,
       ipAddress: getClientIp(request),
       method,
-      outcome: getAuditOutcome(statusCode, request.upstreamStatusForwarded),
+      outcome: getAuditOutcome(statusCode, request.upstreamStatusForwarded, denial?.code === 'authorization_unavailable' && statusCode === 503),
       path: pathname,
       projectId: apiToken?.projectId,
       requestId: request.apiRequestId,
       service,
       statusCode,
       userAgent: getHeaderString(request, 'user-agent'),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
     },
   ));
 }
 
 export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
+  // Remember how every route is authorized (diagnostics for the authorization
+  // settings: "does any route lack a declaration?").
+  app.addHook('onRoute', (route) => {
+    recordRegisteredRoute(route.method, route.url, route.config);
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     const pathname = getPathname(request.raw.url);
     const requestId =
@@ -338,6 +414,24 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     }
 
     if (clientApiRequest) {
+      // `Authorization: Bearer <api token>~<user token>`: the one header an SDK lets its caller set, carrying both the
+      // application token and the statement about the person. Split it here, once, into the two headers every later
+      // step already reads, so nothing downstream knows the combined form exists.
+      try {
+        const combined = splitCombinedAuthorization(request.headers.authorization);
+        if (combined) {
+          if (request.headers[USER_TOKEN_HEADER] !== undefined) {
+            throw new CombinedCredentialError('Send the user token either inside Authorization or in X-Cognipeer-User-Token, not both');
+          }
+          request.headers.authorization = `Bearer ${combined.apiToken}`;
+          request.headers[USER_TOKEN_HEADER] = combined.userToken;
+        }
+      } catch (error) {
+        if (error instanceof CombinedCredentialError) {
+          return reply.code(error.status).send({ error: error.message, code: error.code });
+        }
+        throw error;
+      }
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         const message = 'Missing or invalid Authorization header. Use: Bearer <token>';
@@ -414,6 +508,11 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
+  app.addHook('onSend', async (request, reply, payload) => {
+    stampDecisionHeader(request, reply);
+    return payload;
+  });
+
   app.addHook('onResponse', async (request, reply) => {
     enqueueAuditLog(request, reply);
   });
@@ -425,6 +524,9 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(clientWebhooksApiPlugin);
+  await app.register(clientAgentSessionsApiPlugin);
+  await app.register(agentSessionFilesApiPlugin);
   await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
@@ -499,6 +601,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(providersApiPlugin);
   await app.register(projectsApiPlugin);
   await app.register(groupsApiPlugin);
+  await app.register(iamApiPlugin);
+  await app.register(resourcesApiPlugin);
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
   await app.register(rerankerApiPlugin);
@@ -510,6 +614,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(usersApiPlugin);
   await app.register(vectorApiPlugin);
   await app.register(websearchApiPlugin);
+  await app.register(webhooksApiPlugin);
 
   // ── Enterprise overlay seam ──────────────────────────────────────────────
   // Registers the enterprise Fastify plugins (gpu-fleet, sandbox runtime,

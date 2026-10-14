@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
@@ -20,6 +20,7 @@ import {
   formatRelativeTime,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import { SkipTrail, type OffsetPageInfo } from '@/lib/shared/offsetPaging';
 
 dayjs.extend(relativeTime);
 
@@ -38,9 +39,9 @@ interface ThreadRecord {
   modelsUsed: string[];
 }
 
-interface ThreadsResponse {
+// A caller who may not view every session gets `hasMore` / `nextSkip` instead of a `total` (see offsetPaging.ts).
+interface ThreadsResponse extends OffsetPageInfo {
   threads: ThreadRecord[];
-  total: number;
 }
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -51,6 +52,9 @@ export default function TracingThreadsPage() {
   const { openDocs } = useDocsDrawer();
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [totalThreads, setTotalThreads] = useState(0);
+  // Where each page starts, and whether a list without a total has a next page (null: it has a total).
+  const skipTrail = useRef(new SkipTrail());
+  const [moreAfter, setMoreAfter] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
@@ -67,7 +71,7 @@ export default function TracingThreadsPage() {
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
-    params.set('skip', ((page - 1) * pageSize).toString());
+    params.set('skip', skipTrail.current.skipFor(page, pageSize).toString());
     if (query) params.set('threadId', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (metadataKey.trim() && metadataValue.trim()) {
@@ -101,12 +105,15 @@ export default function TracingThreadsPage() {
         }
         const data: ThreadsResponse = await response.json();
         setThreads(data.threads || []);
-        setTotalThreads(data.total || 0);
+        skipTrail.current.remember(page, data);
+        setTotalThreads(data.total ?? 0);
+        setMoreAfter(typeof data.total === 'number' ? null : data.hasMore === true);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         console.error('Failed to load threads:', error);
         setThreads([]);
         setTotalThreads(0);
+        setMoreAfter(null);
       } finally {
         if (!signal?.aborted) {
           setLoading(false);
@@ -114,8 +121,13 @@ export default function TracingThreadsPage() {
         }
       }
     },
-    [buildQueryParams],
+    [buildQueryParams, page],
   );
+
+  // Another search is another list: the pages of the last one no longer say where this one's start.
+  useEffect(() => {
+    skipTrail.current.reset();
+  }, [query, statusFilter, metadataKey, metadataValue]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -325,15 +337,15 @@ export default function TracingThreadsPage() {
         }}
         footerLeft={
           <Text size="xs" c="dimmed">
-            {formatNumber(totalThreads)} total · Page {page} of {totalPages}
+            {moreAfter === null ? `${formatNumber(totalThreads)} total · Page ${page} of ${totalPages}` : `Page ${page}`}
           </Text>
         }
         pagination={{
           page,
           onPageChange: setPage,
           pageSize,
-          total: totalThreads,
-          hasMore: page < totalPages,
+          ...(moreAfter === null ? { total: totalThreads } : {}),
+          hasMore: moreAfter === null ? page < totalPages : moreAfter,
         }}
         rowActions={(t) => [
           {

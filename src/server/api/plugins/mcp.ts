@@ -52,6 +52,7 @@ import { ensureMcpGuardrailHook } from '@/lib/services/guardrail/hooks/mcpHook';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   type ApiSessionContext,
+  authorizeServiceForRequest,
   getClientIp,
   readJsonBody,
   requireProjectContextForRequest,
@@ -59,7 +60,6 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { resolveCurrentServicePermission } from '@/lib/security/rbac';
 
 const logger = createLogger('api:mcp');
 const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
@@ -111,10 +111,12 @@ function sendEndpointSlugError(reply: FastifyReply, error: unknown): ReturnType<
  * (owner/admin role, or an explicit admin-level grant).
  */
 async function requireStdioSubprocessPermission(
+  request: FastifyRequest,
   session: ApiSessionContext,
 ): Promise<boolean> {
-  const { user, groupGrants } = await resolveSessionRbacContext(session);
-  return resolveCurrentServicePermission(user, 'mcp', groupGrants) === 'admin';
+  const rbac = await resolveSessionRbacContext(session);
+  // The policy engine decides, with project narrowing and custom policies.
+  return (await authorizeServiceForRequest(request, 'mcp', { level: 'admin', rbac })).allowed;
 }
 
 const STDIO_SUBPROCESS_FORBIDDEN_ERROR =
@@ -466,7 +468,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      if (stdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(session))) {
+      if (stdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(request, session))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
@@ -641,7 +643,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      if (nextStdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(session))) {
+      if (nextStdioConfig?.executionMode === 'subprocess' && !(await requireStdioSubprocessPermission(request, session))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 

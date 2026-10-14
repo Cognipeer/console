@@ -1,8 +1,10 @@
 'use client';
 
+import ReasoningSummary from '@/components/models/ReasoningSummary';
+import UpstreamApiSummary from '@/components/models/UpstreamApiSummary';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
   Button,
@@ -47,6 +49,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import ModelPlayground from '@/components/playground/ModelPlayground';
 import SttPlayground from '@/components/playground/SttPlayground';
@@ -80,6 +83,8 @@ import {
 import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
 import { isAbnormalFinishReason } from '@/lib/shared/finishReason';
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
+import EditModelModal from '@/components/models/EditModelModal';
+import CreateDynamicModelModal, { type CandidateModel } from '@/components/models/CreateDynamicModelModal';
 import {
   bindingRowsFromStored,
   effectiveHooks,
@@ -94,6 +99,7 @@ import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import type { IDynamicRoutingConfig, IDynamicRoutingTarget } from '@/lib/database';
+import { modelTakesImages } from '@/components/models/inputModalities';
 
 interface ModelPricing {
   currency?: string;
@@ -122,6 +128,8 @@ interface ModelDetailDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -357,8 +365,8 @@ function parseToolCalls(source: Record<string, unknown> | undefined): ParsedTool
 /**
  * `providerResponse` takes one of a few shapes depending on how the request
  * completed: an OpenAI-style `{choices:[{message}]}` object (non-streaming
- * success), a flat LangChain `AIMessageChunk`-like object (`{content,
- * tool_calls,...}`, aggregated from stream deltas), or a wrapper around one
+ * success), a flat assistant-message-like object (`{content, tool_calls,
+ * reasoning_content}`, aggregated from stream deltas), or a wrapper around one
  * of those (`{partial: ...}` on cancel/guardrail-block, `{error}` on failure).
  * This normalizes all of them to one shape for display.
  */
@@ -464,8 +472,19 @@ export default function ModelDetailPage() {
   const { push: navigate } = useNavigationFeedback();
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelDetail');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
 
   const [model, setModel] = useState<ModelDetailDto | null>(null);
+  // The editor opens in place (an overlay); `?edit=1` is how old /edit links arrive.
+  const searchParams = useSearchParams();
+  const [editOpen, setEditOpen] = useState(searchParams.get('edit') === '1');
+  // Which section the edit overlay opens at (the Reasoning "Edit" shortcut); the top otherwise.
+  const [editSection, setEditSection] = useState<'reasoning' | undefined>(undefined);
+  const [routerCandidates, setRouterCandidates] = useState<{ llm: CandidateModel[]; decision: CandidateModel[] }>({
+    llm: [],
+    decision: [],
+  });
   const [usage, setUsage] = useState<UsageAggregateDto | null>(null);
   const [logs, setLogs] = useState<UsageLogDto[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -675,17 +694,24 @@ export default function ModelDetailPage() {
 
   const handleDelete = async () => {
     if (!model || deleting) return;
-    const confirmed = window.confirm(t('actions.deleteConfirm'));
-    if (!confirmed) return;
     setDeleting(true);
     try {
-      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
-        throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.model'),
+        name: model.name,
+        type: 'model',
+        id: String(model._id),
+        action: async () => {
+          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            const error = await response
+              .json()
+              .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
+            throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
+          }
+        },
+      });
+      if (!deleted) return;
       notifications.show({
         title: t('notifications.deleteSuccessTitle'),
         message: t('notifications.deleteSuccessMessage'),
@@ -703,6 +729,27 @@ export default function ModelDetailPage() {
       setDeleting(false);
     }
   };
+
+  const isDynamicModel = Boolean(model && dynamicConfigOf(model));
+  // A router's editor needs the models it can route to.
+  useEffect(() => {
+    if (!editOpen || !isDynamicModel) return;
+    let cancelled = false;
+    void fetch('/api/models', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const all = (data.models ?? []) as Array<{ key: string; name: string; category: string; settings?: Record<string, unknown> }>;
+        setRouterCandidates({
+          llm: all.filter((m) => m.category === 'llm' && !dynamicConfigOf(m)).map((m) => ({ key: m.key, name: m.name })),
+          decision: all.filter((m) => m.category === 'decision').map((m) => ({ key: m.key, name: m.name })),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [editOpen, isDynamicModel]);
 
   if (loading) {
     return <ModelDetailSkeleton />;
@@ -745,6 +792,7 @@ export default function ModelDetailPage() {
   const dynamic = dynamicConfigOf(model);
   const isDynamic = Boolean(dynamic);
 
+
   // A Dynamic LLM has no real provider runtime, so its playground would error.
   const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding', 'decision'] as const;
   const hasPlayground =
@@ -770,6 +818,27 @@ export default function ModelDetailPage() {
 
   return (
     <PageContainer>
+      {dynamic ? (
+        <CreateDynamicModelModal
+          opened={editOpen}
+          onClose={() => setEditOpen(false)}
+          candidates={routerCandidates.llm}
+          decisionCandidates={routerCandidates.decision}
+          editModel={{ _id: model._id, name: model.name, description: model.description, key: model.key, dynamic }}
+          onSaved={() => void fetchDetail()}
+        />
+      ) : (
+        <EditModelModal
+          modelId={model._id}
+          opened={editOpen}
+          onClose={() => {
+            setEditOpen(false);
+            setEditSection(undefined);
+          }}
+          onSaved={() => void fetchDetail()}
+          initialSection={editSection}
+        />
+      )}
       {/* Header */}
       <header className="ds-page-header" style={{ alignItems: 'center' }}>
         <div className="ds-row ds-gap-md" style={{ flex: 1, minWidth: 0 }}>
@@ -819,7 +888,7 @@ export default function ModelDetailPage() {
               ) : (
                 <span className="ds-badge">{model.category}</span>
               )}
-              {model.isMultimodal ? (
+              {modelTakesImages(model) ? (
                 <span className="ds-badge ds-badge-info">vision</span>
               ) : null}
               {model.supportsToolCalls ? (
@@ -908,12 +977,7 @@ export default function ModelDetailPage() {
             </Menu.Target>
             <Menu.Dropdown>
               <Menu.Item
-                component={Link}
-                href={
-                  dynamic
-                    ? `/dashboard/models?editDynamic=${model._id}`
-                    : `/dashboard/models/${model._id}/edit`
-                }
+                onClick={() => setEditOpen(true)}
                 leftSection={<IconSettings size={14} />}
               >
                 {t('actions.edit')}
@@ -959,6 +1023,7 @@ export default function ModelDetailPage() {
       />
 
       {tab === 'overview' ? (
+        <>
         <OverviewTab
           model={model}
           usage={usage}
@@ -977,17 +1042,30 @@ export default function ModelDetailPage() {
             void fetchDetail(true);
             void fetchLogs();
           }}
+          onEditReasoning={
+            isDynamic
+              ? undefined
+              : () => {
+                setEditSection('reasoning');
+                setEditOpen(true);
+              }
+          }
           onOpenLog={(l) => {
             setSelectedLog(l);
             openLogModal();
           }}
         />
+        <div style={{ marginTop: 'var(--mantine-spacing-md)' }}>
+          <ResourceUsageSection type="model" id={String(model._id)} />
+        </div>
+        </>
       ) : null}
 
       {tab === 'playground' && model.category === 'llm' ? (
         <ModelPlayground
           modelKey={model.key}
           defaultUser={`Hello! Tell me what you can do.`}
+          modelInfo={{ driver: model.providerDriver, modelId: model.modelId, settings: model.settings }}
         />
       ) : null}
 
@@ -1036,6 +1114,7 @@ export default function ModelDetailPage() {
           modelId={String(model._id)}
           config={dynamic}
           logs={logs}
+          onEdit={() => setEditOpen(true)}
           onOpenLog={(l) => {
             setSelectedLog(l);
             openLogModal();
@@ -1050,6 +1129,7 @@ export default function ModelDetailPage() {
           onDelete={handleDelete}
           deleting={deleting}
           onGuardrailsSaved={() => void fetchDetail()}
+          onEdit={() => setEditOpen(true)}
         />
       ) : null}
 
@@ -1263,6 +1343,8 @@ interface OverviewTabProps {
   setDateFilter: (v: ReturnType<typeof defaultDashboardDateFilter>) => void;
   refreshing: boolean;
   onRefresh: () => void;
+  /** Opens the edit overlay at its Reasoning section; undefined for a model with no such editor (Dynamic LLM). */
+  onEditReasoning?: () => void;
   onOpenLog: (l: UsageLogDto) => void;
 }
 
@@ -1281,6 +1363,7 @@ function OverviewTab({
   setDateFilter,
   refreshing,
   onRefresh,
+  onEditReasoning,
   onOpenLog,
 }: OverviewTabProps) {
   const periods: Array<{ id: 'last_day' | 'last_7_days' | 'last_30_days' | 'total'; label: string }> = [
@@ -1582,6 +1665,19 @@ function OverviewTab({
             ) : null}
           </Stack>
         </div>
+
+        {model.category === 'llm' ? (
+          <ReasoningSummary
+            settings={model.settings}
+            driver={model.providerDriver}
+            modelId={model.modelId}
+            onEdit={onEditReasoning}
+          />
+        ) : null}
+
+        {model.category === 'llm' ? (
+          <UpstreamApiSummary settings={model.settings} driver={model.providerDriver} />
+        ) : null}
 
         {Object.keys(model.settings || {}).length > 0 ? (
           <div className="ds-card ds-card-pad-lg">
@@ -1893,12 +1989,14 @@ function ConfigureTab({
   onDelete,
   deleting,
   onGuardrailsSaved,
+  onEdit,
 }: {
   model: ModelDetailDto;
   guardrails: GuardrailLite[];
   onDelete: () => void;
   deleting: boolean;
   onGuardrailsSaved: () => void;
+  onEdit: () => void;
 }) {
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
 
@@ -2202,11 +2300,10 @@ function ConfigureTab({
             style={{ fontSize: 12.5, marginBottom: 12 }}
           >
             Configuration is read-only here — apart from the guardrail bindings above,
-            which their own overlay saves. Use the edit page for everything else.
+            which their own overlay saves. Use the editor for everything else.
           </p>
           <Button
-            component={Link}
-            href={`/dashboard/models/${model._id}/edit`}
+            onClick={onEdit}
             color="teal"
             fullWidth
             leftSection={<IconSettings size={13} stroke={1.7} />}
@@ -2276,10 +2373,12 @@ function RoutingTab({
   config,
   logs,
   onOpenLog,
+  onEdit,
 }: {
   modelId: string;
   config: IDynamicRoutingConfig;
   logs: UsageLogDto[];
+  onEdit: () => void;
   onOpenLog: (l: UsageLogDto) => void;
 }) {
   const decisions = logs.filter((l) => l.routing);
@@ -2402,9 +2501,9 @@ function RoutingTab({
         <div className="ds-card ds-card-pad-lg">
           <div className="ds-row-between" style={{ marginBottom: 12 }}>
             <div className="ds-h4">Configuration</div>
-            <Link href={`/dashboard/models?editDynamic=${modelId}`} style={{ fontSize: 12.5 }}>
+            <Button variant="subtle" size="compact-xs" onClick={onEdit}>
               Edit routing
-            </Link>
+            </Button>
           </div>
           <Stack gap="xs">
             <div className="ds-row-between" style={{ fontSize: 12.5 }}>

@@ -7,13 +7,26 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentConversationListItem,
+  IAgentConversationSearchHit,
+  AgentSessionRuntimeStatus,
   IAgentConversationState,
+  IAgentPendingAction,
+  IAgentMessageFeedback,
+  AgentMessageFeedbackFilter,
+  AgentMessageFeedbackTotals,
+  IAgentSessionEvent,
+  NewAgentSessionEvent,
   IAgentSkill,
   IAgentTracingEvent,
   IAgentTracingDashboardAggregate,
   IAgentTracingSession,
   IAgentVersion,
   IAuditLog,
+  IWebhookDelivery,
+  IWebhookEndpoint,
+  WebhookDeliveryStatus,
+  WebhookEndpointStatus,
   IAlertEvent,
   IAlertRule,
   IApiToken,
@@ -43,6 +56,8 @@ import type {
   IConfigItem,
   IFileBucketRecord,
   IFileRecord,
+  IFileEntriesPage,
+  FileListPurpose,
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
@@ -94,6 +109,17 @@ import type {
   NodeStatus,
   IBetaAccessCode,
   BetaAccessCodeStatus,
+  IIamDoc,
+  IamCollectionName,
+  IamPage,
+  IamPageRequest,
+  IamUserQuery,
+  IamUserFilter,
+  IamGroupQuery,
+  IamGroupFilter,
+  IamTokenQuery,
+  IamTokenFilter,
+  IamAuditQuery,
   IExternalModelPricing,
   IExternalPricingVersion,
   IModelPricing,
@@ -207,7 +233,24 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IUser>;
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
-  listUsers(): Promise<IUser[]>;
+  /**
+   * The workspace's people. Accounts of kind `external` (people of a host application whose identity a trusted issuer
+   * vouched for) are left out unless `includeExternal` asks for them: every member list and picker means the workspace's
+   * own people.
+   */
+  listUsers(options?: { includeExternal?: boolean }): Promise<IUser[]>;
+  /**
+   * The accounts that hold this identity (`externalIds[issuer] === subject`), oldest first (at most a handful - normally
+   * one; a second is the loser of a race between two first sign-ins). Not indexed: callers cache the answer.
+   */
+  findUsersByExternalIdentity(issuer: string, subject: string): Promise<IUser[]>;
+  /**
+   * Record `externalIds[issuer] = subject` on an account unless it already holds another subject for that issuer:
+   * `linked` (written), `already` (it held exactly this one) or `conflict` (it holds a different one) or `not_found`.
+   */
+  linkUserExternalIdentity(userId: string, issuer: string, subject: string): Promise<'linked' | 'already' | 'conflict' | 'not_found'>;
+  /** How many `external` accounts the workspace has. */
+  countExternalUsers(): Promise<number>;
 
   // Project membership (UserProject — replaces user.projectIds)
   findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;
@@ -277,6 +320,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     policy: Omit<IQuotaPolicy, '_id'>,
   ): Promise<IQuotaPolicy>;
   listQuotaPolicies(tenantId: string, projectId?: string): Promise<IQuotaPolicy[]>;
+  /**
+   * Policies that carry no project (`projectId` absent/null/empty). The quota
+   * guard asks for them separately because `listQuotaPolicies(tenant, project)`
+   * only ever returns that project's rows; see `isTenantWideKind` in
+   * lib/quota/types.ts for which of them the guard actually applies.
+   */
+  listTenantWideQuotaPolicies(tenantId: string): Promise<IQuotaPolicy[]>;
   updateQuotaPolicy(
     id: string,
     tenantId: string,
@@ -293,6 +343,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
   listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
   findApiTokenByHash(tokenHash: string): Promise<IApiToken | null>;
+  /** One token by id inside a tenant. Null when it does not exist (a malformed id is "does not exist", not an error). */
+  findApiTokenById(id: string, tenantId: string): Promise<IApiToken | null>;
+  /**
+   * Edit the mutable fields of a token (label, expiry, IP allowlist). Only the
+   * keys present in `data` change; `expiresAt: null` / `allowedIpRanges: null`
+   * clear the field. Null when the token does not exist in the tenant.
+   */
+  updateApiToken(
+    id: string,
+    tenantId: string,
+    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean },
+  ): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
   deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
@@ -584,9 +646,33 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     bucketKey: string;
     projectId?: string;
     search?: string;
+    /** Only keys under this prefix, however deep (a flat, recursive listing). */
+    prefix?: string;
+    purpose?: FileListPurpose;
     limit?: number;
     cursor?: string;
   }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
+  /**
+   * A bucket as folders, like an object store listing with a `/` delimiter:
+   * the sub-folders under `prefix` (a folder path, `''` = the bucket root) and
+   * the files directly in it, in key order. The folders are derived from the keys
+   * — walking the key index, one probe per entry returned, never a scan of the
+   * whole bucket. `cursor` is the path of the last entry of the previous page.
+   */
+  listFileEntries(filters: {
+    providerKey: string;
+    bucketKey: string;
+    projectId?: string;
+    prefix: string;
+    purpose?: FileListPurpose;
+    limit?: number;
+    cursor?: string;
+  }): Promise<IFileEntriesPage>;
+
+  /** Every file of an agent session (`purpose: 'conversation'`), oldest first. */
+  listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]>;
+  /** Session files whose `expiresAt` has passed, for the retention sweep. */
+  listExpiredConversationFiles(before: Date, limit: number): Promise<IFileRecord[]>;
 
   countFileRecords(filters?: {
     projectId?: string;
@@ -1359,12 +1445,80 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<IAgentConversation, 'tenantId' | 'agentKey' | 'createdBy'>>,
   ): Promise<IAgentConversation | null>;
+  /**
+   * Writes only the runtime fields (`runtimeStatus`, `stopReason`,
+   * `pendingActionIds`, `lastEventSeq`, and the session `budget` / `spentUsd`;
+   * `budget: null` removes the budget) — no `updatedAt` bump, no re-read. The
+   * session event recorder calls this around every turn, so it stays much
+   * cheaper than `updateAgentConversation` and cannot be mistaken for a
+   * transcript write.
+   *
+   * `runtimeTurnId` names the turn that owns the fields (a turn writes it when it
+   * starts). With `options.onlyIfTurn` the write is conditional on that: it
+   * happens only when the stored owner is that turn or nobody (a session from
+   * before owners were recorded), and the result says whether it did — `false`
+   * means a newer turn has taken over and the caller must not report its own end
+   * (anything else — `true`, or nothing from a minimal implementation — means written).
+   */
+  updateAgentConversationRuntime(
+    id: string,
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+    options?: { onlyIfTurn?: string },
+  ): Promise<boolean | void>;
+  /**
+   * Atomically moves the session's running spend total (`spentUsd`): first up to
+   * `atLeastUsd` when it is below that (a missing total counts as 0), then by
+   * `addUsd`. The database does the arithmetic, so two writers that spend at the
+   * same time both land — reading the total and writing back a sum lets the last
+   * writer erase the other's. Never lowers the total.
+   */
+  addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   listAgentConversations(
     agentKey: string,
-    filters?: { projectId?: string; limit?: number; skip?: number },
+    filters?: {
+      projectId?: string;
+      limit?: number;
+      skip?: number;
+      /** Only the sessions this user started (the list of a caller who may not see other people's). */
+      createdBy?: string;
+    },
   ): Promise<IAgentConversation[]>;
+  /**
+   * Conversations whose title or message text contains `search` (case-insensitive, literal), newest updated
+   * first, without transcripts, each with where it first matched. `agentKeys` limits it to those agents (an
+   * empty list matches nothing); `createdBy` to one person's sessions. A `search` shorter than 2 characters
+   * matches nothing; longer than 200 is cut.
+   */
+  searchAgentConversations(filters: {
+    projectId: string;
+    search: string;
+    agentKeys?: string[];
+    createdBy?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAgentConversationSearchHit[]>;
+  /**
+   * A page of a project's conversations, newest created first (`createdAt`, then
+   * id), without their transcripts. `runtimeStatus: 'idle'` also matches a
+   * conversation that has never run. `after` is the keyset of the last row of the
+   * previous page.
+   */
+  listAgentConversationPage(filters: {
+    projectId: string;
+    agentKey?: string;
+    runtimeStatus?: AgentSessionRuntimeStatus;
+    limit: number;
+    after?: { createdAt: Date; id: string };
+    /**
+     * The caller may view other people's sessions of only some agents (`viewableAgentKeys`; none when absent):
+     * a row is returned when `userId` started it or its agent is one of those; a row of any other agent - one
+     * that no longer exists included - is returned only to the person who started it.
+     * Applied before the page is cut, so a busy teammate cannot push the caller's own sessions off it.
+     */
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+  }): Promise<IAgentConversationListItem[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
   /** Upsert by `conversationId`. */
@@ -1372,6 +1526,118 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<void>;
   deleteAgentConversationState(conversationId: string): Promise<boolean>;
+
+  // ── Agent session event log (tenant-specific, append-only) ──
+  /**
+   * Appends events. A `(conversationId, seq)` that already exists makes the whole
+   * call throw `AgentSessionEventSeqConflictError`. Nothing is kept from the
+   * conflicting batch on SQLite; on Mongo an ordered insert keeps the events
+   * before the conflict, and the error's `writtenIds` names them — a caller
+   * re-reads the max seq and retries only the rest, so no event is stored
+   * twice. An event may carry its own `_id`; one without gets a generated id.
+   */
+  appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void>;
+  /** Events with `seq > afterSeq`, ascending. `types` filters by exact type. */
+  listAgentSessionEvents(
+    conversationId: string,
+    options?: { afterSeq?: number; types?: string[]; limit?: number },
+  ): Promise<IAgentSessionEvent[]>;
+  /** Highest `seq` written for the conversation; 0 when there are none. */
+  getAgentSessionMaxSeq(conversationId: string): Promise<number>;
+  deleteAgentSessionEvents(conversationId: string): Promise<number>;
+  /** Retention sweep (SQLite; Mongo also has a TTL index). Deletes events with `expiresAt < olderThan`. */
+  cleanupAgentSessionEventRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }>;
+
+  // ── Agent pending actions (tenant-specific; tool approvals / questions a turn paused on) ──
+  createAgentPendingActions(
+    actions: Array<Omit<IAgentPendingAction, '_id'>>,
+  ): Promise<IAgentPendingAction[]>;
+  findAgentPendingActionById(id: string): Promise<IAgentPendingAction | null>;
+  listAgentPendingActions(
+    conversationId: string,
+    options?: { status?: IAgentPendingAction['status'] },
+  ): Promise<IAgentPendingAction[]>;
+  /**
+   * Compare-and-set: applies `data` only while the row's status is `onlyIfStatus`
+   * (default `pending`). Null when it matched nothing — someone else resolved it first.
+   */
+  updateAgentPendingAction(
+    id: string,
+    data: Partial<Omit<IAgentPendingAction, '_id' | 'tenantId' | 'projectId' | 'conversationId'>>,
+    options?: { onlyIfStatus?: IAgentPendingAction['status'] },
+  ): Promise<IAgentPendingAction | null>;
+  /** `status = pending AND expiresAt < now`, oldest first — the reconciler's timeout sweep. */
+  listExpiredAgentPendingActions(now: Date, limit?: number): Promise<IAgentPendingAction[]>;
+  deleteAgentPendingActions(conversationId: string): Promise<number>;
+
+  // ── Message feedback (tenant-specific; a person's rating of an assistant message) ──
+  /**
+   * Stores the rating, replacing the person's earlier one for the same message
+   * (`conversationId + messageId + userId`). `created` is false for a replacement.
+   */
+  upsertAgentMessageFeedback(
+    feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
+  ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }>;
+  findAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<IAgentMessageFeedback | null>;
+  /** Withdraws a rating. False when there was none. */
+  deleteAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<boolean>;
+  /** Every rating of one conversation, oldest first; `userId` narrows it to one person's. */
+  listAgentMessageFeedbackByConversation(conversationId: string, options?: { userId?: string }): Promise<IAgentMessageFeedback[]>;
+  /** An agent's ratings, newest first. */
+  listAgentMessageFeedback(
+    filter: AgentMessageFeedbackFilter,
+    options?: { limit?: number; skip?: number },
+  ): Promise<{ items: IAgentMessageFeedback[]; total: number }>;
+  aggregateAgentMessageFeedback(filter: AgentMessageFeedbackFilter): Promise<AgentMessageFeedbackTotals>;
+  /** Marks the ratings of messages at or after `fromIndex` as removed (the messages were cut from the transcript). */
+  markAgentMessageFeedbackRemoved(conversationId: string, fromIndex: number, at?: Date): Promise<number>;
+  deleteAgentMessageFeedbackByConversation(conversationId: string): Promise<number>;
+
+  // ── Webhook subscriptions (tenant-specific) ──
+  createWebhookEndpoint(
+    endpoint: Omit<IWebhookEndpoint, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IWebhookEndpoint>;
+  findWebhookEndpointById(id: string): Promise<IWebhookEndpoint | null>;
+  /**
+   * `projectScopes` keeps endpoints whose `projectId` is one of the entries
+   * (`null` = tenant-wide); absent = every endpoint. Oldest first.
+   */
+  listWebhookEndpoints(
+    tenantId: string,
+    filter?: { projectScopes?: Array<string | null>; status?: WebhookEndpointStatus },
+  ): Promise<IWebhookEndpoint[]>;
+  updateWebhookEndpoint(
+    id: string,
+    data: Partial<Omit<IWebhookEndpoint, '_id' | 'tenantId' | 'projectId' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IWebhookEndpoint | null>;
+  /** Removes the endpoint and its deliveries. */
+  deleteWebhookEndpoint(id: string): Promise<boolean>;
+  createWebhookDeliveries(
+    deliveries: Array<Omit<IWebhookDelivery, '_id'>>,
+  ): Promise<IWebhookDelivery[]>;
+  findWebhookDeliveryById(id: string): Promise<IWebhookDelivery | null>;
+  /** Newest first. */
+  listWebhookDeliveries(
+    endpointId: string,
+    options?: { limit?: number; skip?: number; status?: WebhookDeliveryStatus },
+  ): Promise<IWebhookDelivery[]>;
+  updateWebhookDelivery(
+    id: string,
+    data: Partial<Omit<IWebhookDelivery, '_id' | 'tenantId' | 'endpointId' | 'eventId' | 'createdAt'>>,
+  ): Promise<IWebhookDelivery | null>;
+  /**
+   * Compare-and-set lease: while the delivery is `pending` and due
+   * (`nextAttemptAt <= now`), pushes `nextAttemptAt` to `leaseUntil` and returns
+   * the row; null when it is not due or someone else holds it. A worker that
+   * dies mid-attempt just lets the lease run out and the reconciler tries again.
+   */
+  claimWebhookDelivery(id: string, now: Date, leaseUntil: Date): Promise<IWebhookDelivery | null>;
+  /** `status = pending AND nextAttemptAt <= now`, oldest due first — the reconciler's retry sweep. */
+  listDueWebhookDeliveries(tenantId: string, now: Date, limit?: number): Promise<IWebhookDelivery[]>;
+  /** Marks every `pending` delivery of the endpoint `failed` (it was disabled or removed). */
+  failPendingWebhookDeliveries(endpointId: string, reason: string): Promise<number>;
+  /** Deletes settled (not `pending`) deliveries created before `olderThan`. */
+  cleanupWebhookDeliveryRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }>;
 
   // ── MCP Server operations (tenant-specific) ──
   createMcpServer(
@@ -1664,16 +1930,28 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Persist a run's terminal status, guarded so it only applies while the
-   * run is still `running`. This is what prevents a deadline-timer-driven
+   * run is still `running` (or paused, see below). This is what prevents a deadline-timer-driven
    * `failed` transition (§12.13) from later being clobbered back to
    * `succeeded` by an abandoned `invoke()` call that eventually settles
    * (§12.12) — the CAS guard, not the caller's discretion, is the actual
-   * protection.
+   * protection. A paused (`requires_action`) run can be finalized as well:
+   * a cancel, or a continuation that completed inline.
    */
   finalizeAgentRun(
     id: string,
     tenantId: string,
     data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Puts a paused (`requires_action`) run back in the queue to continue its
+   * turn: CAS from `requires_action` to `queued`, taking the conversation's
+   * active-run slot again. Null when the run is not paused any more; throws
+   * `AgentRunConflictError` when another run holds the slot.
+   */
+  requeueAgentRunForResume(
+    id: string,
+    tenantId: string,
+    resumeActionIds: string[],
   ): Promise<IAgentRun | null>;
   /**
    * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
@@ -1718,6 +1996,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options?: { createdBefore?: Date; limit?: number },
   ): Promise<IAgentRun[]>;
   /**
+   * Runs whose callback never settled: a `callbackUrl`, a `pending` / `failed`
+   * status with fewer than `maxAttempts` attempts, in a state that has a
+   * callback to send (terminal or `requires_action`), untouched since
+   * `updatedBefore`. The reconciler re-delivers these.
+   */
+  listAgentRunsWithUndeliveredCallbacks(
+    tenantId: string,
+    options: { updatedBefore: Date; maxAttempts: number; limit?: number },
+  ): Promise<IAgentRun[]>;
+  /**
    * Dashboard listing, newest first. Always tenant+project scoped;
    * `agentKey`/`conversationId`/`status`/`mode` narrow it further.
    */
@@ -1728,6 +2016,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     conversationId?: string;
     status?: IAgentRun['status'][];
     mode?: IAgentRun['mode'];
+    /** Only the runs this user queued (the list of a caller who may not see other people's). */
+    userId?: string;
     limit?: number;
   }): Promise<IAgentRun[]>;
   /**
@@ -1900,6 +2190,42 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
   /** Revert a used code back to active (rollback when registration fails after the claim). */
   releaseBetaAccessCode(code: string): Promise<boolean>;
+
+  // ── IAM document store (tenant-scoped; collections/tables created lazily) ──
+  /** One document by id, or null. */
+  iamDocGet(collection: IamCollectionName, id: string): Promise<IIamDoc | null>;
+  /** Insert-or-replace the whole document. */
+  iamDocPut(collection: IamCollectionName, id: string, data: Record<string, unknown>): Promise<IIamDoc>;
+  /** Documents of a collection ordered by id; optional id prefix and limit (default 1000). */
+  iamDocList(collection: IamCollectionName, options?: { idPrefix?: string; limit?: number }): Promise<IIamDoc[]>;
+  iamDocDelete(collection: IamCollectionName, id: string): Promise<boolean>;
+  /** Delete every document of the collection (current tenant only); returns the count. */
+  iamDocClear(collection: IamCollectionName): Promise<number>;
+  /**
+   * Atomically add `by` to the numeric `field` of the document (creating the
+   * document / field at 0 first) and return the new value.
+   */
+  iamDocIncrement(collection: IamCollectionName, id: string, field: string, by?: number): Promise<number>;
+
+  // ── IAM directory queries (read-only, offset-paged; for the Authorization center) ──
+  /** Users of the tenant ordered by name; the returned `password` is always blank. */
+  iamListUsers(query: IamUserQuery): Promise<IamPage<IUser>>;
+  /** Groups of the tenant ordered by name. */
+  iamListGroups(query: IamGroupQuery): Promise<IamPage<IGroup>>;
+  /** Member count per group id (groups without members are 0). */
+  iamCountGroupMembers(groupIds: string[]): Promise<Record<string, number>>;
+  /** User ids that are members of the group, ordered by user id. */
+  iamListGroupMemberIds(groupId: string, page: IamPageRequest): Promise<IamPage<string>>;
+  /** API tokens of the tenant, newest first. Never contains a token secret or hash. */
+  iamListTokens(query: IamTokenQuery): Promise<IamPage<IApiToken>>;
+  /** Audit rows of the tenant, newest first. */
+  iamListAuditEvents(query: IamAuditQuery): Promise<IamPage<IAuditLog>>;
+  /** How many users match (the same filters as `iamListUsers`, without paging). */
+  iamCountUsers(filter: IamUserFilter): Promise<number>;
+  /** How many groups match. */
+  iamCountGroups(filter: IamGroupFilter): Promise<number>;
+  /** How many API tokens match. */
+  iamCountTokens(filter: IamTokenFilter): Promise<number>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

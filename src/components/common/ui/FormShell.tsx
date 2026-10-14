@@ -3,6 +3,7 @@
 import {
   ReactNode,
   useEffect,
+  useRef,
   useState,
   Children,
   isValidElement,
@@ -10,6 +11,7 @@ import {
 import { createPortal } from 'react-dom';
 import { Button, ActionIcon } from '@mantine/core';
 import { IconCheck, IconChevronDown, IconChevronRight, IconX } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 
 /* ──────────────────────────────────────────────────────────────────
    FormShell — full-screen overlay form layout.
@@ -54,6 +56,17 @@ export interface FormShellProps {
   disableEscape?: boolean;
 }
 
+/** The header's "Press ESC to cancel" — absent when the overlay ignores Escape (`disableEscape`). */
+function EscapeHint({ disableEscape = false }: { disableEscape?: boolean }) {
+  const t = useTranslations('formShell');
+  if (disableEscape) return null;
+  return (
+    <div className="form-header-hint">
+      {t('escapeHintBefore')} <span className="form-kbd">ESC</span> {t('escapeHintAfter')}
+    </div>
+  );
+}
+
 export default function FormShell({
   open,
   onClose,
@@ -73,6 +86,7 @@ export default function FormShell({
   // left expanded, pushed the form out of view. Desktop keeps the summary
   // always visible via CSS — this state only affects the stacked layout.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const t = useTranslations('formShell');
 
   useEffect(() => {
     if (!open || disableEscape) return;
@@ -108,7 +122,7 @@ export default function FormShell({
           color="gray"
           radius="md"
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t('close')}
         >
           <IconX size={16} />
         </ActionIcon>
@@ -120,9 +134,7 @@ export default function FormShell({
           </div>
         </div>
         <div style={{ flex: 1 }} />
-        <div className="form-header-hint">
-          Press <span className="form-kbd">ESC</span> to cancel
-        </div>
+        <EscapeHint disableEscape={disableEscape} />
       </div>
 
       <div
@@ -167,7 +179,7 @@ export default function FormShell({
           disabled={secondaryAction?.disabled}
           onClick={secondaryAction?.onClick ?? onClose}
         >
-          {secondaryAction?.label ?? 'Cancel'}
+          {secondaryAction?.label ?? t('cancel')}
         </Button>
         {primaryAction ? (
           <Button
@@ -191,6 +203,7 @@ export default function FormShell({
 /* ─── Sub-components ──────────────────────────────────────────── */
 
 export function FormSection({
+  focusOnMount = false,
   number,
   title,
   description,
@@ -199,6 +212,8 @@ export function FormSection({
   collapsible = false,
   defaultOpen = true,
 }: {
+  /** Scroll this section into view and focus its first control as it appears (deep link into a long form). */
+  focusOnMount?: boolean;
   number?: number | string;
   title: ReactNode;
   description?: ReactNode;
@@ -210,8 +225,20 @@ export function FormSection({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const expanded = !collapsible || open;
+  const sectionRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!focusOnMount) return;
+    const section = sectionRef.current;
+    if (!section) return;
+    // After layout, so the overlay's scroll column has its final height.
+    const frame = requestAnimationFrame(() => {
+      section.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+      section.querySelector<HTMLElement>('input, select, textarea, button')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusOnMount]);
   return (
-    <section className="form-section">
+    <section className="form-section" ref={sectionRef} style={focusOnMount ? { scrollMarginTop: 16 } : undefined}>
       <header
         className="form-section-header"
         onClick={collapsible ? () => setOpen((o) => !o) : undefined}

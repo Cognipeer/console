@@ -7,6 +7,7 @@ import { Center, Loader } from '@mantine/core';
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
+import { assignIfPortal, buildChangePasswordPath, safeReturnTo } from '@/lib/security/returnTo';
 
 function SsoCallbackContent() {
   const router = useRouter();
@@ -33,7 +34,11 @@ function SsoCallbackContent() {
           setError(data.error || 'Single sign-on failed. Please try again.');
           return;
         }
-        router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
+        // The server echoes the validated destination it carried through the
+        // IdP round trip; validate again, this value ends up in router.push.
+        const returnTo = safeReturnTo(data.returnTo);
+        const dest = data.mustChangePassword ? buildChangePasswordPath(returnTo) : returnTo;
+        if (!assignIfPortal(dest)) router.push(dest);
       } catch {
         setError('Single sign-on failed. Please try again.');
       }

@@ -53,6 +53,7 @@ const USERS: Record<string, Record<string, unknown>> = {
   'member-1': MEMBER,
   'off-1': { _id: 'off-1', role: 'user', tenantId: 'tenant-1', status: 'disabled', disabledBy: 'admin-1', disabledReason: 'left' },
   'foreign-1': { _id: 'foreign-1', role: 'user', tenantId: 'other' },
+  'ldap-1': { _id: 'ldap-1', role: 'user', tenantId: 'tenant-1', email: 'l@acme.com', authProvider: 'ldap' },
 };
 
 function authAs(user: Record<string, unknown>) {
@@ -161,5 +162,53 @@ describe('client members lifecycle', () => {
     expect(db.deleteApiToken).toHaveBeenCalledWith('tok-1', 'member-1');
     expect(invalidateApiTokenAuthCache).toHaveBeenCalledWith('c'.repeat(64));
     expect(h.cacheDel).toHaveBeenCalledWith('user-auth-state:tenant_acme:member-1');
+  });
+
+  it('DELETE also drops the user\'s group and project memberships', async () => {
+    db.deleteUser.mockResolvedValue(true);
+    db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g-1', userId: 'member-1' }] as never);
+    db.removeGroupMember.mockResolvedValue(true);
+    db.listUserProjectsByUser.mockResolvedValue([{ projectId: 'p-1' }] as never);
+    const res = await app.inject({
+      method: 'DELETE', url: '/api/client/v1/members/member-1', headers: { authorization: 'Bearer tok_test' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ success: boolean }>(res.body)).toEqual({ success: true });
+    expect(db.removeGroupMember).toHaveBeenCalledWith('g-1', 'member-1');
+    expect(db.deleteUserProjectsByUser).toHaveBeenCalledWith('member-1');
+  });
+
+  it('DELETE refuses an account of a directory (disable it instead) and deletes nothing', async () => {
+    const res = await app.inject({
+      method: 'DELETE', url: '/api/client/v1/members/ldap-1', headers: { authorization: 'Bearer tok_test' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody<{ code: string }>(res.body).code).toBe('directory_managed');
+    expect(db.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 on every group route for a group of another workspace, and changes nothing', async () => {
+    db.findGroupById.mockImplementation(async (id: string) => ({ _id: id, tenantId: 'other', name: 'Foreign', source: 'local' }) as never);
+    const calls = [
+      ['GET', '', undefined],
+      ['PATCH', '', { name: 'Renamed' }],
+      ['DELETE', '', undefined],
+      ['POST', '/members', { userId: 'member-1' }],
+      ['DELETE', '/members/member-1', undefined],
+      ['POST', '/projects', { projectId: 'p-1' }],
+      ['DELETE', '/projects/p-1', undefined],
+    ] as const;
+    for (const [method, suffix, payload] of calls) {
+      const res = await app.inject({
+        method,
+        url: `/api/client/v1/members/groups/g-foreign${suffix}`,
+        headers: payload ? { authorization: 'Bearer tok_test', 'content-type': 'application/json' } : { authorization: 'Bearer tok_test' },
+        ...(payload ? { payload: JSON.stringify(payload) } : {}),
+      });
+      expect(res.statusCode, `${method} ${suffix}`).toBe(404);
+    }
+    expect(db.updateGroup).not.toHaveBeenCalled();
+    expect(db.deleteGroup).not.toHaveBeenCalled();
+    expect(db.addGroupMember).not.toHaveBeenCalled();
   });
 });

@@ -926,6 +926,20 @@ export class AgentTracingService {
   }
 
   /**
+   * The thread a tracing session belongs to (for an agent: its conversation), without loading the session's events.
+   */
+  static async getSessionThreadId(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<string | null> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    const session = await db.findAgentTracingSessionById(sessionId, projectId);
+    return session?.threadId ?? null;
+  }
+
+  /**
    * Get session detail with events
    */
   static async getSessionDetail(

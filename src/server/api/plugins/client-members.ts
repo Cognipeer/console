@@ -29,6 +29,7 @@ import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
+import { isDirectoryManaged, isGroupDirectoryManaged } from '@/lib/iam/identity';
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-members');
@@ -138,6 +139,13 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'User not found' });
       }
       if (target.role === 'owner') return reply.code(403).send({ error: 'Cannot delete the owner account' });
+      // An account of a directory (LDAP, SSO) would be created again at its next sign-in: disable it instead.
+      if (isDirectoryManaged(target)) {
+        return reply.code(409).send({
+          error: 'This account is managed by the directory; disable it instead',
+          code: 'directory_managed',
+        });
+      }
       const deleted = await db.deleteUser(id);
       if (!deleted) return reply.code(500).send({ error: 'Failed to delete user' });
       // The row is gone, so its tokens would otherwise be orphaned. Never fails the delete.
@@ -221,7 +229,6 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
       if (!defaultProjectId) return reply.code(400).send({ error: 'Project context is missing' });
 
-      const existingUsers = await db.listUsers();
       const quota = await checkResourceQuota(
         {
           domain: 'global',
@@ -232,7 +239,8 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
           userId: String(auth.tokenRecord.userId),
         },
         'users',
-        existingUsers.length,
+        // a count, not the whole table
+        await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 
@@ -372,7 +380,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const patch: Parameters<typeof db.updateGroup>[1] = { updatedBy: String(auth.tokenRecord.userId) };
       if (typeof body.name === 'string') {
-        if (group.source === 'ldap') return reply.code(409).send({ error: 'Directory groups cannot be renamed here' });
+        if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory groups cannot be renamed here' });
         patch.name = body.name.trim();
       }
       if (typeof body.description === 'string') patch.description = body.description;
@@ -397,7 +405,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const { db, group } = await loadGroup(auth, id);
       if (!group) return reply.code(404).send({ error: 'Group not found' });
-      if (group.source === 'ldap') return reply.code(409).send({ error: 'Directory groups cannot be deleted here' });
+      if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory groups cannot be deleted here' });
       await db.deleteGroupMembersByGroup(id);
       await db.deleteGroupProjectsByGroup(id);
       await db.deleteGroup(id);
@@ -414,7 +422,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const { id } = request.params as { id: string };
       const { db, group } = await loadGroup(auth, id);
       if (!group) return reply.code(404).send({ error: 'Group not found' });
-      if (group.source === 'ldap') return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
+      if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
       const body = readJsonBody<Record<string, unknown>>(request);
       if (typeof body.userId !== 'string') return reply.code(400).send({ error: 'userId is required' });
       const role: 'admin' | 'member' = body.role === 'admin' ? 'admin' : 'member';
@@ -434,7 +442,7 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const { id, userId } = request.params as { id: string; userId: string };
       const { group } = await loadGroup(auth, id);
       if (!group) return reply.code(404).send({ error: 'Group not found' });
-      if (group.source === 'ldap') return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
+      if (isGroupDirectoryManaged(group)) return reply.code(409).send({ error: 'Directory group membership is managed by sync' });
       const db = await getDatabase();
       const removed = await db.removeGroupMember(id, userId);
       if (!removed) return reply.code(404).send({ error: 'Membership not found' });

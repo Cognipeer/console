@@ -30,7 +30,22 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/sandbox/runners')).toBe('sandbox');
     expect(getEnterpriseModuleForPath('/api/cluster/overview')).toBe('cluster');
     expect(getEnterpriseModuleForPath('/api/prompt-optimizer/runs')).toBe('prompt-optimizer');
+    // Bare collection path (list/create) must be gated too, not only '/…/' sub-paths.
+    expect(getEnterpriseModuleForPath('/api/prompt-optimizer')).toBe('prompt-optimizer');
+    expect(getEnterpriseModuleForPath('/api/gpu-fleet')).toBe('gpu-fleet');
+    expect(getEnterpriseModuleForPath('/api/prompt-optimizerx')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
+  });
+
+  it('gates the portal admin API and the end-user runtime, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/portals')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portals/abc123/stats')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portals/agent-options')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portal/branch-assistant/info')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portal/branch-assistant/agents')).toBe('portals');
+    // Near-misses stay ungated.
+    expect(getEnterpriseModuleForPath('/api/portalsx')).toBeNull();
+    expect(getEnterpriseModuleForPath('/api/portalish/foo')).toBeNull();
   });
 
   it('does not gate community paths', () => {

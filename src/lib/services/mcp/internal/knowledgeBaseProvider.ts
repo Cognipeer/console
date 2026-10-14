@@ -15,6 +15,7 @@
  * module, the same way `search` is scoped to it.
  */
 
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import {
   listRagModules,
   getRagDocument,
@@ -191,7 +192,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
         ragModuleKey: instanceKey,
         query,
         filter,
-      });
+      }, { signal: currentTurnSignal() });
       return {
         query: result.query,
         matches: result.matches,

@@ -7,9 +7,6 @@ import {
   Button,
   Group,
   Menu,
-  Modal,
-  Stack,
-  Text,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -22,12 +19,18 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateAgentModal from './CreateAgentModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import ImportAgentShell from './ImportAgentShell';
+
+/** The main model and the additional ones an agent offers. */
+function agentModelKeys(config: { modelKey?: string; additionalModels?: Array<{ modelKey: string }> }): string[] {
+  return [config.modelKey, ...(config.additionalModels ?? []).map((m) => m.modelKey)].filter((k): k is string => Boolean(k));
+}
 
 interface Agent {
   _id: string;
@@ -36,6 +39,7 @@ interface Agent {
   description?: string;
   config: {
     modelKey?: string;
+    additionalModels?: Array<{ modelKey: string }>;
     kind?: 'native' | 'external';
     connection?: { protocol?: string };
     toolBindings?: Array<{ toolNames?: string[] }>;
@@ -88,6 +92,8 @@ interface Provider {
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -95,7 +101,6 @@ export default function AgentsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
@@ -154,35 +159,36 @@ export default function AgentsPage() {
     router.push(`/dashboard/agents/${agentId}`);
   };
 
-  const handleDelete = async () => {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/agents/${deleteTarget._id}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        notifications.show({
-          title: t('notifications.deleted'),
-          message: t('notifications.deletedDesc', { name: deleteTarget.name }),
-          color: 'teal',
+  const handleDelete = async (target: Agent) => {
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.agent'),
+      name: target.name,
+      type: 'agent',
+      id: String(target._id),
+      action: async () => {
+        const res = await fetch(`/api/agents/${target._id}`, {
+          method: 'DELETE',
         });
-        setDeleteTarget(null);
-        void loadAgents();
-      }
-    } catch {
-      notifications.show({
-        title: t('notifications.error'),
-        message: t('notifications.deleteFailed'),
-        color: 'red',
-      });
-    }
+        if (!res.ok) throw new Error(t('notifications.deleteFailed'));
+      },
+    });
+    if (!deleted) return;
+    notifications.show({
+      title: t('notifications.deleted'),
+      message: t('notifications.deletedDesc', { name: target.name }),
+      color: 'teal',
+    });
+    void loadAgents();
   };
 
   // Model options come from the agents actually listed, so the filter never
   // offers a model no agent uses (an empty result that looks like a bug).
   const modelOptions = useMemo(() => {
     const keys = new Set<string>();
-    for (const a of agents) if (a.config.kind !== 'external' && a.config.modelKey) keys.add(a.config.modelKey);
+    for (const a of agents) {
+      if (a.config.kind === 'external') continue;
+      for (const key of agentModelKeys(a.config)) keys.add(key);
+    }
     return [...keys].sort();
   }, [agents]);
 
@@ -195,7 +201,7 @@ export default function AgentsPage() {
         a.name.toLowerCase().includes(q) ||
         a.key.toLowerCase().includes(q) ||
         (a.description ?? '').toLowerCase().includes(q) ||
-        (a.config.modelKey ?? '').toLowerCase().includes(q) ||
+        agentModelKeys(a.config).some((key) => key.toLowerCase().includes(q)) ||
         (a.config.connection?.protocol ?? '').toLowerCase().includes(q);
       if (!hit) return false;
     }
@@ -206,7 +212,7 @@ export default function AgentsPage() {
     // set of agents no external caller can actually reach yet.
     if (publishFilter === 'published' && !a.publishedVersion) return false;
     if (publishFilter === 'unpublished' && a.publishedVersion) return false;
-    if (modelFilter !== 'all' && a.config.modelKey !== modelFilter) return false;
+    if (modelFilter !== 'all' && !agentModelKeys(a.config).includes(modelFilter)) return false;
     return true;
   }), [agents, query, statusFilter, kindFilter, publishFilter, modelFilter]);
 
@@ -258,6 +264,11 @@ export default function AgentsPage() {
           {agent.config.kind === 'external'
             ? (agent.config.connection?.protocol ?? 'external')
             : (agent.config.modelKey ?? '—')}
+          {agent.config.kind !== 'external' && agent.config.additionalModels?.length ? (
+            <span className="ds-muted" title={agent.config.additionalModels.map((m) => m.modelKey).join(', ')}>
+              {' '}+{agent.config.additionalModels.length}
+            </span>
+          ) : null}
         </span>
       ),
     },
@@ -457,7 +468,7 @@ export default function AgentsPage() {
             label: t('actions.delete'),
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(agent),
+            onClick: () => void handleDelete(agent),
           },
         ]}
       />
@@ -481,24 +492,6 @@ export default function AgentsPage() {
         onCreated={handleCreated}
       />
 
-      <Modal
-        opened={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        title={t('deleteModal.title')}
-        size="sm"
-      >
-        <Stack gap="md">
-          <Text size="sm">{t('deleteModal.message')}</Text>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setDeleteTarget(null)}>
-              {t('deleteModal.cancel')}
-            </Button>
-            <Button color="red" onClick={handleDelete}>
-              {t('deleteModal.delete')}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </PageContainer>
   );
 }

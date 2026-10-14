@@ -19,11 +19,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   }
   return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn().mockReturnValue('models'),
-  authorizeServiceRequest: vi.fn().mockReturnValue({ allowed: true }),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 vi.mock('@/lib/services/models/inferenceService', () => {
   class GuardrailBlockError extends Error {
@@ -51,6 +54,7 @@ import { getDatabase } from '@/lib/database';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { clientInferenceApiPlugin } from '@/server/api/plugins/client-inference';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -73,9 +77,7 @@ describe('POST /api/client/v1/messages', () => {
     vi.clearAllMocks();
     mockFn(isShuttingDown).mockReturnValue(false);
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T>(_db: string, operation: () => T) => operation(),
-    });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     app = await createFastifyApiTestApp(clientInferenceApiPlugin);
   });
 

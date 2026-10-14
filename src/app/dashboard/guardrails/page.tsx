@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button, Group } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconEdit,
   IconEye,
@@ -98,14 +100,14 @@ function policySummary(g: GuardrailView): {
 
 export default function GuardrailsPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [guardrails, setGuardrails] = useState<GuardrailView[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [wordListsOpen, setWordListsOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<GuardrailView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [actionFilter, setActionFilter] = useState('all');
@@ -201,31 +203,25 @@ export default function GuardrailsPage() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/guardrails/${deleteTarget.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({
-        title: 'Guardrail deleted',
-        message: `"${deleteTarget.name}" was deleted`,
-        color: 'red',
-      });
-      setDeleteTarget(null);
-      await loadGuardrails();
-    } catch (err) {
-      notifications.show({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to delete',
-        color: 'red',
-      });
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const confirmDelete = (target: GuardrailView) =>
+    deleteResource({
+      noun: tSafe('nouns.guardrail'),
+      name: target.name,
+      type: 'guardrail',
+      id: target.id,
+      action: async () => {
+        const res = await fetch(`/api/guardrails/${target.id}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) throw new Error('Failed to delete');
+        notifications.show({
+          title: 'Guardrail deleted',
+          message: `"${target.name}" was deleted`,
+          color: 'red',
+        });
+        await loadGuardrails();
+      },
+    });
 
   const filtered = useMemo(() => {
     return guardrails.filter((g) => {
@@ -555,32 +551,10 @@ export default function GuardrailsPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(g),
+            onClick: () => void confirmDelete(g),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete guardrail"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Delete guardrail <strong>{deleteTarget?.name}</strong>? Models that
-          reference this guardrail will no longer apply it. This action cannot be
-          undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            Delete
-          </Button>
-        </Group>
-      </Modal>
 
       <WordListsManager opened={wordListsOpen} onClose={() => setWordListsOpen(false)} />
 

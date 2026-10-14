@@ -1645,3 +1645,138 @@ export interface RealtimeSessionLogDelta {
   usageOutputTokens?: number;
   usageTotalTokens?: number;
 }
+
+// ── IAM document store (tenant-scoped, lazily created) ───────────────────
+// A deliberately tiny, generic key → JSON document store used by the policy
+// engine (src/lib/iam): custom policies, the policy-version counter, the
+// workspace settings and the project-levels activation instant. The
+// collections/tables are created on first use (no migration, no index
+// requirement) and behave identically on MongoDB and SQLite. It is NOT a general
+// query surface: documents are addressed by id.
+
+// `iam_identities` is kept by the SQLite provider only: one small document per account that is of kind `external` or holds an
+// external identity, addressed by the user id (the users table has no column for either; MongoDB keeps both on the user).
+export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta', 'iam_delegations', 'iam_identities'] as const;
+export type IamCollectionName = typeof IAM_COLLECTIONS[number];
+
+export interface IIamDoc {
+  id: string;
+  /** JSON-serialisable payload (keys must not contain '.' or start with '$'). */
+  data: Record<string, unknown>;
+  updatedAt: Date;
+}
+
+// ── IAM directory queries (read-only, paged server-side) ──────────────────
+// What the Authorization center needs to browse ~20K employees without loading
+// them all: searchable, offset-paged listings of users, groups, API tokens and
+// audit events. `hasMore` is computed by reading one row past the page. Rows are
+// returned in the usual domain shapes, except that a user's `password` is blanked.
+
+export interface IamPageRequest {
+  /** 1..200. */
+  limit: number;
+  offset?: number;
+}
+
+export interface IamPage<T> {
+  items: T[];
+  hasMore: boolean;
+}
+
+/** What selects users, whether they are listed or only counted. */
+export interface IamUserFilter {
+  tenantId: string;
+  /** Case-insensitive substring of name or email. */
+  q?: string;
+  roles?: string[];
+  /** 'active' includes accounts that never had a status. */
+  status?: 'active' | 'disabled';
+  /** Restrict to these ids (at most 500). */
+  ids?: string[];
+  /** Leave these ids out (at most 500). */
+  excludeIds?: string[];
+  /** true = accounts that cannot sign in (service accounts), false = accounts that can. A row without the flag can sign in. */
+  canLogin?: boolean;
+  /**
+   * true = only `external` accounts (people of a host application, see `IUser.kind`), false = leave them out (the
+   * workspace's own people). Absent = both.
+   */
+  external?: boolean;
+  /** Where the account signs in. 'local' also matches rows that have no provider. */
+  authProviders?: Array<'local' | 'ldap' | 'oidc' | 'saml'>;
+  /**
+   * true = only accounts with an unanswered invitation (they can sign in, someone invited them, they have not
+   * accepted, and they are not disabled); false = leave those out.
+   */
+  invited?: boolean;
+  /** Members of this group. */
+  groupId?: string;
+  /**
+   * Members of this project: a direct membership, an entry of the legacy project list, or a group assigned to
+   * the project. (Owners and admins are in every project; they match only when they are listed explicitly.)
+   */
+  projectId?: string;
+}
+
+export interface IamUserQuery extends IamUserFilter, IamPageRequest {
+  /** Default 'name'. Plain binary order on both backends (email by its lower-case form), the id breaks ties. */
+  sort?: 'name' | 'email' | 'createdAt';
+  dir?: 'asc' | 'desc';
+}
+
+export interface IamGroupFilter {
+  tenantId: string;
+  q?: string;
+  ids?: string[];
+  /** Where the group comes from; 'local' also matches rows that have no source. */
+  sources?: Array<'local' | 'ldap' | 'oidc'>;
+  /** Groups assigned to this project. */
+  projectId?: string;
+}
+
+export interface IamGroupQuery extends IamGroupFilter, IamPageRequest {}
+
+export interface IamTokenFilter {
+  tenantId: string;
+  /** Case-insensitive substring of the label or the visible prefix. */
+  q?: string;
+  userId?: string;
+  projectId?: string;
+  ids?: string[];
+  /** 'expired' = has an expiry that has passed; 'active' = everything else. */
+  status?: 'active' | 'expired';
+  /** true = the token has a scope of its own (even an empty one), false = it inherits its owner's permissions. */
+  scoped?: boolean;
+  /** Only tokens of these owners (at most 500). An empty list matches nothing. */
+  userIds?: string[];
+  /** Leave out the tokens of these owners (at most 500). */
+  excludeUserIds?: string[];
+  /** The moment `status` is judged at (default: now). */
+  now?: Date;
+}
+
+export interface IamTokenQuery extends IamTokenFilter, IamPageRequest {}
+
+export interface IamAuditQuery extends IamPageRequest {
+  tenantId: string;
+  from?: Date;
+  to?: Date;
+  service?: string;
+  outcome?: 'success' | 'failure' | 'denied';
+  actorUserId?: string;
+  /** actorUserId IN (...) - at most 5000 (a group's members). */
+  actorUserIds?: string[];
+  apiTokenId?: string;
+  /** resourceType IN (...) */
+  resourceTypes?: string[];
+  /**
+   * Also match rows with one of these events, whatever `service` / `resourceTypes`
+   * say: the filter becomes (service AND resourceType IN ...) OR event IN (...).
+   * Every other filter (tenant, dates, outcome, actor) still applies to both sides.
+   */
+  alsoEvents?: string[];
+  /** MongoDB only: stop the server-side scan after this many milliseconds (SQLite ignores it). */
+  maxTimeMs?: number;
+  /** Exact match on one top-level metadata key (`key` is [A-Za-z_][A-Za-z0-9_]*). */
+  metadata?: { key: string; value: string | number | boolean };
+}

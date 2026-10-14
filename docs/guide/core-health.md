@@ -112,7 +112,7 @@ Two HTTP endpoints are available via the API routes:
 | Endpoint | Purpose | HTTP Status |
 |----------|---------|-------------|
 | `GET /api/health/live` | Liveness probe | Always 200 |
-| `GET /api/health/ready` | Readiness probe | 200 (ok) or 503 (down/degraded) |
+| `GET /api/health/ready` | Readiness probe | 200 (ok or degraded) or 503 (down) |
 
 ### Kubernetes Configuration
 
@@ -144,6 +144,7 @@ The gateway registers these health checks at startup:
 | `queue` | Queue provider availability |
 | `browser-runtime` | Managed browser session runtime |
 | `automations` | Background automation/scheduler state |
+| `authorization-engine` | The policy engine that decides every request: `ok`; `degraded` when requests were refused in the last minute because authorization was unavailable, or custom policy statements could not be loaded; `down` when its self-check fails. See [Authorization](/guide/authorization#when-authorization-is-unavailable). |
 
 ## Configuration
 

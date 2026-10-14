@@ -88,6 +88,8 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         [{ expiresAt: 1 }, { name: 'idx_expiresAt' }, true],
         [{ tenantId: 1, projectId: 1, idempotencyKey: 1 }, { name: 'idx_tenant_project_idempotencyKey' }, true],
         [{ tenantId: 1, projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_tenant_project_agent_createdAt' }, true],
+        // The reconciler's sweep for callbacks that never settled.
+        [{ callbackStatus: 1, updatedAt: 1 }, { name: 'idx_callbackStatus_updatedAt' }, true],
       ];
       let requiredOk = true;
       for (const [keys, options, required] of specs) {
@@ -184,7 +186,8 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       }
 
       const now = new Date();
-      const doc: Omit<IAgentRun, '_id'> = { ...record, createdAt: now, updatedAt: now };
+      // An empty list is stored as none, like the SQLite provider does.
+      const doc: Omit<IAgentRun, '_id'> = { ...record, attachments: record.attachments?.length ? record.attachments : null, createdAt: now, updatedAt: now };
       try {
         const result = await db
           .collection<IAgentRun>(COLLECTIONS.agentRuns)
@@ -263,8 +266,48 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
     ): Promise<IAgentRun | null> {
-      const run = await this.setAgentRun({ _id: objectId(id), tenantId, status: 'running' }, { ...data, updatedAt: new Date() });
+      // A paused (`requires_action`) run can be finalized too: cancelled, or
+      // settled by a continuation that ran inline.
+      const run = await this.setAgentRun(
+        { _id: objectId(id), tenantId, status: { $in: ['running', 'requires_action'] } },
+        { ...data, updatedAt: new Date() },
+      );
       if (run && !ACTIVE_STATUSES.has(run.status)) await this.releaseConversationLock(run.conversationId, id);
+      return run;
+    }
+
+    async requeueAgentRunForResume(
+      id: string,
+      tenantId: string,
+      resumeActionIds: string[],
+    ): Promise<IAgentRun | null> {
+      const paused = await this.agentRunsCollection().findOne({ _id: objectId(id), tenantId, status: 'requires_action' });
+      if (!paused) return null;
+      await this.ensureAgentRunsIndexes();
+      // The slot is taken again before the row goes back to `queued`.
+      const lockId = conversationLockId(paused.conversationId);
+      if (!(await this.acquireAgentRunLock(lockId, 'conversation'))) throw new AgentRunConflictError(paused.conversationId);
+      const run = await this.setAgentRun(
+        { _id: objectId(id), tenantId, status: 'requires_action' },
+        {
+          status: 'queued',
+          resumeActionIds,
+          stopReason: null,
+          result: null,
+          errorReason: null,
+          errorMessage: null,
+          workerId: null,
+          cancelRequestedAt: null,
+          completedAt: null,
+          updatedAt: new Date(),
+        },
+      );
+      if (!run) {
+        await this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
+          .deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
+        return null;
+      }
+      await this.bindAgentRunLock(lockId, id);
       return run;
     }
 
@@ -344,6 +387,27 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
+    async listAgentRunsWithUndeliveredCallbacks(
+      tenantId: string,
+      options: { updatedBefore: Date; maxAttempts: number; limit?: number },
+    ): Promise<IAgentRun[]> {
+      const db = this.getTenantDb();
+      const docs = await db
+        .collection<IAgentRun>(COLLECTIONS.agentRuns)
+        .find({
+          tenantId,
+          callbackUrl: { $nin: [null, ''] },
+          callbackStatus: { $in: ['pending', 'failed'] },
+          callbackAttempts: { $not: { $gte: options.maxAttempts } },
+          status: { $in: ['succeeded', 'failed', 'canceled', 'requires_action'] },
+          updatedAt: { $lt: options.updatedBefore },
+        })
+        .sort({ updatedAt: 1 })
+        .limit(options.limit && options.limit > 0 ? options.limit : 100)
+        .toArray();
+      return docs.map(toRun);
+    }
+
     async listAgentRuns(filter: {
       tenantId: string;
       projectId: string;
@@ -351,6 +415,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       conversationId?: string;
       status?: IAgentRun['status'][];
       mode?: IAgentRun['mode'];
+      userId?: string;
       limit?: number;
     }): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
@@ -359,6 +424,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       if (filter.conversationId) query.conversationId = filter.conversationId;
       if (filter.status && filter.status.length > 0) query.status = { $in: filter.status };
       if (filter.mode) query.mode = filter.mode;
+      if (filter.userId) query.userId = filter.userId;
       const docs = await db
         .collection<IAgentRun>(COLLECTIONS.agentRuns)
         .find(query)

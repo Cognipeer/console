@@ -12,7 +12,8 @@ import {
   ModelCategory,
 } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers';
-import { KNOWN_RULE_SIGNALS, configModelKeys } from './dynamicRouting';
+import { ROUTING_CHANNELS } from './routingCallerContext';
+import { CALLER_SIGNALS, KNOWN_RULE_SIGNALS, configModelKeys, parseConditionList } from './dynamicRouting';
 import {
   createProviderConfig,
   getProviderConfigByKey,
@@ -31,7 +32,8 @@ import type {
   ModelProviderView,
   CreateModelProviderInput,
 } from './types';
-import { applyModelCapabilityOverrides } from './modelCapabilities';
+import { applyModelCapabilityOverrides, ModelCapabilityValidationError } from './modelCapabilities';
+import { validateUpstreamApi } from './upstreamApi';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
 const logger = createLogger('model-service');
@@ -179,6 +181,11 @@ async function generateUniqueKey(
   throw new Error('Could not generate unique model key');
 }
 
+function assertUpstreamApi(settings: unknown, driver: string | undefined): void {
+  const problem = validateUpstreamApi(settings, driver);
+  if (problem) throw new ModelCapabilityValidationError(problem);
+}
+
 export async function createModel(
   tenantDbName: string,
   tenantId: string,
@@ -197,6 +204,7 @@ export async function createModel(
   );
 
   ensureProviderSupportsCategory(provider, payload.category);
+  assertUpstreamApi(payload.settings, provider.driver);
   validateSettingsDynamicConfig(payload.settings);
   const createDynamic = settingsDynamicConfig(payload.settings);
   if (createDynamic) {
@@ -369,6 +377,25 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
               ? `rule "${rule.label || '(unnamed)'}": the estimatedCostUsd signal was removed — route by cost with a pool policy or guards instead`
               : `rule "${rule.label || '(unnamed)'}": unknown signal "${condition.signal}"`,
           );
+        }
+        if ((CALLER_SIGNALS as readonly string[]).includes(condition.signal)) {
+          const label = rule.label || '(unnamed)';
+          if (condition.operator !== 'in' && condition.operator !== 'not_in') {
+            throw new Error(`rule "${label}": caller signal "${condition.signal}" supports only the in / not_in operators`);
+          }
+          const list = parseConditionList(condition.value);
+          if (list.length === 0) {
+            throw new Error(`rule "${label}": "${condition.signal}" needs at least one value`);
+          }
+          if (list.length > 100) {
+            throw new Error(`rule "${label}": "${condition.signal}" supports at most 100 values`);
+          }
+          if (condition.signal === 'channel') {
+            const bad = list.find((item) => !(ROUTING_CHANNELS as readonly string[]).includes(item));
+            if (bad) throw new Error(`rule "${label}": unknown channel "${bad}"`);
+          }
+        } else if (condition.operator === 'in' || condition.operator === 'not_in') {
+          throw new Error(`rule "${rule.label || '(unnamed)'}": in / not_in apply only to caller signals`);
         }
         if (condition.signal === 'complexityScore' && !config.complexity) {
           throw new Error(`rule "${rule.label || '(unnamed)'}" uses complexityScore, which needs a complexity decision model`);
@@ -599,6 +626,15 @@ export async function updateModel(
 
   if (userId) {
     updatePayload.updatedBy = userId;
+  }
+
+  // Checked when the settings or the provider change: the saved value has to
+  // stay legal for the driver that will serve it.
+  if (updatePayload.settings !== undefined || updatePayload.providerDriver !== undefined) {
+    assertUpstreamApi(
+      updatePayload.settings ?? existing.settings,
+      updatePayload.providerDriver ?? existing.providerDriver,
+    );
   }
 
   // `updates.settings` may attach a brand-new `dynamic` config or (via a

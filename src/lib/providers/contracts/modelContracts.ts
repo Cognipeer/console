@@ -1,17 +1,16 @@
-import { ChatOpenAI, OpenAIEmbeddings, AzureChatOpenAI, AzureOpenAIEmbeddings } from '@langchain/openai';
-import { ChatTogetherAI } from '@langchain/community/chat_models/togetherai';
-import { TogetherAIEmbeddings } from '@langchain/community/embeddings/togetherai';
-import {
-  ChatBedrockConverse,
-  BedrockEmbeddings,
-  type ChatBedrockConverseInput,
-} from '@langchain/aws';
-import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
-import { ChatAnthropic } from '@langchain/anthropic';
 import type { ProviderContract } from '../types';
-import type { ModelProviderRuntime } from '../domains/model';
+import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
-import { withInlineReasoningNormalization } from './wireNormalization';
+import { resolveRuleForDriver } from '@/lib/services/models/modelRules';
+import {
+  type NormalizedReasoning,
+  THINKING_ANSWER_HEADROOM,
+  hasExplicitThinking,
+  normalizeReasoning,
+  translateAnthropicThinking,
+  translateVertexThinking,
+} from '@/lib/services/models/reasoning';
+import { ANTHROPIC_DEFAULT_MAX_TOKENS, buildNativeChatClient, buildNativeEmbedder } from './nativeClients';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
 import { DECISION_CAPABILITIES } from './structuredDecisionRuntime';
@@ -26,11 +25,9 @@ import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
 } from './openaiAudioHelpers';
+import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
 import { OPENAI_REALTIME_TRANSCRIPTION_URL } from './openaiRealtimeTranscription';
-
-/** One wrapper for every OpenAI-schema chat model built by this module. */
-const reasoningNormalizingFetch = withInlineReasoningNormalization();
 
 interface OpenAiCredentials {
   apiKey: string;
@@ -96,17 +93,14 @@ interface RerankCredentials {
   apiKey: string;
 }
 
-interface ModelSettingsOverrides {
+export interface ModelSettingsOverrides {
   temperature?: number;
   topP?: number;
   presencePenalty?: number;
   frequencyPenalty?: number;
   maxTokens?: number;
   maxCompletionTokens?: number;
-  reasoning?: {
-    effort?: 'low' | 'medium' | 'high';
-    summary?: 'auto' | 'concise';
-  };
+  reasoning?: NormalizedReasoning;
   /**
    * Merged verbatim into the upstream request body. This is how non-OpenAI-schema
    * parameters reach a self-hosted server — vLLM/SGLang take things like
@@ -117,36 +111,33 @@ interface ModelSettingsOverrides {
   /** false when the model declares `stream_options` unsupported. */
   streamUsage?: boolean;
   /**
-   * Suppresses LangChain's own token-cap emission (`maxTokens: -1` is its
-   * documented "omit" sentinel) because we are supplying the renamed key
-   * through `extraBody` instead. See `applyMaxTokensRename`.
+   * The operator declared `max_tokens` unsupported, so the budget travels as
+   * `max_completion_tokens`. A native provider reads this to pin its
+   * `maxTokensParam`, instead of guessing from the model id.
    */
-  suppressMaxTokens?: boolean;
+  maxTokensRenamed?: boolean;
 }
 
 /**
- * Mirrors `isReasoningModel` in @langchain/openai (dist/utils/misc.js) — the
- * predicate it uses to decide whether a chat request carries `max_tokens` or
- * `max_completion_tokens`. We need the same answer *before* constructing the
- * model, because the rename cannot be expressed through constructor fields:
- * `maxCompletionTokens` and `maxTokens` collapse into one property
- * (dist/chat_models/base.js:217) and the wire key is then chosen from the model
- * id alone (dist/chat_models/completions.js:58).
+ * Whether the model's rule (agent-sdk table) makes Chat Completions requests carry
+ * `max_completion_tokens` instead of `max_tokens`.
+ * The same answer is needed *before* a client is built, because an operator's
+ * rename (`max_tokens` declared unsupported) must reach ids no rule recognises -
+ * an Azure deployment, a vanity model id - through the request body.
  */
-function langChainEmitsCompletionTokens(modelId: string | undefined): boolean {
+function emitsCompletionTokens(modelId: string | undefined): boolean {
   if (!modelId) return false;
-  if (/^o\d/.test(modelId)) return true;
-  return modelId.startsWith('gpt-5') && !modelId.startsWith('gpt-5-chat');
+  return resolveRuleForDriver('openai', modelId)?.maxTokensParam === 'max_completion_tokens';
 }
 
 /**
  * Carries the token budget across when an operator declares `max_tokens`
  * unsupported.
  *
- * When the model id already makes LangChain emit `max_completion_tokens`, the
- * constructor field is enough. Otherwise LangChain would emit `max_tokens`
- * regardless of what we pass, so we silence it and put the renamed key in the
- * extra body, which is spread into the request verbatim. This is exactly the
+ * When the model id already makes the provider emit `max_completion_tokens`,
+ * the budget field is enough. Otherwise the provider would emit `max_tokens`,
+ * so the renamed key is put in the extra body as well, which is spread into the
+ * request verbatim. This is exactly the
  * case the setting exists for — an Azure deployment or a vanity model id whose
  * name does not match the provider-side regex.
  */
@@ -158,10 +149,10 @@ function applyMaxTokensRename(
   if (budget === undefined) return;
 
   result.maxCompletionTokens ??= budget;
+  result.maxTokensRenamed = true;
 
-  if (!langChainEmitsCompletionTokens(modelId)) {
+  if (!emitsCompletionTokens(modelId)) {
     result.extraBody = { max_completion_tokens: budget, ...(result.extraBody ?? {}) };
-    result.suppressMaxTokens = true;
   }
 }
 
@@ -229,7 +220,38 @@ const DEFAULT_PROVIDER_RETRIES = 2;
 /** Anthropic's Messages API requires max_tokens; this is the floor applied when
  *  an operator has cleared the field. Generous enough not to truncate a coding
  *  answer, bounded enough not to be a blank cheque. */
-const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
+export { ANTHROPIC_DEFAULT_MAX_TOKENS };
+
+/**
+ * `createNativeChatClient` / `createNativeEmbedder` of one driver, built on the
+ * runtime's own `createNativeProviderSpec` (credentials and endpoint stay inside
+ * the contract's closure) and the per-model overrides (`resolveOverrides`).
+ */
+function nativeClientMethods(
+  driver: string,
+  runtime: () => ModelProviderRuntime,
+): Pick<ModelProviderRuntime, 'createNativeChatClient' | 'createNativeEmbedder'> {
+  return {
+    createNativeChatClient: (config, transport) =>
+      buildNativeChatClient({
+        driver,
+        spec: runtime().createNativeProviderSpec!(config),
+        config,
+        overrides: resolveOverrides(config.modelSettings, config.modelId, driver),
+        transport,
+      }),
+    createNativeEmbedder: (config, transport) =>
+      buildNativeEmbedder({ driver, spec: runtime().createNativeProviderSpec!(config), config, transport }),
+  };
+}
+
+/**
+ * The model's explicit "Upstream API" choice (Chat Completions unless the operator
+ * picked Responses). Never inferred from the model id.
+ */
+function upstreamApiOf(config: { modelSettings?: unknown }): 'chat' | 'responses' {
+  return resolveUpstreamApi(config.modelSettings);
+}
 
 function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
   return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -243,7 +265,7 @@ function asPlainObject(value: unknown): Record<string, unknown> | undefined {
   return Object.keys(record).length > 0 ? { ...record } : undefined;
 }
 
-function resolveOverrides(
+export function resolveOverrides(
   overrides?: Record<string, unknown>,
   modelId?: string,
   driver?: string,
@@ -264,9 +286,9 @@ function resolveOverrides(
   result.maxTokens = num('maxTokens');
   result.maxCompletionTokens = num('maxCompletionTokens');
 
-  if (overrides.reasoning && typeof overrides.reasoning === 'object') {
-    result.reasoning = overrides.reasoning as ModelSettingsOverrides['reasoning'];
-  }
+  // Typed value, legacy `{effort, summary}` and bare strings all land here.
+  const reasoning = normalizeReasoning(overrides.reasoning);
+  if (reasoning) result.reasoning = reasoning;
 
   // `extraBody` is what the gateway resolved for this call (model defaults +
   // caller passthrough). `requestDefaults` is the raw model-level field, honoured
@@ -293,48 +315,6 @@ function resolveOverrides(
   }
 
   return result;
-}
-
-/**
- * Constructor fields shared by every OpenAI-schema chat model (OpenAI, any
- * OpenAI-compatible base URL, Together, Azure). Undefined fields are dropped by
- * `JSON.stringify` on the way to the wire, which is what lets a stripped
- * parameter genuinely disappear from the request.
- */
-function openAiChatOverrides(
-  overrides: ModelSettingsOverrides,
-  options: { streaming?: boolean; disableStreaming?: boolean } | undefined,
-  maxRetries: number,
-) {
-  return {
-    disableStreaming: options?.disableStreaming ?? false,
-    // LangChain's own AsyncCaller retries 6 times by default. Nested inside the
-    // gateway's 3-attempt `withResilience` that is up to 21 upstream calls per
-    // request, 18 of them invisible to the circuit breaker, which then trips 7x
-    // later than configured.
-    maxRetries,
-    temperature: overrides.temperature,
-    topP: overrides.topP,
-    presencePenalty: overrides.presencePenalty,
-    frequencyPenalty: overrides.frequencyPenalty,
-    // Use maxCompletionTokens for reasoning models (o1, o3, gpt-5, …), maxTokens otherwise.
-    // `-1` is LangChain's "omit the cap" sentinel, used when the renamed key is
-    // being supplied through the extra body instead.
-    maxCompletionTokens: overrides.suppressMaxTokens ? -1 : overrides.maxCompletionTokens,
-    maxTokens: overrides.suppressMaxTokens ? -1 : overrides.maxTokens,
-    reasoning: overrides.reasoning,
-    modelKwargs: overrides.extraBody,
-    ...(overrides.streamUsage === false ? { streamUsage: false } : {}),
-    // Only ever pass `streaming: true`. An explicit `streaming: false` is not
-    // "unset" to @langchain/openai: its constructor turns it into
-    // `disableStreaming: true`, and `.stream()` then silently falls back to ONE
-    // non-streaming call. Agents stream through `.stream()` (agent-sdk
-    // `stream: true`) on models built without options, so that default made
-    // every native agent deliver its answer in one piece — the realtime voice
-    // engine waited for the whole reply before speaking. Unset still means a
-    // plain `invoke()` is non-streaming.
-    ...(options?.streaming ? { streaming: true } : {}),
-  };
 }
 
 function ensureValue(value: unknown, message: string): string {
@@ -412,25 +392,16 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
     const audioBase = 'https://api.openai.com/v1';
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai');
-        return new ChatOpenAI({
-          model: config.modelId,
+      ...nativeClientMethods('openai', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai',
           apiKey,
-          configuration: settings.organization
-            ? { organization: settings.organization }
-            : undefined,
-          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new OpenAIEmbeddings({
-          model: config.modelId,
-          apiKey,
-          configuration: settings.organization
-            ? { organization: settings.organization }
-            : undefined,
-        }),
+          ...(settings.organization ? { organization: settings.organization } : {}),
+          api: upstreamApiOf(config),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createSttRuntime: (config) =>
         createOpenAiSttRuntime({
           apiKey,
@@ -578,31 +549,20 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
     const baseUrl = ensureValue(settings.baseUrl, 'Base URL is required.');
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai-compatible');
-        return new ChatOpenAI({
-          model: config.modelId,
+      ...nativeClientMethods('openai-compatible', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai-compatible',
           apiKey,
-          configuration: {
-            baseURL: baseUrl,
-            organization: settings.organization,
-            // See `withInlineReasoningNormalization`: the OpenAI SDK parses the
-            // body itself under `response_format: json_schema`, so a leaked
-            // reasoning block has to be gone before it ever gets there.
-            fetch: reasoningNormalizingFetch,
-          },
-          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new OpenAIEmbeddings({
-          model: config.modelId,
-          apiKey,
-          configuration: {
-            baseURL: baseUrl,
-            organization: settings.organization,
-          },
-        }),
+          baseURL: baseUrl,
+          ...(settings.organization ? { organization: settings.organization } : {}),
+          api: upstreamApiOf(config),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+        // Same reason `createChatModel` below wraps its fetch: an upstream that
+        // leaks a reasoning block into `content` breaks structured output.
+        normalizeInlineReasoning: true,
+      }),
       createSttRuntime: (config) =>
         createOpenAiSttRuntime({
           apiKey,
@@ -653,6 +613,9 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
   },
 };
 
+/** Together AI's OpenAI-schema endpoint, the one `ChatTogetherAI` talks to. */
+const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
+
 export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntime, TogetherCredentials, Record<string, never>> = {
   id: 'together',
   version: '1.0.0',
@@ -685,19 +648,16 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
     const apiKey = ensureValue(credentials.apiKey, 'Together API key is required.');
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'together');
-        return new ChatTogetherAI({
-          model: config.modelId,
+      ...nativeClientMethods('together', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai-compatible',
           apiKey,
-          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new TogetherAIEmbeddings({
-          model: config.modelId,
-          apiKey,
-        }),
+          baseURL: TOGETHER_BASE_URL,
+          api: upstreamApiOf(config),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
     };
 
     return runtime;
@@ -777,27 +737,15 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
       : undefined;
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'anthropic');
-        return new ChatAnthropic({
-          model: config.modelId,
+      ...nativeClientMethods('anthropic', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'anthropic',
           apiKey,
-          maxRetries: resolveMaxRetries(config),
-          ...(baseUrl ? { anthropicApiUrl: baseUrl } : {}),
-          temperature: overrides.temperature,
-          topP: overrides.topP,
-          // Messages API rejects a request without max_tokens, and treats
-          // maxCompletionTokens as unknown. Fold the two names into the one the
-          // provider accepts and keep a floor so a cleared field cannot 400.
-          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
-          // Anthropic's passthrough channel is `invocationKwargs`, not the
-          // `modelKwargs` every OpenAI-schema contract in this file uses. The
-          // operator's configured beta fields — `thinking`, `cache_control`
-          // breakpoints, anything Anthropic ships next — ride here.
-          invocationKwargs: overrides.extraBody,
-          streaming: config.options?.streaming ?? false,
-        });
-      },
+          ...(baseUrl ? { baseURL: baseUrl } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createOcrRuntime: (config) => {
         const prompt =
           typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
@@ -881,39 +829,17 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
     const region = ensureValue(settings.region, 'AWS region is required.');
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'bedrock');
-        return new ChatBedrockConverse({
-          maxRetries: resolveMaxRetries(config),
-          model: config.modelId,
+      ...nativeClientMethods('bedrock', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'bedrock',
           region,
-          credentials: {
-            accessKeyId,
-            secretAccessKey,
-            sessionToken: credentials.sessionToken,
-          },
-          temperature: overrides.temperature,
-          topP: overrides.topP,
-          // Converse carries model-specific parameters in its own envelope
-          // rather than as top-level body fields. The cast is unavoidable:
-          // Smithy types this as a recursive `DocumentType`, which plain
-          // operator-supplied JSON does not structurally satisfy.
-          additionalModelRequestFields:
-            overrides.extraBody as ChatBedrockConverseInput['additionalModelRequestFields'],
-          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
-          streaming: config.options?.streaming ?? false,
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new BedrockEmbeddings({
-          model: config.modelId,
-          region,
-          credentials: {
-            accessKeyId,
-            secretAccessKey,
-            sessionToken: credentials.sessionToken,
-          },
-        }),
+          accessKeyId,
+          secretAccessKey,
+          ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createOcrRuntime: (config) => {
         const prompt =
           typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
@@ -989,31 +915,18 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
     const authOptions = parseServiceAccountKey(credentials.serviceAccountKey);
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'vertex');
-        // `ChatVertexAI`, not `VertexAI`: the latter is a text-completion LLM
-        // whose `.stream()` yields plain strings, so every streamed chunk came
-        // out of the gateway as an empty delta.
-        // `project` is accepted at runtime but not in the published types.
-        return new ChatVertexAI({
-          maxRetries: resolveMaxRetries(config),
-          model: config.modelId,
+      ...nativeClientMethods('vertex', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'vertex',
+          projectId,
           location,
-          authOptions,
-          temperature: overrides.temperature,
-          topP: overrides.topP,
-          maxOutputTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
-          streaming: config.options?.streaming ?? false,
-          ...({ project: projectId } as Record<string, unknown>),
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new VertexAIEmbeddings({
-          model: config.modelId,
-          location,
-          authOptions,
-          ...({ project: projectId } as Record<string, unknown>),
-        }),
+          // Without a key the SDK has no way to mint a token (the LangChain
+          // client fell back to application-default credentials).
+          ...(authOptions ? { serviceAccountJson: authOptions } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createOcrRuntime: (config) => {
         const prompt =
           typeof (config.modelSettings as Record<string, unknown> | undefined)?.ocr === 'object'
@@ -1136,25 +1049,19 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
     };
 
     const runtime: ModelProviderRuntime = {
-      createChatModel: (config) => {
-        const overrides = resolveOverrides(config.modelSettings, config.modelId, 'azure');
-        return new AzureChatOpenAI({
-          model: config.modelId,
-          azureOpenAIApiKey: apiKey,
-          azureOpenAIApiInstanceName: instanceName,
-          azureOpenAIApiDeploymentName: deploymentFor(config.modelId),
-          azureOpenAIApiVersion: apiVersionFor(config.modelSettings),
-          ...openAiChatOverrides(overrides, config.options, resolveMaxRetries(config)),
-        });
-      },
-      createEmbeddingModel: (config) =>
-        new AzureOpenAIEmbeddings({
-          model: config.modelId,
-          azureOpenAIApiKey: apiKey,
-          azureOpenAIApiInstanceName: instanceName,
-          azureOpenAIApiDeploymentName: deploymentFor(config.modelId),
-          azureOpenAIApiVersion: apiVersionFor(config.modelSettings),
-        }),
+      ...nativeClientMethods('azure', () => runtime),
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'azure',
+          apiKey,
+          endpoint: `https://${instanceName}.openai.azure.com`,
+          // Per DEPLOYMENT, not per resource: see `deploymentFor` / `apiVersionFor`.
+          deploymentName: deploymentFor(config.modelId),
+          apiVersion: apiVersionFor(config.modelSettings),
+          api: upstreamApiOf(config),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createSttRuntime: (config) =>
         createOpenAiSttRuntime({
           apiKey,

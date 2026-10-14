@@ -25,6 +25,15 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
+import { listVisibleFiles, sessionOfFile } from './session-linked-files';
+
+/** The caller of a client route, as the session checks name them: the token's owner, in the token's project. */
+const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { userId?: string } }): SessionActor => ({
+  tenantDbName: ctx.tenantDbName,
+  projectId: ctx.projectId,
+  userId: String(ctx.tokenRecord.userId ?? ''),
+});
 
 const logger = createLogger('api:client-files');
 
@@ -135,20 +144,34 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { bucketKey } = request.params as { bucketKey: string };
-      const query = (request.query ?? {}) as { cursor?: string; limit?: string; search?: string };
-      const result = await listFiles(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        bucketKey,
-        cursor: query.cursor,
-        limit: query.limit ? Number.parseInt(query.limit, 10) : 50,
-        search: query.search,
+      const query = (request.query ?? {}) as { cursor?: string; limit?: string; prefix?: string; purpose?: string; search?: string };
+      // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
+      // The files a session holds are the session's: those of somebody else's session the token's owner may not
+      // view are left out, and the page is filled from the following reads rather than cut short (a caller who
+      // may view every session costs one plain read and no lookup).
+      const limit = query.limit ? Number.parseInt(query.limit, 10) : 50;
+      const visible = await listVisibleFiles(request, {
+        cursor: query.cursor || undefined,
+        limit: Number.isInteger(limit) && limit > 0 ? limit : 50,
+        actor: actorOf(ctx),
+        read: (cursor, size) => listFiles(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+          bucketKey,
+          cursor,
+          limit: size,
+          search: query.search,
+          ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
+          ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
+        }),
       });
-
       return reply.code(200).send({
-        count: result.items.length,
-        files: result.items,
-        nextCursor: result.nextCursor,
+        count: visible.items.length,
+        files: visible.items,
+        ...(visible.folders ? { folders: visible.folders, prefix: visible.prefix } : {}),
+        nextCursor: visible.nextCursor,
       });
     } catch (error) {
+      const unavailable = sendClientListUnavailable(reply, request, error);
+      if (unavailable) return unavailable;
       logger.error('List client file objects error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Failed to list files',
@@ -250,6 +273,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!file) {
         return reply.code(404).send({ error: 'File not found' });
       }
+      // A file a session holds is read as the session it belongs to.
+      const refusal = await refuseSessionLinked(request, sessionOfFile(file), 'view', { actor: actorOf(ctx) });
+      if (refusal) return sendClientSessionRefusal(reply, request, refusal);
 
       return reply.code(200).send({ file });
     } catch (error) {
@@ -264,6 +290,11 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { bucketKey, objectKey } = request.params as { bucketKey: string; objectKey: string };
+      // Deleting a file a session holds is acting on the session. (A store that fails here fails the request:
+      // not knowing whether the file belongs to a session is not a reason to let the delete through.)
+      const existing = await getFileRecord(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey, objectKey);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(existing), 'manage', { actor: actorOf(ctx) });
+      if (refusal) return sendClientSessionRefusal(reply, request, refusal);
       await deleteFile(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -280,6 +311,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       });
     } catch (error) {
       logger.error('Delete client file error', { error });
+      if (error instanceof Error && error.message.includes('not found')) {
+        return reply.code(404).send({ error: 'File not found' });
+      }
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Failed to delete file',
       });
@@ -296,6 +330,11 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (variant !== 'original' && variant !== 'markdown') {
         return reply.code(400).send({ error: 'Invalid variant. Must be "original" or "markdown"' });
       }
+
+      // A file a session holds is read as the session it belongs to.
+      const wanted = await getFileRecord(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey, objectKey);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(wanted), 'view', { actor: actorOf(ctx) });
+      if (refusal) return sendClientSessionRefusal(reply, request, refusal);
 
       const result = await downloadFile(
         ctx.tenantDbName,

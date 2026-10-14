@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Modal, Paper, Stack, Text } from '@mantine/core';
+import { Button, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconArrowLeft, IconPencil, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import CreateTargetModal from '@/components/evaluations/CreateTargetModal';
@@ -28,6 +30,8 @@ function Row({ label, value, mono }: { label: string; value: React.ReactNode; mo
 
 export default function EvaluationTargetDetailPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const params = useParams<{ id: string }>();
   const id = params?.id;
   const [target, setTarget] = useState<EvalTargetView | null>(null);
@@ -35,8 +39,6 @@ export default function EvaluationTargetDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   const load = async () => {
     if (!id) return;
@@ -60,16 +62,19 @@ export default function EvaluationTargetDetailPage() {
 
   const onDelete = async () => {
     if (!target) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/evaluation/targets/${target.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${target.name}" was deleted`, color: 'red' });
-      router.push('/dashboard/evaluations');
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-      setDeleting(false);
-    }
+    const done = await deleteResource({
+      noun: tq('nouns.evaluationTarget'),
+      name: target.name,
+      type: 'evaluation-target',
+      id: target.id,
+      action: async () => {
+        const res = await fetch(`/api/evaluation/targets/${target.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${target.name}" was deleted`, color: 'red' });
+    router.push('/dashboard/evaluations');
   };
 
   const backButton = (
@@ -100,7 +105,7 @@ export default function EvaluationTargetDetailPage() {
           <Group gap="xs">
             {backButton}
             <Button size="sm" variant="default" leftSection={<IconPencil size={14} />} onClick={() => setEditOpen(true)}>Edit</Button>
-            <Button size="sm" color="red" variant="light" leftSection={<IconTrash size={14} />} onClick={() => setDeleteOpen(true)}>Delete</Button>
+            <Button size="sm" color="red" variant="light" leftSection={<IconTrash size={14} />} onClick={() => void onDelete()}>Delete</Button>
           </Group>
         }
       />
@@ -129,13 +134,10 @@ export default function EvaluationTargetDetailPage() {
         onCreated={(t) => { setTarget(t); setEditOpen(false); }}
       />
 
-      <Modal opened={deleteOpen} onClose={() => setDeleteOpen(false)} title="Delete target" centered size="sm">
-        <Text size="sm" mb="lg">Delete <strong>{target.name}</strong>? This cannot be undone.</Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={() => void onDelete()}>Delete</Button>
-        </Group>
-      </Modal>
+
+      <div style={{ marginTop: 16 }}>
+        <ResourceUsageSection type="evaluation-target" id={target.id} />
+      </div>
     </PageContainer>
   );
 }

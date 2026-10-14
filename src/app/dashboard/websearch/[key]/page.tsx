@@ -32,6 +32,8 @@ import DetailShell, {
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
 import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
@@ -113,6 +115,8 @@ function ResultLinks({
 
 export default function WebSearchInstancePage() {
   const router = useRouter();
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const params = useParams<{ key: string }>();
   const key = params.key;
 
@@ -133,7 +137,6 @@ export default function WebSearchInstancePage() {
   const [drivers, setDrivers] = useState<ProviderDescriptor[]>([]);
   const [driversLoading, setDriversLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
 
   // Playground
   const [searchQuery, setSearchQuery] = useState('');
@@ -503,10 +506,20 @@ export default function WebSearchInstancePage() {
   async function confirmDelete() {
     if (!instance) return;
     try {
-      const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
-        method: 'DELETE',
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.websearchInstance'),
+        name: instance.label,
+        type: 'provider',
+        id: String(instance._id),
+        extraWarning: tConfirm('extras.websearchKeyFails'),
+        action: async () => {
+          const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
+            method: 'DELETE',
+          });
+          if (!res.ok) throw new Error('Failed to delete');
+        },
       });
-      if (!res.ok) throw new Error('Failed to delete');
+      if (!deleted) return;
       notifications.show({ color: 'teal', title: 'Deleted', message: 'Instance removed' });
       router.push('/dashboard/websearch');
     } catch (err) {
@@ -1033,6 +1046,9 @@ export default function WebSearchInstancePage() {
               </div>
             </DetailCard>
           </div>
+          <DetailCard>
+            <ResourceUsageSection type="provider" id={String(instance._id)} />
+          </DetailCard>
           <DetailCard
             title="Danger zone"
             description="Deleting an instance breaks API calls that use its key."
@@ -1043,7 +1059,7 @@ export default function WebSearchInstancePage() {
               variant="light"
               size="xs"
               leftSection={<IconTrash size={13} stroke={1.7} />}
-              onClick={() => setDeleteOpen(true)}
+              onClick={() => void confirmDelete()}
             >
               Delete instance
             </Button>
@@ -1148,25 +1164,6 @@ export default function WebSearchInstancePage() {
             )}
           </Stack>
         )}
-      </Modal>
-
-      <Modal
-        opened={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
-        title="Delete instance"
-        centered
-        size="sm"
-      >
-        <Stack gap="md">
-          <span>
-            Delete <strong>{instance.label}</strong>? API calls using key{' '}
-            <code>{instance.key}</code> will start failing.
-          </span>
-          <Group justify="flex-end">
-            <Button variant="subtle" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-            <Button color="red" onClick={confirmDelete}>Delete</Button>
-          </Group>
-        </Stack>
       </Modal>
     </DetailShell>
   );

@@ -4,6 +4,7 @@ import type { ProviderDomain } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
@@ -19,6 +20,7 @@ import {
   listFiles,
   updateFileBucket,
   uploadFile,
+  composeUploadKeyHint,
 } from '@/lib/services/files';
 import {
   isDateInDashboardRange,
@@ -30,13 +32,49 @@ import {
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
 import {
+  bucketInUseBody,
+  findAgentsUsingBucket,
+} from '@/lib/services/agents/sessionFilesBucket';
+import {
   readJsonBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { refuseSessionLinked, sendSessionRefusal } from './agent-session-access';
+import { listVisibleFiles, sessionOfFile } from './session-linked-files';
 
 const logger = createLogger('api:files');
+
+/**
+ * Session files name their agent by key; the page of a session is addressed by the
+ * agent's `_id`. Each distinct key is looked up once. A lookup that fails, or an
+ * agent that is gone, leaves the row without `agentId` — the listing never fails
+ * for it.
+ */
+async function withAgentIds<T extends { purpose?: string; agentKey?: string }>(
+  tenantDbName: string,
+  projectId: string,
+  records: T[],
+): Promise<Array<T & { agentId?: string }>> {
+  const keys = [...new Set(records.filter((record) => record.purpose === 'conversation' && record.agentKey).map((record) => record.agentKey!))];
+  if (keys.length === 0) return records;
+  const ids = new Map<string, string>();
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    for (const key of keys) {
+      const agent = await db.findAgentByKey(key, projectId);
+      if (agent) ids.set(key, String(agent._id));
+    }
+  } catch (error) {
+    logger.warn('Could not resolve the agents of session files', { error: error instanceof Error ? error.message : String(error) });
+  }
+  return records.map((record) => {
+    const agentId = record.purpose === 'conversation' && record.agentKey ? ids.get(record.agentKey) : undefined;
+    return agentId ? { ...record, agentId } : record;
+  });
+}
 
 type FileProviderQuery = {
   driver?: string;
@@ -47,6 +85,8 @@ type FileObjectsQuery = {
   cursor?: string;
   download?: string;
   limit?: string;
+  prefix?: string;
+  purpose?: string;
   search?: string;
   variant?: string;
 };
@@ -72,6 +112,11 @@ function estimateBase64Bytes(input: unknown): number | undefined {
   const padding = paddingMatch ? paddingMatch[0].length : 0;
   const bytes = Math.floor((normalized.length * 3) / 4) - padding;
   return bytes > 0 ? bytes : 0;
+}
+
+/** A missing bucket is the handlers' 404; the in-use guard only speaks for one that exists. */
+async function bucketExists(tenantDbName: string, tenantId: string, projectId: string, bucketKey: string): Promise<boolean> {
+  return getFileBucket(tenantDbName, tenantId, projectId, bucketKey).then(() => true, () => false);
 }
 
 function normalizeObjectKey(wildcard: string | undefined): string | null {
@@ -342,6 +387,13 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         updates.status = body.status;
       }
 
+      // Agents keep their session files in the bucket they name: switching it
+      // off would make every upload to those sessions fail.
+      if (updates.status === 'disabled' && await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey)) {
+        const inUse = await findAgentsUsingBucket(session.tenantDbName, projectId, bucketKey);
+        if (inUse.length > 0) return reply.code(409).send(bucketInUseBody(bucketKey, inUse, 'disable'));
+      }
+
       const bucket = await updateFileBucket(
         session.tenantDbName,
         session.tenantId,
@@ -367,6 +419,12 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { bucketKey } = request.params as { bucketKey: string };
       const query = (request.query ?? {}) as { force?: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
+
+      // Not even with `force`: the agent would keep pointing at a bucket that is gone.
+      if (await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey)) {
+        const inUse = await findAgentsUsingBucket(session.tenantDbName, projectId, bucketKey);
+        if (inUse.length > 0) return reply.code(409).send(bucketInUseBody(bucketKey, inUse, 'delete'));
+      }
 
       const deleted = await deleteFileBucket(
         session.tenantDbName,
@@ -401,16 +459,30 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as FileObjectsQuery;
 
-      const scoped = await listFiles(session.tenantDbName, session.tenantId, projectId, {
-        bucketKey,
+      // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
+      // The files a session holds are the session's: those of somebody else's session the caller may not view
+      // are left out, and the page is filled from the following reads rather than cut short (a caller who may
+      // view every session costs one plain read and no lookup).
+      const limit = parseLimit(query.limit) ?? 50;
+      const visible = await listVisibleFiles(request, {
         cursor: query.cursor || undefined,
-        limit: parseLimit(query.limit) ?? 50,
-        search: query.search || undefined,
+        limit,
+        read: (cursor, size) => listFiles(session.tenantDbName, session.tenantId, projectId, {
+          bucketKey,
+          cursor,
+          limit: size,
+          search: query.search || undefined,
+          ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
+          ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
+        }),
       });
-
       return reply.code(200).send({
-        items: scoped.items,
-        nextCursor: scoped.nextCursor,
+        items: await withUploaderNames(
+          session.tenantDbName,
+          await withAgentIds(session.tenantDbName, projectId, visible.items),
+        ),
+        ...(visible.folders ? { folders: visible.folders, prefix: visible.prefix } : {}),
+        nextCursor: visible.nextCursor,
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'File bucket not found.') {
@@ -436,6 +508,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!body.data || typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required' });
       }
+      // `folder` (alias `prefix`) = upload into that folder; `keyHint` is then the file's name in it.
+      const destination = composeUploadKeyHint({ folder: body.folder ?? body.prefix, keyHint: body.keyHint });
+      if ('error' in destination) return reply.code(400).send({ error: destination.error });
 
       const estimatedFileBytes = estimateBase64Bytes(body.data) ?? 0;
       const quotaContext = {
@@ -501,7 +576,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         createdBy: session.userId,
         data: body.data as string,
         fileName: body.fileName as string,
-        keyHint: body.keyHint as string | undefined,
+        ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
         metadata: body.metadata as Record<string, unknown> | undefined,
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
@@ -537,6 +612,12 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as FileObjectsQuery;
 
+      // A file a session holds (`purpose: 'conversation'`) is read as the session it belongs to: its owner
+      // always may, anybody else needs `agent.session_view_others`.
+      const wanted = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(wanted), 'view');
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
+
       if (query.download) {
         const variant = query.download === 'markdown' || query.variant === 'markdown'
           ? 'markdown'
@@ -570,7 +651,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         key,
       );
 
-      return reply.code(200).send({ record });
+      const [withAgent] = await withAgentIds(session.tenantDbName, projectId, [record]);
+      const [named] = await withUploaderNames(session.tenantDbName, [withAgent]);
+      return reply.code(200).send({ record: named });
     } catch (error) {
       if (
         error instanceof Error
@@ -605,6 +688,11 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId, session } = await requireProjectContextForRequest(request);
+      // Deleting a file a session holds is acting on the session: its owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const existing = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(existing), 'manage');
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const deleted = await deleteFile(
         session.tenantDbName,
         session.tenantId,

@@ -28,6 +28,23 @@ curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
 
 Tokens are created in the dashboard under **Settings → API Tokens**.
 
+### Acting for a user
+
+An application that signs its own users in can make a call run as one of them. There are two equivalent ways to send the application token together with the signed statement (a JWT) about the person:
+
+```bash
+# 1. Two headers
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_your_token_here" \
+  -H "X-Cognipeer-User-Token: eyJhbGciOiJSUzI1NiIs..."
+
+# 2. One header, for SDKs that only let you set an API key: <api token>~<user token>
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_your_token_here~eyJhbGciOiJSUzI1NiIs..."
+```
+
+Both are verified identically; sending both at once is refused (`400`, `invalid_combined_credential`). The token must be set up for it first. See [Authentication](/guide/authentication#acting-for-a-user) and [Acting for a user](/guide/authorization#acting-for-a-user-verified-identity).
+
 ## Official SDK
 
 If you are integrating from a TypeScript or JavaScript application, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).
@@ -138,6 +155,8 @@ All responses follow a consistent JSON structure:
 }
 ```
 
+A `403` from the permission gate adds `code`, `service`, `required` and `decisionId` (also in the `X-Decision-Id` header); OpenAI-compatible routes carry them as `error.code` and `error.decision_id`. See [Authorization](/guide/authorization#decision-ids).
+
 ## HTTP Status Codes
 
 | Code | Meaning |
@@ -146,13 +165,13 @@ All responses follow a consistent JSON structure:
 | 201 | Created |
 | 400 | Bad request (missing/invalid parameters) |
 | 401 | Invalid or missing API token |
-| 403 | Feature not available in license |
+| 403 | The token's owner, scope or project does not allow it (`code: "forbidden"`, with a `decisionId`), the route has no authorization declaration (`route_not_declared`), or the feature is not available in the license |
 | 404 | Resource not found |
 | 409 | Conflict (duplicate resource) |
 | 422 | Unprocessable (validation failure) |
 | 429 | Rate limit exceeded |
 | 500 | Internal server error |
-| 503 | Service unavailable (circuit breaker open or shutting down) |
+| 503 | Service unavailable (circuit breaker open or shutting down), or authorization could not be decided (`code: "authorization_unavailable"`, with `Retry-After`) |
 
 ## Rate Limiting
 

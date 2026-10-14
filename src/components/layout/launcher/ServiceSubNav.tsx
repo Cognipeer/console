@@ -54,6 +54,7 @@ import {
   IconTrendingUp,
   IconVector,
   IconVolume,
+  IconWebhook,
   IconWorld,
   type Icon,
 } from '@tabler/icons-react';
@@ -64,15 +65,31 @@ import {
   usePendingNavigationKey,
 } from '@/components/common/navigation/useNavigationFeedback';
 import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
+import type { PermissionService } from '@/lib/security/rbac';
 import classes from './LauncherShell.module.css';
 
 export interface SubNavItem {
   id: string;
   label: string;
+  /** A key of the `navigation` messages; when set it is shown instead of `label`, in the viewer's language. */
+  labelKey?: string;
   href: string;
   icon: Icon;
   badge?: number | string;
   matcher?: (pathname: string, search: URLSearchParams) => boolean;
+  /**
+   * An item that belongs to another permission service than the section it sits
+   * in (Webhooks, in Agents): shown only to someone who can use that service.
+   */
+  requiresService?: PermissionService;
+}
+
+/** Drops the items the viewer has no access to; an item without `requiresService` always stays. */
+export function visibleSubNavItems(
+  items: SubNavItem[] | undefined,
+  canUse: (service: PermissionService) => boolean,
+): SubNavItem[] | undefined {
+  return items?.filter((item) => !item.requiresService || canUse(item.requiresService));
 }
 
 /** Model categories surfaced as their own sub-nav entries under the Models service. */
@@ -445,7 +462,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p, s) =>
         p.startsWith('/dashboard/models') &&
         !MODEL_TYPE_KEYS.includes(s.get('type') ?? '') &&
-        s.get('create') !== 'dynamic',
+        s.get('type') !== 'dynamic',
     },
     {
       id: 'llm',
@@ -457,10 +474,10 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     {
       id: 'dynamic-llm',
       label: 'Dynamic LLM',
-      href: '/dashboard/models?create=dynamic',
+      href: '/dashboard/models?type=dynamic',
       icon: IconArrowsSplit,
       matcher: (p, s) =>
-        p === '/dashboard/models' && s.get('create') === 'dynamic',
+        p === '/dashboard/models' && s.get('type') === 'dynamic',
     },
     {
       id: 'embedding',
@@ -598,7 +615,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p) =>
         p.startsWith('/dashboard/agents') &&
         !p.startsWith('/dashboard/agents/tools') &&
-        !p.startsWith('/dashboard/agents/skills'),
+        !p.startsWith('/dashboard/agents/skills') &&
+        !p.startsWith('/dashboard/agents/webhooks'),
     },
     {
       id: 'tools',
@@ -613,6 +631,17 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/agents/skills',
       icon: IconBulb,
       matcher: (p) => p.startsWith('/dashboard/agents/skills'),
+    },
+    {
+      // Project / tenant level (not per agent), about what agents do — sessions,
+      // approvals, budgets, runs, schedules. Used to sit under Settings.
+      id: 'webhooks',
+      label: 'Webhooks',
+      labelKey: 'webhooks',
+      href: '/dashboard/agents/webhooks',
+      icon: IconWebhook,
+      matcher: (p) => p.startsWith('/dashboard/agents/webhooks'),
+      requiresService: 'webhooks',
     },
   ],
   mcp: [
@@ -815,7 +844,7 @@ export default function ServiceSubNav({
               data-pending={pending ? 'true' : undefined}
               {...getIntentProps(item.href)}>
               <ItemIcon size={15} stroke={1.7} />
-              <span className={classes.subnavItemLabel}>{item.label}</span>
+              <span className={classes.subnavItemLabel}>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
               {item.badge ? (
                 <span className={classes.subnavBadge}>{item.badge}</span>
               ) : null}

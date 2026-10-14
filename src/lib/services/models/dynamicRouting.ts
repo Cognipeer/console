@@ -32,6 +32,7 @@ import type {
   DecisionChoiceQuestion,
   DecisionScoreQuestion,
 } from '@/lib/providers';
+import type { RoutingCallerContext } from './routingCallerContext';
 import type { ResolvedModelCapabilities } from './modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
@@ -60,6 +61,8 @@ export interface RoutingSignals {
   maxOutputTokens?: number;
   /** Expected level index from the router's `complexity` decision model. Lazy. */
   complexityScore?: number;
+  /** Caller identity (channel, user, groups, agent, portal, token, project). Never raw text. */
+  caller?: RoutingCallerContext;
   /** Latest user message text — used for keyword conditions and decider input. */
   lastUserText: string;
 }
@@ -74,6 +77,7 @@ export function publicSignals(signals: RoutingSignals): Record<string, unknown> 
     hasResponseFormat: signals.hasResponseFormat,
     hasImages: signals.hasImages,
     ...(signals.maxOutputTokens !== undefined ? { maxOutputTokens: signals.maxOutputTokens } : {}),
+    ...(signals.caller ? { caller: publicCaller(signals.caller) } : {}),
     ...Object.fromEntries(
       LAZY_NUMERIC_SIGNALS.filter((key) => signals[key] !== undefined).map((key) => [
         key,
@@ -82,6 +86,31 @@ export function publicSignals(signals: RoutingSignals): Record<string, unknown> 
     ),
   };
 }
+
+/** Ids and channel only — never names, headers or any request text. */
+export function publicCaller(caller: RoutingCallerContext): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of CALLER_SIGNALS) {
+    const value = caller[key];
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Caller-context rule signals — compared with `in` / `not_in`. */
+export const CALLER_SIGNALS = [
+  'channel',
+  'userId',
+  'groupIds',
+  'agentKey',
+  'portalKey',
+  'apiTokenId',
+  'projectId',
+] as const;
+export type CallerSignal = (typeof CALLER_SIGNALS)[number];
+const CALLER_SIGNAL_SET = new Set<string>(CALLER_SIGNALS);
 
 /** Numeric signals that need a lookup (pricing, history, counters) and are
  *  therefore only computed when a rule references them. */
@@ -151,7 +180,7 @@ export function extractRoutingSignals(body: {
   response_format?: unknown;
   max_tokens?: unknown;
   max_completion_tokens?: unknown;
-}): RoutingSignals {
+}, caller?: RoutingCallerContext): RoutingSignals {
   const messages = Array.isArray(body.messages)
     ? (body.messages as Array<{ role?: string; content?: unknown }>)
     : [];
@@ -183,6 +212,7 @@ export function extractRoutingSignals(body: {
     hasResponseFormat: body.response_format !== undefined && body.response_format !== null,
     hasImages,
     lastUserText,
+    ...(caller ? { caller } : {}),
     ...(maxTokens !== undefined ? { maxOutputTokens: maxTokens } : {}),
   };
 }
@@ -204,6 +234,7 @@ export const KNOWN_RULE_SIGNALS = new Set<string>([
   'hasResponseFormat',
   'hasImages',
   'keyword',
+  ...CALLER_SIGNALS,
   ...LAZY_NUMERIC_SIGNALS,
 ]);
 
@@ -268,6 +299,31 @@ function safeRegexTest(pattern: RegExp, text: string): boolean {
   }
 }
 
+/** A list value as stored: an array, or a comma-separated string. */
+export function parseConditionList(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : value == null ? [] : [value];
+  return raw.map((item) => String(item).trim()).filter(Boolean);
+}
+
+/**
+ * `in` / `not_in` over caller context. A caller field that is absent never
+ * matches — not even `not_in` — so a rule cannot be satisfied by missing data.
+ */
+function evaluateCallerCondition(
+  condition: IDynamicRoutingCondition,
+  caller: RoutingCallerContext | undefined,
+): boolean {
+  const { signal, operator, value } = condition;
+  if (operator !== 'in' && operator !== 'not_in') return false;
+  const actual = caller?.[signal as CallerSignal];
+  if (actual === undefined || actual === null) return false;
+  const list = parseConditionList(value);
+  if (list.length === 0) return false;
+  const actuals = Array.isArray(actual) ? actual.map(String) : [String(actual)];
+  const anyListed = actuals.some((item) => list.includes(item));
+  return operator === 'in' ? anyListed : !anyListed;
+}
+
 export function evaluateCondition(
   condition: IDynamicRoutingCondition,
   signals: RoutingSignals,
@@ -289,6 +345,10 @@ export function evaluateCondition(
       }
     }
     return false;
+  }
+
+  if (CALLER_SIGNAL_SET.has(signal)) {
+    return evaluateCallerCondition(condition, signals.caller);
   }
 
   if (BOOLEAN_SIGNALS.has(signal)) {

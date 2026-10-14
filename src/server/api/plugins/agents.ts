@@ -1,3 +1,4 @@
+import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import { AgentDocumentParseError } from '@/lib/services/agents/import/document';
 import {
   AgentImportError,
@@ -8,7 +9,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
-import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -24,20 +25,28 @@ import {
   listConversations,
   updateAgentRecord,
 } from '@/lib/services/agents';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
+import { watchTurnCancellation } from '@/lib/services/agents/turnWatch';
 // By path: the agents barrel does not export the error class.
 import {
   AgentGuardrailBlockedError,
   checkAgentModel,
+  executeAgentContinueLocal,
   // Imported BY PATH: the barrel exports the queue-routing wrapper, and the
   // streaming route deliberately needs the local one (a progress callback
   // cannot cross the job queue).
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
+import { AgentBudgetReachedError } from '@/lib/services/agents/agentErrors';
+import { assertSessionBudgetAvailable, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
+import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import {
   validateAgentConfig,
   type AgentConfigIssue,
 } from '@/lib/services/agents/agentConfigValidation';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { classifyAgentRunError, logAgentRunFailure } from '@/lib/services/agents/agentErrors';
+import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from '@/lib/services/agents/agentQuota';
+import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 import {
   AgentManifestError,
   applyAgentManifest,
@@ -68,10 +77,52 @@ import {
   requestAgentRunCancellation,
   reserveConversationForSyncTurn,
   resolveAgentExecutionLimits,
+  runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
+import { DASHBOARD_AGENT_HITL_DEFAULTS } from '@/lib/services/agents/agentHumanInTheLoop';
+import {
+  pendingActionsBlockingMessage,
+  resolveAgentPendingAction,
+  type ResolveActor,
+  type ResolveOutcome,
+} from '@/lib/services/agents/agentActionResolution';
+import {
+  listConversationActions,
+  listSessionEvents,
+  streamSessionEvents,
+  toPublicPendingAction,
+} from './agent-session-events';
+import {
+  approvalAuthorizerFor,
+  authorizeEndingOpenRequests,
+  CANCEL_PENDING_FORBIDDEN_MESSAGE,
+  describeAnswerAbility,
+  refuseCancelPending,
+  withAnswerAbility,
+  type AnswerAbility,
+} from './agent-approval-authz';
+import {
+  AgentModelError,
+  advertisedModelsForRequest,
+  rememberSessionModel,
+  resolveAgentConfigForModels,
+  resolveRunModelForRequest,
+} from './agent-model-authz';
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
+import {
+  decideSessionAccess,
+  loadSessionForPrincipal,
+  sendAuthorizationUnavailable,
+  sendSessionRefusal,
+  sessionListScope,
+  sessionStreamStillAllowed,
+  type SessionNeed,
+} from './agent-session-access';
+import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
 import {
   applyStreamHeaders,
   readJsonBody,
@@ -79,8 +130,10 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { BucketNamingForbiddenError } from '@/lib/services/agents/attachmentsBucketAccess';
 import {
   applyConfigGuardrailBindings,
+  bucketNamingForbiddenBody,
   connectedConfigForUpdate,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
@@ -90,6 +143,16 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
+import { requestCanNameBucket } from './files-permission';
+import { sessionHasAgentsPermission } from './agents-permission';
+import {
+  FeedbackError,
+  FEEDBACK_REASONS,
+  listAgentFeedback,
+  listSessionFeedback,
+  summarizeAgentFeedback,
+  toFeedbackView,
+} from '@/lib/services/agents/agentFeedback';
 
 const logger = createLogger('api:agents');
 
@@ -139,12 +202,110 @@ async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) 
 }
 
 /**
+ * `requireScopedAgent` plus the session `:sessionId` names - scoped to this
+ * agent and project, so an id valid for a sibling agent or project 404s - and
+ * the caller's right to it: the person who started the session needs nothing
+ * beyond the route's own service check; anybody else needs
+ * `agent.session_view_others` (`need: 'view'`, reading) or
+ * `agent.session_manage_others` (`need: 'manage'`, changing) - agent-session-access.ts.
+ * `need: 'none'` skips that question for a route that asks its own (answering a
+ * pending request: `agent.approve`, or the session's ownership for a question).
+ * Null, with the 404 / 403 / 503 already sent, when it is missing, out of
+ * scope or not the caller's to touch.
+ */
+export async function requireScopedSession(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: { need: SessionNeed | 'none' },
+) {
+  const scoped = await requireScopedAgent(request, reply);
+  if (!scoped) return null;
+  const { sessionId } = request.params as { sessionId: string };
+  if (options.need === 'none') {
+    let found: IAgentConversation | null = null;
+    try {
+      found = await getConversationById(scoped.session.tenantDbName, sessionId);
+    } catch {
+      found = null;
+    }
+    if (!found || found.agentKey !== scoped.agent.key || found.projectId !== scoped.projectId) {
+      void reply.code(404).send({ error: 'Session not found' });
+      return null;
+    }
+    return { ...scoped, conversation: found, owner: String(found.createdBy) === scoped.session.userId };
+  }
+  const loaded = await loadSessionForPrincipal(request, sessionId, {
+    need: options.need,
+    agentKey: scoped.agent.key,
+    agent: scoped.agent,
+    projectId: scoped.projectId,
+    actor: { tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId, userId: scoped.session.userId },
+  });
+  if (!loaded.ok) {
+    sendSessionRefusal(reply, request, loaded);
+    return null;
+  }
+  return { ...scoped, conversation: loaded.conversation, owner: loaded.owner };
+}
+
+/** The window of a feedback query in days (default 30, at most 365). */
+function feedbackDays(rawQuery: unknown): number {
+  const days = Number((rawQuery as { days?: string } | undefined)?.days);
+  return Number.isFinite(days) && days >= 1 ? Math.min(Math.floor(days), 365) : 30;
+}
+
+/** The filter of the Feedback tab's queries, or the 400 message. */
+function parseFeedbackFilter(rawQuery: unknown, agentKey: string, projectId: string) {
+  const query = (rawQuery ?? {}) as Record<string, string | undefined>;
+  if (query.rating !== undefined && query.rating !== 'up' && query.rating !== 'down') {
+    return { error: '`rating` must be "up" or "down"' };
+  }
+  if (query.reason !== undefined && !(FEEDBACK_REASONS as readonly string[]).includes(query.reason)) {
+    return { error: `\`reason\` must be one of: ${FEEDBACK_REASONS.join(', ')}` };
+  }
+  return {
+    projectId,
+    agentKey,
+    from: new Date(Date.now() - feedbackDays(query) * 86_400_000),
+    ...(query.rating ? { rating: query.rating as 'up' | 'down' } : {}),
+    ...(query.reason ? { reason: query.reason as (typeof FEEDBACK_REASONS)[number] } : {}),
+    ...(query.portalId ? { portalId: query.portalId } : {}),
+    ...(query.hasComment === 'true' || query.hasComment === '1' ? { hasComment: true } : {}),
+  };
+}
+
+/**
  * Logs a failed route and answers it: the project-context status when that is
  * what failed, else a 500 with `message`.
  */
 function sendRouteError(reply: FastifyReply, error: unknown, logMessage: string, message: string) {
   logger.error(logMessage, { error });
   return sendProjectContextError(reply, error) ?? reply.code(500).send({ error: message });
+}
+
+/** The still-open requests of a session, as stored (who raised each, under which agent version). */
+function openActionsOf(tenantDbName: string, conversationId: string) {
+  return runWithTenantDb(tenantDbName, (db) => db.listAgentPendingActions(conversationId, { status: 'pending' }));
+}
+
+/**
+ * What the caller could do with the requests a waiting session holds, for its row in the table: `canResolve` is
+ * true when every open request is theirs to answer; otherwise the first reason they cannot. Nothing for a
+ * session that waits on nobody, or when the answer cannot be given (it is only a hint: the server decides again).
+ */
+async function answerabilityOfRow(
+  request: FastifyRequest,
+  tenantDbName: string,
+  agent: Pick<IAgent, '_id' | 'key'>,
+  conversation: IAgentConversation,
+  actor: { tenantDbName: string; projectId: string; userId: string },
+): Promise<{ canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null> {
+  if (conversation.runtimeStatus !== 'requires_action') return null;
+  const actions = await openActionsOf(tenantDbName, String(conversation._id));
+  if (actions.length === 0) return null;
+  const ability = await describeAnswerAbility(request, { tenantDbName, conversation, actions, agent, actor });
+  const blocked = [...ability.values()].find((entry) => !entry.canResolve);
+  return blocked ? { canResolve: false, ...(blocked.reason ? { resolveBlockedReason: blocked.reason } : {}) } : { canResolve: true };
 }
 
 /**
@@ -172,6 +333,69 @@ async function reserveDashboardSession(input: {
   });
 }
 
+/** Makes a dashboard turn stoppable from `POST .../sessions/:sessionId/cancel` (any node). */
+function turnWatchFor(turn: { reservation?: { run: { _id?: unknown } } | null; run: { tenantDbName: string; tenantId: string; projectId: string; conversationId?: string } }) {
+  const { reservation, run } = turn;
+  if (!reservation || !run.conversationId) return undefined;
+  return watchTurnCancellation({
+    tenantDbName: run.tenantDbName,
+    tenantId: run.tenantId,
+    projectId: run.projectId,
+    conversationId: run.conversationId,
+    runId: String(reservation.run._id),
+  });
+}
+
+/** Who is answering a pending action: the dashboard user. Whether they may is the policy engine's decision (agent-approval-authz.ts). */
+function dashboardActor(scoped: NonNullable<Awaited<ReturnType<typeof requireScopedAgent>>>): ResolveActor {
+  const { user, session } = scoped;
+  return {
+    userId: session.userId,
+    channel: 'dashboard',
+    email: user.email,
+    role: user.role,
+  };
+}
+
+/** The refusal for a resolve that did not start a continuation, or null for the outcomes that did. */
+function resolveRefusal(outcome: ResolveOutcome): { status: number; body: Record<string, unknown> } | null {
+  switch (outcome.kind) {
+    case 'not_found':
+      return { status: 404, body: { error: 'Request not found' } };
+    case 'not_pending':
+      // Told apart so a client can say what happened to it: answered elsewhere, cancelled (a new
+      // message, a run cancel, the timeout policy), or timed out.
+      if (outcome.status === 'cancelled') {
+        return { status: 409, body: { error: 'This request was cancelled', type: 'action_cancelled', code: 'action_cancelled', actionStatus: outcome.status } };
+      }
+      if (outcome.status === 'expired') {
+        return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired', actionStatus: outcome.status } };
+      }
+      return { status: 409, body: { error: 'This request is no longer open', type: 'action_not_pending', code: 'action_not_pending', actionStatus: outcome.status } };
+    case 'expired':
+      return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired' } };
+    case 'forbidden':
+      return { status: 403, body: { error: outcome.message, code: 'forbidden', ...(outcome.decisionId ? { decisionId: outcome.decisionId } : {}) } };
+    case 'invalid':
+      return { status: 400, body: { error: outcome.message } };
+    case 'busy':
+      return { status: 409, body: SESSION_BUSY_BODY };
+    default:
+      return null;
+  }
+}
+
+/** The dashboard's 402 for a session whose spend budget is used up. */
+function budgetReachedBody(error: AgentBudgetReachedError) {
+  return {
+    error: error.message,
+    type: 'budget_reached',
+    code: 'budget_reached',
+    spentUsd: error.spentUsd,
+    maxCostUsd: error.maxCostUsd,
+  };
+}
+
 const SESSION_BUSY_BODY = {
   error: 'This session already has a run in progress. Wait for it to finish or start a new session.',
   type: 'agent_run_conflict',
@@ -191,6 +415,26 @@ async function readOnlySessionSource(tenantDbName: string, conversationId: unkno
   return typeof source === 'string' && source !== 'console' ? source : null;
 }
 
+/** `attachments` from a chat body: an array of file ids (empty when absent); null when malformed. */
+function parseAttachmentIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 100) return null;
+  return value.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128) ? (value as string[]) : null;
+}
+
+/**
+ * The earlier messages a stateless call (no `conversationId`) carries along. The server
+ * ignores them for a Session, which loads its own history.
+ */
+function readStatelessHistory(body: Record<string, unknown>): Array<{ role: string; content: string }> | undefined {
+  if (!Array.isArray(body.history)) return undefined;
+  return (body.history as Array<{ content?: unknown; role?: unknown } | null>).flatMap((item) => (
+    typeof item?.content === 'string' && typeof item.role === 'string'
+      ? [{ content: item.content, role: item.role }]
+      : []
+  ));
+}
+
 /**
  * What `/chat` and `/chat/stream` both check before a playground turn runs:
  * the message, the agent in scope, a writable session and its run slot. Null —
@@ -206,16 +450,107 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
     void reply.code(400).send({ error: 'Message is required' });
     return null;
   }
+  // Files of this session the message attaches (uploaded to `…/sessions/:id/files` first).
+  const attachments = parseAttachmentIds(body.attachments);
+  if (attachments === null) {
+    void reply.code(400).send({ error: 'attachments must be an array of file ids' });
+    return null;
+  }
   const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
   if (!agent) {
     void reply.code(404).send({ error: 'Agent not found' });
     return null;
+  }
+  // Continuing a session somebody else started is acting on it: the owner always may, anybody else needs
+  // `agent.session_manage_others` and `agent.session_view_others` (the reply is built from what the session holds).
+  // Asked first, so a refusal does not reveal whether the session is read-only.
+  if (typeof body.conversationId === 'string') {
+    const loaded = await loadSessionForPrincipal(request, body.conversationId, {
+      need: 'continue',
+      agentKey: agent.key,
+      agent,
+      projectId,
+      actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+    });
+    if (!loaded.ok) {
+      sendSessionRefusal(reply, request, loaded);
+      return null;
+    }
   }
   const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
   if (readOnlySource) {
     void reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
     return null;
   }
+  // The session is waiting on an approval or an answer and the agent refuses
+  // new messages meanwhile (`onUserMessageWhilePending: 'reject'`).
+  if (typeof body.conversationId === 'string') {
+    const conversation = await getConversationById(session.tenantDbName, body.conversationId);
+    const blocking = await pendingActionsBlockingMessage(session.tenantDbName, conversation, agent.config);
+    if (blocking) {
+      void reply.code(409).send({
+        error: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
+        type: 'pending_action',
+        code: 'pending_action',
+        pendingActionIds: blocking,
+      });
+      return null;
+    }
+    // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it with
+    // "no", so it takes the permission to answer.
+    const cancelRefusal = await refuseCancelPending(request, { tenantDbName: session.tenantDbName, conversation, agent });
+    if (cancelRefusal?.unavailable) {
+      sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
+      return null;
+    }
+    if (cancelRefusal) {
+      void reply.code(403).send({
+        error: CANCEL_PENDING_FORBIDDEN_MESSAGE,
+        code: 'forbidden',
+        ...(cancelRefusal.decisionId ? { decisionId: cancelRefusal.decisionId } : {}),
+      });
+      return null;
+    }
+    // The session has used up its own spend budget.
+    try {
+      assertSessionBudgetAvailable(conversation);
+    } catch (error) {
+      if (!(error instanceof AgentBudgetReachedError)) throw error;
+      void reply.code(402).send(budgetReachedBody(error));
+      return null;
+    }
+  }
+  // `reasoning_effort` / `reasoning: { effort }` from the dashboard chat: same lowest rung as the client API.
+  const reasoningRequest = parseAgentRequestReasoning(body);
+  if (reasoningRequest.error) {
+    void reply.code(400).send({ error: reasoningRequest.error, code: 'invalid_reasoning' });
+    return null;
+  }
+  // Which of the agent's models this turn runs on: `model` in the body (the playground's picker), else the
+  // session's last choice. The draft config unless a version is asked for - the playground runs the draft.
+  let modelChoice: AgentModelChoice | undefined;
+  const askedModel = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+  const sessionConversation = typeof body.conversationId === 'string'
+    ? await getConversationById(session.tenantDbName, body.conversationId)
+    : null;
+  if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
+    const runConfig = typeof body.version === 'number'
+      ? await resolveAgentConfigForModels(session.tenantDbName, agent, projectId, body.version)
+      : agent.config;
+    if (askedModel || runConfig.additionalModels?.length) {
+      try {
+        modelChoice = await resolveRunModelForRequest(request, {
+          agent, config: runConfig, projectId, requested: askedModel, conversation: sessionConversation,
+        });
+      } catch (error) {
+        if (!(error instanceof AgentModelError)) throw error;
+        void reply.code(error.status).send({ error: error.message, code: error.code });
+        return null;
+      }
+    }
+  }
+  if (modelChoice && sessionConversation) await rememberSessionModel(session.tenantDbName, sessionConversation, modelChoice);
+
   const reservation = await reserveDashboardSession({
     session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
   });
@@ -239,9 +574,60 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       tenantDbName: session.tenantDbName,
       tenantId: session.tenantId,
       userMessage: body.message,
+      ...(attachments.length > 0 ? { attachments } : {}),
       ...(typeof body.version === 'number' ? { version: body.version } : {}),
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+      // Operator view (Compare versions): thought text whatever the agent publishes to its API.
+      ...(body.showReasoning === true ? { revealReasoning: true } : {}),
+      ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
+      ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     },
+  };
+}
+
+/**
+ * An SSE response that opens lazily — at the first event it is given — so a
+ * refusal that comes before anything has happened can still be a normal JSON
+ * response. Disabled (`enabled` false) it swallows every call.
+ */
+function openLazyEventStream(reply: FastifyReply, enabled: boolean) {
+  let started = false;
+  let closed = false;
+  const pendingFrames: Array<() => void> = [];
+  const write = (event: string, data: unknown, id?: number) => {
+    if (closed) return;
+    try {
+      reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      closed = true;
+    }
+  };
+  const start = () => {
+    if (started || !enabled) return;
+    started = true;
+    applyStreamHeaders(reply);
+    reply.raw.flushHeaders?.();
+    reply.raw.on('close', () => { closed = true; });
+    for (const frame of pendingFrames.splice(0)) frame();
+  };
+  const send = (event: string, data: unknown, id?: number) => {
+    if (!enabled) return;
+    if (!started) {
+      pendingFrames.push(() => write(event, data, id));
+      return;
+    }
+    write(event, data, id);
+  };
+  return {
+    start,
+    send,
+    started: () => started,
+    /** A callback that starts the stream and forwards one kind of progress event. */
+    live: <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
+      start();
+      send(event, map(...args));
+    },
+    end: () => { if (!closed) reply.raw.end(); },
   };
 }
 
@@ -253,7 +639,15 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
  * session listed months later shows the same numbers it showed live, at the
  * prices that applied then rather than today's.
  */
-function summariseConversation(conversation: IAgentConversation) {
+/** How many waiting sessions of one list are checked for "could you answer it" (the rest simply do not say). */
+const WAITING_ROWS_ANSWERABILITY_LIMIT = 50;
+
+function summariseConversation(
+  conversation: IAgentConversation,
+  owner?: SessionOwner,
+  answerability?: { canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null,
+  viewerId?: string,
+) {
   let inputTokens = 0;
   let outputTokens = 0;
   let totalTokens = 0;
@@ -306,6 +700,17 @@ function summariseConversation(conversation: IAgentConversation) {
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
+    // Whose it is: the person who started it (a name), or the kind of traffic that did (a schedule, a public A2A call...).
+    createdBy: conversation.createdBy,
+    ...(owner ? { owner } : {}),
+    // The viewer started it (so the table can say "you" without knowing who the viewer is).
+    ...(viewerId ? { ownSession: String(conversation.createdBy) === viewerId } : {}),
+    // Waiting for an answer: whether THIS viewer could give it, as the server will decide it.
+    ...(answerability ? answerability : {}),
+    // 'requires_action' = waiting on an approval / answer (the "Waiting for you" badge);
+    // 'budget_paused' = the session's spend budget stopped it.
+    runtimeStatus: conversation.runtimeStatus,
+    ...(conversation.budget ? { budget: conversation.budget, spentUsd: Math.max(conversation.spentUsd ?? 0, costUsd) } : {}),
     hasContext: Boolean(
       conversation.metadata?.runtimeContext
       && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
@@ -344,8 +749,18 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         user,
+        canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
       });
+      if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
+
+      // An agent created from the dashboard asks before its tools run unless the
+      // form said otherwise. Stored explicitly so it shows (and can be changed)
+      // in Configure → Approvals & questions. The client API's create route does
+      // not do this: an API-created agent keeps running unattended.
+      if (prepared.config.kind !== 'external' && prepared.config.humanInTheLoop === undefined) {
+        prepared.config.humanInTheLoop = structuredClone(DASHBOARD_AGENT_HITL_DEFAULTS);
+      }
 
       const agent = await createAgentRecord(
         session.tenantDbName,
@@ -369,7 +784,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
-      return reply.code(200).send({ agent: redactAgent(scoped.agent) });
+      // The models the playground may pick among (main + additional the caller may use).
+      const models = await advertisedModelsForRequest(request, {
+        agent: scoped.agent, tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId,
+      }).catch(() => undefined);
+      return reply.code(200).send({ agent: redactAgent(scoped.agent), ...(models ? { models } : {}) });
     } catch (error) {
       return sendRouteError(reply, error, 'Get agent error', 'Failed to get agent');
     }
@@ -414,7 +833,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: session.tenantId,
             projectId,
             user,
-          });
+            canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+          }, existing.config);
+          if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
           warnings = checked.warnings;
         }
@@ -611,6 +1032,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: body.key,
           name: body.name,
           allowMissingDependencies: body.allowMissingDependencies,
+          // Importing is a config write like any other: naming a bucket takes the right to name it.
+          canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
         },
       );
 
@@ -620,6 +1043,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         missing: result.missing,
       });
     } catch (error) {
+      if (error instanceof BucketNamingForbiddenError) {
+        return reply.code(403).send(bucketNamingForbiddenBody(error));
+      }
       if (error instanceof AgentManifestError) {
         return reply.code(400).send({ error: error.message, issues: error.issues });
       }
@@ -633,6 +1059,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // says otherwise. `/preview` writes nothing.
   const sendImportError = (reply: FastifyReply, error: unknown) => {
     if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
+    if (error instanceof BucketNamingForbiddenError) return reply.code(403).send(bucketNamingForbiddenBody(error));
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
@@ -667,7 +1094,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'content is required' });
       }
       const result = await applyAgentDocumentImport(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          userId: String(user._id),
+          canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+        },
         body,
       );
       return reply.code(result.action === 'created' ? 201 : 200).send({
@@ -928,8 +1361,21 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
       const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
-      const allowed = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
-      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'>;
+      const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
+      // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
+      // this agent sees only the runs they queued, and a run of one session is the session's to read.
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (query.conversationId) {
+        const loaded = await loadSessionForPrincipal(request, query.conversationId, {
+          need: 'view',
+          agentKey: agent.key,
+          agent,
+          projectId,
+          actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        });
+        if (!loaded.ok) return sendSessionRefusal(reply, request, loaded);
+      }
       const runs = await listAgentRuns(session.tenantDbName, {
         tenantId: session.tenantId,
         projectId,
@@ -937,6 +1383,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         mode: 'background',
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });
       return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
@@ -955,6 +1402,34 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
       if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
         return reply.code(404).send({ error: 'Run not found' });
+      }
+      // Cancelling a run is acting on its session: the session's owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
+      if (conversation && conversation.projectId === projectId) {
+        const access = await decideSessionAccess(request, conversation, {
+          need: 'manage',
+          agent,
+          actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+          alsoOwnedBy: [existing.userId],
+        });
+        if (!access.ok) return sendSessionRefusal(reply, request, access);
+      }
+      // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
+      if (existing.status === 'requires_action') {
+        if (conversation && conversation.projectId === projectId) {
+          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: session.tenantDbName, conversation, agent });
+          if (!verdict.allowed && verdict.unavailable) {
+            return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+          }
+          if (!verdict.allowed) {
+            return reply.code(403).send({
+              error: 'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
+              code: 'forbidden',
+              ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}),
+            });
+          }
+        }
       }
       const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
       if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
@@ -1019,9 +1494,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
 
+      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
+      // database, before the page, so a busy teammate cannot push theirs off it.
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
       const conversations = await listConversations(session.tenantDbName, agent.key, {
         limit: 50,
         projectId,
+        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
       });
 
       return reply.code(200).send({ conversations });
@@ -1067,15 +1546,30 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
 
+      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
+      // database, before the page, so a busy teammate cannot push theirs off it (one decision per request).
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
       const sessions = await listConversations(session.tenantDbName, agent.key, {
         limit: 100,
         projectId,
+        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
       });
+      const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
+      // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
+      const waiting = sessions.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
+      const answerable = new Map<string, Awaited<ReturnType<typeof answerabilityOfRow>>>();
+      for (const entry of waiting) {
+        answerable.set(String(entry._id), await answerabilityOfRow(request, session.tenantDbName, agent, entry, { tenantDbName: session.tenantDbName, projectId, userId: session.userId }));
+      }
       // Summarised here rather than shipped whole: every record carries its
       // full transcript, and a hundred of those is megabytes of tool payloads
       // sent so the list can render a row count. The session PAGE fetches the
       // one transcript it actually shows.
-      return reply.code(200).send({ sessions: sessions.map(summariseConversation) });
+      return reply.code(200).send({
+        sessions: sessions.map((entry) => summariseConversation(entry, owners.get(entry.createdBy), answerable.get(String(entry._id)), session.userId)),
+        // Whether this is everybody's sessions of the agent or only the caller's own.
+        scope: { viewOthers: !scope.ownOnly },
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'List agent sessions error', 'Failed to list sessions');
     }
@@ -1099,6 +1593,15 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         })
         : undefined;
 
+      // Optional spend budget for this session (`null` = none); absent = the agent's default.
+      let budget: IAgentSessionBudget | null | undefined;
+      if (body.budget === null) budget = null;
+      else if (body.budget !== undefined) {
+        const parsed = parseSessionBudget(body.budget);
+        if (!parsed.ok) return reply.code(400).send({ error: parsed.message });
+        budget = parsed.budget;
+      }
+
       const created = await createConversation(
         session.tenantDbName,
         session.tenantId,
@@ -1107,6 +1610,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         agent.key,
         typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
         { source: 'console', ...(sessionContext ? { runtimeContext: sessionContext } : {}) },
+        budget,
       );
       return reply.code(201).send({ session: created });
     } catch (error) {
@@ -1116,38 +1620,493 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      // Scope check, not just existence - a session id valid for a sibling agent (or project) in the same
+      // tenant must 404 here too - and the caller's right to read what somebody else started.
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-      const { sessionId } = request.params as { sessionId: string };
+      const { agent, session } = scoped;
+      const found = scoped.conversation;
 
-      const found = await getConversationById(session.tenantDbName, sessionId);
-      // Scope check, not just existence — a session id valid for a sibling
-      // agent (or project) in the same tenant must 404 here too.
-      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
-        return reply.code(404).send({ error: 'Session not found' });
-      }
-      return reply.code(200).send({ session: found });
+      // Whose it is, and which of its open requests THIS caller could answer (the page shows the server's
+      // verdict instead of deriving one from the agent's setting and the viewer's role).
+      const [owners, actions] = await Promise.all([
+        resolveSessionOwners([found.createdBy]),
+        openActionsOf(session.tenantDbName, String(found._id)),
+      ]);
+      const ability = await describeAnswerAbility(request, { tenantDbName: session.tenantDbName, conversation: found, actions, agent, actor: { tenantDbName: session.tenantDbName, projectId: scoped.projectId, userId: session.userId } });
+      return reply.code(200).send({
+        session: found,
+        owner: owners.get(found.createdBy) ?? null,
+        // The caller started it: nothing more than the route's own check was needed.
+        ownSession: scoped.owner,
+        pendingActions: withAnswerAbility(actions.map(toPublicPendingAction), ability),
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'Get agent session error', 'Failed to load session');
     }
   }));
 
+  // ── Session spend budget ──
+  //
+  // `{ budget: { maxCostUsd, onReach } | null }` adds, changes or removes the
+  // session's budget. A paused session is continued with `…/continue` (Studio
+  // calls this, then that).
+  app.patch('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
+      if (!scoped) return reply;
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (body.budget === undefined) {
+        return reply.code(400).send({ error: 'budget is required: { maxCostUsd, onReach }, or null to remove it' });
+      }
+      const outcome = await updateSessionBudget({
+        tenantDbName: scoped.session.tenantDbName,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        budget: body.budget,
+      });
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Session not found' });
+      if (outcome.kind === 'invalid') return reply.code(400).send({ error: outcome.message });
+      // `continuable`: the session was waiting on its budget with a turn left to carry on, so
+      // `…/continue` now makes sense. False for a budget that stops (raise it and send a message),
+      // for a session whose turn already ended with its answer, and for one that was not stopped.
+      return reply.code(200).send({ session: outcome.conversation, continuable: outcome.wasBudgetPaused });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Update session budget error', 'Failed to update the session budget');
+    }
+  }));
+
+  /**
+   * Stop: ends the session's running turn (what it had streamed is kept as the
+   * answer, `cancelled`) and cancels the approvals/questions of a paused one.
+   * Works for a turn started from anywhere — the playground, the API, a portal
+   * — and on any node. Nothing to stop is a 200 with `cancelled: false`.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
+      if (!scoped) return reply;
+      // Ending an open approval is answering it "no": without that right the turn still stops, the approval stays.
+      const verdict = await authorizeEndingOpenRequests(request, {
+        tenantDbName: scoped.session.tenantDbName,
+        conversation: scoped.conversation,
+        agent: scoped.agent,
+      });
+      if (!verdict.allowed && verdict.unavailable) {
+        return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+      }
+      const outcome = await cancelConversationTurn({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        agentKey: scoped.agent.key,
+        requestedBy: scoped.session.userId,
+        cancelActions: verdict.allowed,
+      });
+      return reply.code(200).send(outcome);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Cancel session turn error', 'Failed to stop the turn');
+    }
+  }));
+
+  /**
+   * Continue a session that stopped on its spend budget (after the budget was
+   * raised): the agent carries on from where it stopped, with no new user
+   * message. Without `?stream=1` the call returns when the turn has finished
+   * (JSON); with it, the turn is an SSE stream in the same event format as
+   * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
+   * way: the stream only opens once there is a turn to report.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      // A turn in the session: its owner always may; anybody else must be allowed to change AND to view it.
+      scoped = await requireScopedSession(request, reply, { need: 'continue' });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Continue session error', 'Failed to continue the session');
+    }
+    if (!scoped) return reply;
+    const conversationId = String(scoped.conversation._id);
+    const source = scoped.conversation.metadata?.source;
+    if (typeof source === 'string' && source !== 'console') {
+      return reply.code(409).send({ error: `This session came in via ${source} and is read-only. Start a new session to test the agent.` });
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const wantsStream = query.stream === '1' || query.stream === 'true';
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    const reservation = await reserveDashboardSession({
+      session: scoped.session,
+      projectId: scoped.projectId,
+      agentKey: scoped.agent.key,
+      conversationId,
+      userMessage: '',
+    });
+    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
+
+    const stream = openLazyEventStream(reply, wantsStream);
+    const unsubscribe = wantsStream
+      ? sessionEventBus.subscribe(conversationId, (frame) => {
+        if (frame.type === 'action.required') stream.send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) stream.send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
+
+    const watch = reservation
+      ? watchTurnCancellation({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId,
+        runId: String(reservation.run._id),
+      })
+      : undefined;
+
+    try {
+      const continued = await executeAgentContinueLocal({
+        ...(watch ? { signal: watch.signal } : {}),
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        agentKey: scoped.agent.key,
+        conversationId,
+        userId: scoped.session.userId,
+        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+          userId: scoped.session.userId,
+          source: 'playground',
+        }),
+        continuation: {
+          source: 'agent-playground',
+          ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        },
+        ...(wantsStream
+          ? {
+            onToolEvent: stream.live('tool', (event) => event),
+            onTextChunk: stream.live('text', (text: string) => ({ text })),
+            onReasoningChunk: stream.live('reasoning', (text: string) => ({ text })),
+            onCompaction: stream.live('summary', (compaction) => compaction),
+          }
+          : {}),
+      });
+      if (wantsStream) {
+        stream.start();
+        stream.send('result', continued.result);
+        stream.end();
+        return reply;
+      }
+      return reply.code(200).send({ status: 'continued', result: continued.result });
+    } catch (error) {
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const resumeStatus = (error as { status?: unknown })?.status;
+      if (stream.started()) {
+        // The status line is long gone; the error travels as an event, like `/chat/stream`.
+        stream.send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        stream.end();
+        return reply;
+      }
+      if (error instanceof AgentGuardrailBlockedError) {
+        return sendAgentGuardrailBlock(reply, error);
+      }
+      if (classified.status >= 500) logger.error('Continue session error', { error });
+      return sendProjectContextError(reply, error) ?? reply.code(
+        typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
+      ).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+        ...(classified.error.spentUsd !== undefined ? { spentUsd: classified.error.spentUsd } : {}),
+        ...(classified.error.maxCostUsd !== undefined ? { maxCostUsd: classified.error.maxCostUsd } : {}),
+      });
+    } finally {
+      watch?.stop();
+      unsubscribe?.();
+      await reservation?.release();
+    }
+  }));
+
   app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      // Deleting somebody else's session is acting on it: the owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
+      if (!scoped) return reply;
+      await deleteConversation(scoped.session.tenantDbName, String(scoped.conversation._id));
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Delete agent session error', 'Failed to delete session');
+    }
+  }));
+
+  // ── Session event log + pending actions ──
+
+  app.get('/agents/:agentId/sessions/:sessionId/events', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
+      if (!scoped) return reply;
+      const body = await listSessionEvents(
+        scoped.session.tenantDbName,
+        String(scoped.conversation._id),
+        (request.query ?? {}) as Record<string, unknown>,
+      );
+      return reply.code(200).send(body);
+    } catch (error) {
+      return sendRouteError(reply, error, 'List session events error', 'Failed to list session events');
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId/events/stream', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      scoped = await requireScopedSession(request, reply, { need: 'view' });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Session event stream error', 'Failed to open the event stream');
+    }
+    if (!scoped) return reply;
+    const conversationId = String(scoped.conversation._id);
+    return streamSessionEvents(request, reply, scoped.session.tenantDbName, conversationId, 'dashboard', () => sessionStreamStillAllowed(request, conversationId, {
+      agentKey: scoped.agent.key,
+      agent: scoped.agent,
+      projectId: scoped.projectId,
+    }));
+  }));
+
+  // ── Feedback: what people said about this agent's answers ──
+  //
+  // Counts and reasons are for everyone who can read agents; the words people wrote (and
+  // who wrote them) only for those who can change them (`canReadComments` says which).
+
+  app.get('/agents/:agentId/sessions/:sessionId/feedback', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
+      if (!scoped) return reply;
+      const canReadComments = await sessionHasAgentsPermission(scoped.session, 'write');
+      const rows = await listSessionFeedback({
+        tenantDbName: scoped.session.tenantDbName,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        agentKey: scoped.agent.key,
+      });
+      return reply.code(200).send({
+        feedback: rows.map((row) => {
+          const view = toFeedbackView(row, { includeComment: canReadComments });
+          return canReadComments ? view : { ...view, userId: undefined };
+        }),
+        canReadComments,
+      });
+    } catch (error) {
+      if (error instanceof FeedbackError) return reply.code(error.status).send({ error: error.message, code: error.code });
+      return sendRouteError(reply, error, 'List session feedback error', 'Failed to list feedback');
+    }
+  }));
+
+  app.get('/agents/:agentId/feedback', withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const { sessionId } = request.params as { sessionId: string };
-
-      const found = await getConversationById(session.tenantDbName, sessionId);
-      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
-        return reply.code(404).send({ error: 'Session not found' });
-      }
-      await deleteConversation(session.tenantDbName, sessionId);
-      return reply.code(200).send({ success: true });
+      const filter = parseFeedbackFilter(request.query, agent.key, projectId);
+      if ('error' in filter) return reply.code(400).send({ error: filter.error });
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const canReadComments = await sessionHasAgentsPermission(session, 'write');
+      const page = await listAgentFeedback(session.tenantDbName, filter, {
+        limit: Math.min(Math.max(Number(query.limit) || 25, 1), 100),
+        skip: Math.max(Number(query.skip) || 0, 0),
+      });
+      return reply.code(200).send({
+        items: page.items.map((row) => ({
+          ...toFeedbackView(row, { includeComment: canReadComments }),
+          conversationId: row.conversationId,
+          agentVersion: row.agentVersion ?? null,
+          ...(canReadComments ? {} : { userId: undefined }),
+        })),
+        total: page.total,
+        canReadComments,
+      });
     } catch (error) {
-      return sendRouteError(reply, error, 'Delete agent session error', 'Failed to delete session');
+      return sendRouteError(reply, error, 'List agent feedback error', 'Failed to list feedback');
+    }
+  }));
+
+  app.get('/agents/:agentId/feedback/summary', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const filter = parseFeedbackFilter(request.query, agent.key, projectId);
+      if ('error' in filter) return reply.code(400).send({ error: filter.error });
+      const summary = await summarizeAgentFeedback(session.tenantDbName, filter);
+      return reply.code(200).send({ summary, days: feedbackDays(request.query) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Summarize agent feedback error', 'Failed to summarize feedback');
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
+      if (!scoped) return reply;
+      const body = await listConversationActions(
+        scoped.session.tenantDbName,
+        String(scoped.conversation._id),
+        (request.query ?? {}) as Record<string, unknown>,
+      );
+      // What THIS caller could do with each open request, decided by the engine's own rule - the page shows it
+      // instead of guessing from the agent's setting and the viewer's role.
+      const ability = await describeAnswerAbility(request, {
+        tenantDbName: scoped.session.tenantDbName,
+        conversation: scoped.conversation,
+        actions: await openActionsOf(scoped.session.tenantDbName, String(scoped.conversation._id)),
+        agent: scoped.agent,
+        actor: { tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId, userId: scoped.session.userId },
+      });
+      return reply.code(200).send({ actions: withAnswerAbility(body.actions, ability) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List session actions error', 'Failed to list session actions');
+    }
+  }));
+
+  /**
+   * Answer a pending approval / question and let the paused turn continue.
+   *
+   * Without `?stream=1` the call returns when the continuation has finished
+   * (JSON). With it, the continuation is an SSE stream in the SAME event format
+   * as `/chat/stream` (`tool`, `text`, `summary`, `result`, `error`, plus the
+   * additive `action` / `status`), so a client renders it like any other turn.
+   * A refusal (404, 403, 409, 410, 400) is a normal JSON response either way:
+   * the stream only opens once there is a continuation to report.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/actions/:actionId/resolve', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      // Who may answer is asked below, of the request itself: `agent.approve` for a tool approval, the session's
+      // ownership for a question - not the "view / change somebody else's session" pair this loader asks.
+      scoped = await requireScopedSession(request, reply, { need: 'none' });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Resolve action error', 'Failed to resolve the request');
+    }
+    if (!scoped) return reply;
+
+    const { actionId } = request.params as { actionId: string };
+    const conversationId = String(scoped.conversation._id);
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const wantsStream = query.stream === '1' || query.stream === 'true';
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    // The stream opens lazily; the continuation's first event starts it.
+    let started = false;
+    let closed = false;
+    const pendingFrames: Array<() => void> = [];
+    const write = (event: string, data: unknown, id?: number) => {
+      if (closed) return;
+      try {
+        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        closed = true;
+      }
+    };
+    const startStream = () => {
+      if (started || !wantsStream) return;
+      started = true;
+      applyStreamHeaders(reply);
+      reply.raw.flushHeaders?.();
+      reply.raw.on('close', () => { closed = true; });
+      for (const frame of pendingFrames.splice(0)) frame();
+    };
+    const send = (event: string, data: unknown, id?: number) => {
+      if (!wantsStream) return;
+      if (!started) {
+        pendingFrames.push(() => write(event, data, id));
+        return;
+      }
+      write(event, data, id);
+    };
+    const live = <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
+      startStream();
+      send(event, map(...args));
+    };
+
+    const unsubscribe = wantsStream
+      ? sessionEventBus.subscribe(conversationId, (frame) => {
+        if (frame.type === 'action.required') send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
+
+    try {
+      const outcome = await resolveAgentPendingAction({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId,
+        actionId,
+        agentKey: scoped.agent.key,
+        body,
+        actor: dashboardActor(scoped),
+        authorize: approvalAuthorizerFor(request, scoped.session.tenantDbName),
+        mode: 'sync',
+        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+          userId: scoped.session.userId,
+          source: 'playground',
+        }),
+        ...(wantsStream
+          ? {
+            stream: {
+              onToolEvent: live('tool', (event) => event),
+              onTextChunk: live('text', (text: string) => ({ text })),
+              onReasoningChunk: live('reasoning', (text: string) => ({ text })),
+              onCompaction: live('summary', (compaction) => compaction),
+            },
+          }
+          : {}),
+        audit: {
+          ipAddress: request.ip,
+          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+        },
+      });
+
+      // The engine could not decide who may answer: 503 (never a 403), nothing was recorded.
+      if (outcome.kind === 'unavailable') {
+        return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: outcome.decisionId });
+      }
+      const refusal = resolveRefusal(outcome);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+
+      if (outcome.kind === 'pending') {
+        return reply.code(200).send({ status: 'requires_action', pendingActions: outcome.pendingActions });
+      }
+      if (outcome.kind === 'resumed') {
+        if (wantsStream) {
+          startStream();
+          send('result', outcome.result);
+          if (!closed) reply.raw.end();
+          return reply;
+        }
+        return reply.code(200).send({ status: 'resumed', result: outcome.result });
+      }
+      return reply.code(500).send({ error: 'Unexpected resolution outcome' });
+    } catch (error) {
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const resumeStatus = (error as { status?: unknown })?.status;
+      if (started) {
+        // The status line is long gone; the error travels as an event, like `/chat/stream`.
+        send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        if (!closed) reply.raw.end();
+        return reply;
+      }
+      if (error instanceof AgentGuardrailBlockedError) {
+        return sendAgentGuardrailBlock(reply, error);
+      }
+      logger.error('Resolve action error', { error });
+      return sendProjectContextError(reply, error) ?? reply.code(
+        typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
+      ).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+      });
+    } finally {
+      unsubscribe?.();
     }
   }));
 
@@ -1175,32 +2134,85 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     const turn = await prepareDashboardTurn(request, reply);
     if (!turn) return reply;
 
+    // Agent-run quota (domain `agent`). This route runs the playground runtime
+    // directly (below), bypassing the `executePlaygroundChat` wrapper that
+    // counts every other caller, so it counts here — before the stream opens,
+    // which lets an exhausted caller get a real 429 instead of an error event.
+    const quotaCaller: AgentRunCaller = {
+      tenantDbName: turn.run.tenantDbName,
+      tenantId: turn.run.tenantId,
+      projectId: turn.run.projectId,
+      agentKey: turn.run.agentKey,
+      userId: turn.run.runtimeContext?.userId,
+      tokenId: turn.run.runtimeContext?.tokenId,
+    };
+    try {
+      await enforceAgentRunQuota(quotaCaller);
+    } catch (error) {
+      await turn.reservation?.release();
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      return reply.code(classified.status).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+      });
+    }
+
     applyStreamHeaders(reply);
     reply.raw.flushHeaders?.();
 
+    // A stateless turn (no Session) has no run record for `…/cancel` to point at, so the client's
+    // Stop is closing the stream: the run ends with what it had streamed. A Session turn keeps
+    // running after a tab closes and is stopped through the session instead (`turnWatchFor`).
+    const disconnect = typeof turn.run.conversationId === 'string' ? undefined : new AbortController();
     let closed = false;
-    reply.raw.on('close', () => { closed = true; });
-    const send = (event: string, data: unknown) => {
+    reply.raw.on('close', () => {
+      closed = true;
+      if (!reply.raw.writableEnded) disconnect?.abort();
+    });
+    const send = (event: string, data: unknown, id?: number) => {
       if (closed) return;
       try {
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       } catch {
         closed = true;
       }
     };
 
+    // A run that fails or is aborted late has still spent its tokens (see runUsage.ts).
+    const usage = createRunUsageSink();
+
+    // Additive events for a Session turn, taken from the same log the
+    // `/events` endpoints serve (`id:` = the event's seq): `action` when the
+    // agent pauses for an approval or a question, `status` as the turn starts
+    // and stops. The events above are unchanged; an older client ignores these.
+    const unsubscribeSessionEvents = typeof turn.run.conversationId === 'string'
+      ? sessionEventBus.subscribe(turn.run.conversationId, (frame) => {
+        if (frame.type === 'action.required') send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
+
+    const watch = turnWatchFor(turn);
     try {
-      const result = await executePlaygroundChatLocal({
+      const result = await runWithUsageSink(usage, () => executePlaygroundChatLocal({
         ...turn.run,
+        ...(watch ? { signal: watch.signal } : disconnect ? { signal: disconnect.signal } : {}),
+        // A stateless call (Compare versions) carries its own earlier messages.
+        history: readStatelessHistory(turn.body),
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
+        // The model's thinking as it happens (additive event: older clients ignore it).
+        onReasoningChunk: (text) => send('reasoning', { text }),
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.
         onCompaction: (compaction) => send('summary', compaction),
-      });
+      }));
 
+      settleAgentRun(quotaCaller, usage, result.usage?.totalTokens);
       send('result', result);
     } catch (error) {
+      settleAgentRun(quotaCaller, usage);
       // The status line is long gone by now, so the error travels as an
       // event. A client that only listened for `result` would otherwise hang
       // until the socket closed and call it a network fault.
@@ -1211,11 +2223,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         });
         send('error', { error: error.message, type: 'guardrail_block' });
       } else {
-        logger.error('Agent playground stream error', { error });
+        logAgentRunFailure(logger, 'Agent playground stream error', error);
         const classified = classifyAgentRunError(error, { exposeInternal: true });
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
+      watch?.stop();
+      unsubscribeSessionEvents?.();
       await turn.reservation?.release();
       if (!closed) reply.raw.end();
     }
@@ -1229,21 +2243,18 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { body } = turn;
 
       let result: Awaited<ReturnType<typeof executePlaygroundChat>>;
+      const watch = turnWatchFor(turn);
       try {
         result = await executePlaygroundChat({
           ...turn.run,
+          ...(watch ? { signal: watch.signal } : {}),
           // Ignored server-side when conversationId is set (history loads from
           // the session instead) — still parsed so a stateless call (no
           // conversationId) keeps working exactly as before.
-          history: Array.isArray(body.history)
-            ? (body.history as Array<{ content?: unknown; role?: unknown } | null>).flatMap((item) => (
-              typeof item?.content === 'string' && typeof item.role === 'string'
-                ? [{ content: item.content, role: item.role }]
-                : []
-            ))
-            : undefined,
+          history: readStatelessHistory(body),
         });
       } finally {
+        watch?.stop();
         await turn.reservation?.release();
       }
 
@@ -1258,7 +2269,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           hook: error.hook,
         });
       } else {
-        logger.error('Agent playground chat error', { error });
+        logAgentRunFailure(logger, 'Agent playground chat error', error);
       }
       const classified = classifyAgentRunError(error, { exposeInternal: true });
       return sendAgentGuardrailBlock(reply, error)

@@ -1,20 +1,45 @@
 'use client';
 
-import { use, useEffect, useMemo, useState } from 'react';
+import { Suspense, use, useEffect, useMemo, useState } from 'react';
 import { Button, Paper, Tabs, Text } from '@mantine/core';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
 import { IconArrowLeft, IconRefresh } from '@tabler/icons-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
 import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
 import QuotaManagement from '@/components/settings/QuotaManagement';
+import { notifyActiveProjectChanged } from '@/components/layout/useEffectivePermissions';
 
 type Project = {
   _id: string;
   name: string;
   key: string;
 };
+
+/**
+ * The Users tab. `?member=<userId>` opens that member's project permission editor
+ * (the Access check links here from "Project limit" reasons).
+ */
+function ProjectMembers({ projectId }: { projectId: string }) {
+  const searchParams = useSearchParams();
+  const param = searchParams?.get('member') ?? null;
+  // Kept after the address is cleaned up below, until the editor has been opened.
+  const [memberId, setMemberId] = useState<string | null>(param);
+  useEffect(() => {
+    if (!param) return;
+    setMemberId(param);
+    // A one-shot link: drop it from the address so a refresh does not reopen the editor.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('member');
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    } catch {
+      /* the History API is unavailable (embedded frame): the link just stays */
+    }
+  }, [param]);
+  return <ProjectMembersManager projectId={projectId} openMemberId={memberId} />;
+}
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = use(params);
@@ -67,6 +92,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
         throw new Error(body?.error || 'Failed to set active project');
       }
       setActiveProjectId(projectId);
+      // What the navigation shows depends on the active project's limits.
+      notifyActiveProjectChanged();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to set active project';
       notifications.show({ title: 'Project', message, color: 'red' });
@@ -134,7 +161,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ projec
           </Tabs.List>
 
           <Tabs.Panel value="users" pt="md">
-            <ProjectMembersManager projectId={projectId} />
+            <Suspense fallback={null}>
+              <ProjectMembers projectId={projectId} />
+            </Suspense>
           </Tabs.Panel>
 
           <Tabs.Panel value="providers" pt="md">

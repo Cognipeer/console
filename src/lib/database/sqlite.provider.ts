@@ -45,6 +45,7 @@ import { BrowserMixin } from './sqlite/browser.mixin';
 import { CrawlerMixin } from './sqlite/crawler.mixin';
 import { AgentRunMixin } from './sqlite/agent-run.mixin';
 import { OcrJobMixin } from './sqlite/ocr-jobs.mixin';
+import { WebhookMixin } from './sqlite/webhook.mixin';
 import { BatchJobMixin } from './sqlite/batch.mixin';
 import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { ExternalModelPricingMixin } from './sqlite/external-model-pricing.mixin';
@@ -52,6 +53,9 @@ import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
 import { BetaAccessCodeMixin } from './sqlite/beta-access-code.mixin';
+import { IamInvalidationMixin } from './iam-invalidation.mixin';
+import { IamDocsMixin } from './sqlite/iam-docs.mixin';
+import { IamDirectoryMixin } from './sqlite/iam-directory.mixin';
 import { applyEnterpriseSqliteDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -82,7 +86,7 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = ExternalModelPricingMixin(BulkBase);
+const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the
@@ -92,12 +96,19 @@ const ClusterBase = ClusterMixin(PricingBase);
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
+// Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
+const IamBase = IamDirectoryMixin(IamDocsMixin(SignupBase));
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; this is a no-op in the community edition.
 // See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseSqliteDbMixins(SignupBase);
+const FinalBase = applyEnterpriseSqliteDbMixins(IamBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class SQLiteProvider extends FinalBase implements DatabaseProvider {}
+// Outermost: observes writes of every layer (core + enterprise overlay) so the
+// policy engine's principal cache drops stale slices (src/lib/iam).
+const ObservedBase = IamInvalidationMixin(FinalBase);
+
+export class SQLiteProvider extends ObservedBase implements DatabaseProvider {}

@@ -16,14 +16,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -42,7 +42,6 @@ vi.mock('@/lib/services/models/modelService', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
 import { getModelById, listModels, updateModel } from '@/lib/services/models/modelService';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -72,8 +71,6 @@ describe('client model registry', () => {
     const db = createMockDb();
     db.findUserById.mockResolvedValue({ _id: 'user-1', role: 'owner', tenantId: 'tenant-1' } as never);
     mockFn(getDatabase).mockResolvedValue(db);
-    mockFn(getPermissionServiceForPath).mockReturnValue('models');
-    mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true, service: 'models', required: 'read' });
     mockFn(listModels).mockResolvedValue([
       {
         _id: 'model-1',

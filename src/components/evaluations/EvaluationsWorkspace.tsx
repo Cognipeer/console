@@ -10,8 +10,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Loader, Modal, Text } from '@mantine/core';
+import { Button, Group, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconCamera,
   IconChecklist,
@@ -61,6 +63,8 @@ function pct(value?: number): string {
 
 export default function EvaluationsWorkspace({ section }: { section: EvaluationSection }) {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const [targets, setTargets] = useState<EvalTargetView[]>([]);
   const [datasets, setDatasets] = useState<EvalDatasetView[]>([]);
   const [suites, setSuites] = useState<EvalSuiteView[]>([]);
@@ -76,8 +80,6 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
   const [editTarget, setEditTarget] = useState<EvalTargetView | null>(null);
   const [editSuite, setEditSuite] = useState<EvalSuiteView | null>(null);
   const [editDataset, setEditDataset] = useState<EvalDatasetView | null>(null);
-  const [deleteItem, setDeleteItem] = useState<{ kind: EvaluationSection; id: string; name: string } | null>(null);
-  const [deleting, setDeleting] = useState(false);
 
   const loadAll = async () => {
     setRefreshing(true);
@@ -144,22 +146,27 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteItem) return;
-    const path =
-      deleteItem.kind === 'targets' ? 'targets' : deleteItem.kind === 'datasets' ? 'datasets' : 'suites';
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/evaluation/${path}/${deleteItem.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${deleteItem.name}" was deleted`, color: 'red' });
-      setDeleteItem(null);
-      await loadAll();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeleting(false);
-    }
+  const confirmDelete = async (item: { kind: EvaluationSection; id: string; name: string }) => {
+    const path = item.kind === 'targets' ? 'targets' : item.kind === 'datasets' ? 'datasets' : 'suites';
+    const kinds = {
+      targets: { noun: 'evaluationTarget', type: 'evaluation-target' },
+      datasets: { noun: 'evaluationDataset', type: 'evaluation-dataset' },
+      suites: { noun: 'evaluationSuite', type: 'evaluation-suite' },
+    } as const;
+    const kind = kinds[path];
+    const done = await deleteResource({
+      noun: tq(`nouns.${kind.noun}`),
+      name: item.name,
+      type: kind.type,
+      id: item.id,
+      action: async () => {
+        const res = await fetch(`/api/evaluation/${path}/${item.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${item.name}" was deleted`, color: 'red' });
+    await loadAll();
   };
 
   const targetName = (key: string) => targets.find((t) => t.key === key)?.name ?? key;
@@ -334,7 +341,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
           rowActions={(t) => [
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => setEditTarget(t) },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ kind: 'targets', id: t.id, name: t.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'targets', id: t.id, name: t.name }) },
           ]}
         />
       )}
@@ -360,7 +367,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
           rowActions={(d) => [
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => setEditDataset(d) },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ kind: 'datasets', id: d.id, name: d.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'datasets', id: d.id, name: d.name }) },
           ]}
         />
       )}
@@ -393,7 +400,7 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
             },
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => setEditSuite(s) },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ kind: 'suites', id: s.id, name: s.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'suites', id: s.id, name: s.name }) },
           ]}
         />
       )}
@@ -419,16 +426,6 @@ export default function EvaluationsWorkspace({ section }: { section: EvaluationS
       )}
 
       {section === 'api' && <EvaluationApiUsage suiteKey={suites[0]?.key} />}
-
-      <Modal opened={deleteItem !== null} onClose={() => setDeleteItem(null)} title="Delete" centered size="sm">
-        <Text size="sm" mb="lg">
-          Delete <strong>{deleteItem?.name}</strong>? This action cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteItem(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
-        </Group>
-      </Modal>
 
       <CreateTargetModal
         opened={targetModal || !!editTarget}

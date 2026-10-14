@@ -45,6 +45,7 @@ import { BrowserMixin } from './mongodb/browser.mixin';
 import { CrawlerMixin } from './mongodb/crawler.mixin';
 import { AgentRunMixin } from './mongodb/agent-run.mixin';
 import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
+import { WebhookMixin } from './mongodb/webhook.mixin';
 import { BatchJobMixin } from './mongodb/batch.mixin';
 import { UsageRollupMixin } from './mongodb/usage.mixin';
 import { ExternalModelPricingMixin } from './mongodb/external-model-pricing.mixin';
@@ -52,6 +53,9 @@ import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
 import { BetaAccessCodeMixin } from './mongodb/beta-access-code.mixin';
+import { IamInvalidationMixin } from './iam-invalidation.mixin';
+import { IamDocsMixin } from './mongodb/iam-docs.mixin';
+import { IamDirectoryMixin } from './mongodb/iam-directory.mixin';
 import { applyEnterpriseMongoDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -83,7 +87,7 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = ExternalModelPricingMixin(BulkBase);
+const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.
@@ -92,11 +96,18 @@ const ClusterBase = ClusterMixin(PricingBase);
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
+// Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
+const IamBase = IamDirectoryMixin(IamDocsMixin(SignupBase));
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; no-op in the community edition. See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseMongoDbMixins(SignupBase);
+const FinalBase = applyEnterpriseMongoDbMixins(IamBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class MongoDBProvider extends FinalBase implements DatabaseProvider {}
+// Outermost: observes writes of every layer (core + enterprise overlay) so the
+// policy engine's principal cache drops stale slices (src/lib/iam).
+const ObservedBase = IamInvalidationMixin(FinalBase);
+
+export class MongoDBProvider extends ObservedBase implements DatabaseProvider {}

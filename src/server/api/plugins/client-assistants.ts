@@ -24,8 +24,11 @@
  *    pauses mid-run for the caller to act, so there is no `queued` /
  *    `in_progress` state and no `requires_action` /
  *    `submit_tool_outputs`. A run is created already `completed` or `failed`.
- *    `POST .../runs/:runId/cancel` therefore always 400s — there is nothing
- *    in flight to cancel by the time a caller could reach it.
+ *    A run is recorded when its turn ends, so `POST .../runs/:runId/cancel`
+ *    on a recorded run 400s. What it can still do is stop the turn that is
+ *    running on the thread right now (the run that is not recorded yet): that
+ *    goes through the shared `cancelConversationTurn`, answers `cancelling`,
+ *    and the run is then recorded `cancelled` with the partial answer kept.
  *
  * 3. CLIENT-EXECUTED FUNCTION TOOLS ARE NOT SUPPORTED, for the same reason:
  *    a `function` tool's contract is "the run pauses, the caller executes the
@@ -37,8 +40,9 @@
  */
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { randomUUID } from 'node:crypto';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -58,6 +62,7 @@ import {
   updateAgentRecord,
 } from '@/lib/services/agents';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import { mergeClientConversationMetadata } from '@/lib/services/agents/conversationMetadata';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
@@ -65,6 +70,8 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, SESSION_FORBIDDEN_MESSAGE, sessionRefusalError, type SessionNeed } from './agent-session-access';
 
 const logger = createLogger('api:client-assistants');
 
@@ -91,9 +98,10 @@ interface PendingMessage {
 interface RunRecord {
   id: string;
   /** `incomplete`: a run limit, a cancellation or a pause ended it without a final answer. */
-  status: 'completed' | 'failed' | 'incomplete';
+  status: 'completed' | 'failed' | 'incomplete' | 'cancelled';
   created_at: number;
   completed_at?: number;
+  cancelled_at?: number;
   failed_at?: number;
   incomplete_at?: number;
   incomplete_details?: { reason: string };
@@ -200,6 +208,7 @@ export function toRunObject(threadIdValue: string, run: RunRecord) {
     created_at: run.created_at,
     started_at: run.created_at,
     completed_at: run.completed_at ?? null,
+    cancelled_at: run.cancelled_at ?? null,
     failed_at: run.failed_at ?? null,
     incomplete_at: run.incomplete_at ?? null,
     incomplete_details: run.incomplete_details ?? null,
@@ -340,12 +349,28 @@ export function extractMessageText(input: unknown): string | null {
   return null;
 }
 
+/** A refusal of `loadThreadOr404`: the status and sentence, and for an engine refusal the body and headers the gates use. */
+interface ThreadError {
+  code: number;
+  message: string;
+  body?: Record<string, unknown>;
+  headers?: Record<string, string>;
+}
+
+/**
+ * The thread `rawThreadId` names, its assistant, and the caller's right to it: the token's owner who started the
+ * thread needs nothing beyond the route's own service check; anybody else needs `agent.session_view_others`
+ * (`need: 'view'`) or `agent.session_manage_others` (`need: 'manage'`) - a thread is an agent session
+ * (agent-session-access.ts).
+ */
 async function loadThreadOr404(
-  tenantDbName: string,
+  request: FastifyRequest,
+  ctx: Awaited<ReturnType<typeof getApiTokenContextForRequest>>,
   rawThreadId: string,
-  projectId: string,
-): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: { code: number; message: string } }> {
+  need: SessionNeed,
+): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: ThreadError }> {
   const conversationId = conversationIdFromThreadId(rawThreadId);
+  const { tenantDbName, projectId } = ctx;
   const conversation = await getConversationById(tenantDbName, conversationId);
   // getConversationById resolves purely by _id (findAgentConversationById has
   // no projectId parameter at all) — without this check, a caller who can
@@ -359,7 +384,29 @@ async function loadThreadOr404(
   }
   const agent = await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
   if (!agent) return { error: { code: 404, message: 'Thread references an assistant that no longer exists' } };
+  const access = await decideSessionAccess(request, conversation, {
+    need,
+    agent,
+    actor: { tenantDbName, projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+  });
+  if (!access.ok) {
+    const refusal = sessionRefusalError(request, access) as Error & { headers?: Record<string, string> };
+    return {
+      error: {
+        code: access.status,
+        message: access.status === 503 ? 'Authorization is temporarily unavailable' : SESSION_FORBIDDEN_MESSAGE[access.need],
+        ...(access.decisionId ? { body: { decision_id: access.decisionId } } : {}),
+        ...(refusal.headers ? { headers: refusal.headers } : {}),
+      },
+    };
+  }
   return { conversation, agent };
+}
+
+/** The reply to a thread that could not be handed to the caller. */
+function sendThreadError(reply: FastifyReply, error: ThreadError) {
+  for (const [name, value] of Object.entries(error.headers ?? {})) void reply.header(name, value);
+  return reply.code(error.code).send({ error: error.message, ...(error.body ?? {}) });
 }
 
 export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -575,8 +622,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
       return reply.code(200).send(threadObject(loaded.conversation));
     } catch (error) {
       logger.error('Retrieve thread error', { error });
@@ -588,25 +635,22 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const db = await getDatabase();
       await db.switchToTenant(ctx.tenantDbName);
       const conversationId = conversationIdFromThreadId(rawId);
-      if (body.metadata && typeof body.metadata === 'object') {
-        const merged = { ...(loaded.conversation.metadata ?? {}), ...(body.metadata as Record<string, unknown>) };
-        // The Assistants bookkeeping namespace is server-owned; a caller
-        // patching `metadata` must not be able to erase pending messages or
-        // run history it never knew existed.
-        merged.assistantsApi = readAssistantsMetadata(loaded.conversation);
-        // Same for the thread's sandbox record: the run path owns it, and a
-        // caller-supplied `sandbox` key would point the thread at someone
-        // else's machine (or drop it).
-        const sandboxRecord = (loaded.conversation.metadata as Record<string, unknown> | undefined)?.sandbox;
-        if (sandboxRecord === undefined) delete merged.sandbox;
-        else merged.sandbox = sandboxRecord;
+      if (body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)) {
+        // The column also holds the server's own bookkeeping: the Assistants namespace (pending messages, run
+        // history), the thread's sandbox record, and the settings a run is configured by - the session's tool
+        // allow-list among them, which only resolving an approval writes. The server keeps those as they are;
+        // every other key is the caller's.
+        const merged = mergeClientConversationMetadata(
+          loaded.conversation.metadata as Record<string, unknown> | undefined,
+          body.metadata as Record<string, unknown>,
+        );
         await db.updateAgentConversation(conversationId, { metadata: merged });
       }
       const refreshed = await getConversationById(ctx.tenantDbName, conversationId);
@@ -621,8 +665,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
       const deleted = await deleteConversation(ctx.tenantDbName, conversationIdFromThreadId(rawId));
       return reply.code(200).send({ id: rawId, object: 'thread.deleted', deleted });
     } catch (error) {
@@ -637,8 +681,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const text = extractMessageText(body.content);
@@ -677,8 +721,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const conversationId = conversationIdFromThreadId(rawId);
       const query = request.query as { limit?: string; order?: string };
@@ -697,8 +741,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, messageId: rawMessageId } = request.params as { threadId: string; messageId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const conversationId = conversationIdFromThreadId(rawId);
       const merged = mergedMessages(loaded.conversation);
@@ -742,6 +786,22 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       };
     }
 
+    // Running the thread sends a message; under `cancel_pending` that cancels an open request of the session,
+    // which takes the permission to answer it.
+    const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+    if (cancelRefusal?.unavailable) {
+      return {
+        status: 503,
+        body: { error: 'Authorization is temporarily unavailable', ...(cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : {}) },
+      };
+    }
+    if (cancelRefusal) {
+      return {
+        status: 403,
+        body: { error: CANCEL_PENDING_FORBIDDEN_MESSAGE, ...(cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : {}) },
+      };
+    }
+
     const record: RunRecord = {
       id: runId(),
       status: 'completed',
@@ -766,12 +826,19 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         userId: ctx.tokenRecord.userId,
         userMessage: toRun.content,
         runtimeContext,
+        // The Assistants wire has no way to answer an approval: a gated tool
+        // follows the agent's `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
       });
 
       // `executeAgentChat` just persisted the (user, assistant) pair itself —
       // the pending entry is now redundant history, so it comes off the queue
       // rather than being replayed on the next run.
-      if (result.status === 'incomplete') {
+      if (result.stop_reason === 'cancelled') {
+        // A Stop (POST .../runs/:id/cancel, or the caller hanging up): the partial answer is kept in the thread.
+        record.status = 'cancelled';
+        record.cancelled_at = Math.floor(Date.now() / 1000);
+      } else if (result.status === 'incomplete') {
         record.status = 'incomplete';
         record.incomplete_at = Math.floor(Date.now() / 1000);
         record.incomplete_details = result.incomplete_details ?? { reason: result.stop_reason ?? 'incomplete' };
@@ -814,8 +881,9 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      // A run is a new turn in the session: changing it and viewing it.
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'continue');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const outcome = await runThread(ctx, request, conversationIdFromThreadId(rawId), loaded.conversation, loaded.agent, body);
@@ -855,8 +923,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const query = request.query as { limit?: string; order?: string };
@@ -874,8 +942,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const run = runs.find((r) => r.id === rawRunId);
@@ -887,21 +955,59 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  /** Always refuses: see the module doc's point 2 — a run is terminal the
-   * instant it exists, so there is never anything in flight to cancel. */
+  /**
+   * Stops the turn that is running on the thread (see the module doc's point 2). A run is only recorded when its
+   * turn ends, so a recorded run is terminal and refuses with 400; any other id stops the thread's running turn
+   * through the shared cancel, and answers `cancelling` - the request that runs the turn then records the run
+   * `cancelled`, with the partial answer kept. Nothing running: 404.
+   */
   app.post('/client/v1/threads/:threadId/runs/:runId/cancel', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const run = runs.find((r) => r.id === rawRunId);
-      if (!run) return reply.code(404).send({ error: 'Run not found' });
-      return reply.code(400).send({
-        error: `Run "${rawRunId}" is already "${run.status}": every run on this Assistants dialect completes `
-          + 'synchronously, so by the time a client could reach this endpoint there is nothing left in flight.',
+      if (run) {
+        return reply.code(400).send({
+          error: `Run "${rawRunId}" is already "${run.status}": a run is recorded when its turn ends, `
+            + 'so there is nothing left in flight to cancel.',
+        });
+      }
+
+      // Stopping a session's turn is acting on it: the owner always may, anybody else needs `agent.session_manage_others`.
+      const managed = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in managed) return sendThreadError(reply, managed.error);
+      // Ending an open approval is answering it "no": without that right the turn still stops, the approval stays.
+      const verdict = await authorizeEndingOpenRequests(request, {
+        tenantDbName: ctx.tenantDbName,
+        conversation: managed.conversation,
+        agent: managed.agent,
+      });
+      if (!verdict.allowed && verdict.unavailable) {
+        return reply.code(503).send({
+          error: 'Authorization is temporarily unavailable',
+          ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+        });
+      }
+      const outcome = await cancelConversationTurn({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        conversationId: conversationIdFromThreadId(rawId),
+        agentKey: managed.agent.key,
+        cancelActions: verdict.allowed,
+      });
+      if (!outcome.cancelled) return reply.code(404).send({ error: 'Run not found' });
+      return reply.code(200).send({
+        id: rawRunId,
+        object: 'thread.run',
+        thread_id: threadId(conversationIdFromThreadId(rawId)),
+        assistant_id: assistantId(managed.agent.key),
+        status: 'cancelling',
+        required_action: null,
       });
     } catch (error) {
       logger.error('Cancel run error', { error });

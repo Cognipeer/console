@@ -32,6 +32,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import { agentSandboxRunner, type AgentSandboxRunner } from '@/enterprise/registry';
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { buildAgentSandboxTools, destroyConversationSandbox } from '@/lib/services/agents/agentSandboxTools';
 import { sealAgentSandboxConfig } from '@/lib/services/agents/agentSandboxSecrets';
 import type { IAgentSandboxConfig } from '@/lib/database';
@@ -184,7 +185,7 @@ describe('secrets', () => {
 
 describe('session sandbox', () => {
     it('is the default: one machine per conversation, left running between turns and reused by the next', async () => {
-        conversations.set('conv-1', { _id: 'conv-1', metadata: { runtimeContext: { a: 1 } } });
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: { runtimeContext: { a: 1 } } });
         const conversation = { _id: 'conv-1', metadata: { runtimeContext: { a: 1 } } };
 
         const first = await build({ enabled: true }, { conversation });
@@ -209,7 +210,7 @@ describe('session sandbox', () => {
     });
 
     it('records the machine as soon as it exists, not only when the run ends', async () => {
-        conversations.set('conv-1', { _id: 'conv-1', metadata: {} });
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
         const { byName } = await build({ enabled: true }, { conversation: { _id: 'conv-1' } });
         await byName('sandbox_exec').invoke({ command: 'ls' });
         // No cleanup: the process died mid-run. The next turn must still find it.
@@ -217,7 +218,7 @@ describe('session sandbox', () => {
     });
 
     it('the persist mode of earlier versions is read as session', async () => {
-        conversations.set('conv-1', { _id: 'conv-1', metadata: {} });
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
         const { byName, cleanup } = await build({ enabled: true, mode: 'persist' }, { conversation: { _id: 'conv-1' } });
         await byName('sandbox_exec').invoke({ command: 'ls' });
         await cleanup();
@@ -226,7 +227,7 @@ describe('session sandbox', () => {
 
     it('starts a fresh machine when the recorded one was closed by the idle reaper', async () => {
         conversations.set('conv-1', {
-            _id: 'conv-1',
+            _id: 'conv-1', agentKey: 'builder', projectId: 'p1',
             metadata: { sandbox: { instanceId: 'sbx-gone', lifecycle: 'session', createdAt: '2026-09-01T00:00:00.000Z', lastUsedAt: '2026-09-01T00:00:00.000Z' } },
         });
         fake.closed.add('sbx-gone');
@@ -243,7 +244,7 @@ describe('session sandbox', () => {
 
     it('replaces a machine made under the old persist mode instead of adopting it', async () => {
         conversations.set('conv-2', {
-            _id: 'conv-2',
+            _id: 'conv-2', agentKey: 'builder', projectId: 'p1',
             metadata: { sandbox: { instanceId: 'sbx-old', createdAt: '2026-09-24T00:00:00.000Z', lastUsedAt: '2026-09-24T00:00:00.000Z' } },
         });
         const { byName } = await build({ enabled: true }, { conversation: { _id: 'conv-2' } });
@@ -256,13 +257,27 @@ describe('session sandbox', () => {
 
     it('replaces the machine when the agent now wants another template', async () => {
         conversations.set('conv-4', {
-            _id: 'conv-4',
+            _id: 'conv-4', agentKey: 'builder', projectId: 'p1',
             metadata: { sandbox: { instanceId: 'sbx-py', templateKey: 'py', lifecycle: 'session', createdAt: 'x', lastUsedAt: 'x' } },
         });
         const { byName } = await build({ enabled: true, templateKey: 'node' }, { conversation: { _id: 'conv-4' } });
         await byName('sandbox_list_files').invoke({});
         expect(fake.ops().slice(0, 2)).toEqual(['destroy', 'ensureInstance']);
         expect(fake.calls[0].args[1]).toBe('sbx-py');
+    });
+
+    it('only reads and writes the record of the agent\'s own session: a conversation of another agent or project is left alone', async () => {
+        conversations.set('conv-5', { _id: 'conv-5', agentKey: 'someone-else', projectId: 'p1', metadata: { sandbox: { instanceId: 'sbx-theirs', lifecycle: 'session', createdAt: 'x', lastUsedAt: 'x' } } });
+        conversations.set('conv-6', { _id: 'conv-6', agentKey: 'builder', projectId: 'p-other', metadata: {} });
+        for (const id of ['conv-5', 'conv-6']) {
+            const built = await build({ enabled: true }, { conversation: { _id: id } });
+            await built.byName('sandbox_list_files').invoke({});
+            await built.cleanup();
+        }
+        // never adopted the other agent's machine, and wrote no record into either row
+        expect(fake.calls.some((c) => c.op === 'ensureInstance' && (c.args[1] as { instanceId?: string }).instanceId === 'sbx-theirs')).toBe(false);
+        expect((conversations.get('conv-5')!.metadata as Record<string, any>).sandbox.instanceId).toBe('sbx-theirs');
+        expect((conversations.get('conv-6')!.metadata as Record<string, any>).sandbox).toBeUndefined();
     });
 
     it('without a conversation, it lasts one message', async () => {
@@ -285,7 +300,7 @@ describe('session sandbox', () => {
 
 describe('per-message sandbox on a conversation', () => {
     it('is deleted when the reply is done, and nothing is recorded on the conversation', async () => {
-        conversations.set('conv-5', { _id: 'conv-5', metadata: { keep: true } });
+        conversations.set('conv-5', { _id: 'conv-5', agentKey: 'builder', projectId: 'p1', metadata: { keep: true } });
         const { byName, cleanup } = await build({ enabled: true, mode: 'ephemeral' }, { conversation: { _id: 'conv-5' } });
         await byName('sandbox_exec').invoke({ command: 'ls' });
         await cleanup();
@@ -319,7 +334,7 @@ describe('preview', () => {
     });
 
     it('a session machine with a live preview is kept and recorded, and stops itself once idle', async () => {
-        conversations.set('conv-p', { _id: 'conv-p', metadata: {} });
+        conversations.set('conv-p', { _id: 'conv-p', agentKey: 'builder', projectId: 'p1', metadata: {} });
         const { byName, cleanup } = await build({ enabled: true, mode: 'session', preview: { enabled: true } }, { conversation: { _id: 'conv-p' } });
         await byName('sandbox_preview_link').invoke({ port: 3000 });
         await cleanup();
@@ -339,5 +354,21 @@ describe('preview', () => {
         const { byName } = await build({ enabled: true, preview: { enabled: true, public: true } });
         const link = await byName('sandbox_preview_link').invoke({ port: 9999 }) as Record<string, unknown>;
         expect(String(link.warning)).toMatch(/Nothing answered on port 9999/);
+    });
+});
+
+describe('the turn\'s Stop reaches a running command', () => {
+    it('sandbox_exec and sandbox_run_code get the turn signal; outside a turn they get none', async () => {
+        const { byName } = await build({ enabled: true });
+        const controller = new AbortController();
+        await runWithTurnSignal(controller.signal, async () => {
+            await byName('sandbox_exec').invoke({ command: 'sleep 60' });
+            await byName('sandbox_run_code').invoke({ language: 'python', code: 'print(1)' });
+        });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        const execs = fake.calls.filter((c) => c.op === 'exec' || c.op === 'runCode').map((c) => c.args[2] as { signal?: AbortSignal });
+        expect(execs[0].signal).toBe(controller.signal);
+        expect(execs[1].signal).toBe(controller.signal);
+        expect('signal' in execs[2]).toBe(false);
     });
 });

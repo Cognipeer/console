@@ -34,10 +34,17 @@ import {
 import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { resolveChildAllowlist } from '@/lib/services/apiTokens/ipAllowlist';
+import {
+  prepareTokenCreate,
+  presentAllowedIpRanges,
+  tokenExceedsPolicy,
+} from '@/lib/services/apiTokens/tokenPolicy';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
-import { canActOnTokensOf, clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
+import { canActOnTokensOf, EXTERNAL_TOKEN_OWNER_REFUSAL } from '@/lib/services/apiTokens/tokenGovernance';
+import { clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:client-users');
 
@@ -104,7 +111,6 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         if (existing) return reply.code(409).send({ error: 'User with this email already exists in your organization' });
       }
 
-      const existingUsers = await db.listUsers();
       const quota = await checkResourceQuota(
         {
           domain: 'global',
@@ -115,7 +121,8 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
           userId: String(auth.tokenRecord.userId),
         },
         'users',
-        existingUsers.length,
+        // a count, not the whole table
+        await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 
@@ -166,7 +173,14 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
 
       const { id } = request.params as { id: string };
-      const body = readJsonBody<{ label?: string; servicePermissions?: unknown }>(request);
+      const body = readJsonBody<{
+        label?: string;
+        servicePermissions?: unknown;
+        expiresAt?: unknown;
+        expiresInDays?: unknown;
+        allowedIpRanges?: unknown;
+        requireUserToken?: unknown;
+      }>(request);
       if (!body.label || body.label.length < 3) {
         return reply.code(400).send({ error: 'Label must be at least 3 characters' });
       }
@@ -185,6 +199,11 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (isUserDisabled(targetUser)) {
         return reply.code(400).send({ error: 'User is disabled' });
+      }
+
+      // External accounts (a host application's people) hold no API tokens at all.
+      if (targetUser.kind === 'external') {
+        return reply.code(400).send(EXTERNAL_TOKEN_OWNER_REFUSAL);
       }
 
       // The target's profile is not a trustworthy ceiling on its own: this
@@ -222,6 +241,34 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(429).send({ error: quotaCheck.reason || 'API token quota exceeded' });
       }
 
+      // Expiry + IP allowlist against the tenant token policy (same preparation
+      // as the dashboard mint routes).
+      const prepared = await prepareTokenCreate({ body, tenantDbName: auth.tenantDbName });
+      if (!prepared.ok) {
+        return reply.code(prepared.status).send(prepared.body);
+      }
+
+      // Network scope never goes upward either: a token confined to some ranges
+      // cannot mint one that works from anywhere. It inherits the caller's
+      // ranges unless it asks for a subset.
+      const allowlist = resolveChildAllowlist(auth.tokenRecord.allowedIpRanges, prepared.allowedIpRanges);
+      if (!allowlist.ok) {
+        return reply.code(403).send({
+          error: 'allowedIpRanges must stay inside the ranges of the token that creates it',
+          code: 'ip_ranges_exceed_minter',
+          details: allowlist.offending,
+        });
+      }
+
+      // The requirement never goes down either: a token that must act for a person cannot mint one that does not.
+      if (auth.tokenRecord.requireUserToken === true && body.requireUserToken === false) {
+        return reply.code(403).send({
+          error: 'requireUserToken cannot be switched off by a token that requires a user token',
+          code: 'user_token_requirement_inherited',
+        });
+      }
+      const requireUserToken = auth.tokenRecord.requireUserToken === true || prepared.requireUserToken;
+
       const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label,
@@ -232,6 +279,9 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         userId: id,
         createdBy: String(auth.tokenRecord.userId),
         servicePermissions,
+        ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
+        ...(allowlist.ranges ? { allowedIpRanges: allowlist.ranges } : {}),
+        ...(requireUserToken ? { requireUserToken: true } : {}),
       });
 
       return reply.code(201).send({
@@ -241,6 +291,11 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions: apiToken.servicePermissions ?? null,
         token,
         userId: apiToken.userId,
+        expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
+        allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        requireUserToken: apiToken.requireUserToken === true,
+        lastUsedAt: null,
+        exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });
     } catch (error) {
       logger.error('Client mint user token error', { error });

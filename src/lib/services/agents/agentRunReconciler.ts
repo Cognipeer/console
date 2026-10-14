@@ -22,6 +22,11 @@
  *    for a caller to poll (a synchronous call persists no queryable
  *    artifact by design), only a `conversationId` slot to free.
  *
+ * Webhooks ride the same tick: deliveries that are `pending` and due are
+ * enqueued again (a retry's wait is a row, not a timer), and an agent-run
+ * callback left `pending` / `failed` with attempts to spare is sent again, so
+ * neither depends on the queue having kept its messages.
+ *
  * A `queued` run whose message was lost (memory-queue restart, matching the
  * crawler's documented failure mode) IS safe to republish as-is, since it
  * never started executing: every queued run at boot, and on each tick those
@@ -33,7 +38,17 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
-import { fireAgentRunCallback, isAbandonedSyncReservation, publishAgentRunJob, runWithTenantDb } from './agentRunService';
+import {
+  AGENT_RUN_CALLBACK_MAX_ATTEMPTS,
+  fireAgentRunCallback,
+  isAbandonedSyncReservation,
+  publishAgentRunJob,
+  redeliverAgentRunCallback,
+  runWithTenantDb,
+} from './agentRunService';
+import { cleanupWebhookDeliveries, sweepDueWebhookDeliveries } from '@/lib/services/webhooks/webhookService';
+import { sweepExpiredPendingActions } from './agentActionResolution';
+import { cleanupExpiredSessionFiles } from './sessionFiles';
 
 const logger = createLogger('agent-run:reconcile');
 
@@ -58,9 +73,18 @@ interface SweepResult {
   deletedSyncRuns: number;
   requeuedRuns: number;
   retentionDeleted: number;
+  /** Pending approvals / questions whose time ran out (dropped, or denied and continued). */
+  expiredActions: number;
+  /** Webhook deliveries that were due and are enqueued again. */
+  requeuedWebhookDeliveries: number;
+  /** Agent-run callbacks that never settled and are sent again. */
+  redeliveredCallbacks: number;
 }
 
-const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0 };
+const EMPTY_SWEEP: SweepResult = {
+  tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0, expiredActions: 0,
+  requeuedWebhookDeliveries: 0, redeliveredCallbacks: 0,
+};
 
 /**
  * One pass over every tenant:
@@ -71,6 +95,10 @@ const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, dele
  *  - `queued` runs older than `runRequeueAfterMs` → republished (a lost queue
  *    message, a memory queue on a pod that died). Safe: the claim is a CAS,
  *    a duplicate delivery just no-ops;
+ *  - pending approvals / questions past their `expiresAt` → the agent's own
+ *    `onTimeout` (drop them, or deny and let the agent continue as a job);
+ *  - webhook deliveries that are pending and due → enqueued again;
+ *  - agent-run callbacks still pending / failed with attempts left → sent again;
  *  - hourly, retention.
  */
 async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean } = {}): Promise<SweepResult> {
@@ -90,6 +118,9 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   let deletedSyncRuns = 0;
   let requeuedRuns = 0;
   let retentionDeleted = 0;
+  let expiredActions = 0;
+  let requeuedWebhookDeliveries = 0;
+  let redeliveredCallbacks = 0;
 
   for (const tenant of tenants) {
     if (!tenant.dbName || !tenant._id) continue;
@@ -143,9 +174,47 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
         }
 
+        // Callbacks nobody delivered: the row says `pending` / `failed`, the run
+        // is past the point of sending one, and it has been quiet for longer than
+        // the queue's own retries take (a live retry would have touched the row).
+        const stuckCallbacks = await tenantDb.listAgentRunsWithUndeliveredCallbacks(tenantId, {
+          // At boot an in-memory queue lost every job, so nothing is "in flight".
+          updatedBefore: options.requeueAllQueued ? new Date(now + 1) : new Date(now - cfg.agent.runRequeueAfterMs),
+          maxAttempts: AGENT_RUN_CALLBACK_MAX_ATTEMPTS,
+          limit: REQUEUE_BATCH,
+        });
+        for (const run of stuckCallbacks) {
+          try {
+            if (await redeliverAgentRunCallback(run)) redeliveredCallbacks += 1;
+          } catch (error) {
+            logger.warn('Failed to re-deliver an agent-run callback', {
+              runId: String(run._id),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        requeuedWebhookDeliveries += await sweepDueWebhookDeliveries(
+          tenantDb,
+          { tenantId, tenantDbName: tenant.dbName! },
+          new Date(now),
+        );
+
+        const timedOut = await sweepExpiredPendingActions(tenantDb, tenant.dbName!, new Date(now));
+        expiredActions += timedOut.expired + timedOut.denied;
+
         if (doRetention) {
           const { deletedCount } = await tenantDb.cleanupAgentRunRetention({ olderThan: new Date(now), batchSize: 1000 });
           retentionDeleted += deletedCount;
+          // The session event log keeps its own, separate retention (each row
+          // carries the `expiresAt` it was written with). Mongo also has a TTL
+          // index; SQLite has only this sweep.
+          const events = await tenantDb.cleanupAgentSessionEventRetention({ olderThan: new Date(now), batchSize: 1000 });
+          retentionDeleted += events.deletedCount;
+          retentionDeleted += await cleanupWebhookDeliveries(tenantDb, new Date(now));
+          // Files attached to sessions live as long as the agent's `attachments.retentionDays`
+          // (stamped on each file as `expiresAt` when it was uploaded).
+          retentionDeleted += await cleanupExpiredSessionFiles(tenantDb, tenant.dbName!, new Date(now));
         }
       });
     } catch (error) {
@@ -157,7 +226,10 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
     }
   }
 
-  return { tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted };
+  return {
+    tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted, expiredActions,
+    requeuedWebhookDeliveries, redeliveredCallbacks,
+  };
 }
 
 /**
@@ -171,7 +243,8 @@ export async function reconcileOrphanedAgentRuns(): Promise<SweepResult> {
   // At boot every queued run is republished, not just old ones: an in-memory
   // queue lost them all with the previous process.
   const sweep = await sweepStaleRunningAgentRuns({ requeueAllQueued: true });
-  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0) {
+  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0 || sweep.expiredActions > 0
+    || sweep.requeuedWebhookDeliveries > 0 || sweep.redeliveredCallbacks > 0) {
     logger.info('Reconciled orphaned agent runs at boot', { ...sweep });
   }
   return sweep;
@@ -194,7 +267,8 @@ async function runOnce(): Promise<SweepResult> {
     }
 
     const result = await sweepStaleRunningAgentRuns();
-    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0) {
+    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0 || result.expiredActions > 0
+      || result.requeuedWebhookDeliveries > 0 || result.redeliveredCallbacks > 0) {
       logger.info('Reconciled orphaned agent runs', result);
     }
     return result;

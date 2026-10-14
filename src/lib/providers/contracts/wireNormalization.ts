@@ -89,3 +89,45 @@ function normalizeChatCompletionBody(raw: string): string {
 
   return changed ? JSON.stringify(payload) : raw;
 }
+
+/**
+ * A chat message part `{type: 'file', file: {file_id}}` points at a file the
+ * upstream already holds. The agent-sdk part model has no such part (its `file`
+ * part carries the bytes), and its OpenAI conversion would throw on one, so the
+ * gateway carries the reference under this private type and puts the caller's
+ * own part back on the way out of the process.
+ */
+export const FILE_REFERENCE_PART_TYPE = 'gateway_file_ref';
+
+function restoreFileReferences(raw: string): string {
+  if (!raw.includes(FILE_REFERENCE_PART_TYPE)) return raw;
+  let payload: { messages?: Array<{ content?: unknown }> };
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  let changed = false;
+  for (const message of Array.isArray(payload?.messages) ? payload.messages : []) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content as Array<Record<string, unknown>>) {
+      if (part?.type === FILE_REFERENCE_PART_TYPE) {
+        part.type = 'file';
+        changed = true;
+      }
+    }
+  }
+  return changed ? JSON.stringify(payload) : raw;
+}
+
+/** OpenAI-schema requests: file references leave the process as the caller wrote them. */
+export function withFileReferenceRestore(baseFetch?: typeof fetch): typeof fetch {
+  const inner: typeof fetch = baseFetch ?? ((input, init) => fetch(input, init));
+  return (input, init) => {
+    const body = init?.body;
+    if (typeof body === 'string' && body.includes(FILE_REFERENCE_PART_TYPE)) {
+      return inner(input, { ...init, body: restoreFileReferences(body) });
+    }
+    return inner(input, init);
+  };
+}

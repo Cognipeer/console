@@ -94,6 +94,9 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
         userMessage: lastUser(messages),
         userId: ctx.userId ?? 'redteam',
         usePublished: true,
+        // No one is present during a red-team run: a gated tool follows the agent's
+        // `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
       });
       return { text: extractAgentText(response), latencyMs: Date.now() - started, raw: response };
     }

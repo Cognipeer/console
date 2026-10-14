@@ -18,12 +18,42 @@
  *     legacy hand-written mock to preserve existing test behavior.
  *
  * Usage:
- *   vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+ *   vi.mock('@/lib/database', () => {
+ *     const getDatabase = vi.fn();
+ *     return {
+ *       getDatabase,
+ *       // the request gates read the caller (and the engine its policies) through the tenant scope
+ *       runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+ *     };
+ *   });
  *   const db = createMockDb();
  *   (getDatabase as Mock).mockResolvedValue(db);
  *
  *   // Override per test:
  *   db.findUserById.mockResolvedValue(someUser);
+ *
+ * Every request of every workspace is decided by the authorization engine, so a
+ * suite that drives a gated route (withApiRequestContext / withClientApiRequestContext)
+ * needs more than `getDatabase`: the gate and the engine read the user row, the
+ * groups, the project assignments and the policy version through
+ * `runWithTenantScope` - never through the bare `switchToTenant`. `vi.mock`
+ * factories run before any import, so the scope function is written inline in the
+ * suite's factory (a sync factory on purpose: see the notes in the suites that
+ * mock more of the database layer). With the Proxy below behind `getDatabase`
+ * every read the engine makes has a default (no groups, no projects, no stored
+ * policies), so the caller is decided by the user row the suite serves from
+ * `findUserById` (a session) or by the token context it mocks (a token).
+ *
+ * Two more rules for a suite that drives a gated route:
+ *   - do not replace `@/lib/security/rbac` with a factory of a few functions: the
+ *     route declarations and the engine's schema read `RBAC_SERVICE_DEFINITIONS`
+ *     and friends from it, so the modules fail to load. The gate no longer asks
+ *     rbac.ts for a verdict anyway - give the suite a caller (a user row, a token
+ *     owner) whose role and permissions produce the verdict it wants.
+ *   - an ad-hoc test route has to say how it is authorized, like every real one:
+ *     `{ config: authz.authenticated() }` (or `authz.service('models')`, ...), or a
+ *     path under a ROUTE_PREFIXES entry. A route that declares nothing is refused
+ *     with 403 `route_not_declared`.
  */
 
 import { vi, type Mock, type Mocked } from 'vitest';
@@ -116,6 +146,15 @@ function buildPrimers(): Record<string, Mock> {
     deleteUserProject: vi.fn().mockResolvedValue(true),
     deleteUserProjectsByProject: vi.fn().mockResolvedValue(undefined),
     deleteUserProjectsByUser: vi.fn().mockResolvedValue(undefined),
+
+    // IAM documents (policies, policy version, project-level activation instant).
+    // The authorization engine decides every request, so it reads these on the
+    // request path: nothing stored means "no custom policies, activation now".
+    iamDocGet: vi.fn().mockResolvedValue(null),
+    iamDocPut: vi.fn().mockResolvedValue(undefined),
+    iamDocList: vi.fn().mockResolvedValue([]),
+    iamDocDelete: vi.fn().mockResolvedValue(true),
+    iamDocIncrement: vi.fn().mockResolvedValue(1),
 
     // Groups (stubbed but interface-present)
     listGroups: vi.fn().mockResolvedValue([]),

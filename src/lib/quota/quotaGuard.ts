@@ -4,20 +4,35 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { onIamInvalidation } from '@/lib/iam/events';
 
 const logger = createLogger('quota-guard');
-import type {
-  QuotaDomain,
-  QuotaLimits,
+import {
+  isTenantWideKind,
+  type QuotaDomain,
+  type QuotaLimits,
+  type QuotaRateLimit,
 } from '@/lib/quota/types';
 
 export interface QuotaContext {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
-  licenseType: LicenseType;
+  /** Informational: no guard decision depends on it. */
+  licenseType?: LicenseType;
   userId?: string;
   tokenId?: string;
+  /**
+   * The caller's user-group ids, which `group`-scoped policies match against.
+   *
+   * Optional on purpose. Left out, the guard looks them up itself — one
+   * membership read, cached for 15 s and dropped on every membership change
+   * (the same events the authorization engine's principal cache listens to) —
+   * and only when the tenant actually has a group-scoped policy that could
+   * apply, so a tenant without group limits pays nothing and decides exactly as
+   * before. A caller that already holds the ids can pass them to skip even that.
+   */
+  groupIds?: string[];
   domain: QuotaDomain;
   // Resource identification (model key, index key, bucket key, session id)
   resourceKey?: string;
@@ -37,18 +52,35 @@ async function fetchPolicies(
 ): Promise<IQuotaPolicy[]> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  return db.listQuotaPolicies(tenantId, projectId);
+  const projectPolicies = await db.listQuotaPolicies(tenantId, projectId);
+
+  // Group limits and agent-run limits may be tenant-wide (no project). Rows of
+  // any other kind without a project stay unloaded, exactly as before — see
+  // `isTenantWideKind`.
+  const tenantWide = typeof db.listTenantWideQuotaPolicies === 'function'
+    ? await db.listTenantWideQuotaPolicies(tenantId)
+    : [];
+  // (A context with an empty project id reads every policy of the tenant above,
+  // tenant-wide ones included; do not count those twice.)
+  const known = new Set(projectPolicies.map((policy) => String(policy._id)));
+  const applicable = Array.isArray(tenantWide)
+    ? tenantWide.filter((policy) => isTenantWideKind(policy) && !known.has(String(policy._id)))
+    : [];
+  return applicable.length === 0 ? projectPolicies : [...projectPolicies, ...applicable];
 }
 
 function matchesScope(
   policy: IQuotaPolicy,
   context: QuotaContext,
+  groupIds: readonly string[],
 ): boolean {
   if (!policy.enabled) return false;
 
   switch (policy.scope) {
     case 'tenant':
       return true;
+    case 'group':
+      return policy.scopeId !== undefined && policy.scopeId !== null && groupIds.includes(String(policy.scopeId));
     case 'user':
       return policy.scopeId === context.userId;
     case 'token':
@@ -62,11 +94,19 @@ function matchesScope(
   }
 }
 
+/**
+ * Domains whose checks ignore `global` policies. A `global` policy is written
+ * for "everything a project does" — rate limits and budgets sized for model
+ * calls — and the agent domain is new: applying those to agent runs would start
+ * refusing runs for tenants that never configured an agent limit.
+ */
+const DOMAINS_WITHOUT_GLOBAL_FALLBACK: ReadonlySet<QuotaDomain> = new Set<QuotaDomain>(['agent']);
+
 function matchesDomain(
   policy: IQuotaPolicy,
   context: QuotaContext,
 ): boolean {
-  if (policy.domain === 'global') return true;
+  if (policy.domain === 'global') return !DOMAINS_WITHOUT_GLOBAL_FALLBACK.has(context.domain);
   return policy.domain === context.domain;
 }
 
@@ -108,6 +148,231 @@ function mergeLimits(base: QuotaLimits, override: QuotaLimits): QuotaLimits {
   }
 
   return merged;
+}
+
+// ── Group scope, shared pools, tenant ceilings, agent narrowing ─────────────
+
+/** Higher = more specific, so it wins a tie in priority (see `resolveLimits`). */
+const SCOPE_SPECIFICITY: Record<IQuotaPolicy['scope'], number> = {
+  tenant: 0,
+  group: 1,
+  resource: 2,
+  provider: 2,
+  user: 3,
+  token: 4,
+};
+
+const isSharedGroupPolicy = (policy: IQuotaPolicy): boolean =>
+  policy.scope === 'group' && policy.groupMode === 'shared';
+
+/** The part of a policy that is checked per request or per resource count: no counter involved. */
+function statelessPart(limits: QuotaLimits): QuotaLimits {
+  const part: QuotaLimits = {};
+  if (limits.perRequest) part.perRequest = limits.perRequest;
+  if (limits.quotas) part.quotas = limits.quotas;
+  return part;
+}
+
+/** The part of a policy that is counted over time: this is what a shared group pool owns. */
+function statefulPart(limits: QuotaLimits): QuotaLimits {
+  const part: QuotaLimits = {};
+  if (limits.rateLimit) part.rateLimit = limits.rateLimit;
+  if (limits.budget) part.budget = limits.budget;
+  return part;
+}
+
+/**
+ * Policies folded into `base` in the order given (callers pass them by ascending
+ * priority, so the last one wins a conflict). A shared group policy contributes
+ * only its stateless half here: its counted half lives in the group's own pool.
+ */
+function mergePolicies(base: QuotaLimits, policies: readonly IQuotaPolicy[]): QuotaLimits {
+  let merged = base;
+  for (const policy of policies) {
+    merged = mergeLimits(merged, isSharedGroupPolicy(policy) ? statelessPart(policy.limits) : policy.limits);
+  }
+  return merged;
+}
+
+function numericLeaves(node: unknown, path: string[] = [], out: Array<{ path: string[]; value: number }> = []) {
+  if (typeof node === 'number') {
+    out.push({ path, value: node });
+  } else if (node && typeof node === 'object' && !Array.isArray(node)) {
+    for (const [key, value] of Object.entries(node)) numericLeaves(value, [...path, key], out);
+  }
+  return out;
+}
+
+function readPath(node: unknown, path: readonly string[]): unknown {
+  let current = node;
+  for (const key of path) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function writePath(node: Record<string, unknown>, path: readonly string[], value: number): void {
+  let current = node;
+  for (const key of path.slice(0, -1)) {
+    const next = current[key];
+    if (!next || typeof next !== 'object') return;
+    current = next as Record<string, unknown>;
+  }
+  current[path[path.length - 1]] = value;
+}
+
+/**
+ * Tenant policies are ceilings for what GROUPS hand out.
+ *
+ * `merged` is the priority merge with the group policies in it, `withoutGroups`
+ * the same merge without them. Every number the groups changed is held to the
+ * tenant policies' value for that field (-1 meaning "unlimited" never lowers the
+ * ceiling and never passes it). Numbers a group did not change are left alone —
+ * which is why a tenant that has no group policy, and an explicit user or token
+ * policy that outranks a group, decide exactly as they did before groups.
+ *
+ * A SHARED group pool is not capped here: it counts the whole group, tenant
+ * policies count each person, and a number in one unit cannot cap the other.
+ */
+function applyTenantCeilings(
+  merged: QuotaLimits,
+  withoutGroups: QuotaLimits,
+  ceilings: QuotaLimits,
+): QuotaLimits {
+  const clamped = structuredClone(merged) as unknown as Record<string, unknown>;
+  for (const { path, value } of numericLeaves(merged)) {
+    if (readPath(withoutGroups, path) === value) continue;
+    const ceiling = readPath(ceilings, path);
+    if (typeof ceiling !== 'number' || ceiling === -1) continue;
+    if (value === -1 || value > ceiling) writePath(clamped, path, ceiling);
+  }
+  return clamped as unknown as QuotaLimits;
+}
+
+/**
+ * One independently-counted slice of the limits a request is checked against.
+ *
+ * Today's single counter (per caller, scoped by provider/resource key) is the
+ * `subject` bucket. A shared group pool and an agent-narrowed limit are the
+ * other two kinds; each owns its counter keys, so one request is counted
+ * separately — and refused separately — in every bucket that applies to it.
+ */
+interface LimitBucket {
+  id: string;
+  /** Only `rateLimit` and `budget` are read from a bucket. */
+  limits: QuotaLimits;
+  /** Counter-key suffix naming whose usage this counter holds. */
+  identity: string;
+  /** Whether the context's provider / resource key is part of the counter key. */
+  scoped: { provider: boolean; resource: boolean };
+  /** Start of the refusal reason. */
+  reasonPrefix: string;
+}
+
+interface ResolvedLimits {
+  /** What `resolveEffectiveLimits` reports: every merge, stateless parts included. */
+  effective: QuotaLimits;
+  buckets: LimitBucket[];
+}
+
+function callerIdentity(context: QuotaContext): string {
+  if (context.userId) return `user:${context.userId}`;
+  if (context.tokenId) return `token:${context.tokenId}`;
+  return `tenant:${context.tenantId}`;
+}
+
+function subjectBucket(context: QuotaContext, limits: QuotaLimits): LimitBucket {
+  // The agent domain counts a caller's runs across ALL agents; only a policy
+  // narrowed to one agent (below) keys its counter by the agent.
+  const agent = context.domain === 'agent';
+  return {
+    id: 'subject',
+    limits,
+    identity: callerIdentity(context),
+    scoped: { provider: !agent, resource: !agent },
+    reasonPrefix: 'Rate limit exceeded for',
+  };
+}
+
+// ── caller's groups ─────────────────────────────────────────────────────────
+
+/**
+ * A user's group ids, per (tenant database, user), for a short time.
+ *
+ * Just the memberships: unlike the authorization engine's principal context this
+ * needs neither the user row nor the group documents, so it also works for an
+ * actor that has no user row at all (a schedule, the public A2A identity) — such
+ * a caller simply has no memberships. A write that changes memberships reaches
+ * this cache through the same invalidation events the principal cache hears;
+ * another node's write is seen when the entry expires.
+ */
+const GROUP_IDS_TTL_MS = 15_000;
+const GROUP_IDS_MAX_ENTRIES = 5_000;
+const groupIdsCache = new Map<string, { expiresAt: number; ids: Promise<string[]> }>();
+const groupIdsKey = (tenantDbName: string, userId: string) => `${tenantDbName}\u0000${userId}`;
+
+onIamInvalidation((event) => {
+  if (event.kind === 'user') {
+    for (const key of [...groupIdsCache.keys()]) {
+      const [tenant, user] = key.split('\u0000');
+      if (user === event.userId && (event.tenantDbName === null || tenant === event.tenantDbName)) groupIdsCache.delete(key);
+    }
+  } else if (event.kind === 'tenant-principals') {
+    for (const key of [...groupIdsCache.keys()]) {
+      if (event.tenantDbName === null || key.startsWith(`${event.tenantDbName}\u0000`)) groupIdsCache.delete(key);
+    }
+  }
+});
+
+/** Test hook: forget every cached membership. */
+export function resetQuotaGroupCacheForTests(): void {
+  groupIdsCache.clear();
+}
+
+async function loadGroupIds(tenantDbName: string, userId: string): Promise<string[]> {
+  const db = await getDatabase();
+  const read = () => db.listGroupMembersByUser(userId);
+  const memberships = db.runWithTenant
+    ? await db.runWithTenant(tenantDbName, read)
+    : (await db.switchToTenant(tenantDbName), await read());
+  return [...new Set((Array.isArray(memberships) ? memberships : []).map((m) => String(m.groupId)))];
+}
+
+/**
+ * The caller's group ids — from the context when it carries them, else (and
+ * only when a group policy could match) from the cached memberships.
+ */
+async function callerGroupIds(
+  context: QuotaContext,
+  policies: readonly IQuotaPolicy[],
+): Promise<readonly string[]> {
+  if (context.groupIds) return context.groupIds;
+  if (!context.userId) return [];
+  const couldMatch = policies.some(
+    (policy) => policy.enabled && policy.scope === 'group' && matchesDomain(policy, context),
+  );
+  if (!couldMatch) return [];
+
+  const key = groupIdsKey(context.tenantDbName, context.userId);
+  const now = Date.now();
+  const cached = groupIdsCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.ids;
+
+  if (groupIdsCache.size >= GROUP_IDS_MAX_ENTRIES) {
+    const oldest = groupIdsCache.keys().next().value;
+    if (oldest !== undefined) groupIdsCache.delete(oldest);
+  }
+  const ids = loadGroupIds(context.tenantDbName, context.userId);
+  const entry = { expiresAt: now + GROUP_IDS_TTL_MS, ids };
+  groupIdsCache.set(key, entry);
+  try {
+    return await ids;
+  } catch (error) {
+    // Never keep a failure around: the next call asks again.
+    if (groupIdsCache.get(key) === entry) groupIdsCache.delete(key);
+    throw error;
+  }
 }
 
 async function incrementRateLimitCounter(
@@ -219,11 +484,22 @@ async function loadPolicySource(
   return source;
 }
 
-export async function resolveEffectiveLimits(
-  context: QuotaContext,
-): Promise<QuotaLimits> {
+/**
+ * Everything the guard decides on for one caller: the merged limits and the
+ * counters those limits are checked against.
+ *
+ * Without a group policy and outside the agent domain this is the pre-group
+ * algorithm to the letter — license defaults, then every applicable policy by
+ * ascending priority, one counter per caller — so a tenant that uses neither
+ * decides as it always did. Group policies join the SAME priority merge (a
+ * higher-priority explicit user or token policy still wins a conflict); the one
+ * addition is that tenant policies cap what a group hands out
+ * (`applyTenantCeilings`). A `shared` group policy is the exception to the merge:
+ * its counted limits become a pool of their own.
+ */
+async function resolveLimits(context: QuotaContext): Promise<ResolvedLimits> {
   const { licenseDefaults, policies } = await loadPolicySource(context);
-  let effectiveLimits: QuotaLimits = {
+  const base: QuotaLimits = {
     ...licenseDefaults,
     quotas: { ...licenseDefaults.quotas },
     rateLimit: licenseDefaults.rateLimit
@@ -231,15 +507,88 @@ export async function resolveEffectiveLimits(
       : undefined,
   };
 
-  const applicable = policies
-    .filter((p) => matchesScope(p, context) && matchesDomain(p, context))
-    .sort((a, b) => a.priority - b.priority);
+  const groupIds = await callerGroupIds(context, policies);
+  const matching = policies.filter((p) => matchesScope(p, context, groupIds) && matchesDomain(p, context));
 
-  for (const policy of applicable) {
-    effectiveLimits = mergeLimits(effectiveLimits, policy.limits);
+  const agentDomain = context.domain === 'agent';
+  const hasGroupPolicy = matching.some((p) => p.scope === 'group');
+
+  // Ascending priority, the last one wins. Where a group or agent-run limit is
+  // involved, two policies of EQUAL priority are ordered by how specific their
+  // target is (the editor offers priority 0 to everyone, so ties are the norm):
+  // an explicit user or token limit must beat the group it belongs to, whichever
+  // was written first. Policies from before groups keep their original order.
+  const applicable = matching.sort(
+    agentDomain || hasGroupPolicy
+      ? (a, b) => a.priority - b.priority || SCOPE_SPECIFICITY[a.scope] - SCOPE_SPECIFICITY[b.scope]
+      : (a, b) => a.priority - b.priority,
+  );
+
+  if (!agentDomain && !hasGroupPolicy) {
+    const effective = mergePolicies(base, applicable);
+    return { effective, buckets: [subjectBucket(context, effective)] };
   }
 
-  return effectiveLimits;
+  // Agent domain: a policy narrowed to one agent (scope 'resource') is counted
+  // per agent and checked on its own; everything else counts the caller's runs
+  // across all agents.
+  const narrowed = agentDomain ? applicable.filter((p) => p.scope === 'resource') : [];
+  const wide = agentDomain ? applicable.filter((p) => p.scope !== 'resource') : applicable;
+
+  let wideLimits = mergePolicies(base, wide);
+  if (wide.some((p) => p.scope === 'group')) {
+    wideLimits = applyTenantCeilings(
+      wideLimits,
+      mergePolicies(base, wide.filter((p) => p.scope !== 'group')),
+      mergePolicies({}, wide.filter((p) => p.scope === 'tenant')),
+    );
+  }
+
+  const buckets: LimitBucket[] = [subjectBucket(context, wideLimits)];
+  let effective = wideLimits;
+
+  if (narrowed.length > 0) {
+    const narrowedLimits = mergePolicies({}, narrowed);
+    effective = mergeLimits(wideLimits, narrowedLimits);
+    buckets.push({
+      id: 'resource',
+      limits: narrowedLimits,
+      identity: callerIdentity(context),
+      scoped: { provider: false, resource: true },
+      reasonPrefix: 'Agent rate limit exceeded for',
+    });
+  }
+
+  // One pool per group that has a shared policy: every member's usage lands on
+  // the same counter. Policies arrive priority-ordered, so the last one wins.
+  const pools = new Map<string, IQuotaPolicy[]>();
+  for (const policy of wide) {
+    if (!isSharedGroupPolicy(policy) || !policy.scopeId) continue;
+    const key = String(policy.scopeId);
+    pools.set(key, [...(pools.get(key) ?? []), policy]);
+  }
+  for (const [groupId, members] of pools) {
+    const limits = members.reduce<QuotaLimits>(
+      (acc, policy) => mergeLimits(acc, statefulPart(policy.limits)),
+      {},
+    );
+    if (!limits.rateLimit && !limits.budget) continue;
+    buckets.push({
+      id: `group:${groupId}`,
+      limits,
+      identity: `group:${groupId}`,
+      scoped: { provider: !agentDomain, resource: !agentDomain },
+      reasonPrefix: 'Group rate limit exceeded for',
+    });
+  }
+
+  return { effective, buckets };
+}
+
+export async function resolveEffectiveLimits(
+  context: QuotaContext,
+): Promise<QuotaLimits> {
+  return (await resolveLimits(context)).effective;
 }
 
 export async function checkQuota(
@@ -440,47 +789,86 @@ export async function checkPerRequestLimits(
   return { allowed: true, effectiveLimits };
 }
 
+export interface RateLimitCost {
+  requests?: number;
+  tokens?: number;
+  vectors?: number;
+  files?: number;
+  storageBytes?: number;
+}
+
+export interface CheckRateLimitOptions {
+  /**
+   * Counters to inspect WITHOUT counting anything, when their cost is 0: the
+   * call is refused once the window has already reached its limit. This is how a
+   * run whose size is only known afterwards (an agent run's tokens) is gated up
+   * front; the usage itself is recorded when it is known.
+   */
+  headroom?: ReadonlyArray<keyof RateLimitCost>;
+}
+
+/** Per-kind wiring: where the limit sits, what the counter is called, which cost feeds it. */
+const RATE_KINDS: ReadonlyArray<{
+  limit: keyof QuotaRateLimit;
+  counter: string;
+  cost: keyof RateLimitCost;
+}> = [
+  { limit: 'requests', counter: 'requests', cost: 'requests' },
+  { limit: 'tokens', counter: 'tokens', cost: 'tokens' },
+  { limit: 'vectors', counter: 'vectors', cost: 'vectors' },
+  { limit: 'files', counter: 'files', cost: 'files' },
+  { limit: 'storage', counter: 'storageBytes', cost: 'storageBytes' },
+];
+
+const RATE_WINDOWS = [
+  ['perSecond', 1],
+  ['perMinute', 60],
+  ['perHour', 3600],
+  ['perDay', 86400],
+  ['perMonth', 2592000],
+] as const;
+
+/** The counter-key tail shared by rate and budget keys: provider, resource, then whose usage it is. */
+function counterScope(context: QuotaContext, bucket: LimitBucket): string[] {
+  const parts: string[] = [];
+  if (bucket.scoped.provider && context.providerKey) parts.push(`prov:${context.providerKey}`);
+  if (bucket.scoped.resource && context.resourceKey) parts.push(`res:${context.resourceKey}`);
+  parts.push(bucket.identity);
+  return parts;
+}
+
 export async function checkRateLimit(
   context: QuotaContext,
-  cost: {
-    requests?: number;
-    tokens?: number;
-    vectors?: number;
-    files?: number;
-    storageBytes?: number;
-  } = { requests: 1, tokens: 0 },
+  cost: RateLimitCost = { requests: 1, tokens: 0 },
+  options: CheckRateLimitOptions = {},
 ): Promise<QuotaCheckResult> {
-  const effectiveLimits = await resolveEffectiveLimits(context);
+  const { effective: effectiveLimits, buckets } = await resolveLimits(context);
 
-  const rateLimit = effectiveLimits.rateLimit;
-  if (!rateLimit) return { allowed: true, effectiveLimits };
+  if (!buckets.some((bucket) => bucket.limits.rateLimit)) {
+    return { allowed: true, effectiveLimits };
+  }
 
   const errors: string[] = [];
 
   const checkWindow = async (
-    type: 'requests' | 'tokens' | 'vectors' | 'files' | 'storageBytes',
-    windowName: 'perSecond' | 'perMinute' | 'perHour' | 'perDay' | 'perMonth',
+    bucket: LimitBucket,
+    kind: (typeof RATE_KINDS)[number],
+    windowName: (typeof RATE_WINDOWS)[number][0],
+    windowSeconds: number,
     limit: number | undefined,
     incrementBy: number,
   ) => {
-    if (limit === undefined || limit === -1 || incrementBy === 0) return;
+    if (limit === undefined || limit === -1) return;
+    const inspectOnly = incrementBy === 0;
+    if (inspectOnly && !options.headroom?.includes(kind.cost)) return;
 
-    const windowSeconds = {
-      perSecond: 1,
-      perMinute: 60,
-      perHour: 3600,
-      perDay: 86400,
-      perMonth: 2592000,
-    }[windowName];
-
-    const keyParts = ['rate_limit', context.domain, type, windowName];
-    if (context.providerKey) keyParts.push(`prov:${context.providerKey}`);
-    if (context.resourceKey) keyParts.push(`res:${context.resourceKey}`);
-    if (context.userId) keyParts.push(`user:${context.userId}`);
-    else if (context.tokenId) keyParts.push(`token:${context.tokenId}`);
-    else keyParts.push(`tenant:${context.tenantId}`);
-
-    const key = keyParts.join(':');
+    const key = [
+      'rate_limit',
+      context.domain,
+      kind.counter,
+      windowName,
+      ...counterScope(context, bucket),
+    ].join(':');
 
     try {
       const { count } = await incrementRateLimitCounter(
@@ -489,9 +877,9 @@ export async function checkRateLimit(
         windowSeconds,
         incrementBy,
       );
-      if (count > limit) {
+      if (inspectOnly ? count >= limit : count > limit) {
         errors.push(
-          `Rate limit exceeded for ${type} ${windowName} (${count}/${limit})`,
+          `${bucket.reasonPrefix} ${kind.counter} ${windowName} (${count}/${limit})`,
         );
       }
     } catch (error) {
@@ -503,100 +891,18 @@ export async function checkRateLimit(
   };
 
   const promises: Promise<void>[] = [];
-
-  if (rateLimit.requests) {
-    const r = rateLimit.requests;
-    promises.push(
-      checkWindow('requests', 'perSecond', r.perSecond, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perMinute', r.perMinute, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perHour', r.perHour, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perDay', r.perDay, cost.requests || 0),
-    );
-    promises.push(
-      checkWindow('requests', 'perMonth', r.perMonth, cost.requests || 0),
-    );
-  }
-
-  if (rateLimit.tokens) {
-    const t = rateLimit.tokens;
-    promises.push(
-      checkWindow('tokens', 'perSecond', t.perSecond, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perMinute', t.perMinute, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perHour', t.perHour, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perDay', t.perDay, cost.tokens || 0),
-    );
-    promises.push(
-      checkWindow('tokens', 'perMonth', t.perMonth, cost.tokens || 0),
-    );
-  }
-
-  if (rateLimit.vectors) {
-    const v = rateLimit.vectors;
-    promises.push(
-      checkWindow('vectors', 'perSecond', v.perSecond, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perMinute', v.perMinute, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perHour', v.perHour, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perDay', v.perDay, cost.vectors || 0),
-    );
-    promises.push(
-      checkWindow('vectors', 'perMonth', v.perMonth, cost.vectors || 0),
-    );
-  }
-
-  if (rateLimit.files) {
-    const f = rateLimit.files;
-    promises.push(
-      checkWindow('files', 'perSecond', f.perSecond, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perMinute', f.perMinute, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perHour', f.perHour, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perDay', f.perDay, cost.files || 0),
-    );
-    promises.push(
-      checkWindow('files', 'perMonth', f.perMonth, cost.files || 0),
-    );
-  }
-
-  if (rateLimit.storage) {
-    const s = rateLimit.storage;
-    promises.push(
-      checkWindow('storageBytes', 'perSecond', s.perSecond, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perMinute', s.perMinute, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perHour', s.perHour, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perDay', s.perDay, cost.storageBytes || 0),
-    );
-    promises.push(
-      checkWindow('storageBytes', 'perMonth', s.perMonth, cost.storageBytes || 0),
-    );
+  for (const bucket of buckets) {
+    const rateLimit = bucket.limits.rateLimit;
+    if (!rateLimit) continue;
+    for (const kind of RATE_KINDS) {
+      const windows = rateLimit[kind.limit];
+      if (!windows) continue;
+      for (const [windowName, windowSeconds] of RATE_WINDOWS) {
+        promises.push(
+          checkWindow(bucket, kind, windowName, windowSeconds, windows[windowName], cost[kind.cost] || 0),
+        );
+      }
+    }
   }
 
   await Promise.all(promises);
@@ -652,17 +958,19 @@ export async function checkBudget(
   context: QuotaContext,
   cost: { usd?: number } = {},
 ): Promise<QuotaCheckResult> {
-  const effectiveLimits = await resolveEffectiveLimits(context);
+  const { effective: effectiveLimits, buckets } = await resolveLimits(context);
   const db = await getDatabase();
   await db.switchToTenant(context.tenantDbName);
 
-  const budget = effectiveLimits.budget;
-  if (!budget) return { allowed: true, effectiveLimits };
+  if (!buckets.some((bucket) => bucket.limits.budget)) {
+    return { allowed: true, effectiveLimits };
+  }
 
   const costMicros = usdToMicros(cost.usd ?? 0);
   const errors: string[] = [];
 
   const checkWindow = async (
+    bucket: LimitBucket,
     windowName: 'perDay' | 'perMonth',
     limitUsd: number | undefined,
     incrementByMicros: number,
@@ -671,7 +979,7 @@ export async function checkBudget(
 
     const limitMicros = usdToMicros(limitUsd);
     const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
-    const key = budgetCounterKey(context, windowName);
+    const key = budgetCounterKey(context, windowName, bucket);
 
     try {
       // Read current value without incrementing.
@@ -704,10 +1012,16 @@ export async function checkBudget(
     }
   };
 
-  await Promise.all([
-    checkWindow('perDay', budget.dailySpendLimit, costMicros),
-    checkWindow('perMonth', budget.monthlySpendLimit, costMicros),
-  ]);
+  await Promise.all(
+    buckets.flatMap((bucket) => {
+      const budget = bucket.limits.budget;
+      if (!budget) return [];
+      return [
+        checkWindow(bucket, 'perDay', budget.dailySpendLimit, costMicros),
+        checkWindow(bucket, 'perMonth', budget.monthlySpendLimit, costMicros),
+      ];
+    }),
+  );
 
   if (errors.length > 0) {
     return { allowed: false, reason: errors[0], effectiveLimits };
@@ -735,15 +1049,16 @@ export interface BudgetUsage {
   alertThresholds?: number[];
 }
 
-/** Shared counter key scheme for `checkBudget` and `getBudgetUsage`. */
-function budgetCounterKey(context: QuotaContext, windowName: 'perDay' | 'perMonth'): string {
-  const keyParts = ['budget', context.domain, 'usd_micros', windowName];
-  if (context.providerKey) keyParts.push(`prov:${context.providerKey}`);
-  if (context.resourceKey) keyParts.push(`res:${context.resourceKey}`);
-  if (context.userId) keyParts.push(`user:${context.userId}`);
-  else if (context.tokenId) keyParts.push(`token:${context.tokenId}`);
-  else keyParts.push(`tenant:${context.tenantId}`);
-  return keyParts.join(':');
+/**
+ * Shared counter key scheme for `checkBudget` and `getBudgetUsage`. The default
+ * bucket is the caller's own counter — what a budget has always been counted on.
+ */
+function budgetCounterKey(
+  context: QuotaContext,
+  windowName: 'perDay' | 'perMonth',
+  bucket: LimitBucket = subjectBucket(context, {}),
+): string {
+  return ['budget', context.domain, 'usd_micros', windowName, ...counterScope(context, bucket)].join(':');
 }
 
 /**

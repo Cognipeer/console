@@ -52,6 +52,28 @@ export function QuotaMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       }));
     }
 
+    async listTenantWideQuotaPolicies(tenantId: string): Promise<IQuotaPolicy[]> {
+      const db = this.getTenantDb();
+      const tenantFilter = ObjectId.isValid(tenantId)
+        ? { $or: [{ tenantId }, { tenantId: new ObjectId(tenantId) }] }
+        : { tenantId };
+      // "No project": the field is absent, null or an empty string (the SQLite
+      // provider stores that as NULL, so all three spellings read the same).
+      const noProject = {
+        $or: [{ projectId: { $exists: false } }, { projectId: null }, { projectId: '' }],
+      };
+      const policies = await db
+        .collection<IQuotaPolicy>(COLLECTIONS.quotaPolicies)
+        .find({ $and: [tenantFilter, noProject] } as Filter<IQuotaPolicy>)
+        .sort({ priority: -1, createdAt: -1 })
+        .toArray();
+
+      return policies.map((policy) => ({
+        ...policy,
+        _id: policy._id?.toString(),
+      }));
+    }
+
     async updateQuotaPolicy(
       id: string,
       tenantId: string,

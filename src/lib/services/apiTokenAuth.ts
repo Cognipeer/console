@@ -5,20 +5,63 @@ import { fireAndForget } from '@/lib/core/asyncTask';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { hasIpRestriction, isIpAllowed, TOKEN_IP_NOT_ALLOWED } from '@/lib/services/apiTokens/ipAllowlist';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 
 const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
+/** Who was refused, when a refusal is worth auditing. Never serialized into a response. */
+export interface ApiTokenDenialContext {
+  tenantId: string;
+  tenantDbName: string;
+  tokenId?: string;
+  userId?: string;
+  projectId?: string;
+  clientIp?: string;
+}
+
 export class ApiTokenAuthError extends Error {
   status: number;
+  /** Machine-readable reason for refusals that have one (`ip_not_allowed`); plain 401s carry none. */
+  code?: string;
+  denial?: ApiTokenDenialContext;
 
-  constructor(message: string, status = 401) {
+  constructor(message: string, status = 401, code?: string, denial?: ApiTokenDenialContext) {
     super(message);
     this.name = 'ApiTokenAuthError';
     this.status = status;
+    this.code = code;
+    this.denial = denial;
   }
 }
+
+export interface ApiTokenAuthOptions {
+  /**
+   * The caller's address as the server resolved it (Fastify's `request.ip`,
+   * which honours `TRUSTED_PROXIES`). Required for a token that carries an IP
+   * allowlist: without it such a token is refused, never waved through.
+   */
+  clientIp?: string | null;
+}
+
+/**
+ * A call that acts FOR a person (the application sent a signed statement about them in `X-Cognipeer-User-Token`, see
+ * lib/iam/delegationGate.ts). `active`: `user` and `tokenRecord.userId` of the context are that person, `tokenRecord._id`
+ * and the scope stay the application's token. `refused`: the statement was not accepted - the call is answered with an
+ * error and attributed to the application token alone, never to the token's owner.
+ */
+export type ApiTokenDelegation =
+  | {
+    state: 'active';
+    issuer: string;
+    subject: string;
+    kind: 'person' | 'external';
+    /** The account the token belongs to: whom the call would have been without the user token. */
+    appOwnerId: string;
+    created: boolean;
+  }
+  | { state: 'refused'; code: string; issuer?: string; subject?: string };
 
 export interface ApiTokenContext {
   token: string;
@@ -29,12 +72,16 @@ export interface ApiTokenContext {
   tenantDbName: string;
   projectId: string;
   user: IUser | null;
+  /** Set when the call acts for a person (see {@link ApiTokenDelegation}). */
+  delegation?: ApiTokenDelegation;
 }
 
 export interface ApiTokenRequestLike {
   headers: {
     get(name: string): string | null;
   };
+  /** The caller's address (Fastify's `request.ip`); needed to honour a token's IP allowlist. */
+  ip?: string | null;
 }
 
 /**
@@ -65,6 +112,7 @@ export async function invalidateApiTokenAuthCache(tokenHash: string | undefined)
 
 export async function requireApiTokenFromHeader(
   authHeader: string | null | undefined,
+  options: ApiTokenAuthOptions = {},
 ): Promise<ApiTokenContext> {
   const normalizedHeader = authHeader ?? null;
 
@@ -124,6 +172,28 @@ export async function requireApiTokenFromHeader(
     }
   }
 
+  // Network allowlist. Checked on EVERY request (the record may come from the
+  // auth cache, which a token edit invalidates), before the permission gate,
+  // and before anything with side effects (tenant binding, default-project
+  // creation, the last-used stamp), so a refused call leaves no trace on the
+  // token. A token without a list is unrestricted; one with a list and no
+  // usable client address is refused.
+  if (hasIpRestriction(tokenRecord.allowedIpRanges) && !isIpAllowed(options.clientIp, tokenRecord.allowedIpRanges)) {
+    throw new ApiTokenAuthError(
+      'API token is not allowed from this IP address',
+      403,
+      TOKEN_IP_NOT_ALLOWED,
+      {
+        tenantId: String(tokenRecord.tenantId),
+        tenantDbName: tenant.dbName,
+        tokenId: tokenRecord._id ? String(tokenRecord._id) : undefined,
+        userId: tokenRecord.userId ? String(tokenRecord.userId) : undefined,
+        projectId: tokenRecord.projectId ? String(tokenRecord.projectId) : undefined,
+        clientIp: options.clientIp ?? undefined,
+      },
+    );
+  }
+
   const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
   tenant = {
     ...tenant,
@@ -152,6 +222,11 @@ export async function requireApiTokenFromHeader(
   }
   if (isUserDisabled(user)) {
     throw new ApiTokenAuthError('API token owner is disabled', 401);
+  }
+  // An external account (a person of a host application) holds no API tokens: a token that somehow names one
+  // authenticates nobody.
+  if (user.kind === 'external') {
+    throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
   }
 
   // Non-critical last-used timestamp update — fire and forget
@@ -186,5 +261,5 @@ export async function requireApiTokenFromHeader(
 export async function requireApiToken(
   request: ApiTokenRequestLike,
 ): Promise<ApiTokenContext> {
-  return requireApiTokenFromHeader(request.headers.get('authorization'));
+  return requireApiTokenFromHeader(request.headers.get('authorization'), { clientIp: request.ip });
 }

@@ -790,7 +790,7 @@ export interface DatabaseProvider {
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   listAgentConversations(
     agentKey: string,
-    filters?: { projectId?: string; limit?: number; skip?: number },
+    filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
   ): Promise<IAgentConversation[]>;
 
   // ── MCP Server operations (tenant-specific) ──

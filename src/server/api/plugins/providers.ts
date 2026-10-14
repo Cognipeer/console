@@ -24,6 +24,8 @@ import {
   withApiRequestContext,
 } from '../fastify-utils';
 
+import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+
 const logger = createLogger('api:providers');
 
 /**
@@ -40,6 +42,10 @@ function sendProviderError(reply: FastifyReply, error: unknown) {
 
   if (error instanceof ProviderCredentialDecryptError) {
     return reply.code(409).send({ error: error.message });
+  }
+
+  if (error instanceof ProviderEndpointError) {
+    return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
   }
 
   if (error instanceof WebSearchCacheConfigError) {
@@ -227,6 +233,9 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (error instanceof ProviderEndpointError) {
+        return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
+      }
       if (error instanceof Error) {
         if (error.message.includes('already exists')) {
           return reply.code(409).send({ error: error.message });

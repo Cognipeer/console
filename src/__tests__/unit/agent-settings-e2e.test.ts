@@ -111,7 +111,8 @@ describe('agent settings — runtime resolution', () => {
         expect(resolved.limits?.maxToolCalls).toBe(25);
         expect(resolved.limits?.maxCostUsd).toBe(1.5);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
-        expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'high' } });
+        // Effort / level moved next to the model; with reflection left on there is nothing to hand the SDK loop.
+        expect(resolved.reasoning).toBeUndefined();
         // A stored `askUser: true` is ignored: no console channel can answer
         // the question, so offering the tool only ever locked the conversation.
         expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
@@ -322,6 +323,39 @@ describe('agent settings — what a run reports back', () => {
         } as never);
         expect(steps[0].status).toBe('error');
         expect(steps[0].error).toBe('Blocked before the tool ran.');
+    });
+
+    it('stores a call a person denied as rejected by the person — a decision, not a failure', () => {
+        const steps = extractPlaygroundSteps({
+            content: '', metadata: {}, messages: [],
+            state: {
+                pendingApprovals: [
+                    { id: 'a1', toolCallId: 'c1', status: 'executed', metadata: { resolution: 'rejected' }, comment: 'not now' },
+                    { id: 'a2', toolCallId: 'c2', status: 'executed', metadata: { resolution: 'approved' } },
+                ],
+                toolHistory: [
+                    { executionId: 'e1', toolName: 'sandbox_exec', tool_call_id: 'c1', status: 'rejected', output: 'Rejected: not now', rawOutput: null },
+                    { executionId: 'e2', toolName: 'sandbox_exec', tool_call_id: 'c2', status: 'success', output: { ok: true } },
+                    // A guardrail's block is also `rejected` in the history, but there is no approval behind it.
+                    { executionId: 'e3', toolName: 'ack_incident', tool_call_id: 'c3', status: 'rejected', output: 'Tool call blocked by policy' },
+                ],
+            },
+        } as never);
+
+        expect(steps[0]).toMatchObject({ name: 'sandbox_exec', status: 'rejected', deniedByUser: true, output: 'Rejected: not now' });
+        expect(steps[0].error).toBeUndefined();
+        expect(steps[1].status).toBe('success');
+        expect(steps[1].deniedByUser).toBeUndefined();
+        expect(steps[2]).toMatchObject({ status: 'error', error: 'Blocked before the tool ran.' });
+        expect(steps[2].deniedByUser).toBeUndefined();
+    });
+
+    it('still recognises a reviewer’s refusal when the approvals are not in the state', () => {
+        const steps = extractPlaygroundSteps({
+            content: '', metadata: {}, messages: [],
+            state: { toolHistory: [{ executionId: 'e1', toolName: 'sandbox_exec', status: 'rejected', output: 'Rejected: no', rawOutput: null }] },
+        } as never);
+        expect(steps[0]).toMatchObject({ status: 'rejected', deniedByUser: true });
     });
 
     it('catches a tool that swallowed its own error instead of throwing', () => {

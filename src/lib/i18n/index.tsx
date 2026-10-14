@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, ReactNode, useContext, useMemo } from 'react';
+import { createContext, ReactNode, useContext, useEffect, useMemo } from 'react';
 import { Locale, messages } from './messages';
 
 type TranslationValues = Record<string, string | number | undefined | null>;
@@ -46,6 +46,13 @@ function interpolate(message: string, values?: TranslationValues): string {
 
 export function I18nProvider({ locale = 'en', children }: { locale?: Locale; children: ReactNode }) {
   const value = useMemo<I18nContextValue>(() => ({ locale }), [locale]);
+
+  // The document's language follows the locale. The root layout renders `<html lang>` before it can know the
+  // locale, and the browser takes its text rules from that attribute: with lang="en", CSS `text-transform:
+  // uppercase` turns Turkish "i" into "I" instead of "İ" ("yerleşik kural" -> "YERLEŞIK KURAL").
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

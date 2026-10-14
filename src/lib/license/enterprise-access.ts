@@ -138,6 +138,16 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'ai-app-gateway',
     prefixes: ['/api/ai-app-gateway/', '/api/client/v1/ai-app-gateway/', '/api/appgw/'],
   },
+  {
+    // Portals: curated chat pages that expose selected agents to end users.
+    // Gates the ADMIN CRUD (/api/portals) and the END-USER runtime
+    // (/api/portal/:key/...). The bare collection path '/api/portals' is
+    // covered by the trailing-slash rule (see matchesRulePrefix); the runtime
+    // prefix is singular ('/api/portal/'), so it needs its own entry. The
+    // runtime still re-checks the portal access list in-handler.
+    module: 'portals',
+    prefixes: ['/api/portals/', '/api/portal/'],
+  },
 ];
 
 export interface EnterpriseDenial {
@@ -149,12 +159,21 @@ export interface EnterpriseDenial {
   } & ({ requiresEnterprise: true } | { requiresOnPrem: true });
 }
 
+/**
+ * A '/api/foo/' prefix also covers the bare collection path '/api/foo'
+ * (list/create routes): matching on the trailing slash alone left those
+ * enterprise routes ungated for non-enterprise tenants.
+ */
+function matchesRulePrefix(pathname: string, prefix: string): boolean {
+  return pathname.startsWith(prefix) || (prefix.endsWith('/') && pathname === prefix.slice(0, -1));
+}
+
 function getEnterpriseRuleForPath(pathname: string): EnterpriseApiRule | null {
   for (const rule of ENTERPRISE_API_RULES) {
     if (rule.exemptPrefixes?.some((p) => pathname.startsWith(p))) {
       continue;
     }
-    if (rule.prefixes.some((p) => pathname.startsWith(p))) {
+    if (rule.prefixes.some((p) => matchesRulePrefix(pathname, p))) {
       return rule;
     }
   }

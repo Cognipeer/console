@@ -1,164 +1,197 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Select, TextInput, Loader } from '@mantine/core';
-import type { QuotaScope } from '@/lib/quota/types';
+import { useMemo, type ReactNode } from 'react';
+import { Stack, Text } from '@mantine/core';
+import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
+import { quotaTargetSource } from '@/lib/quota/targets';
 import { useTranslations } from '@/lib/i18n';
+import { PrincipalSelect } from './PrincipalSelect';
+import { SearchableSelect } from './SearchableSelect';
+import { TargetSelect } from './TargetSelect';
+import type { PickerOption } from './pickerSources';
 
 interface ScopeIdSelectorProps {
   scope: QuotaScope;
+  /**
+   * Which service the limit is for: it decides what a `resource` or `provider`
+   * target is (an agent in the agent domain, a model in the model domains, an
+   * index for vector...) — see `quotaTargetSource`.
+   */
+  domain?: QuotaDomain;
   value?: string;
-  onChange: (value: string | undefined) => void;
+  /** The saved name of `value`, shown until the picker has loaded anything. */
+  valueLabel?: string;
+  /** The limit's project: tells apart rows that store the same value in different projects. */
+  projectId?: string;
+  /**
+   * The saved person / group / token / agent is known to be gone (the Limits
+   * table flags it): the id stays, with a note, until another is chosen. A
+   * resource or provider is looked up by its own picker instead.
+   */
+  valueMissing?: boolean;
+  onChange: (value: string | undefined, option?: PickerOption) => void;
+  /** The name of the chosen user / group / token / agent / resource, as the picker knows it. */
+  onLabelChange?: (label: string | undefined) => void;
   resourceType?: 'model' | 'vectorIndex' | 'provider';
+  /** A fixed list of resources for callers that have one; without it the registry is searched. */
   resourceOptions?: { value: string; label: string }[];
   disabled?: boolean;
 }
 
-interface UserOption {
-  value: string;
-  label: string;
-}
-
-interface TokenOption {
-  value: string;
-  label: string;
-}
-
+/**
+ * The "who / what does this limit point at" field. Everything that can be long
+ * is found by searching as you type (the tenant may have tens of thousands of
+ * users, hundreds of models): users, groups, API tokens, agents, and the
+ * resource or provider of a resource / provider limit.
+ */
 export function ScopeIdSelector({
   scope,
+  domain,
   value,
+  valueLabel,
+  projectId,
+  valueMissing = false,
   onChange,
+  onLabelChange,
   resourceOptions = [],
   disabled = false,
 }: ScopeIdSelectorProps) {
   const t = useTranslations('settings.quotaSection.form');
-  
-  const [users, setUsers] = useState<UserOption[]>([]);
-  const [tokens, setTokens] = useState<TokenOption[]>([]);
-  const [loadingUsers, setLoadingUsers] = useState(false);
-  const [loadingTokens, setLoadingTokens] = useState(false);
+  const tTarget = useTranslations('settings.quotaSection.target');
+  const tDomains = useTranslations('settings.quotaSection.domains');
+  // One object per (service, kind of target): the picker below is keyed by its id.
+  const source = useMemo(() => quotaTargetSource(domain ?? 'global', scope), [domain, scope]);
 
-  // Fetch users when scope is 'user'
-  useEffect(() => {
-    if (scope === 'user') {
-      setLoadingUsers(true);
-      fetch('/api/users')
-        .then((res) => res.json())
-        .then((data) => {
-          const userOptions = (data.users || []).map((u: { _id: string; name: string; email: string }) => ({
-            value: u._id,
-            label: `${u.name} (${u.email})`,
-          }));
-          setUsers(userOptions);
-        })
-        .catch(() => setUsers([]))
-        .finally(() => setLoadingUsers(false));
-    }
-  }, [scope]);
+  // The editor wraps this field in its own labelled FormField, so the controls
+  // below carry no label or description of their own.
 
-  // Fetch tokens when scope is 'token'
-  useEffect(() => {
-    if (scope === 'token') {
-      setLoadingTokens(true);
-      fetch('/api/tokens')
-        .then((res) => res.json())
-        .then((data) => {
-          const tokenOptions = (data.tokens || []).map((tok: { _id: string; label: string }) => ({
-            value: tok._id,
-            label: tok.label,
-          }));
-          setTokens(tokenOptions);
-        })
-        .catch(() => setTokens([]))
-        .finally(() => setLoadingTokens(false));
-    }
-  }, [scope]);
+  /** A picker of people / groups / tokens / agents, with the note for a saved one that is gone. */
+  const withGoneNote = (kind: 'user' | 'group' | 'token' | 'agent', picker: ReactNode) => (
+    <Stack gap={4}>
+      {picker}
+      {valueMissing && value ? (
+        <Text size="xs" c="orange" role="status">
+          {tTarget(`gone.${kind}`)}
+        </Text>
+      ) : null}
+    </Stack>
+  );
 
   // Tenant scope doesn't need a selector
   if (scope === 'tenant') {
     return null;
   }
 
-  // User scope - dropdown with users
   if (scope === 'user') {
-    return (
-      <Select
-        label={t('scopeId')}
+    return withGoneNote(
+      'user',
+      <PrincipalSelect
+        type="user"
         placeholder={t('selectUser')}
-        description={t('scopeIdDescription')}
-        data={users}
-        value={value || null}
-        onChange={(v) => onChange(v || undefined)}
-        searchable
-        clearable
-        disabled={disabled}
-        rightSection={loadingUsers ? <Loader size="xs" /> : undefined}
         nothingFoundMessage={t('noUsersFound')}
-      />
-    );
-  }
-
-  // Token scope - dropdown with tokens
-  if (scope === 'token') {
-    return (
-      <Select
-        label={t('scopeId')}
-        placeholder={t('selectToken')}
-        description={t('scopeIdDescription')}
-        data={tokens}
-        value={value || null}
-        onChange={(v) => onChange(v || undefined)}
-        searchable
-        clearable
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
         disabled={disabled}
-        rightSection={loadingTokens ? <Loader size="xs" /> : undefined}
-        nothingFoundMessage={t('noTokensFound')}
-      />
+      />,
     );
   }
 
-  // Resource scope - dropdown with provided resources
+  if (scope === 'group') {
+    return withGoneNote(
+      'group',
+      <PrincipalSelect
+        type="group"
+        placeholder={t('selectGroup')}
+        nothingFoundMessage={t('noGroupsFound')}
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
+        disabled={disabled}
+      />,
+    );
+  }
+
+  if (scope === 'token') {
+    return withGoneNote(
+      'token',
+      <PrincipalSelect
+        type="token"
+        placeholder={t('selectToken')}
+        nothingFoundMessage={t('noTokensFound')}
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
+        disabled={disabled}
+      />,
+    );
+  }
+
   if (scope === 'resource') {
+    // In the agent domain a resource limit is a limit on ONE AGENT.
+    if (domain === 'agent') {
+      return withGoneNote(
+        'agent',
+        <PrincipalSelect
+          type="agent"
+          placeholder={t('selectAgent')}
+          nothingFoundMessage={t('noAgentsFound')}
+          value={value}
+          valueLabel={valueLabel}
+          onChange={onChange}
+          onLabelChange={onLabelChange}
+          disabled={disabled}
+        />,
+      );
+    }
     if (resourceOptions.length > 0) {
       return (
-        <Select
-          label={t('scopeId')}
+        <SearchableSelect
           placeholder={t('selectResource')}
-          description={t('scopeIdDescription')}
           data={resourceOptions}
           value={value || null}
           onChange={(v) => onChange(v || undefined)}
-          searchable
           clearable
           disabled={disabled}
           nothingFoundMessage={t('noResourcesFound')}
         />
       );
     }
-    // Fallback to text input if no options provided
-    return (
-      <TextInput
-        label={t('scopeId')}
-        placeholder={t('scopeIdPlaceholder')}
-        description={t('scopeIdDescription')}
-        value={value || ''}
-        onChange={(e) => onChange(e.currentTarget.value || undefined)}
+    return source ? (
+      <TargetSelect
+        key={source.id}
+        source={source}
+        value={value}
+        projectId={projectId}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
         disabled={disabled}
       />
-    );
+    ) : null;
   }
 
-  // Provider scope - text input for provider key
-  if (scope === 'provider') {
+  // A provider limit is matched on the provider's key, which only vector and file calls report.
+  if (scope === 'provider' && source) {
     return (
-      <TextInput
-        label={t('scopeId')}
-        placeholder={t('scopeIdPlaceholder')}
-        description={t('scopeIdDescription')}
-        value={value || ''}
-        onChange={(e) => onChange(e.currentTarget.value || undefined)}
-        disabled={disabled}
-      />
+      <Stack gap="xs">
+        <TargetSelect
+          key={source.id}
+          source={source}
+          value={value}
+          projectId={projectId}
+          onChange={onChange}
+          onLabelChange={onLabelChange}
+          disabled={disabled}
+        />
+        {source.neverApplies ? (
+          <Text size="xs" c="orange" role="status">
+            {tTarget('providerNeverApplies', { domain: tDomains(domain ?? 'global') })}
+          </Text>
+        ) : null}
+      </Stack>
     );
   }
 

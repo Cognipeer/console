@@ -25,6 +25,11 @@ import {
 } from './bindingResolution';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
+import { validateHitlConfig } from './agentHumanInTheLoop';
+import { checkEmbeddedClientTools } from './agentClientTools';
+import { normalizeAttachmentsFolder } from './sessionFilesConfig';
+import { inspectFileBucket } from './sessionFilesBucket';
+import { reasoningConfigIssues } from './agentReasoning';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -90,6 +95,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     if (config.kind === 'external') return issues;
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
+    checkAdditionalModelsShape(issues, config);
+    issues.errors.push(...reasoningConfigIssues(config));
     if (config.systemPrompt && config.promptKey) {
         issues.warnings.push({
             field: 'promptKey',
@@ -178,6 +185,24 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
         checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
         checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
+        const sessionBudget = execution.sessionBudget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
+        if (sessionBudget !== undefined && sessionBudget !== null) {
+            if (typeof sessionBudget !== 'object' || Array.isArray(sessionBudget)) {
+                issues.errors.push({ field: 'execution.sessionBudget', message: 'must be an object: { maxCostUsd, onReach }' });
+            } else {
+                if (!isNumber(sessionBudget.maxCostUsd)) {
+                    issues.errors.push({ field: 'execution.sessionBudget.maxCostUsd', message: 'is required and must be a number' });
+                } else {
+                    checkNumber(issues, 'execution.sessionBudget.maxCostUsd', sessionBudget.maxCostUsd, { min: 0, exclusiveMin: true });
+                }
+                if (sessionBudget.onReach !== 'pause' && sessionBudget.onReach !== 'stop') {
+                    issues.errors.push({ field: 'execution.sessionBudget.onReach', message: 'must be one of: pause, stop' });
+                }
+                if (sessionBudget.allowClientOverride !== undefined && typeof sessionBudget.allowClientOverride !== 'boolean') {
+                    issues.errors.push({ field: 'execution.sessionBudget.allowClientOverride', message: 'must be a boolean' });
+                }
+            }
+        }
         if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
             issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
         }
@@ -198,6 +223,54 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
         if (execution.callbackSecret && !execution.callbackUrl) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        }
+    }
+
+    if (config.clientTools !== undefined) {
+        const checked = checkEmbeddedClientTools(config.clientTools);
+        if (!checked.ok) {
+            for (const problem of checked.errors) issues.errors.push({ field: problem.field, message: problem.message });
+        }
+    }
+
+    if (config.clientToolSurfaces !== undefined) {
+        const surfaces = config.clientToolSurfaces as unknown;
+        if (!surfaces || typeof surfaces !== 'object' || Array.isArray(surfaces)) {
+            issues.errors.push({ field: 'clientToolSurfaces', message: 'must be an object' });
+        } else {
+            for (const [key, value] of Object.entries(surfaces)) {
+                if (!['api', 'playground', 'portal'].includes(key)) issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'unknown surface (api, playground, portal)' });
+                else if (typeof value !== 'boolean') issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'must be true or false' });
+            }
+        }
+    }
+
+    const attachments = config.attachments;
+    if (attachments) {
+        checkNumber(issues, 'attachments.maxFiles', attachments.maxFiles, { min: 1, max: 100, integer: true });
+        checkNumber(issues, 'attachments.maxFileSizeMb', attachments.maxFileSizeMb, { min: 0, exclusiveMin: true, max: getConfig().limits.fileUploadMaxMb });
+        checkNumber(issues, 'attachments.inlineMaxTokens', attachments.inlineMaxTokens, { min: 100, integer: true });
+        checkNumber(issues, 'attachments.readPageChars', attachments.readPageChars, { min: 500, max: 200_000, integer: true });
+        checkNumber(issues, 'attachments.retentionDays', attachments.retentionDays, { min: 1, max: 3650 });
+        checkNumber(issues, 'attachments.maxImages', attachments.maxImages, { min: 1, max: 50, integer: true });
+        checkNumber(issues, 'attachments.maxBytes', attachments.maxBytes, { min: 100_000, max: 200_000_000, integer: true });
+        checkNumber(issues, 'attachments.carryRecentImages', attachments.carryRecentImages, { min: 0, max: 20, integer: true });
+        if (attachments.allowedMimeTypes !== undefined
+            && (!Array.isArray(attachments.allowedMimeTypes) || attachments.allowedMimeTypes.some((entry) => typeof entry !== 'string'))) {
+            issues.errors.push({ field: 'attachments.allowedMimeTypes', message: 'must be a list of MIME types (image/* is allowed)' });
+        }
+        for (const flag of ['enabled', 'attachNewUploads'] as const) {
+            if (attachments[flag] !== undefined && typeof attachments[flag] !== 'boolean') {
+                issues.errors.push({ field: `attachments.${flag}`, message: 'must be true or false' });
+            }
+        }
+        const folder = normalizeAttachmentsFolder(attachments.folder);
+        if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
+        if (attachments.bucketKey !== undefined && typeof attachments.bucketKey !== 'string') {
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'must be a bucket key' });
+        } else if (attachments.enabled === true && !attachments.bucketKey?.trim()) {
+            // Files are kept in a bucket of the project; there is no built-in storage to fall back to.
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
         }
     }
 
@@ -243,6 +316,10 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
+    const hitl = validateHitlConfig(config);
+    issues.errors.push(...hitl.errors);
+    issues.warnings.push(...hitl.warnings);
+
     const memory = config.memory;
     if (memory?.enabled && !memory.memoryStoreKey) {
         issues.errors.push({ field: 'memory.memoryStoreKey', message: 'Pick a memory store, or turn memory off' });
@@ -274,6 +351,38 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     });
 
     return issues;
+}
+
+export const MAX_ADDITIONAL_MODELS = 10;
+
+/** `additionalModels`: a list of at most 10 distinct models, none of them the main one. */
+function checkAdditionalModelsShape(issues: Issues, config: IAgentConfig): void {
+    const list = config.additionalModels;
+    if (list === undefined || list === null) return;
+    if (!Array.isArray(list)) {
+        issues.errors.push({ field: 'additionalModels', message: 'must be a list' });
+        return;
+    }
+    if (list.length > MAX_ADDITIONAL_MODELS) {
+        issues.errors.push({ field: 'additionalModels', message: `An agent can offer at most ${MAX_ADDITIONAL_MODELS} additional models` });
+    }
+    const seen = new Set<string>();
+    list.forEach((entry, index) => {
+        const field = `additionalModels[${index}]`;
+        const key = entry && typeof entry === 'object' && typeof entry.modelKey === 'string' ? entry.modelKey.trim() : '';
+        if (!key) {
+            issues.errors.push({ field: `${field}.modelKey`, message: 'Pick a model' });
+            return;
+        }
+        if (key === config.modelKey) {
+            issues.errors.push({ field: `${field}.modelKey`, message: `"${key}" is already the main model` });
+        } else if (seen.has(key)) {
+            issues.errors.push({ field: `${field}.modelKey`, message: `Model "${key}" is listed twice` });
+        }
+        seen.add(key);
+        if (entry.label !== undefined && typeof entry.label !== 'string') issues.errors.push({ field: `${field}.label`, message: 'must be text' });
+        if (entry.description !== undefined && typeof entry.description !== 'string') issues.errors.push({ field: `${field}.description`, message: 'must be text' });
+    });
 }
 
 function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBinding): void {
@@ -367,8 +476,38 @@ export async function validateAgentConfig(input: {
         }
     }
 
+    // Session files need a bucket that can take a file: it exists in this project, is
+    // active, and its provider exists, is assigned here and is active.
+    const filesBucketKey = config.attachments?.enabled === true && typeof config.attachments.bucketKey === 'string'
+        ? config.attachments.bucketKey.trim()
+        : '';
+    if (filesBucketKey && input.tenantId) {
+        const inspection = await inspectFileBucket(db, input.tenantId, projectId, filesBucketKey).catch(() => null);
+        if (inspection && !inspection.usable) {
+            issues.errors.push({
+                field: 'attachments.bucketKey',
+                message: `${inspection.message.charAt(0).toUpperCase()}${inspection.message.slice(1)}`,
+            });
+        }
+    }
+
     const wantsCost = isNumber(config.runtime?.limits?.maxCostUsd) && config.runtime!.limits!.maxCostUsd! > 0;
     if (config.modelKey) await checkModel('modelKey', config.modelKey, wantsCost);
+    for (const [index, entry] of (config.additionalModels ?? []).entries()) {
+        const key = typeof entry?.modelKey === 'string' ? entry.modelKey.trim() : '';
+        if (!key || key === config.modelKey) continue; // the shape pass reported it
+        const field = `additionalModels[${index}].modelKey`;
+        await checkModel(field, key, wantsCost);
+        const model = await db.findModelByKey(key, projectId).catch(() => null);
+        if (!model || model.category !== 'llm') continue;
+        // A Dynamic LLM routes on its own rules; only a plain model can be known to lack a capability.
+        if (model.supportsToolCalls === false && ((config.toolBindings?.length ?? 0) > 0 || config.knowledgeEngineKey)) {
+            issues.warnings.push({ field, message: `Model "${key}" does not support tool calls, but this agent uses tools` });
+        }
+        if (model.isMultimodal === false && config.attachments?.enabled === true) {
+            issues.warnings.push({ field, message: `Model "${key}" does not accept images, but this agent takes attachments` });
+        }
+    }
 
     if (!config.systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId).catch(() => null);

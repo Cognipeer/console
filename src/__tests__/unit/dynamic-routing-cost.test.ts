@@ -537,3 +537,21 @@ describe('summarizeRoutedUsage', () => {
     expect(summary.totals.avgTotalLatencyMs).toBeNull();
   });
 });
+
+describe('validateDynamicConfig · caller conditions', () => {
+  const cfg = (condition: Record<string, unknown>) =>
+    ({
+      strategy: 'rule-based',
+      defaultModelKey: 'a',
+      rules: [{ label: 'r', targetModelKey: 'b', conditions: [condition] }],
+    }) as never;
+
+  it('accepts in/not_in with values and rejects bad shapes', () => {
+    expect(() => validateDynamicConfig(cfg({ signal: 'channel', operator: 'in', value: 'portal,api' }))).not.toThrow();
+    expect(() => validateDynamicConfig(cfg({ signal: 'groupIds', operator: 'not_in', value: ['g1'] }))).not.toThrow();
+    expect(() => validateDynamicConfig(cfg({ signal: 'channel', operator: 'gt', value: 'x' }))).toThrow(/in \/ not_in/);
+    expect(() => validateDynamicConfig(cfg({ signal: 'userId', operator: 'in', value: '' }))).toThrow(/at least one value/);
+    expect(() => validateDynamicConfig(cfg({ signal: 'channel', operator: 'in', value: 'mars' }))).toThrow(/unknown channel/);
+    expect(() => validateDynamicConfig(cfg({ signal: 'messageCount', operator: 'in', value: '1' }))).toThrow(/caller signals/);
+  });
+});

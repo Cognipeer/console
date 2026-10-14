@@ -5,7 +5,6 @@ import type {
   IGuardrailModerationPolicy,
   IGuardrailPromptShieldPolicy,
 } from '@/lib/database';
-import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
@@ -32,10 +31,6 @@ interface LlmCallContext {
   failMode?: GuardrailFailMode;
 }
 
-interface EvaluationModel {
-  invoke(messages: unknown[]): Promise<unknown>;
-}
-
 async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: string): Promise<string> {
   const db = await getDatabase();
   await db.switchToTenant(ctx.tenantDbName);
@@ -54,32 +49,30 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
     ctx.projectId,
   );
 
-  if (!runtime.createChatModel) {
+  if (!runtime.createNativeChatClient) {
     throw new Error('Model provider does not support chat completions');
   }
 
-  const chatModel = await runtime.createChatModel({
+  // The judge talks to the native client directly, not the gateway pipeline:
+  // routing it through the model's own guardrails would recurse.
+  const client = await runtime.createNativeChatClient({
     modelId: model.modelId,
     category: model.category,
     modelSettings: model.settings,
-    options: {},
-  }) as EvaluationModel;
+    options: { maxRetries: 0 },
+  });
 
   const response = await withResilience(
-    () => chatModel.invoke([
-      new SystemMessage(systemPrompt),
-      new HumanMessage(userPrompt),
-    ]),
-    { key: `guardrail:${ctx.modelKey}` },
+    () => client.complete({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+    { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
   );
 
-  const content = (response as { content?: unknown })?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const text = content.find((c: unknown) => (c as { type?: string })?.type === 'text') as { text?: string } | undefined;
-    return text?.text ?? '';
-  }
-  return String(content ?? '');
+  return response.content ?? '';
 }
 
 /**

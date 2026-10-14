@@ -7,11 +7,12 @@
  * OpenAI-compatible drivers; other families get a clear 400 until their own
  * strategy (Anthropic forced tool, Gemini responseSchema) lands.
  *
- * It builds the chat model through the provider's own `createChatModel`, so the
+ * It builds the chat client through the provider's own `createNativeChatClient`, so the
  * per-model parameter stripping (`unsupportedParams`, e.g. no `temperature` on
  * the gpt-5 / o-series) and `extraBody` handling are inherited, not re-done.
  */
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import type { ChatCompletionResponse, UnifiedMessage } from '@cognipeer/agent-sdk';
+import { imageUrlToPart, type ContentPart } from './nativeParts';
 import type { DecisionRequest, DecisionResult, DecisionRuntime } from '../domains/decision';
 import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
@@ -54,71 +55,26 @@ export class DecisionBackendError extends Error {
   }
 }
 
-interface ChatRunnable {
-  invoke(input: unknown, options?: Record<string, unknown>): Promise<unknown>;
+function extractUsage(response: ChatCompletionResponse): DecisionResult['usage'] {
+  const u = response.usage;
+  if (!u || (!u.inputTokens && !u.outputTokens)) return undefined;
+  return { inputTokens: u.inputTokens, outputTokens: u.outputTokens };
 }
 
-function isChatRunnable(value: unknown): value is ChatRunnable {
-  return Boolean(
-    value && typeof value === 'object' && typeof (value as { invoke?: unknown }).invoke === 'function',
-  );
-}
-
-function messageText(message: unknown): string {
-  const content = (message as { content?: unknown } | undefined)?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        const text = (part as { text?: unknown } | null)?.text;
-        return typeof text === 'string' ? text : '';
-      })
-      .join('');
-  }
-  return '';
-}
-
-function numberOf(...candidates: unknown[]): number | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
-  }
-  return undefined;
-}
-
-function extractUsage(message: unknown): DecisionResult['usage'] {
-  const record = (message ?? {}) as {
-    usage_metadata?: Record<string, unknown>;
-    response_metadata?: Record<string, unknown>;
-  };
-  const meta = record.usage_metadata ?? {};
-  const wire = (record.response_metadata?.tokenUsage
-    ?? record.response_metadata?.token_usage
-    ?? record.response_metadata?.usage
-    ?? {}) as Record<string, unknown>;
-  const inputTokens = numberOf(meta.input_tokens, wire.promptTokens, wire.prompt_tokens, wire.input_tokens);
-  const outputTokens = numberOf(meta.output_tokens, wire.completionTokens, wire.completion_tokens, wire.output_tokens);
-  if (inputTokens === undefined && outputTokens === undefined) return undefined;
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-  };
-}
-
-function buildMessages(request: DecisionRequest, includeRationale: boolean) {
-  const content: Array<Record<string, unknown>> = [];
+function buildMessages(request: DecisionRequest, includeRationale: boolean): UnifiedMessage[] {
+  const content: ContentPart[] = [];
   const text = request.input
     .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
     .map((part) => part.text)
     .join('\n\n');
   if (text) content.push({ type: 'text', text: `Input:\n<input>\n${text}\n</input>` });
   for (const part of request.input) {
-    if (part.type === 'image') content.push({ type: 'image_url', image_url: { url: part.data_url } });
+    if (part.type === 'image') content.push(imageUrlToPart(part.data_url));
   }
   content.push({ type: 'text', text: buildDecisionQuestionsPrompt(request.questions) });
   return [
-    new SystemMessage(buildDecisionSystemPrompt(includeRationale)),
-    new HumanMessage({ content: content as never }),
+    { role: 'system', content: buildDecisionSystemPrompt(includeRationale) },
+    { role: 'user', content },
   ];
 }
 
@@ -129,37 +85,39 @@ export function createStructuredDecisionRuntime(
 ): DecisionRuntime {
   return {
     async decide(request, options): Promise<DecisionResult> {
-      if (!runtime.createChatModel) {
+      if (!runtime.createNativeChatClient) {
         throw new DecisionBackendError(`Provider "${provider}" has no chat runtime to serve decisions`);
       }
       const includeRationale = request.includeRationale === true;
 
-      // Temperature 0 where accepted: createChatModel drops it again for the
+      // Temperature 0 where accepted: the client drops it again for the
       // models whose registry rule says they reject it.
-      const chatModel = await runtime.createChatModel({
+      const client = await runtime.createNativeChatClient({
         modelId: config.modelId,
         category: 'llm',
         modelSettings: { ...(config.modelSettings ?? {}), temperature: 0 },
         options: { maxRetries: 0 },
       });
-      if (!isChatRunnable(chatModel)) {
+      if (!client || typeof client.complete !== 'function') {
         throw new DecisionBackendError(`Provider "${provider}" returned a chat model that cannot be invoked`);
       }
 
-      const response = await chatModel.invoke(buildMessages(request, includeRationale), {
-        response_format: buildDecisionResponseFormat(request.questions, includeRationale),
+      const format = buildDecisionResponseFormat(request.questions, includeRationale);
+      const response = await client.complete({
+        messages: buildMessages(request, includeRationale),
+        responseFormat: { type: 'json_schema', name: format.json_schema.name, schema: format.json_schema.schema as Record<string, unknown> },
         ...(options?.signal ? { signal: options.signal } : {}),
       });
 
       const usage = extractUsage(response);
       const backend = { kind: 'structured' as const, provider };
 
-      const refusal = (response as { additional_kwargs?: { refusal?: unknown } }).additional_kwargs?.refusal;
+      const refusal = response.providerFields?.refusal;
       if (typeof refusal === 'string' && refusal.trim()) {
         return { ...refuseAll(request.questions), usage, backend };
       }
 
-      const raw = stripInlineReasoning(messageText(response)).trim();
+      const raw = stripInlineReasoning(response.content ?? '').trim();
       if (!raw) {
         throw new DecisionBackendError('The model returned an empty response');
       }

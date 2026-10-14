@@ -54,6 +54,12 @@ export function normalizeModelSettings(
       continue;
     }
 
+    if (key === 'returnReasoning') {
+      const lowered = value.trim().toLowerCase();
+      normalized[key] = lowered === 'false' ? false : lowered === 'true' ? true : value;
+      continue;
+    }
+
     if (NUMERIC_KEYS.has(key)) {
       const asNumber = Number(value);
       // An empty string coerces to 0, which would silently pin temperature to 0.

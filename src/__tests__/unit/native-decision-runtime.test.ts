@@ -326,7 +326,7 @@ describe('mode selection', () => {
   });
 
   it('defaults to structured when no mode is set, and rejects an unknown one', () => {
-    const runtime = { createChatModel: vi.fn() };
+    const runtime = { createNativeChatClient: vi.fn() };
     const config = { modelId: 'm', category: 'decision' as const };
     expect(selectDecisionRuntime({ runtime, config, provider: 'openai' })).toBeDefined();
     expect(() => selectDecisionRuntime({
@@ -349,6 +349,7 @@ describe('native vs structured response-shape parity', () => {
 
     // Structured, with a fake chat model reporting the very same numbers.
     const invoke = vi.fn().mockResolvedValue({
+      id: 'r', model: 'gpt-4o', toolCalls: [], finishReason: 'stop', raw: {},
       content: JSON.stringify({
         answers: {
           department: { billing: 0.93, technical: 0.07 },
@@ -356,10 +357,13 @@ describe('native vs structured response-shape parity', () => {
           severity: { 0: 0.1, 1: 0.7, 2: 0.2 },
         },
       }),
-      usage_metadata: { input_tokens: 42, output_tokens: 30 },
+      usage: {
+        inputTokens: 42, outputTokens: 30, totalTokens: 72,
+        cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0,
+      },
     });
     const structured = await createStructuredDecisionRuntime(
-      { createChatModel: () => ({ invoke }) },
+      { createNativeChatClient: async () => ({ complete: invoke }) } as never,
       { modelId: 'gpt-4o', category: 'decision' },
       'openai',
     ).decide(REQUEST);

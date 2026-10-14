@@ -13,8 +13,8 @@ import { Box, Tooltip, UnstyledButton } from '@mantine/core';
 import { useElementSize } from '@mantine/hooks';
 import { useEffect, useMemo, useState } from 'react';
 import { formatDuration } from '@/lib/utils/tracingUtils';
-import { stepFailed, type ChatMessage } from './sessionTypes';
-import { layoutTimeline, pickSegmentLabel, turnLabelParts, turnTooltip } from './turnTimelineLayout';
+import type { ChatMessage } from './sessionTypes';
+import { failedTurnFlags, layoutTimeline, pickSegmentLabel, turnLabelParts, turnTooltip } from './turnTimelineLayout';
 import classes from './AgentSessionView.module.css';
 
 /**
@@ -95,6 +95,7 @@ export default function TurnTimeline({ entries, zoom, onSelect }: TurnTimelinePr
 
     const durations = useMemo(() => entries.map(({ message }) => message.latencyMs ?? 0), [entries]);
     const layout = useMemo(() => layoutTimeline(durations, width), [durations, width]);
+    const failedFlags = useMemo(() => failedTurnFlags(entries.map(({ message }) => message)), [entries]);
 
     return (
         <Box px="xs" py={6} className={classes.timelineStrip}>
@@ -107,9 +108,7 @@ export default function TurnTimeline({ entries, zoom, onSelect }: TurnTimelinePr
                 style={{ gap: layout.gap, height: level.height }}
             >
                 {entries.map(({ index, message }, position) => {
-                    const failed = message.role === 'error'
-                        || Boolean(message.stopReason)
-                        || Boolean(message.steps?.some(stepFailed));
+                    const failed = failedFlags[position] ?? false;
                     const toolCalls = message.steps?.length ?? 0;
                     const duration = formatDuration(message.latencyMs);
                     const segmentWidth = layout.widths[position] ?? 0;

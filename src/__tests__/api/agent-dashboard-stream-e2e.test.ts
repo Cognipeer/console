@@ -20,6 +20,8 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
         ...actual,
         requireProjectContextForRequest: vi.fn(),
         sendProjectContextError: vi.fn().mockReturnValue(null),
+        // Who may touch a session somebody else started is the policy engine's question (agent-session-authz.test.ts); allowed here.
+        authorizeResourceForRequest: vi.fn(async () => ({ allowed: true, source: 'engine', reasons: [], policyIds: [] })),
     };
 });
 
@@ -57,10 +59,11 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { getDatabase } from '@/lib/database';
-import { executePlaygroundChat, getAgentById } from '@/lib/services/agents';
+import { executePlaygroundChat, getAgentById, getConversationById } from '@/lib/services/agents';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
+import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
 
 const SESSION_CTX = {
@@ -72,6 +75,9 @@ const SESSION_CTX = {
         userId: 'user-1',
     },
 };
+
+// The session the turns continue: the signed-in user's own, of this agent and project.
+const CONVERSATION = { _id: 'conv-1', agentKey: 'field-ops', projectId: 'proj-1', createdBy: 'user-1', messages: [] };
 
 const AGENT = {
     _id: 'agent-1',
@@ -107,6 +113,7 @@ beforeEach(() => {
     deleteAgentRun.mockResolvedValue(true);
     mockFn(getDatabase).mockResolvedValue({ createAgentRun, deleteAgentRun });
     mockFn(getAgentById).mockResolvedValue(AGENT);
+    mockFn(getConversationById).mockResolvedValue(CONVERSATION);
     mockFn(executePlaygroundChatLocal).mockResolvedValue(PLAYGROUND_RESULT);
 });
 
@@ -170,6 +177,77 @@ describe('channel: dashboard session stream', () => {
         // same numbers it showed live.
         expect(result?.data.usage.costUsd).toBeCloseTo(0.0182, 6);
         expect(result?.data.latencyMs).toBe(4200);
+    });
+
+    it('streams the model\'s thinking as `reasoning` events, ahead of the result that carries it whole', async () => {
+        mockFn(executePlaygroundChatLocal).mockImplementation(
+            async (request: { onReasoningChunk?: (t: string) => void; onTextChunk?: (t: string) => void }) => {
+                request.onReasoningChunk?.('Checking the ');
+                request.onReasoningChunk?.('status page.');
+                request.onTextChunk?.('The database is down.');
+                return { ...PLAYGROUND_RESULT, reasoning: 'Checking the status page.' };
+            },
+        );
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'what is broken?', conversationId: 'conv-1' },
+        });
+
+        const events = readEvents(res.body);
+        const names = events.map((e) => e.event);
+        expect(events.filter((e) => e.event === 'reasoning').map((e) => e.data.text).join('')).toBe('Checking the status page.');
+        expect(names.indexOf('reasoning')).toBeLessThan(names.indexOf('text'));
+        expect(names.indexOf('text')).toBeLessThan(names.indexOf('result'));
+        expect(events.find((e) => e.event === 'result')?.data.reasoning).toBe('Checking the status page.');
+    });
+
+    it('adds action and status events (with id: seq) for a session turn, and leaves the existing events alone', async () => {
+        mockFn(executePlaygroundChatLocal).mockImplementation(
+            async (request: { onToolEvent?: (e: Record<string, unknown>) => void }) => {
+                const at = new Date().toISOString();
+                sessionEventBus.publish('conv-1', { seq: 1, type: 'session.status_running', data: { trigger: 'message' }, createdAt: at });
+                request.onToolEvent?.({ phase: 'start', name: 'sandbox_exec', id: 'c1' });
+                sessionEventBus.publish('conv-1', { seq: 2, type: 'agent.tool_use', data: { name: 'sandbox_exec' }, createdAt: at });
+                sessionEventBus.publish('conv-1', { seq: 3, type: 'action.required', data: { actionId: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec' }, createdAt: at });
+                sessionEventBus.publish('conv-1', { seq: 4, type: 'session.status_idle', data: { stopReason: 'requires_action' }, createdAt: at });
+                return PLAYGROUND_RESULT;
+            },
+        );
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'run it', conversationId: 'conv-1' },
+        });
+
+        expect(res.body).toContain('id: 3\nevent: action\n');
+        expect(res.body).toContain('id: 1\nevent: status\n');
+        const events = readEvents(res.body);
+        expect(events.find((e) => e.event === 'action')?.data).toMatchObject({ actionId: 'act_1', toolName: 'sandbox_exec' });
+        expect(events.filter((e) => e.event === 'status').map((e) => e.data.type)).toEqual(['session.status_running', 'session.status_idle']);
+        // Existing events are untouched: no ids, same names.
+        expect(res.body).toContain('event: tool\ndata:');
+        expect(events.some((e) => e.event === 'result')).toBe(true);
+        // The tool_use bus frame is NOT re-sent as a second tool event.
+        expect(events.filter((e) => e.event === 'tool')).toHaveLength(1);
+    });
+
+    it('a stateless turn (no conversation) gets no session events', async () => {
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi' },
+        });
+        expect(res.body).not.toContain('event: status');
+        expect(res.body).not.toContain('event: action');
     });
 
     it('sends a failure as an event, not as a dead socket', async () => {

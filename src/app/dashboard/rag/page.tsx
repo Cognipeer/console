@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconBook2,
@@ -19,6 +19,8 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateRagModuleModal from '@/components/rag/CreateRagModuleModal';
 import { CHUNK_STRATEGIES } from '@/components/rag/ragModuleForm';
 import type { RagChunkStrategy } from '@/lib/database';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 
 interface RagModuleView {
   _id: string;
@@ -54,12 +56,12 @@ function strategyLabel(strategy: string) {
 
 export default function RagDashboardPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [modules, setModules] = useState<RagModuleView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<RagModuleView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -87,35 +89,30 @@ export default function RagDashboardPage() {
     void loadModules();
   }, [loadModules]);
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(deleteTarget.key)}`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to delete module');
-      }
-      notifications.show({
-        color: 'green',
-        title: 'Knowledge Engine module deleted',
-        message: `${deleteTarget.name} has been removed.`,
-      });
-      setModules((prev) => prev.filter((m) => m.key !== deleteTarget.key));
-      setDeleteTarget(null);
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete module',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const confirmDelete = (target: RagModuleView) =>
+    deleteResource({
+      noun: tSafe('nouns.ragModule'),
+      name: target.name,
+      type: 'rag-module',
+      id: target._id,
+      extraWarning: tSafe('ragModuleExtra'),
+      action: async () => {
+        const res = await fetch(
+          `/api/rag/modules/${encodeURIComponent(target.key)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(err.error ?? 'Failed to delete module');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Knowledge Engine module deleted',
+          message: `${target.name} has been removed.`,
+        });
+        setModules((prev) => prev.filter((m) => m.key !== target.key));
+      },
+    });
 
   const handleCreated = (ragModule: Record<string, unknown>) => {
     setCreateModalOpen(false);
@@ -318,32 +315,10 @@ export default function RagDashboardPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(m),
+            onClick: () => void confirmDelete(m),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete Knowledge Engine module"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Delete Knowledge Engine module <strong>{deleteTarget?.name}</strong>? This will remove
-          the module and its index configuration. Documents in the vector index will
-          not be deleted automatically.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            Delete
-          </Button>
-        </Group>
-      </Modal>
 
       <CreateRagModuleModal
         opened={createModalOpen}

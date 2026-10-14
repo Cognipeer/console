@@ -20,6 +20,7 @@ import {
   IconKey,
   IconLayoutDashboard,
   IconLock,
+  IconMessageChatbot,
   IconPlug,
   IconReportAnalytics,
   IconRobot,
@@ -31,6 +32,7 @@ import {
   IconTool,
   IconUsers,
   IconVectorBezier,
+  IconWebhook,
   IconWorld,
   IconWorldSearch,
   type Icon,
@@ -39,6 +41,7 @@ import platformServicesJson from '@/config/platform-services.json';
 import {
   getEffectiveServicePermission,
   type PermissionService,
+  type ServicePermissionLevel,
   type UserRole,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
@@ -70,6 +73,7 @@ const ICON_REGISTRY = {
   IconKey,
   IconLayoutDashboard,
   IconLock,
+  IconMessageChatbot,
   IconPlug,
   IconReportAnalytics,
   IconRobot,
@@ -80,6 +84,7 @@ const ICON_REGISTRY = {
   IconTool,
   IconUsers,
   IconVectorBezier,
+  IconWebhook,
   IconWorld,
   IconWorldSearch,
 } satisfies Record<string, Icon>;
@@ -188,38 +193,66 @@ type DashboardServicesOptions = {
   role?: UserRole;
   servicesHomeOnly?: boolean;
   servicePermissions?: UserServicePermissions;
+  /**
+   * What the policy engine allows the person per service in the ACTIVE project
+   * (groups, policies and project limits included; `GET /api/auth/session`).
+   * A service named here is judged by this level; a service the map does not
+   * name, or no map at all (loading, or the engine could not answer), falls back
+   * to the role-based level.
+   */
+  effectivePermissions?: Partial<Record<string, ServicePermissionLevel>> | null;
   /** Current deployment mode. Services marked `requiresOnPrem` are hidden entirely when false. */
   isOnPrem?: boolean;
 };
+
+/**
+ * The level the shell treats the person as having on a permission service: the
+ * engine's answer for the active project when it names the service, else the
+ * role-based level.
+ */
+function serviceLevelOf(
+  options: Pick<DashboardServicesOptions, 'role' | 'servicePermissions' | 'effectivePermissions'>,
+  id: PermissionService,
+): ServicePermissionLevel {
+  const { role = 'user', servicePermissions = {}, effectivePermissions = null } = options;
+  return effectivePermissions?.[id] ?? getEffectiveServicePermission({ role, servicePermissions }, id);
+}
+
+/**
+ * Whether the person may use a permission service at all. It answers for the
+ * pages that sit inside another service's menu (Webhooks, in Agents) and have no
+ * service entry to be offered by, with the same level the services are judged by.
+ */
+export function canUseDashboardService(
+  options: Pick<DashboardServicesOptions, 'role' | 'servicePermissions' | 'effectivePermissions'>,
+  id: PermissionService,
+): boolean {
+  return serviceLevelOf(options, id) !== 'none';
+}
 
 export function getDashboardServices(
   options: DashboardServicesOptions = {},
 ): DashboardServiceDefinition[] {
   const {
     isTenantAdmin = false,
-    role = 'user',
     servicesHomeOnly = false,
-    servicePermissions = {},
     isOnPrem = false,
   } = options;
+
+  const levelOf = (id: PermissionService): ServicePermissionLevel => serviceLevelOf(options, id);
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
     if (service.requiresOnPrem && !isOnPrem) return false;
 
     if (service.id !== 'services-home') {
-      const level = getEffectiveServicePermission(
-        { role, servicePermissions },
-        service.id,
-      );
-      if (level === 'none') return false;
+      if (levelOf(service.id) === 'none') return false;
     }
 
     if (
       service.tenantAdminOnly &&
       !isTenantAdmin &&
       service.id !== 'services-home' &&
-      getEffectiveServicePermission({ role, servicePermissions }, service.id) !==
-        'admin'
+      levelOf(service.id) !== 'admin'
     ) {
       return false;
     }
@@ -248,6 +281,41 @@ export const SETTINGS_NAV_SECTION: DashboardServiceDefinition = {
   tags: [],
   searchKeywords: [],
 };
+
+/**
+ * A page that lives inside another service's sub-nav instead of being a service
+ * of its own — searchable from the command palette, but with no launcher tile,
+ * rail icon or path ownership (the section it sits in owns the path).
+ */
+export interface DashboardSubpage {
+  id: string;
+  /** The service whose sub-nav it is in. */
+  parent: DashboardServiceDefinition['id'];
+  /** The RBAC service that gates the page. */
+  service: PermissionService;
+  href: string;
+  icon: Icon;
+  navLabelKey: string;
+  navDescriptionKey: string;
+  tags: string[];
+  searchKeywords: string[];
+}
+
+export const DASHBOARD_SUBPAGES: ReadonlyArray<DashboardSubpage> = [
+  {
+    // Project / tenant level, not per agent: what it announces is agent activity,
+    // so it lives in the Agents menu (it used to be a Settings page).
+    id: 'webhooks',
+    parent: 'agents',
+    service: 'webhooks',
+    href: '/dashboard/agents/webhooks',
+    icon: IconWebhook,
+    navLabelKey: 'webhooks',
+    navDescriptionKey: 'webhooksDescription',
+    tags: ['webhooks', 'events', 'notifications', 'agents'],
+    searchKeywords: ['webhook', 'event', 'callback', 'notification', 'olay', 'bildirim'],
+  },
+];
 
 /** All known service definitions (does not honor permissions). */
 export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =

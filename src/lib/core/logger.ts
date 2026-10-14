@@ -15,6 +15,9 @@
  *   log.info('Chat completion', { model: 'gpt-4' });  // adds scope + requestId
  */
 
+import { Agent as HttpAgent, ClientRequest, IncomingMessage, ServerResponse } from 'node:http';
+import { Socket } from 'node:net';
+import { inspect } from 'node:util';
 import winston from 'winston';
 import { getConfig } from './config';
 import { getRequestContext } from './requestContext';
@@ -46,13 +49,94 @@ const REDACTED = '[REDACTED]';
  */
 export const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret)$/i;
 const REDACT_MAX_DEPTH = 6;
+const CIRCULAR = '[Circular]';
+/** Characters of a failed HTTP call's response body kept in a log line. */
+const HTTP_ERROR_BODY_MAX_CHARS = 2_000;
+
+function typeTag(value: object): string {
+  return `[${value.constructor?.name || 'Object'}]`;
+}
+
+/**
+ * Node's own HTTP and socket objects. They point at each other (a request at
+ * its response and socket, both back at the request), and a request's
+ * `_header` is the raw request head, Authorization header included. A log
+ * line gets their type, never their fields.
+ */
+function isNodeIoObject(value: object): boolean {
+  return value instanceof ClientRequest
+    || value instanceof IncomingMessage
+    || value instanceof ServerResponse
+    || value instanceof Socket
+    || value instanceof HttpAgent;
+}
+
+interface HttpClientErrorLike extends Error {
+  code?: unknown;
+  status?: unknown;
+  config?: { method?: unknown; url?: unknown; baseURL?: unknown };
+  response?: { status?: unknown; data?: unknown };
+}
+
+function isHttpClientError(value: object): value is HttpClientErrorLike {
+  return value instanceof Error && (value as { isAxiosError?: unknown }).isAxiosError === true;
+}
+
+/** The request URL without its query, fragment or credentials, any of which can carry a key. */
+function loggableUrl(url: unknown, baseURL: unknown): string | undefined {
+  if (typeof url !== 'string' || !url) return undefined;
+  try {
+    const parsed = new URL(url, typeof baseURL === 'string' && baseURL ? baseURL : undefined);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url.split(/[?#]/)[0].replace(/\/\/[^/@]*@/, '//');
+  }
+}
+
+function loggableResponseBody(data: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (data === undefined || data === null || data === '') return undefined;
+  if (typeof data === 'string') {
+    return data.length > HTTP_ERROR_BODY_MAX_CHARS
+      ? `${data.slice(0, HTTP_ERROR_BODY_MAX_CHARS)}… [truncated]`
+      : data;
+  }
+  if (typeof data === 'object' && (Buffer.isBuffer(data) || data instanceof ArrayBuffer)) {
+    return typeTag(data);
+  }
+  return redactValue(data, depth, seen);
+}
+
+/**
+ * A failed axios call carries the whole exchange: the live request and
+ * response (which point at each other), the request body with whatever
+ * credentials were posted, the raw request head with its Authorization
+ * header. What identifies the failure is kept; none of the rest is.
+ */
+function summarizeHttpClientError(
+  error: HttpClientErrorLike,
+  depth: number,
+  seen: WeakSet<object>,
+): Record<string, unknown> {
+  const summary: Record<string, unknown> = { name: error.name, message: error.message, stack: error.stack };
+  if (error.code !== undefined && error.code !== null) summary.code = error.code;
+  const status = error.response?.status ?? error.status;
+  if (status !== undefined && status !== null) summary.status = status;
+  if (typeof error.config?.method === 'string') summary.method = error.config.method.toUpperCase();
+  const url = loggableUrl(error.config?.url, error.config?.baseURL);
+  if (url) summary.url = url;
+  const body = loggableResponseBody(error.response?.data, depth + 1, seen);
+  if (body !== undefined) summary.responseBody = body;
+  return summary;
+}
 
 function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (value === null || value === undefined) return value;
-  if (depth > REDACT_MAX_DEPTH) return value;
   if (typeof value !== 'object') return value;
-  if (seen.has(value as object)) return value;
-  seen.add(value as object);
+  // Never hand the object itself back: whatever cycle it is part of would
+  // reach the serializer and throw out of the log call.
+  if (seen.has(value)) return CIRCULAR;
+  if (depth > REDACT_MAX_DEPTH) return typeTag(value);
+  seen.add(value);
 
   if (Array.isArray(value)) {
     return value.map((item) => redactValue(item, depth + 1, seen));
@@ -60,6 +144,14 @@ function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unkn
 
   if (value instanceof Date || Buffer.isBuffer(value)) {
     return value;
+  }
+
+  if (isNodeIoObject(value)) {
+    return typeTag(value);
+  }
+
+  if (isHttpClientError(value)) {
+    return summarizeHttpClientError(value, depth, seen);
   }
 
   // `winston.format.errors({ stack: true })` below only expands an Error
@@ -119,6 +211,25 @@ export const redactSecretsFormat = winston.format((info) => {
 /*  Build format pipeline based on config                             */
 /* ------------------------------------------------------------------ */
 
+function stringifyFields(fields: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(fields, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
+  } catch {
+    // String keys only: winston keeps the raw log arguments under symbol keys.
+    const plain = Object.fromEntries(Object.keys(fields).map((key) => [key, fields[key]]));
+    return inspect(plain, { depth: REDACT_MAX_DEPTH, breakLength: Infinity });
+  }
+}
+
+/** The development (pretty) line. Never throws: a log call must not fail the code that makes it. */
+export const prettyLineFormat = winston.format.printf(({ timestamp, level, message, scope, requestId, tenantId, ...rest }) => {
+  const scopeTag = scope ? `[${scope}]` : '';
+  const reqTag = requestId ? `(${String(requestId).slice(0, 8)})` : '';
+  const tenantTag = tenantId ? `{${tenantId}}` : '';
+  const extra = Object.keys(rest).length ? ` ${stringifyFields(rest)}` : '';
+  return `${timestamp} ${level} ${scopeTag}${reqTag}${tenantTag} ${message}${extra}`;
+});
+
 function buildFormat() {
   const cfg = getConfig();
   const base = winston.format.combine(
@@ -132,13 +243,7 @@ function buildFormat() {
     return winston.format.combine(
       base,
       winston.format.colorize(),
-      winston.format.printf(({ timestamp, level, message, scope, requestId, tenantId, ...rest }) => {
-        const scopeTag = scope ? `[${scope}]` : '';
-        const reqTag = requestId ? `(${String(requestId).slice(0, 8)})` : '';
-        const tenantTag = tenantId ? `{${tenantId}}` : '';
-        const extra = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
-        return `${timestamp} ${level} ${scopeTag}${reqTag}${tenantTag} ${message}${extra}`;
-      }),
+      prettyLineFormat,
     );
   }
 

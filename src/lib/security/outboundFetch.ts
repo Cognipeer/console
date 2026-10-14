@@ -44,6 +44,15 @@ export class OutboundNetworkError extends Error {
   }
 }
 
+/**
+ * The host could not be resolved (a resolver outage, NXDOMAIN). Still refused —
+ * the guard fails closed — but it says nothing about the ADDRESS, so a caller
+ * that retries (webhook delivery) can tell it from a rejected private target.
+ */
+export class OutboundDnsError extends OutboundNetworkError {
+  readonly code = 'dns_lookup_failed';
+}
+
 export function isPrivateIpAddress(ip: string): boolean {
   const family = isIP(ip);
   if (family === 4) {
@@ -173,7 +182,9 @@ export function isAllowlistedHost(host: string, allowedHosts: string[]): boolean
  * exists to close the gap between "resolved" and "connected", which a cache
  * up to 30s old would reopen.
  */
-async function resolvesToPrivateNetwork(host: string): Promise<{ privateNetwork: boolean; addresses: ResolvedAddress[] }> {
+async function resolvesToPrivateNetwork(
+  host: string,
+): Promise<{ privateNetwork: boolean; addresses: ResolvedAddress[]; lookupFailed?: boolean }> {
   const bare = host.replace(/^\[|\]$/g, '');
   if (isLocalHostname(bare)) return { privateNetwork: true, addresses: [] };
   if (isIP(bare)) {
@@ -194,7 +205,9 @@ async function resolvesToPrivateNetwork(host: string): Promise<{ privateNetwork:
     privateNetwork = records.length === 0
       || records.some((record) => isPrivateIpAddress(record.address));
   } catch {
-    privateNetwork = true;
+    // No verdict to remember: a failed lookup is not evidence of a private
+    // address, so it is neither cached nor reported as one.
+    return { privateNetwork: true, addresses: [], lookupFailed: true };
   }
 
   hostPrivacyCache.set(bare, { privateNetwork, addresses, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
@@ -318,7 +331,8 @@ async function checkPublicUrl(
     if (isAllowlistedHost(url.hostname, allowedHosts)) return { url, pinned: [] };
   }
 
-  const { privateNetwork } = await resolvesToPrivateNetwork(url.hostname);
+  const { privateNetwork, lookupFailed } = await resolvesToPrivateNetwork(url.hostname);
+  if (lookupFailed) throw new OutboundDnsError(`Could not resolve host: ${url.hostname}`);
   if (privateNetwork) {
     throw new OutboundNetworkError(
       `Refusing outbound request to private/loopback host: ${url.hostname}`,
@@ -343,6 +357,19 @@ async function checkPublicUrl(
 export interface SafeFetchOptions extends OutboundGuardOptions {
   /** Abort the request after this many ms (default `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS`). */
   timeoutMs?: number;
+  /**
+   * `false` hands a 3xx back to the caller as it is instead of following it
+   * (default `true`). For callers that treat "the target moved" as an answer.
+   */
+  followRedirects?: boolean;
+  /**
+   * Keep forwarding the caller's `init.signal` to the response BODY after the
+   * headers arrive (default: detached, so a long-lived signal does not collect a
+   * listener per call). Streaming callers need it: the timeout only bounds the
+   * time to headers, and a pending `reader.read()` on a silent upstream is ended
+   * by the fetch signal alone.
+   */
+  keepAbortLinked?: boolean;
 }
 
 /**
@@ -395,6 +422,8 @@ export async function safeFetch(
   // Every other one (each redirect hop, and any hop that threw) is finished
   // the moment we stop using it, and is destroyed below.
   let liveDispatcher: Agent | undefined;
+  // A response is on its way to the caller (not a failure, not a redirect hop).
+  let delivered = false;
 
   try {
     let currentUrl = rawUrl;
@@ -427,10 +456,11 @@ export async function safeFetch(
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
-        if (!location) {
+        if (!location || options?.followRedirects === false) {
           // Returned to the caller as-is: its body is theirs to read, so the
           // dispatcher stays alive with it.
           liveDispatcher = undefined;
+          delivered = true;
           return response;
         }
         if (hop === MAX_REDIRECTS) {
@@ -452,12 +482,15 @@ export async function safeFetch(
       }
 
       liveDispatcher = undefined; // handed to the caller together with the body
+      delivered = true;
       return response;
     }
     throw new OutboundNetworkError(`Too many redirects fetching ${rawUrl}`);
   } finally {
     clearTimeout(timer);
-    externalSignal?.removeEventListener('abort', onExternalAbort);
+    if (!(delivered && options?.keepAbortLinked)) {
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
     // Anything still held here belongs to a hop nobody will read (the redirect
     // cap threw, or the loop fell through) -- releasing it is what keeps a
     // redirect chain from leaking one socket per hop.

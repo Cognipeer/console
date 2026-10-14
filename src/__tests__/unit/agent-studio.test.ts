@@ -74,7 +74,7 @@ describe('resolveAgentRuntimeOptions', () => {
                 planning: { mode: 'planner_executor', replanPolicy: 'every_n_steps', everyNSteps: 3 },
                 limits: { maxToolCalls: 40, maxCostUsd: 2.5 },
                 contextPilot: { enabled: true, excludeTools: ['knowledge_search'] },
-                reasoning: { enabled: true, level: 'high', effort: 'medium' },
+                reasoning: { enabled: true, level: 'high', effort: 'medium', reflection: false },
                 askUser: true,
             },
         });
@@ -86,7 +86,8 @@ describe('resolveAgentRuntimeOptions', () => {
         // untouched knob keeps the module default
         expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
-        expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'medium' } });
+        // Effort / level moved next to the model (agentReasoning.ts); only reflection is read here.
+        expect(resolved.reasoning).toEqual({ enabled: true, reflection: false });
         // A stored `askUser: true` is ignored: no console channel can answer
         // the question, so offering the tool only ever locked the conversation.
         expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
@@ -299,6 +300,19 @@ describe('agent code export', () => {
         expect(files['src/agent.ts']).toContain('outputSchema');
         expect(files['src/agent.ts']).toContain('z.enum(["low","high"])');
         expect(files['src/agent.ts']).toContain('.strict()');
+    });
+
+    it('the generated model is an agent-sdk native provider on the console gateway - no LangChain', () => {
+        const { files } = fileMap('cli');
+        const model = files['src/model.ts'];
+        expect(model).toContain("import { createProvider, fromNativeProvider } from '@cognipeer/agent-sdk'");
+        expect(model).toContain("provider: 'openai-compatible'");
+        expect(model).toContain('/api/client/v1');
+        expect(model).not.toMatch(/langchain|fromLangchainModel|ChatOpenAI/i);
+        const pkg = JSON.parse(files['package.json']);
+        expect(pkg.dependencies['@cognipeer/agent-sdk']).toBe('^0.12.0');
+        expect(Object.keys(pkg.dependencies).some((name) => name.includes('langchain'))).toBe(false);
+        for (const file of Object.values(files)) expect(file).not.toMatch(/langchain/i);
     });
 
     it('declares tools even when only sub-agents need them', () => {
@@ -834,7 +848,7 @@ describe('live turn order', () => {
         segments = applyLiveToolEvent(segments, { phase: 'error', name: 'fetch', error: 'boom' });
         segments = appendLiveText(segments, 'Answer');
 
-        expect(segments.map((segment) => (segment.kind === 'text' ? segment.text : segment.calls.map((call) => `${call.name}${call.running ? '…' : call.error ? '!' : ''}`).join(',')))).toEqual([
+        expect(segments.map((segment) => (segment.kind === 'text' || segment.kind === 'reasoning' ? segment.text : segment.calls.map((call) => `${call.name}${call.running ? '…' : call.error ? '!' : ''}`).join(',')))).toEqual([
             'Let me search.', 'web_search,web_search', 'Found it.', 'fetch!', 'Answer',
         ]);
     });

@@ -233,3 +233,70 @@ describe('getDynamicRoutingConfig', () => {
     expect(getDynamicRoutingConfig(model)).toBeNull();
   });
 });
+
+describe('caller-context conditions', () => {
+  const withCaller = (caller?: Parameters<typeof extractRoutingSignals>[1]) =>
+    extractRoutingSignals({ messages: [{ role: 'user', content: 'hi' }] }, caller);
+  const cond = (signal: string, operator: string, value: unknown) =>
+    ({ signal, operator, value }) as never;
+
+  it('matches channel in / not_in (array or comma string)', () => {
+    const s = withCaller({ channel: 'portal' });
+    expect(evaluateCondition(cond('channel', 'in', 'portal,api'), s)).toBe(true);
+    expect(evaluateCondition(cond('channel', 'in', ['api']), s)).toBe(false);
+    expect(evaluateCondition(cond('channel', 'not_in', ['api']), s)).toBe(true);
+    expect(evaluateCondition(cond('channel', 'not_in', 'portal'), s)).toBe(false);
+  });
+
+  it('groupIds matches when any group is listed', () => {
+    const s = withCaller({ groupIds: ['g1', 'g2'] });
+    expect(evaluateCondition(cond('groupIds', 'in', 'g2, g9'), s)).toBe(true);
+    expect(evaluateCondition(cond('groupIds', 'in', 'g9'), s)).toBe(false);
+    expect(evaluateCondition(cond('groupIds', 'not_in', 'g9'), s)).toBe(true);
+    expect(evaluateCondition(cond('groupIds', 'not_in', 'g1'), s)).toBe(false);
+  });
+
+  it('missing context never matches, even for not_in, and never throws', () => {
+    const none = withCaller();
+    for (const signal of ['channel', 'userId', 'groupIds', 'agentKey', 'portalKey', 'apiTokenId', 'projectId']) {
+      expect(evaluateCondition(cond(signal, 'in', 'x'), none)).toBe(false);
+      expect(evaluateCondition(cond(signal, 'not_in', 'x'), none)).toBe(false);
+    }
+    expect(evaluateCondition(cond('agentKey', 'in', ''), withCaller({ agentKey: 'a' }))).toBe(false);
+    expect(evaluateCondition(cond('agentKey', 'gt', 'a'), withCaller({ agentKey: 'a' }))).toBe(false);
+  });
+
+  it('combines with request signals in a rule and persists only ids', () => {
+    const rule = {
+      label: 'pro-portal',
+      matchType: 'all',
+      targetModelKey: 'gpt-5',
+      conditions: [cond('channel', 'in', 'portal'), cond('groupIds', 'in', 'pro')],
+    } as unknown as IDynamicRoutingRule;
+    const s = withCaller({ channel: 'portal', groupIds: ['pro'], portalKey: 'p1', userId: 'u1' });
+    expect(evaluateRules([rule], s)?.label).toBe('pro-portal');
+    expect(evaluateRules([rule], withCaller({ channel: 'api' }))).toBeNull();
+    const pub = publicSignals(s) as { caller?: Record<string, unknown> };
+    expect(pub.caller).toEqual({ channel: 'portal', userId: 'u1', groupIds: ['pro'], portalKey: 'p1' });
+    expect(rulesReferenceSignal([rule], 'groupIds')).toBe(true);
+  });
+});
+
+describe('routing caller scope', () => {
+  it('inherits the ambient scope and lets explicit fields win', async () => {
+    const { runWithRoutingCaller, mergeRoutingCaller, getRoutingCaller, channelFromSource } = await import(
+      '@/lib/services/models/routingCallerContext'
+    );
+    expect(getRoutingCaller()).toBeUndefined();
+    expect(mergeRoutingCaller()).toBeUndefined();
+    runWithRoutingCaller({ channel: 'portal', agentKey: 'a1' }, () => {
+      runWithRoutingCaller({ agentKey: 'a2', userId: undefined }, () => {
+        expect(getRoutingCaller()).toEqual({ channel: 'portal', agentKey: 'a2' });
+        expect(mergeRoutingCaller({ channel: 'api' })).toEqual({ channel: 'api', agentKey: 'a2' });
+      });
+    });
+    expect(channelFromSource('realtime')).toBe('api');
+    expect(channelFromSource('portal')).toBe('portal');
+    expect(channelFromSource('weird')).toBeUndefined();
+  });
+});

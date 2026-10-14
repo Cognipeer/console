@@ -1,5 +1,7 @@
 'use client';
 
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -320,6 +322,8 @@ print(f"Latency: {result['latencyMs']}ms")`;
 export default function ToolDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
   const initialTab = ['overview', 'actions', 'logs', 'usage', 'test'].includes(tabParam ?? '')
@@ -332,8 +336,6 @@ export default function ToolDetailPage() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(initialTab);
 
   // ── Overview state ──
@@ -607,10 +609,18 @@ export default function ToolDetailPage() {
   };
 
   const handleDelete = async () => {
-    setDeleting(true);
     try {
-      const res = await fetch(`/api/tools/${params.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.tool'),
+        name: tool?.name,
+        type: 'tool',
+        id: String(params.id),
+        action: async () => {
+          const res = await fetch(`/api/tools/${params.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to delete');
+        },
+      });
+      if (!deleted) return;
       notifications.show({ title: 'Deleted', message: `"${tool?.name}" was deleted`, color: 'red' });
       router.push('/dashboard/agents/tools');
     } catch (err) {
@@ -619,8 +629,6 @@ export default function ToolDetailPage() {
         message: err instanceof Error ? err.message : 'Failed to delete',
         color: 'red',
       });
-    } finally {
-      setDeleting(false);
     }
   };
 
@@ -709,7 +717,7 @@ export default function ToolDetailPage() {
               color="red"
               size="xs"
               leftSection={<IconTrash size={14} />}
-              onClick={() => setDeleteOpen(true)}
+              onClick={() => void handleDelete()}
             >
               Delete
             </Button>
@@ -923,6 +931,9 @@ export default function ToolDetailPage() {
               <Text size="sm">{tool.mcpEndpoint}</Text>
             </Paper>
           )}
+          <Paper withBorder p="md" radius="md" mb="md">
+            <ResourceUsageSection type="tool" id={String(params.id)} />
+          </Paper>
         </Tabs.Panel>
 
         {/* ── Actions Tab ── */}
@@ -1418,24 +1429,6 @@ export default function ToolDetailPage() {
             <Button loading={saving} onClick={handleSave}>Save</Button>
           </Group>
         </Stack>
-      </Modal>
-
-      {/* Delete Confirmation */}
-      <Modal
-        opened={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
-        title="Delete Tool"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{tool.name}</strong>?
-          Agents referencing this tool will lose access to its actions. This cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={handleDelete}>Delete</Button>
-        </Group>
       </Modal>
     </>
   );

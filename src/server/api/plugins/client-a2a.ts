@@ -1,4 +1,5 @@
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
  * A2A clients over JSON-RPC 2.0 (spec v1.0).
@@ -15,12 +16,14 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  *
  * State model: A2A `contextId` maps 1:1 onto the existing agent conversation
  * id (the same store the Responses API uses via `resp_<conversationId>`).
- * Tasks complete synchronously — `message/send` returns a terminal `completed`
- * task whose id encodes the conversation and assistant-message index, so
+ * A turn runs inside the `message/send` call, which returns a `completed` task
+ * (or an `input-required` one when the turn paused for an approval or an
+ * answer) whose id encodes the conversation and assistant-message index, so
  * `tasks/get` can rebuild it without a separate task collection.
  */
 
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
@@ -34,6 +37,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
+import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
 
@@ -43,6 +47,10 @@ const JSONRPC_VERSION = '2.0';
 // A2A-specific JSON-RPC error codes (spec §8).
 const ERR_TASK_NOT_FOUND = -32001;
 const ERR_UNSUPPORTED_OPERATION = -32004;
+// Not one of the spec's: a caller the policy engine does not let answer the request this call would end.
+const ERR_FORBIDDEN = -32010;
+/** The policy engine could not decide: try again (the JSON-RPC "internal error" code; nothing was refused on merit). */
+const ERR_AUTHORIZATION_UNAVAILABLE = -32603;
 
 interface A2aPart {
   kind?: string;
@@ -153,6 +161,40 @@ function completedTask(
   };
 }
 
+/**
+ * A task paused for an approval or a question: A2A's `input-required`. The
+ * actions to resolve ride in `metadata.pendingActions` (resolve them through
+ * the session actions endpoint; the task then continues). The actions are
+ * spelled as the rest of the client API does (`tool_name`, `allow_free_text`);
+ * the A2A envelope keeps the protocol's own camelCase.
+ */
+function inputRequiredTask(
+    id: string,
+    contextId: string,
+    assistantText: string,
+    pendingActions: unknown[],
+): Record<string, unknown> {
+    return {
+        kind: 'task',
+        id,
+        contextId,
+        status: {
+            state: 'input-required',
+            timestamp: new Date().toISOString(),
+            message: {
+                kind: 'message',
+                role: 'agent',
+                messageId: `${id}_status`,
+                parts: [{ kind: 'text', text: assistantText || 'Waiting for an approval or an answer.' }],
+            },
+        },
+        metadata: { stopReason: 'requires_action', pendingActions },
+        artifacts: assistantText
+            ? [{ artifactId: `${id}_artifact`, name: 'response', parts: [{ kind: 'text', text: assistantText }] }]
+            : [],
+    };
+}
+
 export function externalBaseUrl(request: FastifyRequest): string {
   const forwardedProto = request.headers['x-forwarded-proto'];
   const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
@@ -259,6 +301,27 @@ export async function handleA2aRpc(
       }
       const { conversationId } = resolved;
 
+      // A new message to a task that waits on a request, under `cancel_pending`, cancels that request. Over the
+      // token route the caller is a principal the engine can be asked about (the public route's callers are
+      // the conversation's creator by construction - `conversationVisibleTo` - and have no principal).
+      if (contextId && request.apiTokenContext) {
+        const refusal = await refuseCancelPending(request, {
+          tenantDbName: ctx.tenantDbName,
+          conversation: await getConversationById(ctx.tenantDbName, contextId),
+          agent,
+        });
+        if (refusal?.unavailable) {
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+          }));
+        }
+        if (refusal) {
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, CANCEL_PENDING_FORBIDDEN_MESSAGE, {
+            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+          }));
+        }
+      }
+
       const runtimeContext = buildRuntimeContextFromRequest(
         message.metadata?.runtime_context,
         request.headers,
@@ -287,6 +350,13 @@ export async function handleA2aRpc(
         .join('');
       const messageIndex = (result._conversation_messages?.length ?? 1) - 1;
 
+      if (result.status === 'requires_action') {
+        return reply.code(200).send(jsonRpcOk(
+          rpcId,
+          inputRequiredTask(taskId(conversationId, messageIndex), conversationId, assistantText, result.required_action?.actions ?? []),
+        ));
+      }
+
       return reply.code(200).send(jsonRpcOk(
         rpcId,
         completedTask(
@@ -313,6 +383,12 @@ export async function handleA2aRpc(
       if (!message || message.role !== 'assistant') {
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
       }
+      if (message.pendingActions?.some((action) => action.status === 'pending')) {
+        return reply.code(200).send(jsonRpcOk(
+          rpcId,
+          inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions.map(toClientPendingAction)),
+        ));
+      }
       return reply.code(200).send(jsonRpcOk(
         rpcId,
         completedTask(
@@ -325,19 +401,80 @@ export async function handleA2aRpc(
     }
 
     if (method === 'tasks/cancel') {
-      // Tasks complete synchronously — there is never anything to cancel.
-      return reply.code(200).send(
-        jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'Tasks complete synchronously and cannot be canceled'),
-      );
+      // A turn runs inside a `message/send` call, but another request can still stop it: the turn
+      // holds the conversation's run slot, which every node reads. A task that waits on a person
+      // (`input-required`) is cancelled with it — its open approvals and questions end as cancelled.
+      const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
+      const parsed = requestedId ? parseTaskId(requestedId) : null;
+      if (!parsed) {
+        // Not an id this server hands out: nothing to look up, and nothing that could be canceled.
+        return reply.code(200).send(jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'));
+      }
+      const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
+      if (!conversationVisibleTo(conversation, agent, ctx)) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32001, 'Task not found'));
+      }
+      const message = conversation?.messages?.[parsed.messageIndex];
+      const waitingOn = message?.role === 'assistant'
+        ? (message.pendingActions ?? []).filter((action) => action.status === 'pending').map((action) => action.id)
+        : [];
+      if (waitingOn.length > 0) {
+        // Ending a task that waits on a request is answering it with "no": the engine says whether this caller may.
+        if (conversation && request.apiTokenContext) {
+          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+          if (!verdict.allowed && verdict.unavailable) {
+            return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+              pending_action_ids: waitingOn,
+              ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+            }));
+          }
+          if (!verdict.allowed) {
+            return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, 'You are not allowed to answer the request this task waits on.', {
+              pending_action_ids: waitingOn,
+              ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+            }));
+          }
+        }
+      }
+      const outcome = await cancelConversationTurn({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        conversationId: parsed.conversationId,
+        agentKey: agent.key,
+      });
+      if (!outcome.cancelled) {
+        if (waitingOn.length > 0) {
+          return reply.code(200).send(jsonRpcError(
+            rpcId,
+            ERR_UNSUPPORTED_OPERATION,
+            'The task is waiting for an approval or an answer, so there is no running turn to stop; answer the open requests (or reject them) through the actions endpoint to end the wait.',
+            { pending_action_ids: waitingOn },
+          ));
+        }
+        return reply.code(200).send(
+          jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'),
+        );
+      }
+      return reply.code(200).send(jsonRpcOk(rpcId, {
+        kind: 'task',
+        id: requestedId,
+        contextId: parsed.conversationId,
+        status: { state: 'canceled', timestamp: new Date().toISOString() },
+      }));
     }
 
     return reply.code(200).send(jsonRpcError(rpcId, -32601, `Method not found: ${method}`));
   } catch (error) {
-    logger.error('A2A request error', { error });
-    const classified = classifyAgentRunError(error);
+    const classified = logAgentRouteError(logger, 'A2A request error', error);
+    // What the caller needs to act on it rides along, spelled as the rest of the client API does
+    // (`pending_action_ids` to answer, `spent_usd` / `max_cost_usd` of a spent budget).
+    const { message: _message, type: _type, code: _code, ...extra } = toClientErrorBody(classified.error);
+    void _message; void _type; void _code;
     return reply.code(200).send(jsonRpcError(rpcId, -32603, classified.error.message, {
       type: classified.error.type,
       ...(classified.error.code ? { code: classified.error.code } : {}),
+      ...extra,
     }));
   }
 }

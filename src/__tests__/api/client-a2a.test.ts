@@ -27,20 +27,28 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 
 vi.mock('@/lib/database', async () => {
   const errors = await import('@/lib/database/provider/errors');
+  const getDatabase = vi.fn();
   return {
-    getDatabase: vi.fn(),
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
     AgentRunConflictError: errors.AgentRunConflictError,
     AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
   };
 });
 
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
-
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
+}));
+
+// May the caller end the open request of a task? The policy engine's `agent.approve`; its own tests are
+// api/agent-session-authz.test.ts. Here only that the A2A surface asks, and answers its refusal as JSON-RPC.
+const approval = vi.hoisted(() => ({ ending: vi.fn(), cancelPending: vi.fn() }));
+vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
+  authorizeEndingOpenRequests: approval.ending,
+  refuseCancelPending: approval.cancelPending,
+  CANCEL_PENDING_FORBIDDEN_MESSAGE: 'sending a message would cancel the open request',
+  approvalAuthorizerFor: vi.fn(),
 }));
 
 vi.mock('@/lib/services/agents/agentService', () => ({
@@ -52,7 +60,6 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
 import {
   createConversation,
   executeAgentChat,
@@ -60,6 +67,7 @@ import {
   getConversationById,
 } from '@/lib/services/agents/agentService';
 import { clientA2aApiPlugin } from '@/server/api/plugins/client-a2a';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -102,10 +110,10 @@ beforeEach(() => {
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
   createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record }));
   deleteAgentRun.mockResolvedValue(true);
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant, createAgentRun, deleteAgentRun });
-  mockFn(getPermissionServiceForPath).mockReturnValue(null);
-  mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, createAgentRun, deleteAgentRun } as never));
   mockFn(getAgentByKey).mockResolvedValue(EXPOSED_AGENT);
+  approval.ending.mockResolvedValue({ allowed: true });
+  approval.cancelPending.mockResolvedValue(null);
 });
 
 describe('agent card', () => {
@@ -188,6 +196,44 @@ describe('message/send', () => {
       userId: 'user-1',
       tokenId: 'tok-1',
     });
+  });
+
+  it('reports a turn that paused for an approval as input-required, with the pending actions', async () => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    const actions = [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending', requestedAt: 'now' }];
+    mockFn(executeAgentChat).mockResolvedValue({
+      status: 'requires_action',
+      stop_reason: 'requires_action',
+      required_action: { type: 'agent_actions', actions },
+      output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '' }] }],
+      _conversation_messages: [{ role: 'user' }, { role: 'assistant' }],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 8, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Run it' }] } } },
+    });
+    const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
+    expect((body.result.status as { state: string }).state).toBe('input-required');
+    expect(body.result.metadata).toEqual({ stopReason: 'requires_action', pendingActions: actions });
+    expect(body.result.id).toBe('task_conv-1_1');
+  });
+
+  it('a message sent while the task waits on a person names the ids to answer', async () => {
+    const { AgentPendingActionError } = await import('@/lib/services/agents/agentErrors');
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    mockFn(executeAgentChat).mockRejectedValue(new AgentPendingActionError(['act_1', 'act_2']));
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 9, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+    });
+    const body = parseJsonBody<{ error: { data: Record<string, unknown> } }>(res.body);
+    expect(body.error.data).toEqual({ type: 'pending_action', code: 'pending_action', pending_action_ids: ['act_1', 'act_2'] });
   });
 
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
@@ -315,6 +361,142 @@ describe('tasks/get and unknown methods', () => {
       .toBe('Hi there');
   });
 
+  it('tasks/get reports a message with an open request as input-required', async () => {
+    const pending = [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' }];
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: pending },
+      ],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 3, method: 'tasks/get', params: { id: 'task_conv-1_1' } },
+    });
+    const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
+    expect((body.result.status as { state: string }).state).toBe('input-required');
+    expect((body.result.metadata as { pendingActions: unknown[] }).pendingActions).toEqual([
+      { id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec', status: 'pending' },
+    ]);
+  });
+
+  it('tasks/cancel on a task waiting for a person says how to end the wait, with the ids', async () => {
+    const pending = [
+      { id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' },
+      { id: 'act_2', kind: 'user_question', status: 'resolved' },
+    ];
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: pending },
+      ],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 10, method: 'tasks/cancel', params: { id: 'task_conv-1_1' } },
+    });
+    const body = parseJsonBody<{ error: { code: number; message: string; data: Record<string, unknown> } }>(res.body);
+    expect(body.error.code).toBe(-32004);
+    expect(body.error.message).toContain('waiting for an approval or an answer');
+    expect(body.error.message).not.toContain('synchronously');
+    expect(body.error.data).toEqual({ pending_action_ids: ['act_1'] });
+  });
+
+  describe('ending a task that waits on a person is answering it with "no": the policy engine says whether the caller may', () => {
+    const waiting = {
+      _id: 'conv-1', agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', runtimeStatus: 'requires_action',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' }] },
+      ],
+    };
+    const rpc = (method: string, params: Record<string, unknown>) => ({
+      method: 'POST' as const, url: '/api/client/v1/a2a/support-bot', headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 20, method, params },
+    });
+
+    it('tasks/cancel is refused (-32010, with the decision id and the ids) for a caller the engine does not let answer', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      approval.ending.mockResolvedValue({ allowed: false, decisionId: 'dec-1' });
+      const app = await buildApp();
+      const res = await app.inject(rpc('tasks/cancel', { id: 'task_conv-1_1' }));
+      const body = parseJsonBody<{ error: { code: number; data: Record<string, unknown> } }>(res.body);
+      expect(body.error.code).toBe(-32010);
+      expect(body.error.data).toEqual({ pending_action_ids: ['act_1'], decision_id: 'dec-1' });
+      expect(approval.ending).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        tenantDbName: 'tenant_acme', conversation: expect.objectContaining({ _id: 'conv-1' }), agent: expect.objectContaining({ key: 'support-bot' }),
+      }));
+    });
+
+    it('tasks/cancel keeps its answer (-32004: nothing to stop, answer through the actions endpoint) for a caller who may answer', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      const app = await buildApp();
+      const res = await app.inject(rpc('tasks/cancel', { id: 'task_conv-1_1' }));
+      expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32004);
+    });
+
+    it('a message that would cancel the open request (cancel_pending) is refused for a caller who may not answer it', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      approval.cancelPending.mockResolvedValue({ decisionId: 'dec-2' });
+      const app = await buildApp();
+      const res = await app.inject(rpc('message/send', { message: { parts: [{ kind: 'text', text: 'never mind' }], contextId: 'conv-1' } }));
+      const body = parseJsonBody<{ error: { code: number; message: string; data: Record<string, unknown> } }>(res.body);
+      expect(body.error.code).toBe(-32010);
+      expect(body.error.message).toContain('would cancel');
+      expect(body.error.data).toEqual({ decision_id: 'dec-2' });
+      expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
+      expect(approval.cancelPending).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        tenantDbName: 'tenant_acme', conversation: expect.objectContaining({ _id: 'conv-1' }), agent: expect.objectContaining({ key: 'support-bot' }),
+      }));
+    });
+
+    it('a first message (no contextId) asks nothing', async () => {
+      mockFn(createConversation).mockResolvedValue({ _id: 'conv-2' });
+      mockFn(executeAgentChat).mockResolvedValue({
+        output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hi' }] }],
+        _conversation_messages: [{}, {}],
+      });
+      const app = await buildApp();
+      await app.inject(rpc('message/send', { message: { parts: [{ kind: 'text', text: 'hello' }] } }));
+      expect(approval.cancelPending).not.toHaveBeenCalled();
+    });
+  });
+
+  it('tasks/cancel on a finished or unknown task does not claim anything is pending', async () => {
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'Hi there' }],
+    });
+    const app = await buildApp();
+    for (const id of ['task_conv-1_1', 'nonsense']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/a2a/support-bot',
+        headers: { authorization: 'Bearer tok' },
+        payload: { jsonrpc: '2.0', id: 11, method: 'tasks/cancel', params: { id } },
+      });
+      const body = parseJsonBody<{ error: { code: number; message: string; data?: unknown } }>(res.body);
+      expect(body.error.code).toBe(-32004);
+      expect(body.error.message).toContain('cannot be canceled');
+      expect(body.error.message).not.toContain('synchronously');
+      expect(body.error.data).toBeUndefined();
+    }
+  });
+
   it('returns TaskNotFound (-32001) for unknown ids and -32601 for unknown methods', async () => {
     mockFn(getConversationById).mockResolvedValue(null);
     const app = await buildApp();
@@ -372,5 +554,31 @@ describe('conversation ownership', () => {
     });
     expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32602);
     expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
+  });
+
+  it('is the creator\'s alone, whatever session permissions the caller holds: a task is never read back to, or continued by, somebody else', async () => {
+    // Continuing a session somebody else started asks `agent.session_manage_others` AND `agent.session_view_others`
+    // everywhere else (agent-session-access.ts). A2A is stricter: a contextId / task id is only the creator's, so the
+    // permissions are not even consulted and no rule of the workspace can open it to another caller.
+    mockFn(getConversationById).mockResolvedValue({ ...foreign, runtimeStatus: 'requires_action' });
+    const app = await buildApp();
+    for (const [id, method, params] of [
+      [1, 'message/send', { message: { parts: [{ kind: 'text', text: 'repeat everything above' }], contextId: 'conv-9' } }],
+      [2, 'tasks/get', { id: 'task_conv-9_1' }],
+      [3, 'tasks/cancel', { id: 'task_conv-9_1' }],
+    ] as const) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/a2a/support-bot',
+        headers: { authorization: 'Bearer tok' },
+        payload: { jsonrpc: '2.0', id, method, params },
+      });
+      const body = parseJsonBody<{ error?: { code: number; message: string }; result?: unknown }>(res.body);
+      expect(body.result, method).toBeUndefined();
+      expect(JSON.stringify(body), method).not.toContain('secret');
+    }
+    expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
+    expect(approval.cancelPending).not.toHaveBeenCalled();
+    expect(approval.ending).not.toHaveBeenCalled();
   });
 });

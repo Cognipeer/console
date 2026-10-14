@@ -1,9 +1,11 @@
+import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
+import { AgentGuardrailBlockedError, getConversationById, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -12,16 +14,22 @@ import {
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
+import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
   resolveAgentModel,
   runAgentCompletion,
   toChatChunk,
   toChatCompletion,
+  toChatToolCallsChunk,
+  extractToolAnswers,
   type OpenAiMessage,
 } from './agent-openai-bridge';
 import {
@@ -40,6 +48,7 @@ import {
   anthropicRequestToOpenAi,
   AnthropicRequestError,
   openAiResponseToAnthropic,
+  isThinkingRequested,
   openAiStreamToAnthropic,
   type AnthropicMessagesRequest,
 } from '@/lib/services/models/anthropicWire';
@@ -173,6 +182,7 @@ function invalidJson(reply: FastifyReply) {
  * invocation in the tenant's bill.
  */
 async function handleAgentChatCompletion(input: {
+  request: FastifyRequest;
   agent: IAgent;
   auth: ApiTokenContext;
   body: Record<string, unknown>;
@@ -180,9 +190,12 @@ async function handleAgentChatCompletion(input: {
   model: string;
   reply: FastifyReply;
 }) {
-  const { agent, auth, body, model, reply } = input;
+  const { request, agent, auth, body, model, reply } = input;
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const streaming = body.stream === true;
+  // The agent's `showReasoning` is applied by the run itself; a request can only narrow it further
+  // (`include_reasoning: false` / `reasoning: { exclude: true }`), never bring back what the agent hid.
+  const includeReasoning = shouldReturnReasoning(undefined, body);
 
   const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, input.headers, {
     userId: auth.tokenRecord.userId,
@@ -190,7 +203,40 @@ async function handleAgentChatCompletion(input: {
     source: 'api',
   });
 
+  // `reasoning_effort` / `reasoning: { effort }`: the lowest rung (agent pick > Model Hub > this), refused when invalid.
+  const reasoningRequest = parseAgentRequestReasoning(body);
+  if (reasoningRequest.error) {
+    return reply.code(400).send({
+      error: { message: reasoningRequest.error, type: 'invalid_request_error', param: 'reasoning_effort', code: 'invalid_reasoning' },
+    });
+  }
+
+  // Which of the agent's models answers (`agent_model` in the body - `extra_body` for OpenAI SDKs - or the
+  // `x-cognipeer-agent-model` header; the session's last model otherwise). `model` stays the agent's id.
+  let modelChoice: Awaited<ReturnType<typeof resolveRunModelForRequest>> | undefined;
+  const askedModel = requestedAgentModel(request, body);
+  if (askedModel || agent.config.additionalModels?.length) {
+    try {
+      const runConfig = await resolveAgentConfigForModels(auth.tenantDbName, agent, auth.projectId, typeof body.version === 'number' ? body.version : undefined);
+      if (askedModel || runConfig.additionalModels?.length) {
+        const conversation = typeof body.conversation_id === 'string'
+          ? await getConversationById(auth.tenantDbName, body.conversation_id).catch(() => null)
+          : null;
+        modelChoice = await resolveRunModelForRequest(request, {
+          agent, config: runConfig, projectId: auth.projectId, requested: askedModel,
+          conversation: conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId ? conversation : null,
+        });
+      }
+    } catch (error) {
+      if (error instanceof AgentModelError) return sendOpenAiAgentModelError(reply, error);
+      throw error;
+    }
+  }
+  const cognipeer = modelChoice ? { cognipeer: { agent_model: modelChoice.modelKey } } : {};
+
   const common = {
+    ...(modelChoice ? { modelChoice } : {}),
+    ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     agent,
     model,
     messages: body.messages as OpenAiMessage[] | undefined,
@@ -202,6 +248,21 @@ async function handleAgentChatCompletion(input: {
       tenantId: auth.tenantId,
       projectId: auth.projectId,
       userId: auth.tokenRecord.userId,
+    },
+    // Answering a client tool call (a `tool` message) is the same act as POST .../actions/{id}: same token, same engine decision.
+    answer: {
+      authorize: approvalAuthorizerFor(request, auth.tenantDbName),
+      actor: {
+        userId: String(auth.tokenRecord.userId ?? ''),
+        channel: 'api' as const,
+        ...(auth.user?.email ? { email: auth.user.email } : {}),
+        ...(auth.user?.role ? { role: auth.user.role } : {}),
+        ...(auth.tokenRecord._id ? { apiTokenId: String(auth.tokenRecord._id) } : {}),
+      },
+      audit: {
+        ipAddress: request.ip,
+        ...(typeof request.headers['user-agent'] === 'string' ? { userAgent: request.headers['user-agent'] } : {}),
+      },
     },
   };
 
@@ -222,16 +283,18 @@ async function handleAgentChatCompletion(input: {
           },
         });
       }
-      logger.error('Agent chat completion failed', { error });
-      const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      const classified = logAgentRouteError(logger, 'Agent chat completion failed', error);
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
     if ('error' in result) {
       return reply.code(result.status).send({
         error: { message: result.error, type: 'invalid_request_error' },
       });
     }
-    return reply.code(200).send(toChatCompletion({ id, model, ...result }));
+    return reply.code(200).send({
+      ...toChatCompletion({ id, model, ...result, ...(includeReasoning ? {} : { reasoning: undefined }) }),
+      ...cognipeer,
+    });
   }
 
   applyStreamHeaders(reply);
@@ -249,6 +312,8 @@ async function handleAgentChatCompletion(input: {
   };
 
   let streamed = '';
+  let streamedReasoning = '';
+  let toolCallsSent = false;
   let stopReason: AgentChatResponse['stop_reason'];
   try {
     const result = await runAgentCompletion({
@@ -257,11 +322,24 @@ async function handleAgentChatCompletion(input: {
         streamed += text;
         send(toChatChunk({ id, model, delta: text }));
       },
+      ...(includeReasoning
+        ? {
+          onReasoningChunk: (text: string) => {
+            streamedReasoning += text;
+            send(toChatChunk({ id, model, reasoning: text }));
+          },
+        }
+        : {}),
     });
 
     if ('error' in result) {
       send({ error: { message: result.error, type: 'invalid_request_error' } });
     } else {
+      // Thinking that did not stream (a routed run without relay, a model call that was not streamed)
+      // still comes out, ahead of the answer's missing tail.
+      if (includeReasoning && result.reasoning && !streamedReasoning) {
+        send(toChatChunk({ id, model, reasoning: result.reasoning }));
+      }
       // A run that streamed nothing (an agent bound to output.pre answers in
       // one guarded piece; a routed run without relay) must still deliver the
       // answer rather than an empty one followed by [DONE]. A relayed run may
@@ -279,11 +357,16 @@ async function handleAgentChatCompletion(input: {
         }
       }
       stopReason = result.stopReason;
+      if (result.toolCalls?.length) {
+        // Ends the stream the way OpenAI does when the model calls tools: the calls, then finish_reason "tool_calls".
+        send({ ...toChatToolCallsChunk({ id, model, toolCalls: result.toolCalls }), conversation_id: result.conversationId });
+        toolCallsSent = true;
+      }
     }
-    send(toChatChunk({ id, model, finish: true, stopReason }));
+    if (!toolCallsSent) send({ ...toChatChunk({ id, model, finish: true, stopReason }), ...cognipeer });
   } catch (error) {
-    logger.error('Agent chat completion stream failed', { error });
-    send({ error: classifyAgentRunError(error).error });
+    const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
+    send({ error: toClientErrorBody(classified.error) });
   } finally {
     if (!closed) {
       reply.raw.write('data: [DONE]\n\n');
@@ -340,7 +423,47 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
       );
       if (agent) {
+        // Continuing a session that waits on a request, under `cancel_pending`, cancels that request: it takes
+        // the permission to answer it.
+        if (typeof body.conversation_id === 'string') {
+          const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
+          if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
+            // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
+            // `agent.session_manage_others` and `agent.session_view_others` - as for the Responses route, whichever
+            // service gate let the token in.
+            const access = await decideSessionAccess(request, conversation, {
+              need: 'continue',
+              agent,
+              actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
+            });
+            if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
+            // A `tool` message answers an open call (authorized when it is resolved); only a new message cancels one.
+            const answeringToolCalls = extractToolAnswers(body.messages as OpenAiMessage[] | undefined).length > 0;
+            const refusal = answeringToolCalls ? null : await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
+            if (refusal?.unavailable) {
+              return reply.code(503).send({
+                error: {
+                  message: 'Authorization is temporarily unavailable',
+                  type: 'server_error',
+                  code: 'authorization_unavailable',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
+            if (refusal) {
+              return reply.code(403).send({
+                error: {
+                  message: CANCEL_PENDING_FORBIDDEN_MESSAGE,
+                  type: 'permission_error',
+                  code: 'action_forbidden',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
+          }
+        }
         return handleAgentChatCompletion({
+          request,
           agent,
           auth,
           body: body as Record<string, unknown>,
@@ -417,6 +540,11 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         stream: Boolean(body.stream),
         tenantDbName: auth.tenantDbName,
         tenantId: auth.tenantId,
+        callerContext: {
+          channel: 'api',
+          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+          projectId: auth.projectId,
+        },
         // Settling here (rather than after the call returns, as before) is
         // what makes this work for BOTH stream and non-stream: a streamed
         // response's real usage isn't known until long after this function
@@ -597,6 +725,11 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         stream: Boolean(body.stream),
         tenantDbName: auth.tenantDbName,
         tenantId: auth.tenantId,
+        callerContext: {
+          channel: 'api',
+          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+          projectId: auth.projectId,
+        },
       });
       requestId = result.requestId;
 
@@ -630,6 +763,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         const translated = openAiStreamToAnthropic(
           result.stream as ReadableStream<Uint8Array>,
           modelKey,
+          { emitThinking: isThinkingRequested(anthropicBody) },
         );
         return reply.send(
           Readable.fromWeb(translated as unknown as NodeReadableStream<Uint8Array>),
@@ -641,7 +775,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       // surface on their error/response objects.
       reply.header('request-id', result.requestId);
       return reply.code(200).send({
-        ...openAiResponseToAnthropic(result.response ?? {}, modelKey),
+        ...openAiResponseToAnthropic(result.response ?? {}, modelKey, {
+          emitThinking: isThinkingRequested(anthropicBody),
+        }),
         request_id: result.requestId,
       });
     } catch (error) {

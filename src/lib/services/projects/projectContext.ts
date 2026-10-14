@@ -1,5 +1,8 @@
 import type { NextRequest } from '@/server/api/http';
 import { getDatabase, type IProject, type IUser, type IUserProject } from '@/lib/database';
+import { getPrincipalContext } from '@/lib/iam/principalCache';
+import type { ProjectAssignmentRow } from '@/lib/iam/projectMembership';
+import { mergeServicePermissions } from '@/lib/security/rbac';
 import { ensureDefaultProject } from './projectService';
 
 export class ProjectContextError extends Error {
@@ -47,14 +50,34 @@ export async function resolveProjectContext(
 
   let projectId = ctx.activeProjectId || defaultProjectId;
 
+  // The projects a member can open: the legacy `projectIds`, the member's own
+  // assignments (read fresh, so a project the member just created or joined is
+  // usable at once) and the assignments of the member's groups. The group part
+  // comes with the cached principal context (at most 15 s old on another node,
+  // dropped at once on every group or assignment change on this node): it costs
+  // no round trip on a warm request, however many groups the member is in.
+  let directRows: IUserProject[] = [];
+  let groupRows: ProjectAssignmentRow[] = [];
   if (!isPrivileged) {
-    // Resolve project access via UserProject membership records
-    const memberships = await db.listUserProjectsByUser(ctx.userId);
+    const [direct, principal] = await Promise.all([
+      db.listUserProjectsByUser(ctx.userId),
+      getPrincipalContext({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        user,
+        withProjects: true,
+      }),
+    ]);
+    directRows = direct;
+    groupRows = principal.groupProjects ?? [];
+
     const legacyProjectIds = (user.projectIds ?? []).map(String).filter(Boolean);
     const memberProjectIds = Array.from(new Set([
       ...legacyProjectIds,
-      ...memberships.map((membership) => membership.projectId),
-    ]));
+      ...directRows.map((membership) => String(membership.projectId)),
+      ...groupRows.map((row) => row.projectId),
+    ].filter(Boolean)));
 
     if (memberProjectIds.length === 0) {
       throw new ProjectContextError('No project assigned', 403);
@@ -81,7 +104,7 @@ export async function resolveProjectContext(
   const userProject = isPrivileged
     ? null
     : (
-      (await db.findUserProject(ctx.userId, projectId))
+      directRows.find((membership) => String(membership.projectId) === projectId)
       ?? (
         (user.projectIds ?? []).map(String).includes(projectId)
           ? {
@@ -93,6 +116,7 @@ export async function resolveProjectContext(
             }
           : null
       )
+      ?? groupProjectMembership(groupRows, ctx, projectId)
     );
 
   return {
@@ -101,6 +125,23 @@ export async function resolveProjectContext(
     user,
     userProject,
   };
+}
+
+/** A membership synthesized from the user's group assignments of one project (null when no group of the user is assigned to it). */
+function groupProjectMembership(
+  rows: ReadonlyArray<ProjectAssignmentRow>,
+  ctx: { tenantId: string; userId: string },
+  projectId: string,
+): IUserProject | null {
+  const assignments = rows.filter((row) => row.projectId === projectId);
+  if (assignments.length === 0) return null;
+  return {
+    projectId,
+    role: assignments.some((row) => row.role === 'project_admin') ? 'project_admin' : 'member',
+    servicePermissions: mergeServicePermissions(assignments.map((row) => row.servicePermissions)),
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+  } as IUserProject;
 }
 
 export async function requireProjectContext(

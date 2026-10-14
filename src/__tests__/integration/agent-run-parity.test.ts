@@ -6,7 +6,7 @@
  * and that the claim/finalize CAS transitions behave identically in both.
  */
 
-import { it, expect, beforeEach } from 'vitest';
+import { it, expect, beforeEach, describe } from 'vitest';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '@/lib/database/provider.interface';
 import type { IAgentRun } from '@/lib/database/provider.interface';
 import { describeForEachProvider } from './db-parity.helper';
@@ -376,5 +376,80 @@ describeForEachProvider('AgentRun — data model foundation (Group A)', (getDb) 
       runtimeContext: null,
     });
     expect(finalized?.runtimeContext ?? null).toBeNull();
+  });
+
+  describe('a run paused for a person (requires_action)', () => {
+    async function pausedRun(conversationId: string) {
+      const db = getDb();
+      const run = await db.createAgentRun(baseRecord(conversationId));
+      await db.claimAgentRun(String(run._id), tenantId, 'w', new Date());
+      const paused = await db.finalizeAgentRun(String(run._id), tenantId, {
+        status: 'requires_action',
+        stopReason: 'requires_action',
+        result: { status: 'requires_action' },
+      });
+      expect(paused?.status).toBe('requires_action');
+      return run;
+    }
+
+    it('does not hold the conversation slot, so the paused conversation can take another run', async () => {
+      const db = getDb();
+      const conversationId = conv();
+      await pausedRun(conversationId);
+      const other = await db.createAgentRun(baseRecord(conversationId, { mode: 'sync', status: 'running' }));
+      expect(other.status).toBe('running');
+    });
+
+    it('requeueAgentRunForResume puts it back in the queue under its own id and takes the slot again', async () => {
+      const db = getDb();
+      const conversationId = conv();
+      const run = await pausedRun(conversationId);
+
+      const queued = await db.requeueAgentRunForResume(String(run._id), tenantId, ['act_1', 'act_2']);
+      expect(queued).toMatchObject({ status: 'queued', resumeActionIds: ['act_1', 'act_2'] });
+      expect(String(queued?._id)).toBe(String(run._id));
+      expect(queued?.stopReason ?? null).toBeNull();
+      expect(queued?.result ?? null).toBeNull();
+      await expect(db.createAgentRun(baseRecord(conversationId))).rejects.toBeInstanceOf(AgentRunConflictError);
+
+      // And it runs like any queued run: claim, then finalize.
+      const claimed = await db.claimAgentRun(String(run._id), tenantId, 'w2', new Date());
+      expect(claimed?.status).toBe('running');
+      expect(claimed?.resumeActionIds).toEqual(['act_1', 'act_2']);
+      const done = await db.finalizeAgentRun(String(run._id), tenantId, { status: 'succeeded', completedAt: new Date(), resumeActionIds: null });
+      expect(done?.status).toBe('succeeded');
+      expect(done?.resumeActionIds ?? null).toBeNull();
+      await expect(db.createAgentRun(baseRecord(conversationId))).resolves.toBeTruthy();
+    });
+
+    it('requeue throws AgentRunConflictError while another run holds the conversation, and is null for a run that is not paused', async () => {
+      const db = getDb();
+      const conversationId = conv();
+      const run = await pausedRun(conversationId);
+      const holder = await db.createAgentRun(baseRecord(conversationId));
+      await expect(db.requeueAgentRunForResume(String(run._id), tenantId, ['a'])).rejects.toBeInstanceOf(AgentRunConflictError);
+      expect((await db.getAgentRunById(String(run._id), tenantId, projectId))?.status).toBe('requires_action');
+
+      expect(await db.requeueAgentRunForResume(String(holder._id), tenantId, ['a'])).toBeNull();
+    });
+
+    it('a paused run can be finalized (cancelled) and a resume row can be created queued', async () => {
+      const db = getDb();
+      const run = await pausedRun(conv());
+      const cancelled = await db.finalizeAgentRun(String(run._id), tenantId, { status: 'canceled', completedAt: new Date() });
+      expect(cancelled?.status).toBe('canceled');
+
+      const fresh = await db.createAgentRun(baseRecord(conv(), { userMessage: '', resumeActionIds: ['act_9'] }));
+      expect((await db.getAgentRunById(String(fresh._id), tenantId, projectId))?.resumeActionIds).toEqual(['act_9']);
+    });
+
+    it('is listed by status and not touched by the stale-heartbeat sweep', async () => {
+      const db = getDb();
+      const run = await pausedRun(conv());
+      const listed = await db.listAgentRuns({ tenantId, projectId, status: ['requires_action'] });
+      expect(listed.map((r) => String(r._id))).toContain(String(run._id));
+      const stale = await db.listStaleAgentRuns(tenantId, new Date(Date.now() + 60_000));
+      expect(stale.map((r) => String(r._id))).not.toContain(String(run._id));
+    });
   });
 });

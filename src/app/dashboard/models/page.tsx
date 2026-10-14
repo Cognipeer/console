@@ -21,6 +21,7 @@ import {
   IconActivity,
   IconAlertTriangle,
   IconBolt,
+  IconArrowsSplit,
   IconBrain,
   IconChartBar,
   IconCoins,
@@ -47,9 +48,12 @@ import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import EditModelModal from '@/components/models/EditModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
+import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
   type CandidateModel,
   type DynamicModelInit,
@@ -151,6 +155,8 @@ interface ModelDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -188,6 +194,7 @@ export default function ModelsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
+  const [editModelId, setEditModelId] = useState<string | null>(null);
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
@@ -199,6 +206,8 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const t = useTranslations('models');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
@@ -209,10 +218,19 @@ export default function ModelsPage() {
 
   // The model type is driven by the left sub-nav via the `?type=` query param.
   const typeParam = searchParams.get('type');
+  // `?type=dynamic` narrows the list to Dynamic LLM routers (an `llm` view).
+  const dynamicOnly = typeParam === 'dynamic';
   const activeType: CategoryFilter =
     typeParam && MODEL_TYPE_KEYS.includes(typeParam as ModelCategory)
       ? (typeParam as ModelCategory)
       : 'all';
+  const setKindFilter = (kind: string) => {
+    const next = new URLSearchParams(searchParams.toString());
+    if (kind === 'dynamic') next.set('type', 'dynamic');
+    else if (next.get('type') === 'dynamic') next.delete('type');
+    const qs = next.toString();
+    router.replace(qs ? `/dashboard/models?${qs}` : '/dashboard/models');
+  };
   const dynamicCreateRequested = searchParams.get('create') === 'dynamic';
 
   useEffect(() => {
@@ -301,6 +319,7 @@ export default function ModelsPage() {
       category: model.category,
       modelId: model.modelId,
       isMultimodal: model.isMultimodal,
+      capabilities: (model as { capabilities?: { inputModalities?: string[] } }).capabilities,
       supportsToolCalls: model.supportsToolCalls,
       pricing: model.pricing as ModelPricing,
       settings: model.settings ?? {},
@@ -340,7 +359,7 @@ export default function ModelsPage() {
   const counts = useMemo(() => {
     const llm = models.filter((m) => m.category === 'llm').length;
     const embedding = models.filter((m) => m.category === 'embedding').length;
-    const multimodal = models.filter((m) => m.isMultimodal).length;
+    const multimodal = models.filter(modelTakesImages).length;
     return { all: models.length, llm, embedding, multimodal };
   }, [models]);
 
@@ -379,7 +398,8 @@ export default function ModelsPage() {
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
-      if (capability === 'multimodal' && !m.isMultimodal) return false;
+      if (dynamicOnly && !dynamicConfigOf(m)) return false;
+      if (capability === 'multimodal' && !modelTakesImages(m)) return false;
       if (capability === 'tools' && !m.supportsToolCalls) return false;
       if (providerFilter !== 'all' && m.providerKey !== providerFilter) return false;
       if (query) {
@@ -393,22 +413,29 @@ export default function ModelsPage() {
       }
       return true;
     });
-  }, [models, activeType, capability, query, providerFilter]);
+  }, [models, activeType, dynamicOnly, capability, query, providerFilter]);
 
   const modelsCtl = useTableControls(filtered, {
-    filterKey: `${activeType}|${capability}|${query}|${providerFilter}`,
+    filterKey: `${activeType}|${dynamicOnly}|${capability}|${query}|${providerFilter}`,
   });
 
   const handleDeleteModel = async (model: ModelDto) => {
-    const confirmed = window.confirm(t('actions.deleteConfirm'));
-    if (!confirmed) return;
-    setDeletingModelId(model._id);
     try {
-      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-        throw new Error(error.error ?? 'Failed to delete model');
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.model'),
+        name: model.name,
+        type: 'model',
+        id: model._id,
+        action: async () => {
+          setDeletingModelId(model._id);
+          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
+            throw new Error(error.error ?? 'Failed to delete model');
+          }
+        },
+      });
+      if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
       void loadDashboard();
       notifications.show({
@@ -440,6 +467,11 @@ export default function ModelsPage() {
     void loadDashboard();
   };
 
+  const openDynamicCreate = () => {
+    setDynamicEdit(null);
+    setDynamicModalOpen(true);
+  };
+
   const closeDynamicModal = () => {
     setDynamicModalOpen(false);
     if (!dynamicCreateRequested && !dynamicEditRequested) return;
@@ -455,13 +487,17 @@ export default function ModelsPage() {
     <PageContainer>
       <PageHeader
         eyebrow={
-          activeType === 'all'
+          dynamicOnly
+            ? 'Build · Models · Dynamic LLM'
+            : activeType === 'all'
             ? 'Build · Models'
             : `Build · Models · ${TYPE_LABELS[activeType]}`
         }
-        title={activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
+        title={dynamicOnly ? 'Dynamic LLM' : activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
         subtitle={
-          activeType === 'all'
+          dynamicOnly
+            ? `Virtual models that route each request to a concrete model · ${filteredCount} of ${modelCount} models.`
+            : activeType === 'all'
             ? `Manage inference endpoints across providers. ${modelCount} deployed in this project.`
             : `${TYPE_LABELS[activeType]} endpoints · ${filteredCount} of ${modelCount} models.`
         }
@@ -477,13 +513,23 @@ export default function ModelsPage() {
             >
               Browse providers
             </Button>
+            {!dynamicOnly ? (
+              <Button
+                variant="default"
+                size="sm"
+                leftSection={<IconArrowsSplit size={14} stroke={1.7} />}
+                onClick={openDynamicCreate}
+              >
+                New Dynamic LLM
+              </Button>
+            ) : null}
             <Button
               color="teal"
               size="sm"
               leftSection={<IconPlus size={14} stroke={1.7} />}
-              onClick={() => setCreateModalOpen(true)}
+              onClick={dynamicOnly ? openDynamicCreate : () => setCreateModalOpen(true)}
             >
-              {t('actions.create')}
+              {dynamicOnly ? 'New Dynamic LLM' : t('actions.create')}
             </Button>
           </>
         }
@@ -537,6 +583,16 @@ export default function ModelsPage() {
             placeholder: 'Filter by name, key, or model id…',
           }}
           filters={[
+            {
+              value: dynamicOnly ? 'dynamic' : 'all',
+              onChange: setKindFilter,
+              ariaLabel: 'Filter by model kind',
+              width: 150,
+              options: [
+                { value: 'all', label: 'All kinds' },
+                { value: 'dynamic', label: 'Dynamic LLM' },
+              ],
+            },
             {
               value: capability,
               onChange: (v) => setCapability(v as CapabilityFilter),
@@ -603,7 +659,7 @@ export default function ModelsPage() {
               onClick: () =>
                 dynamicConfigOf(m)
                   ? openDynamicEdit(m)
-                  : navigate(`${modelDetailHref(m)}/edit`),
+                  : setEditModelId(m._id),
             },
             { divider: true },
             {
@@ -885,6 +941,16 @@ export default function ModelsPage() {
         onAddProvider={() => setProviderModalOpen(true)}
       />
 
+      <EditModelModal
+        modelId={editModelId}
+        opened={editModelId !== null}
+        onClose={() => setEditModelId(null)}
+        onSaved={() => {
+          void loadModels();
+          void loadDashboard();
+        }}
+      />
+
       <CreateDynamicModelModal
         opened={dynamicModalOpen}
         onClose={closeDynamicModal}
@@ -1019,7 +1085,7 @@ function modelColumns(
           ) : (
             <span className="ds-badge">{m.category}</span>
           )}
-          {m.isMultimodal ? (
+          {modelTakesImages(m) ? (
             <span className="ds-badge ds-badge-info" title={t('list.capabilities.multimodal')}>
               vision
             </span>

@@ -63,8 +63,7 @@ async function cached(
  *
  * `path` is everything after `dashboard` and before the dynamic segment.
  * E.g. `path: ['models']` matches `/dashboard/models/:id`, while
- * `path: ['tenant-settings', 'projects']` matches
- * `/dashboard/tenant-settings/projects/:projectId`.
+ * `path: ['tracing', 'agents']` matches `/dashboard/tracing/agents/:name`.
  */
 type ApiResponseBody = Record<string, unknown>;
 
@@ -161,6 +160,14 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     path: ['agents'],
     buildUrl: (id) => `/api/agents/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'agent'),
+    // `webhooks` is a page of the Agents menu, not an agent id.
+    excludeValues: ['new', 'webhooks'],
+  }),
+  createStandardResolver({
+    path: ['portals'],
+    // The summary view names the portal and nothing else: the full detail reads a week of conversations.
+    buildUrl: (id) => `/api/portals/${encodeURIComponent(id)}?view=summary`,
+    pickLabel: (b) => wrappedName(b, 'portal'),
     excludeValues: ['new'],
   }),
   createStandardResolver({
@@ -232,7 +239,7 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
 
 /* ----- Custom resolvers --------------------------------------------------- */
 /**
- * Projects: `/dashboard/projects/:id` and `/dashboard/tenant-settings/projects/:id`.
+ * Projects: `/dashboard/projects/:id`.
  *
  * There is no GET-by-id endpoint, so we look the project up in the
  * list response.
@@ -246,15 +253,6 @@ const projectsResolver: BreadcrumbResolver = {
     // Direct: /dashboard/projects/:id
     if (segments[0] === 'dashboard' && segments[1] === 'projects' && segments[2]) {
       matches.push({ index: 2, id: segments[2] });
-    }
-    // Nested: /dashboard/tenant-settings/projects/:id
-    if (
-      segments[0] === 'dashboard'
-      && segments[1] === 'tenant-settings'
-      && segments[2] === 'projects'
-      && segments[3]
-    ) {
-      matches.push({ index: 3, id: segments[3] });
     }
 
     const filtered = matches.filter((m) => m.id !== 'new');

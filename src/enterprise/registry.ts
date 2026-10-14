@@ -52,8 +52,69 @@ import type { FastifyInstance } from 'fastify';
  *     `IRealtimeSessionLog.turnCount` is now required. A seam-4 overlay no
  *     longer compiles against this tree, and a seam-5 overlay not against a
  *     seam-4 one.
+ * 6 — engine-only authorization. Every workspace is decided by the policy
+ *     engine from the first request; the legacy rbac.ts decision, the workspace
+ *     modes (legacy / shadow / enforce) and the shadow recorder, the kill
+ *     switches and the per-policy monitor mode are gone. The registry's own
+ *     shape is unchanged; the community contract the overlay compiles against
+ *     changed in both directions. Removed: `ServiceAuthzOptions.legacy` and
+ *     `ServiceAuthzResult.enforced` (`@/lib/iam/requestAuthz`) and the whole
+ *     `@/lib/iam/shadow` tree. Added: `ServiceAuthzResult.unavailable` (an engine
+ *     that cannot decide refuses with 503 `authorization_unavailable`, which a
+ *     handler-level check must map instead of reading as an answer),
+ *     `ServiceAuthzPrincipal.groups`, the `groups` that `resolveSessionRbacContext`
+ *     returns, and `registerGateAction` (`@/lib/iam/gateActions`). A seam-5
+ *     overlay no longer compiles against this tree (`legacy` / `enforced`), and
+ *     a seam-6 overlay not against a seam-5 one (`unavailable`, `groups`,
+ *     `registerGateAction`).
+ *     The same release adds the portal side of the engine, all as new community
+ *     modules (so this file's shape is unchanged): `authorizeResourceAccess`
+ *     (`@/lib/iam/resourceAuthz`, the decision the portal runtime asks for on
+ *     every request), the entity builders `portalResource` / `portalAgentResource`
+ *     (`@/lib/iam/portalEntities`) and the leaf seam `registerIamPortalResolver`
+ *     (`@/enterprise/iam-portal`, which the overlay calls once at load, from its
+ *     own `registry.ts`, and which is what turns the portal rules on). An overlay
+ *     that uses them needs a community tree that has them, which is what the
+ *     `compatibleCommunity` floor of COMPAT.json is for; a community tree
+ *     without an overlay never registers a resolver, and the portal rules stay
+ *     "not enforced".
+ * 7 — approvals decided by the policy engine, and agent files on buckets. The
+ *     registry's own shape is unchanged; the community contract the portal
+ *     runtime compiles against changed in both directions. The resolve service
+ *     (`@/lib/services/agents/agentActionResolution`) REQUIRES `authorize` (an
+ *     `ApprovalAuthorizer`; the portal builds it with `portalApprovalAuthorizer`
+ *     from `@/lib/services/agents/approvalAuthorizers`), lost `ResolveActor.isAdmin`
+ *     and gained the `unavailable` outcome (the engine could not decide, which
+ *     is a 503 and never an allow). Community also added
+ *     `describeAgentAttachments` (`@/lib/services/agents/agentAttachmentInfo`),
+ *     the run `signal` of the playground and resolve calls,
+ *     `executeAgentContinueLocal`, `updateSessionBudget`, `readSessionFileContent`,
+ *     `normalizeStaleRunningStatus`, the session event log
+ *     (`listAgentSessionEvents`, `getAgentSessionMaxSeq`) and the run-state /
+ *     budget columns of `agent_conversations`. A seam-6 overlay no longer
+ *     compiles against this tree (`authorize` is required, `isAdmin` is gone),
+ *     and a seam-7 overlay not against a seam-6 one (no authorizer, no
+ *     attachments info, no event log). `compatibleCommunity` in COMPAT.json is
+ *     raised to the first community release that declares 7.
+ *     Seam 7 is still unreleased, so the portal "Now" release and the embed with a
+ *     host-signed identity are part of it too (additions only, nothing was removed):
+ *     `IamPortalAccessFacts.networks` / `.embedded` (the network boundary and the
+ *     embed setting of a portal's access list), `ResourceAuthzClient.embedded` /
+ *     `.test` (the two flags only the portal runtime may set), `simulatePortalView`
+ *     and the `group` audience of the Access check (`@/lib/iam/viewAs`,
+ *     `@/lib/iam/simulate`), `validatePortalNetworks` / `checkPortalNetwork`
+ *     (`@/lib/iam/portalNetworks`), and the people of a host application, which
+ *     are the shared verified-identity core (not an embed-only model): the
+ *     assertion check `verifyIdentityAssertion` / `validateIdentityAssertionTrust`
+ *     (`@/lib/iam/identityAssertion`), the resolver `resolveDelegatedPrincipal` /
+ *     `validateDelegatedMapping` (`@/lib/iam/delegatedIdentity`), and the data
+ *     they rest on: `IUser.kind` / `.externalIds`, `findUsersByExternalIdentity`,
+ *     `linkUserExternalIdentity`, `countExternalUsers` and
+ *     `listUsers({ includeExternal })`. An overlay that
+ *     passes `networks` to the policy engine against a tree without them would run
+ *     its portal unrestricted, which is why the pairing is checked at the seam.
  */
-export const SEAM_CONTRACT_VERSION = 5;
+export const SEAM_CONTRACT_VERSION = 7;
 
 
 
@@ -290,12 +351,26 @@ export interface AgentSandboxRunner {
   exec(
     ref: AgentSandboxRef,
     instanceId: string,
-    input: { command: string; cwd?: string; env?: Record<string, string>; timeoutSec?: number },
+    input: {
+      command: string;
+      cwd?: string;
+      env?: Record<string, string>;
+      timeoutSec?: number;
+      /** The agent turn's signal: a Stop aborts the command instead of waiting for it (optional; a runner may ignore it). */
+      signal?: AbortSignal;
+    },
   ): Promise<AgentSandboxExecResult>;
   runCode(
     ref: AgentSandboxRef,
     instanceId: string,
-    input: { code: string; language: 'python' | 'javascript' | 'typescript' | 'bash'; env?: Record<string, string>; timeoutSec?: number },
+    input: {
+      code: string;
+      language: 'python' | 'javascript' | 'typescript' | 'bash';
+      env?: Record<string, string>;
+      timeoutSec?: number;
+      /** The agent turn's signal (see `exec`). */
+      signal?: AbortSignal;
+    },
   ): Promise<AgentSandboxExecResult>;
   readFile(ref: AgentSandboxRef, instanceId: string, path: string): Promise<string>;
   writeFile(ref: AgentSandboxRef, instanceId: string, path: string, content: string): Promise<void>;

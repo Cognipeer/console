@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Stack } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconEye,
   IconPlus,
@@ -20,13 +22,14 @@ import type { CrawlerView } from '@/lib/services/crawler';
 
 export default function CrawlersListPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [crawlers, setCrawlers] = useState<CrawlerView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
-  const [deleteTarget, setDeleteTarget] = useState<CrawlerView | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -73,23 +76,22 @@ export default function CrawlersListPage() {
     });
   }, [crawlers, statusFilter, query]);
 
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/crawler/crawlers/${deleteTarget.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ color: 'teal', title: 'Deleted', message: 'Crawler removed' });
-      setDeleteTarget(null);
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function confirmDelete(target: CrawlerView) {
+    return deleteResource({
+      noun: tSafe('nouns.crawler'),
+      name: target.name,
+      type: 'crawler',
+      id: target.id,
+      extraWarning: tSafe('crawlerExtra'),
+      action: async () => {
+        const res = await fetch(`/api/crawler/crawlers/${target.id}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) throw new Error('Failed to delete');
+        notifications.show({ color: 'teal', title: 'Deleted', message: 'Crawler removed' });
+        await load();
+      },
+    });
   }
 
   const columns: DataGridColumn<CrawlerView>[] = [
@@ -237,7 +239,7 @@ export default function CrawlersListPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(c),
+            onClick: () => void confirmDelete(c),
           },
         ]}
       />
@@ -252,26 +254,6 @@ export default function CrawlersListPage() {
         }}
       />
 
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete crawler"
-        centered
-        size="sm"
-      >
-        <Stack gap="md">
-          <span>
-            Delete <strong>{deleteTarget?.name}</strong>? This also removes all
-            past jobs and results.
-          </span>
-          <Group justify="flex-end">
-            <Button variant="subtle" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button color="red" onClick={confirmDelete}>Delete</Button>
-          </Group>
-        </Stack>
-      </Modal>
     </PageContainer>
   );
 }

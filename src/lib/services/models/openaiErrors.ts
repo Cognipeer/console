@@ -28,8 +28,55 @@ export class OutputTokenLimitError extends Error {
 
 type ErrorRecord = Record<string, unknown>;
 
+export const MODEL_PARAMETER_UNSUPPORTED_CODE = 'model_parameter_unsupported';
+const MODEL_REQUEST_ERROR_CODES = new Set(['unsupported_parameter', 'unsupported_value', 'model_request_invalid']);
+
+/**
+ * The agent-sdk's `ModelRequestError`: the model answered 400 about a parameter or value the SDK could not
+ * adjust away (after its own retries). Recognised by shape so this module stays free of the SDK.
+ */
+export function isModelRequestError(error: unknown): error is Error & {
+  code: string;
+  param?: string;
+  value?: unknown;
+  supportedValues?: string[];
+  provider?: string;
+  model?: string;
+} {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as unknown as ErrorRecord;
+  return candidate.status === 400
+    && typeof candidate.code === 'string'
+    && MODEL_REQUEST_ERROR_CODES.has(candidate.code)
+    && typeof candidate.model === 'string';
+}
+
+/** A clean 400 for a request setting the model refuses: names the model, the parameter and, when known, what it takes. */
+function normalizeModelRequestError(error: NonNullable<ReturnType<typeof asModelRequestError>>): NormalizedOpenAIError {
+  const supported = error.supportedValues?.length ? ` Supported values: ${error.supportedValues.join(', ')}.` : '';
+  const message = `The model "${error.model}" does not accept this request: ${error.message.replace(/\s+/g, ' ').trim()}${supported}`;
+  const code = error.code === 'model_request_invalid' ? 'model_request_invalid' : MODEL_PARAMETER_UNSUPPORTED_CODE;
+  return normalized(400, message, 'invalid_request_error', code, error.param ?? null);
+}
+
+function asModelRequestError(error: unknown) {
+  return isModelRequestError(error) ? error : undefined;
+}
+
 function asRecord(value: unknown): ErrorRecord | null {
   return value !== null && typeof value === 'object' ? value as ErrorRecord : null;
+}
+
+/** A provider error body kept as text (`{"error":{"code":...}}`) is read as the object it is. */
+function parseJsonBody(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{')) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
 }
 
 function collectErrorRecords(error: unknown): ErrorRecord[] {
@@ -50,6 +97,8 @@ function collectErrorRecords(error: unknown): ErrorRecord[] {
       record.error,
       record.errors,
       record.response,
+      // The agent-sdk providers' ProviderError keeps the upstream's error body here.
+      parseJsonBody(record.responseBody),
       record.body,
       record.data,
       record.details,
@@ -113,6 +162,24 @@ function normalized(
   };
 }
 
+/**
+ * The upstream's OWN message out of a provider error body. agent-sdk's
+ * ProviderError words its `message` as `<Provider> API error <status>: <raw
+ * response text>`; a client wants the sentence the upstream wrote, not the wrapper
+ * and a JSON blob around it. Anthropic / OpenAI / Gemini nest it under
+ * `error.message`, Bedrock and some compatible servers put `message` at the top.
+ */
+function upstreamMessage(error: unknown): string | undefined {
+  const body = parseJsonBody(asRecord(error)?.responseBody);
+  const record = asRecord(body);
+  if (!record) return undefined;
+  const nested = asRecord(record.error);
+  for (const candidate of [nested?.message, typeof record.error === 'string' ? record.error : undefined, record.message]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  return undefined;
+}
+
 export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
   if (error instanceof OutputTokenLimitError) {
     return normalized(
@@ -124,10 +191,14 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
     );
   }
 
+  const modelRequestError = asModelRequestError(error);
+  if (modelRequestError) return normalizeModelRequestError(modelRequestError);
+
   const records = collectErrorRecords(error);
-  const rawMessage = error instanceof Error
-    ? error.message
-    : firstString(records, ['message']) || 'Inference request failed';
+  const rawMessage = upstreamMessage(error)
+    ?? (error instanceof Error
+      ? error.message
+      : firstString(records, ['message']) || 'Inference request failed');
   const message = safeMessage(rawMessage);
   const status = firstStatus(records);
   const providerCode = firstString(records, ['code']);

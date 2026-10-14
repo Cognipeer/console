@@ -55,6 +55,8 @@ import {
 } from '../_workbench/actions';
 import { useDriveSession, useFillMain, useWorkbenchStage } from '../_workbench/useWorkbench';
 import classes from '../_workbench/workbench.module.css';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 
 interface LogEntry {
   id: number;
@@ -65,6 +67,8 @@ interface LogEntry {
 }
 
 export default function BrowserPlaygroundPage() {
+  const { confirm } = useConfirm();
+  const tds = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const shell = useFillMain();
 
@@ -112,6 +116,17 @@ export default function BrowserPlaygroundPage() {
   async function endSession() {
     await drive.end();
     setSessionKey(undefined);
+  }
+
+  /** Ending drops the live page and whatever state it holds, so an explicit End asks first. */
+  async function confirmEnd() {
+    const ok = await confirm({
+      title: tds('closeSession.title'),
+      message: tds('closeSession.message'),
+      confirmLabel: tds('closeSession.confirm'),
+      tone: 'warning',
+    });
+    if (ok) await endSession();
   }
 
   async function runStep() {
@@ -220,7 +235,7 @@ export default function BrowserPlaygroundPage() {
               >
                 Record as flow
               </Button>
-              <Button size="xs" variant="default" leftSection={<IconX size={14} />} onClick={endSession}>
+              <Button size="xs" variant="default" leftSection={<IconX size={14} />} onClick={confirmEnd}>
                 End session
               </Button>
             </>

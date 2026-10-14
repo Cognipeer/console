@@ -3,8 +3,11 @@
  *
  * This is the automatic half of the parameter-stripping story, and the direct
  * equivalent of LiteLLM's `drop_params` + `get_supported_openai_params()`: a
- * maintained registry keyed on **provider driver and model id**, so a request
- * never carries a parameter the upstream is going to reject. The manual
+ * registry keyed on **provider driver and model id**, so a request never carries
+ * a parameter the upstream is going to reject. The per-model facts (OpenAI
+ * reasoning families, GPT tools + reasoning, `max_completion_tokens`) come from
+ * the agent-sdk rule table (`modelRules.ts`) - the only place they are written
+ * down; this file adds the wire-level rules and the operator's manual layer. The manual
  * per-model `settings.unsupportedParams` list is the equivalent of LiteLLM's
  * `additional_drop_params` and is unioned on top of whatever is detected here.
  *
@@ -20,6 +23,8 @@
  * behaviour, a missing entry produces a 400. Add a rule only for a restriction
  * the provider actually documents.
  */
+
+import { resolveRuleForDriver, unsupportedParamsOfRule } from '@/lib/services/models/modelRules';
 
 /** Drivers that speak the OpenAI chat-completions schema. */
 const OPENAI_SCHEMA_DRIVERS = ['openai', 'openai-compatible', 'azure'] as const;
@@ -59,38 +64,6 @@ export interface UnsupportedParamRule {
 
 export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
   {
-    id: 'openai-o-series',
-    drivers: OPENAI_SCHEMA_DRIVERS,
-    match: /^o\d/,
-    // The o-series rejects the whole sampling group outright and replaced
-    // `max_tokens` with `max_completion_tokens`.
-    params: [
-      'temperature',
-      'top_p',
-      'presence_penalty',
-      'frequency_penalty',
-      'logprobs',
-      'top_logprobs',
-      'logit_bias',
-      'max_tokens',
-    ],
-    reason: 'OpenAI reasoning family (o-series): sampling parameters are fixed and max_tokens was replaced by max_completion_tokens',
-  },
-  {
-    id: 'openai-gpt-5',
-    drivers: OPENAI_SCHEMA_DRIVERS,
-    // `gpt-5-chat` is the non-reasoning variant and keeps the normal knobs.
-    match: /^gpt-5(?!-chat)/,
-    params: ['temperature', 'top_p', 'max_tokens'],
-    // Confirmed on gpt-5.6-terra: /v1/chat/completions 400s with "Function tools
-    // with reasoning_effort are not supported ... To use function tools, use
-    // /v1/responses or set reasoning_effort to 'none'." The console does not proxy
-    // /v1/responses, so the only safe move on this endpoint is to drop it.
-    paramsWithTools: ['reasoning', 'reasoning_effort'],
-    forcedParamsWithTools: { reasoning_effort: 'none' },
-    reason: 'GPT-5 family: only the default temperature and top_p are accepted, max_tokens was replaced by max_completion_tokens, and reasoning_effort cannot be combined with function tools on /v1/chat/completions (upstream requires /v1/responses, or reasoning_effort:"none")',
-  },
-  {
     id: 'anthropic-messages',
     drivers: ['anthropic'],
     // Every Claude model on the Messages API, not a family quirk.
@@ -113,6 +86,30 @@ export const UNSUPPORTED_PARAM_RULES: readonly UnsupportedParamRule[] = [
     reason: 'Anthropic Messages API: no presence/frequency penalties, no logprobs or logit_bias, and the output cap is max_tokens (there is no max_completion_tokens)',
   },
 ];
+
+/**
+ * OpenAI-schema drivers whose parameter limits come from the SDK rule table. Bedrock / Vertex / Anthropic
+ * clients apply their own rules inside the SDK, so nothing is detected for them here.
+ */
+const RULE_DRIVEN_DRIVERS: ReadonlySet<string> = new Set(OPENAI_SCHEMA_DRIVERS);
+
+function detectFromSdkRule(driver: string, modelId: string, hasTools: boolean): DetectedUnsupportedParams | undefined {
+  if (!RULE_DRIVEN_DRIVERS.has(driver)) return undefined;
+  const rule = resolveRuleForDriver(driver, modelId);
+  if (!rule) return undefined;
+  const params = unsupportedParamsOfRule(rule);
+  // GPT-5+: Chat Completions 400s on function tools next to any reasoning effort but 'none' (and the model's own
+  // default is not always 'none'), so the effort is dropped and 'none' is sent explicitly.
+  const forceNone = hasTools && rule.chatTools.reasoning === 'force-none';
+  if (forceNone) params.push('reasoning', 'reasoning_effort');
+  if (params.length === 0 && !forceNone) return undefined;
+  return {
+    params,
+    reason: rule.note,
+    ruleId: rule.matchedRuleId,
+    ...(forceNone ? { forced: { reasoning_effort: 'none' } } : {}),
+  };
+}
 
 export interface DetectedUnsupportedParams {
   /** Wire names to strip. Empty when no rule matched. */
@@ -145,7 +142,7 @@ const EMPTY: DetectedUnsupportedParams = { params: [] };
  * `eu.anthropic.claude-...`, so anchored matching silently detected nothing and
  * the request went out with the parameters the upstream rejects.
  */
-function candidateModelIds(modelId: string): string[] {
+export function candidateModelIds(modelId: string): string[] {
   const candidates = [modelId];
   let rest = modelId;
   // Only leading `vendor.`/`region.` style segments are peeled: a dot inside the
@@ -168,6 +165,9 @@ export function detectUnsupportedParams(
   hasTools = false,
 ): DetectedUnsupportedParams {
   if (!driver || !modelId) return EMPTY;
+
+  const fromRule = detectFromSdkRule(driver, modelId, hasTools);
+  if (fromRule) return fromRule;
 
   const candidates = candidateModelIds(modelId);
   const rule = UNSUPPORTED_PARAM_RULES.find(
@@ -214,4 +214,28 @@ export function resolveUnsupportedParamNames(input: {
     detected,
     params: [...new Set([...detected.params, ...manual].map((name) => name.trim()).filter(Boolean))],
   };
+}
+
+/** OpenAI-schema drivers, `together` included: it is a record driver of its own that speaks the same wire. */
+const REASONING_EFFORT_DRIVERS: ReadonlySet<string> = new Set([...OPENAI_SCHEMA_DRIVERS, 'together']);
+
+/**
+ * Whether a reasoning effort that arrived on the REQUEST may be sent to this
+ * model. OpenAI and Azure answer `reasoning_effort` on a model that does not
+ * reason (gpt-4o, gpt-5-chat) with a 400; a caller's effort there is dropped, as
+ * the LangChain-based gateway always did. Every other model gets it: the SDK
+ * maps a level the model lacks to the nearest one it takes, and a model the
+ * rule table does not know is learned from the provider's answer. An operator's
+ * Model Hub pin never goes through this check: what the operator wrote is what
+ * is sent. Providers with their own reasoning envelope (Anthropic, Bedrock,
+ * Vertex) are not OpenAI-schema and always pass.
+ */
+export function requestReasoningEffortAccepted(
+  driver: string | undefined,
+  modelId: string | undefined,
+  effort: string | undefined,
+): boolean {
+  if (!driver || !REASONING_EFFORT_DRIVERS.has(driver)) return true;
+  if (!effort) return true;
+  return resolveRuleForDriver(driver, modelId)?.reasoning.style !== 'none';
 }

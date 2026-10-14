@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { createSmartAgent, createTool, restoreToolCalls, toStrictCompatible } from '@cognipeer/agent-sdk';
 import { buildMemoryTools } from '@/lib/services/agents/agentMemoryTools';
 import { toolInputSchemaToZod } from '@/lib/services/agents/agentRuntimeConfig';
@@ -36,8 +36,8 @@ function violations(schema: JsonSchema, path = 'root'): string[] {
     return out;
 }
 
-const strictParams = (schema: z.ZodTypeAny) =>
-    (convertToOpenAITool({ name: 't', description: 'd', schema }, { strict: true }) as { function: { parameters: JsonSchema } }).function.parameters;
+/** The JSON schema a zod tool schema becomes on the wire (what the SDK's providers send as `parameters`). */
+const strictParams = (schema: z.ZodTypeAny) => zodToJsonSchema(schema, { $refStrategy: 'none' }) as JsonSchema;
 
 describe('strict-compatible tool schemas', () => {
     const readLines = z.object({

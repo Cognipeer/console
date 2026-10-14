@@ -220,9 +220,9 @@ export type PrefetchIntentKind = 'auto' | 'full';
 /**
  * Dashboard subtrees whose server layouts decide per user whether the page may
  * render: `projects/[projectId]` checks project membership in the tenant
- * database, and `members`, `providers` and `tenant-settings` check the session
- * role. A full prefetch renders that decision into a payload that Next reuses
- * for its static stale time (5 minutes by default), so a user who has lost
+ * database, `providers` checks the session role, and `iam` (the IAM center)
+ * checks who may open it. A full prefetch renders that decision into a payload
+ * that Next reuses for its static stale time (5 minutes by default), so a user who has lost
  * access, or another user signing in on the same tab (logout and login are
  * soft navigations), could still open the page from the cache. These subtrees
  * have no `loading.tsx`, so their default (`auto`) prefetch carries only the
@@ -231,9 +231,8 @@ export type PrefetchIntentKind = 'auto' | 'full';
  */
 const SERVER_GATED_DASHBOARD_ROUTES: readonly string[] = [
   '/dashboard/projects',
-  '/dashboard/members',
+  '/dashboard/iam',
   '/dashboard/providers',
-  '/dashboard/tenant-settings',
 ];
 
 function isWithinRoute(pathname: string, route: string): boolean {

@@ -14,6 +14,7 @@ import cookie from '@fastify/cookie';
 const h = vi.hoisted(() => ({
   verifyToken: vi.fn(),
   getUserAuthState: vi.fn(),
+  getUserIdentity: vi.fn(),
 }));
 
 // Handlers that do run (the "active" control) must not reach a real database.
@@ -33,7 +34,7 @@ vi.mock('@/lib/license/token-manager', async (importOriginal) => {
 });
 vi.mock('@/lib/services/users/userAuthState', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/users/userAuthState')>();
-  return { ...actual, getUserAuthState: h.getUserAuthState };
+  return { ...actual, getUserAuthState: h.getUserAuthState, getUserIdentity: h.getUserIdentity };
 });
 
 import { fastifyApiPlugin } from '@/server/api/plugin';
@@ -76,6 +77,7 @@ afterAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   h.verifyToken.mockResolvedValue(payload);
+  h.getUserIdentity.mockResolvedValue({ state: 'active', role: 'admin' });
 });
 
 const call = (url: string, method: 'GET' | 'POST' = 'GET') => app.inject({
@@ -134,6 +136,20 @@ describe('cookie session hook: account state', () => {
     expect(clearedCookies(res)).toEqual([]);
   });
 
+  it('fails closed with 503 when the current role of an active account cannot be read', async () => {
+    h.getUserAuthState.mockResolvedValue('active');
+    h.getUserIdentity.mockRejectedValue(new Error('db down'));
+    const res = await call('/api/auth/session');
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: 'Service Unavailable', message: 'Unable to verify session' });
+  });
+
+  it('reads the current role with the session claims for a route that does not load the account itself', async () => {
+    h.getUserAuthState.mockResolvedValue('active');
+    await call('/api/auth/session');
+    expect(h.getUserIdentity).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'user-1');
+  });
+
   it('does not run for Bearer client-API paths or public paths', async () => {
     h.getUserAuthState.mockResolvedValue('disabled');
     const client = await app.inject({ method: 'GET', url: '/api/client/v1/models' });
@@ -142,5 +158,6 @@ describe('cookie session hook: account state', () => {
     const health = await app.inject({ method: 'GET', url: '/api/health/live' });
     expect(health.statusCode).not.toBe(401);
     expect(h.getUserAuthState).not.toHaveBeenCalled();
+    expect(h.getUserIdentity).not.toHaveBeenCalled();
   });
 });

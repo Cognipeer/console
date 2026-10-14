@@ -1,7 +1,9 @@
 'use client';
 
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconBulb,
@@ -19,12 +21,12 @@ import SkillEditorModal from '@/components/skills/SkillEditorModal';
 import type { SkillView } from '@/components/skills/types';
 
 export default function SkillsPage() {
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<SkillView | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<SkillView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -67,20 +69,20 @@ export default function SkillsPage() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/skills/${deleteTarget._id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Skill deleted', message: `"${deleteTarget.title}" was deleted`, color: 'red' });
-      setDeleteTarget(null);
-      await loadSkills();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeleting(false);
-    }
+  const confirmDelete = async (target: SkillView) => {
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.skill'),
+      name: target.title,
+      type: 'skill',
+      id: String(target._id),
+      action: async () => {
+        const res = await fetch(`/api/skills/${target._id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete');
+      },
+    });
+    if (!deleted) return;
+    notifications.show({ title: 'Skill deleted', message: `"${target.title}" was deleted`, color: 'red' });
+    await loadSkills();
   };
 
   const openEditor = (skill: SkillView | null) => {
@@ -197,21 +199,10 @@ export default function SkillsPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(s),
+            onClick: () => void confirmDelete(s),
           },
         ]}
       />
-
-      <Modal opened={deleteTarget !== null} onClose={() => setDeleteTarget(null)} title="Delete skill" centered size="sm">
-        <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{deleteTarget?.title}</strong>? Any agent whose Skills tab
-          references this key will simply stop seeing it — nothing breaks, but confirm no agent still relies on it.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
-        </Group>
-      </Modal>
 
       <SkillEditorModal
         opened={editorOpen}

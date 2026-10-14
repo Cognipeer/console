@@ -1,8 +1,10 @@
 'use client';
 
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconApi,
@@ -38,11 +40,11 @@ export default function McpServersPage() {
   const [servers, setServers] = useState<McpServerView[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<McpServerView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const router = useRouter();
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
 
   const loadServers = async () => {
     setLoading(true);
@@ -87,28 +89,24 @@ export default function McpServersPage() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/mcp/${deleteTarget.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({
-        title: 'Server deleted',
-        message: `"${deleteTarget.name}" was deleted`,
-        color: 'red',
-      });
-      setDeleteTarget(null);
-      await loadServers();
-    } catch (err) {
-      notifications.show({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to delete',
-        color: 'red',
-      });
-    } finally {
-      setDeleting(false);
-    }
+  const confirmDelete = async (target: McpServerView) => {
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.mcpServer'),
+      name: target.name,
+      type: 'mcp-server',
+      id: target.id,
+      action: async () => {
+        const res = await fetch(`/api/mcp/${target.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete');
+      },
+    });
+    if (!deleted) return;
+    notifications.show({
+      title: 'Server deleted',
+      message: `"${target.name}" was deleted`,
+      color: 'red',
+    });
+    await loadServers();
   };
 
   const filtered = useMemo(() => {
@@ -329,32 +327,10 @@ export default function McpServersPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(s),
+            onClick: () => void confirmDelete(s),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete MCP server"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This
-          will permanently remove the server and all its associated tools. This action
-          cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            Delete
-          </Button>
-        </Group>
-      </Modal>
 
       <CreateMcpModal
         opened={createModalOpen}

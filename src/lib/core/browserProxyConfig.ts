@@ -16,13 +16,15 @@
 export interface BrowserProxyConfig {
   server: string;
   bypass?: string;
+  username?: string;
+  password?: string;
 }
 
 export function resolveBrowserProxyConfig(): BrowserProxyConfig | undefined {
-  const server =
+  const raw =
     process.env.HTTPS_PROXY || process.env.https_proxy
     || process.env.HTTP_PROXY || process.env.http_proxy;
-  if (!server) return undefined;
+  if (!raw) return undefined;
 
   // Playwright's `bypass` is a plain comma-separated host list; passed
   // through as-is rather than reparsed, since NO_PROXY's own conventions
@@ -31,5 +33,46 @@ export function resolveBrowserProxyConfig(): BrowserProxyConfig | undefined {
   // tolerates the common comma-separated form.
   const bypass = process.env.NO_PROXY || process.env.no_proxy;
 
-  return bypass ? { server, bypass } : { server };
+  const { server, username, password } = splitProxyCredentials(raw.trim());
+  return {
+    server,
+    ...(bypass ? { bypass } : {}),
+    ...(username !== undefined ? { username } : {}),
+    ...(password !== undefined ? { password } : {}),
+  };
+}
+
+/**
+ * Corporate proxy URLs commonly embed basic-auth credentials
+ * (`http://user:pass@host:3128`). Chromium ignores credentials in
+ * `--proxy-server`, so Playwright needs them as separate `username` /
+ * `password` fields; left in the URL the proxy answers 407 (or the request
+ * stalls) and surfaces only as a navigation timeout.
+ */
+function splitProxyCredentials(raw: string): { server: string; username?: string; password?: string } {
+  // Bare `host:port` is valid for Playwright (treated as HTTP) but not for
+  // `new URL`, which would read `host` as the scheme.
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+  if (!hasScheme) return { server: raw };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { server: raw };
+  }
+  if (!parsed.username && !parsed.password) return { server: raw };
+
+  const decode = (value: string): string => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+  return {
+    server: `${parsed.protocol}//${parsed.host}`,
+    username: decode(parsed.username),
+    password: decode(parsed.password),
+  };
 }

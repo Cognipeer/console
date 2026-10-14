@@ -38,7 +38,14 @@ const browserMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/services/browser', () => browserMocks);
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 vi.mock('@/lib/services/projects/projectContext', () => ({
   resolveProjectContext: vi.fn(),
   ProjectContextError: class ProjectContextError extends Error {

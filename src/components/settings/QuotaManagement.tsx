@@ -213,7 +213,9 @@ export default function QuotaManagement({ projectId }: QuotaManagementProps) {
         throw new Error(body?.error || 'Failed to load quota');
       }
       const data = (await res.json()) as { policies?: QuotaPolicy[] };
-      const policies = data.policies ?? [];
+      // Group limits and agent-run limits live in the IAM center's Limits tab:
+      // they are not this form's "project quota", and saving would overwrite them.
+      const policies = (data.policies ?? []).filter((p) => p.scope !== 'group' && p.domain !== 'agent');
       const selected =
         policies.find((p) => (p.label ?? '').toLowerCase() === 'project quota') ??
         policies[0] ??

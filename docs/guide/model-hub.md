@@ -102,6 +102,32 @@ Keep these identities separate:
 
 Multiple public aliases may intentionally point to the same provider model with different settings, pricing, guardrails, or routing behavior. Discovery therefore never replaces the public key with the provider model ID.
 
+### Upstream API (OpenAI-schema models)
+
+Models served by the `openai`, `azure`, `openai-compatible` and `together` drivers have an **Upstream API** setting in the create and edit screens, and on the model detail page. It decides which OpenAI endpoint Console calls for that model:
+
+| Value | Endpoint | When to use it |
+| --- | --- | --- |
+| **Chat Completions** (default) | `/chat/completions` | Every OpenAI-compatible server, and any model that does not need anything else. |
+| **Responses** | `/responses` | Models that are only served on the Responses API, or when you want the upstream's reasoning summaries. The upstream must implement the Responses API. |
+
+Things to know:
+
+- **It is always your choice.** Console never switches APIs on its own, and it does not look at the model id. A model id that is "Responses-first" still uses Chat Completions until you pick Responses.
+- **Clients are not affected.** The gateway endpoints (`/chat/completions`, `/messages`) keep answering in the format the client asked for. A chat-completions client talking to a model whose upstream API is Responses still gets a normal `chat.completion` back, with reasoning text and reasoning-token usage included under the usual rules (see below).
+- **Only these drivers.** Saving `Responses` for an Anthropic, Bedrock or Vertex model is rejected with HTTP 400. Those drivers use their own native APIs.
+- **Stored as** `settings.upstreamApi` (`"responses"`; absent means Chat Completions). Clearing the field in the edit screen removes the key.
+- Streaming works over the Responses API too, including reasoning summaries.
+
+### Reasoning visibility and Claude thinking
+
+Claude 5.x models return their thinking blocks empty unless the request asks for a summary. Console asks for one only when someone will actually see it:
+
+- The reasoning is **visible** when the Model Hub **Return reasoning** switch is on, and the caller has not hidden it: an agent with **Show reasoning** off, or a request that sends `include_reasoning: false`.
+- When visible, Console requests summarized thinking from Anthropic and Bedrock Claude models.
+- When hidden, Console does not request it, so the model does not spend output tokens writing thought summaries nobody reads. The thinking itself still runs and is billed as usual.
+- Thinking tokens reported by the provider are stored as **reasoning tokens** on the usage row (Anthropic, Bedrock and the Responses API).
+
 ## How requests resolve
 
 When a client calls `/api/client/v1/chat/completions` with `model: "gpt-4o-mini"`, the runtime resolves the call in this order:

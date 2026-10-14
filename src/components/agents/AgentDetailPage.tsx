@@ -29,6 +29,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconMessageCircle,
   IconCode,
+  IconThumbUp,
   IconCopy,
   IconCheck,
   IconSettings,
@@ -46,6 +47,7 @@ import {
   IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { ResourceUsageSection } from '@/components/common/confirm';
 import EmptyState from '@/components/common/EmptyState';
 import GuardrailBindingList, {
   bindingRowsFromLegacySlots,
@@ -68,8 +70,16 @@ import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentFilesPanel from './studio/AgentFilesPanel';
+import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
+import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
+import AgentClientToolsPanel from './studio/AgentClientToolsPanel';
+import { normalizeClientTools } from './studio/clientToolsSettings';
+import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
+import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
+import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
-import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
+import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
@@ -77,12 +87,19 @@ import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPa
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
+import AgentAdditionalModels from './studio/AgentAdditionalModels';
+import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
+import { migrateAgentReasoning } from '@/lib/services/agents/agentReasoning';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentConfig,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentExecutionConfig,
+  IAgentClientToolSurfaces,
+  IAgentHumanInTheLoopConfig,
+  IAgentAdditionalModel,
+  IAgentClientToolConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -137,6 +154,10 @@ interface Model {
   name: string;
   modelId: string;
   category: string;
+  providerKey?: string;
+  providerDriver?: string;
+  capabilities?: { supportsReasoning?: boolean } | null;
+  settings?: Record<string, unknown>;
 }
 
 interface RagModule {
@@ -187,6 +208,13 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
   execution: { top: 'configure', sub: 'execution' },
+  files: { top: 'configure', sub: 'files' },
+  attachments: { top: 'configure', sub: 'files' },
+  hitl: { top: 'configure', sub: 'hitl' },
+  approvals: { top: 'configure', sub: 'hitl' },
+  clienttools: { top: 'configure', sub: 'clienttools' },
+  'client-tools': { top: 'configure', sub: 'clienttools' },
+  feedback: { top: 'feedback' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -219,10 +247,18 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
+  const [additionalModels, setAdditionalModels] = useState<IAgentAdditionalModel[]>([]);
+  // The main model's own reasoning pick, side by side with the model ("Model default" = unset).
+  const [mainReasoning, setMainReasoning] = useState<ReasoningPickerValue>({});
+  const [showReasoning, setShowReasoning] = useState(true);
   const [prompts, setPrompts] = useState<PromptOption[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailBindingOption[]>([]);
-  const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
+  const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string; driver?: string }>>([]);
+  const driverByProviderKey = useMemo(
+    () => Object.fromEntries(providers.map((p) => [p.key, p.driver])) as Record<string, string | undefined>,
+    [providers],
+  );
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   // Overview is the landing tab — it's the one screen that answers "is this
@@ -260,6 +296,12 @@ export default function AgentDetailPage() {
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
+  const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
+  const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
+  const [attachmentsConfig, setAttachmentsConfig] = useState<AttachmentsSettings | undefined>(undefined);
+  // A save was refused because Files is on without a bucket: the field shows its error from then on.
+  const [filesSaveRefused, setFilesSaveRefused] = useState(false);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
@@ -301,6 +343,7 @@ export default function AgentDetailPage() {
   // own route, see AgentSessionView).
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsOwnOnly, setSessionsOwnOnly] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
@@ -345,7 +388,15 @@ export default function AgentDetailPage() {
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
-        setRuntimeConfig(cfg.runtime ?? {});
+        // Old Advanced-tab reasoning is folded into the model's own fields (the server does it on read too).
+        const migrated = migrateAgentReasoning(cfg);
+        setAdditionalModels(migrated.additionalModels ?? []);
+        setMainReasoning({
+          ...(migrated.reasoningEffort ? { reasoningEffort: migrated.reasoningEffort } : {}),
+          ...(migrated.reasoningBudgetTokens ? { reasoningBudgetTokens: migrated.reasoningBudgetTokens } : {}),
+        });
+        setShowReasoning(migrated.showReasoning !== false);
+        setRuntimeConfig(migrated.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
@@ -354,6 +405,11 @@ export default function AgentDetailPage() {
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
         setExecutionConfig(cfg.execution);
+        setHitlConfig(cfg.humanInTheLoop);
+        setClientToolsConfig(cfg.clientTools);
+        setClientToolSurfaces(cfg.clientToolSurfaces);
+        setAttachmentsConfig(cfg.attachments);
+        setFilesSaveRefused(false);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -399,6 +455,8 @@ export default function AgentDetailPage() {
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions ?? []);
+        // The caller may not view other people's sessions of this agent: the list holds only their own.
+        setSessionsOwnOnly(data.scope?.viewOthers === false);
       }
     } catch (err) {
       console.error('Failed to load sessions', err);
@@ -473,7 +531,9 @@ export default function AgentDetailPage() {
         // still render as a (badged) row in the binding list, which keeps
         // disabled ones out of its picker instead.
         loadList('/api/guardrails', (d) => d.guardrails, setGuardrails, 'guardrails'),
-        loadList('/api/providers?scope=tenant', (d) => d.providers, setProviders, 'providers'),
+        // Project scope, not tenant scope: the tenant list is provider-admin only, and an
+        // empty map would hide the reasoning dropdown next to every model.
+        loadList('/api/providers', (d) => d.providers, setProviders, 'providers'),
         // Native agents only: a connected agent is an HTTP endpoint, and the
         // runtime refuses to flatten one into a sub-agent, so offering it here
         // would only produce a binding that silently drops at run time.
@@ -556,6 +616,16 @@ export default function AgentDetailPage() {
     const values = configForm.values;
     const nextConfig: Record<string, unknown> = {
       modelKey: values.modelKey,
+      // Never the main model (the picker hides it, and a model switched to main drops out of the list).
+      additionalModels: additionalModels.filter((entry) => entry.modelKey !== values.modelKey).length > 0
+        ? additionalModels.filter((entry) => entry.modelKey !== values.modelKey)
+        : undefined,
+      // Reasoning of the main model: set means the agent decides; unset leaves it to the Model Hub default.
+      reasoningEffort: mainReasoning.reasoningEffort,
+      reasoningBudgetTokens: mainReasoning.reasoningEffort && mainReasoning.reasoningEffort !== 'none'
+        ? mainReasoning.reasoningBudgetTokens
+        : undefined,
+      showReasoning: showReasoning ? undefined : false,
       // No temperature / maxTokens. The form used to send 0.7 and 4096 on
       // every save, so every agent was silently capped at 4096 output tokens
       // and pinned to a temperature — settings nobody chose and, once the
@@ -591,6 +661,13 @@ export default function AgentDetailPage() {
     // silently wipe a value an import or the API set, since `config` replaces
     // the stored object wholesale rather than merging.
     nextConfig.promptVariables = agent?.config?.promptVariables;
+    // Absent stays absent: an agent that never opened Approvals & questions
+    // (every agent from before it existed) must keep never pausing.
+    nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
+    nextConfig.clientTools = normalizeClientTools(clientToolsConfig);
+    nextConfig.clientToolSurfaces = clientToolSurfaces && Object.keys(clientToolSurfaces).length > 0 ? clientToolSurfaces : undefined;
+    // Absent = files off.
+    nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -603,10 +680,47 @@ export default function AgentDetailPage() {
     return nextConfig;
   };
 
+  /** The sentence for a Files problem that blocks a save (the server words the rest). */
+  const filesErrorMessage = (code: ReturnType<typeof filesSaveErrors>[number]['code']): string =>
+    code === 'bucket_required' ? t('attachments.bucketRequired')
+      : code === 'invalid_chars' ? t('attachments.folderInvalidChars')
+        : code === 'dot_dot' ? t('attachments.folderDotDot')
+          : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
+
+  /** An edit in Files. Once the problem that refused the last save is fixed, its message goes away with it. */
+  const handleFilesChange = (next: AttachmentsSettings | undefined) => {
+    setAttachmentsConfig(next);
+    if (!filesSaveRefused || filesSaveErrors(next).length > 0) return;
+    setFilesSaveRefused(false);
+    setConfigIssues((current) => (current && current.errors.length > 0 && current.errors.every((issue) => issue.field.startsWith('attachments.'))
+      ? null
+      : current));
+  };
+
   const saveAgentConfig = async (
     options: { notify?: boolean; bindings?: ToolBinding[] } = {},
   ): Promise<boolean> => {
     const notify = options.notify ?? true;
+
+    // Files on without a bucket (or a folder the server would refuse) is not
+    // sent at all: the field says what to fix instead of a round trip doing it.
+    const filesErrors = filesSaveErrors(attachmentsConfig);
+    if (filesErrors.length > 0) {
+      setFilesSaveRefused(true);
+      setConfigIssues({
+        errors: filesErrors.map((error) => ({ field: error.field, message: filesErrorMessage(error.code) })),
+        warnings: [],
+      });
+      if (notify) {
+        notifications.show({
+          title: t('notifications.error'),
+          message: filesErrorMessage(filesErrors[0].code),
+          color: 'red',
+        });
+        document.getElementById('config-files')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return false;
+    }
 
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
@@ -638,6 +752,7 @@ export default function AgentDetailPage() {
 
       const data = await res.json();
       setAgent(data.agent);
+      setFilesSaveRefused(false);
       setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
         ? { errors: [], warnings: data.warnings }
         : null);
@@ -803,15 +918,53 @@ export default function AgentDetailPage() {
       </Stack>
     ) : (
       <Stack gap="xl">
-        <Select
-          label={t('config.model')}
-          placeholder={t('config.modelPlaceholder')}
-          data={models.map((m) => ({
-            value: m.key,
-            label: `${m.name} (${m.modelId})`,
-          }))}
-          searchable
-          {...configForm.getInputProps('modelKey')}
+        <Group align="flex-end" gap="sm" wrap="wrap">
+          <Select
+            label={t('config.model')}
+            placeholder={t('config.modelPlaceholder')}
+            data={models.map((m) => ({
+              value: m.key,
+              label: `${m.name} (${m.modelId})`,
+            }))}
+            searchable
+            style={{ flex: 1, minWidth: 220 }}
+            {...configForm.getInputProps('modelKey')}
+            onChange={(next) => {
+              // Another model may speak another reasoning dialect: its pick starts at "Model default".
+              if (next !== configForm.values.modelKey) setMainReasoning({});
+              configForm.setFieldValue('modelKey', next ?? '');
+            }}
+          />
+          <AgentReasoningPicker
+            model={models.find((m) => m.key === configForm.values.modelKey)}
+            driverByProviderKey={driverByProviderKey}
+            value={mainReasoning}
+            onChange={setMainReasoning}
+            testId="agent-main-reasoning"
+          />
+        </Group>
+
+        <AgentAdditionalModels
+          value={additionalModels}
+          onChange={setAdditionalModels}
+          models={models}
+          mainModelKey={configForm.values.modelKey}
+          driverByProviderKey={driverByProviderKey}
+          labels={{
+            title: t('config.additionalModels'),
+            description: t('config.additionalModelsDescription'),
+            placeholder: t('config.additionalModelsPlaceholder'),
+            modelColumn: t('config.additionalModelColumn'),
+            reasoningColumn: t('config.reasoningEffort'),
+          }}
+        />
+
+        <Switch
+          label={t('config.showReasoning')}
+          description={t('config.showReasoningDescription')}
+          checked={showReasoning}
+          onChange={(event) => setShowReasoning(event.currentTarget.checked)}
+          data-testid="agent-show-reasoning"
         />
 
         {/* Prompt configuration (mode / template / managed prompt) lives in
@@ -899,7 +1052,7 @@ export default function AgentDetailPage() {
     (id === 'basic' || !isConnected) && sectionVisible(id) ? (
       <ConfigSection
         id={id}
-        title={CONFIG_SECTION_TITLES[id]}
+        title={configSectionTitle(id, t)}
         description={description}
         meta={meta}
         changed={changedSections.has(id)}
@@ -971,6 +1124,11 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
             Sessions
             {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
+            {sessions.some((item) => item.runtimeStatus === 'requires_action') ? (
+              <Badge size="xs" variant="filled" color="orange" ml={4} title={t('hitl.waitingTooltip')}>
+                {sessions.filter((item) => item.runtimeStatus === 'requires_action').length}
+              </Badge>
+            ) : null}
           </Tabs.Tab>
           <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
             Build
@@ -983,6 +1141,11 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
             Ship
           </Tabs.Tab>
+          {!isConnected ? (
+            <Tabs.Tab value="feedback" leftSection={<IconThumbUp size={14} />}>
+              {t('tabs.feedback')}
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
           </Tabs.Tab>
@@ -1007,6 +1170,9 @@ export default function AgentDetailPage() {
               if (alias.top === 'deploy') setDeployTab(alias.sub);
             }}
           />
+          <Paper withBorder radius="md" p="md" mt="md">
+            <ResourceUsageSection type="agent" id={String(agent._id)} showUses />
+          </Paper>
         </Tabs.Panel>
 
         {/* ── Sessions ────────────────────────────────────────── */}
@@ -1029,6 +1195,7 @@ export default function AgentDetailPage() {
             {sessionsView === 'sessions' ? (
               <SessionList
                 sessions={sessions}
+                ownOnly={sessionsOwnOnly}
                 loading={sessionsLoading}
                 onOpen={(id) => setViewedSessionId(id)}
                 onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
@@ -1053,6 +1220,7 @@ export default function AgentDetailPage() {
                 : null}
               onClose={() => setViewedSessionId(null)}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              onResolved={() => void loadSessions()}
             />
           </SectionCard>
         </Tabs.Panel>
@@ -1163,9 +1331,68 @@ export default function AgentDetailPage() {
             {buildSection(
               'execution',
               'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
-              <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />,
+              <AgentExecutionPanel
+                value={executionConfig}
+                onChange={setExecutionConfig}
+              />,
               executionConfig?.defaultMode === 'background' ? (
                 <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'files',
+              t('attachments.sectionDescription'),
+              <AgentFilesPanel
+                value={attachmentsConfig}
+                onChange={handleFilesChange}
+                agentKey={agent.key}
+                showErrors={filesSaveRefused}
+              />,
+              filesEnabled(attachmentsConfig) ? (
+                <Badge size="xs" color="teal" variant="light" w="fit-content">
+                  {t('attachments.badgeOn', {
+                    files: attachmentsConfig?.maxFiles ?? SESSION_FILES_DEFAULTS.maxFiles,
+                    days: attachmentsConfig?.retentionDays ?? SESSION_FILES_DEFAULTS.retentionDays,
+                  })}
+                </Badge>
+              ) : (
+                <Badge size="xs" color="gray" variant="light" w="fit-content">{t('attachments.badgeOff')}</Badge>
+              ),
+            )}
+            {buildSection(
+              'clienttools',
+              t('clientTools.sectionDescription'),
+              <Stack gap="lg">
+                <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />
+                <ClientToolsSurfaces value={clientToolSurfaces} onChange={setClientToolSurfaces} />
+              </Stack>,
+              clientToolsConfig && clientToolsConfig.length > 0 ? (
+                <Badge size="xs" color="grape" variant="light" w="fit-content">
+                  {t('clientTools.badgeCount', { count: clientToolsConfig.length })}
+                </Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'hitl',
+              t('hitl.sectionDescription'),
+              <AgentHumanInTheLoopPanel
+                value={hitlConfig}
+                onChange={setHitlConfig}
+                clientTools={clientToolsConfig}
+                toolConfig={{
+                  toolBindings,
+                  knowledgeEngineKey: configForm.values.knowledgeEngineKey || undefined,
+                  subagents,
+                  skills,
+                  memory: memoryConfig,
+                  sandbox: sandboxConfig,
+                }}
+              />,
+              hitlConfig?.toolApproval?.enabled || hitlConfig?.askUser?.enabled ? (
+                <Badge size="xs" color="orange" variant="light" w="fit-content">
+                  {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
+                    .filter(Boolean).join(' + ')}
+                </Badge>
               ) : null,
             )}
             {buildSection(
@@ -1451,6 +1678,11 @@ export default function AgentDetailPage() {
           tab because it is what someone integrating the agent opens first,
           and it had been buried as the second item of Observe's rail.
         */}
+        {/* ── Feedback ────────────────────────────────────────── */}
+        <Tabs.Panel value="feedback">
+          {activeTab === 'feedback' ? <AgentFeedbackPanel agentId={agentId} /> : null}
+        </Tabs.Panel>
+
         <Tabs.Panel value="usage">
           <SectionCard p="md">
             <Stack gap="md">
@@ -1773,7 +2005,7 @@ for chunk in stream:
         agentId={agentId}
         publishedVersion={agent.publishedVersion ?? null}
         versions={Array.from({ length: agent.latestVersion ?? 0 }, (_, index) => (agent.latestVersion ?? 0) - index)}
-        changedSections={[...changedSections].map((id) => CONFIG_SECTION_TITLES[id] ?? id)}
+        changedSections={[...changedSections].map((id) => configSectionTitle(id, t))}
       />
       <StartSessionModal
         opened={startSessionOpen}

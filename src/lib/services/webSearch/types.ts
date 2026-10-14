@@ -2,6 +2,8 @@
 
 export interface WebSearchInput {
   query: string;
+  /** Aborts the provider request. Defaults to the running agent turn's signal. */
+  signal?: AbortSignal;
   /** Max results to return (provider-side cap applies). Default 10, max 50. */
   count?: number;
   /** Result offset / paging hint where the provider supports it. */

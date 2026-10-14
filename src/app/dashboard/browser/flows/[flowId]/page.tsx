@@ -80,6 +80,8 @@ import StepDialog, {
 import InputDialog, { EMPTY_INPUT } from './_components/InputDialog';
 import OutputDialog, { EMPTY_OUTPUT } from './_components/OutputDialog';
 import ParametrizeDialog, { applyToAction } from './_components/ParametrizeDialog';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 
 /** A slug that is a valid identifier and not already taken. */
 function uniqueName(base: string, taken: string[]): string {
@@ -102,6 +104,8 @@ function looksSecret(action: Record<string, unknown>): boolean {
 }
 
 export default function BrowserFlowEditorPage() {
+  const { confirm } = useConfirm();
+  const tds = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const params = useParams<{ flowId: string }>();
   const flowId = params?.flowId ?? '';
@@ -239,6 +243,17 @@ export default function BrowserFlowEditorPage() {
     await drive.end();
     setAuthorKey(undefined);
     forgetPosition();
+  }
+
+  /** Ending drops the live page and whatever state it holds, so an explicit End asks first. */
+  async function confirmEnd() {
+    const ok = await confirm({
+      title: tds('closeSession.title'),
+      message: tds('closeSession.message'),
+      confirmLabel: tds('closeSession.confirm'),
+      tone: 'warning',
+    });
+    if (ok) await endAuthoring();
   }
 
   /** A fresh session, so a replay starts from a page nothing has touched. */
@@ -686,7 +701,7 @@ export default function BrowserFlowEditorPage() {
             aria-label="Flow status"
           />
           {drive.session ? (
-            <Button size="xs" variant="default" leftSection={<IconX size={14} />} onClick={endAuthoring}>
+            <Button size="xs" variant="default" leftSection={<IconX size={14} />} onClick={confirmEnd}>
               End session
             </Button>
           ) : (

@@ -76,9 +76,9 @@ Projects (**Configure → Projects**) carry the active-project context that ever
 
 ![Projects](/screenshots/multi-tenancy/01-projects.png)
 
-Members (**Configure → Members**) lists the tenant's users and pending invitations, each with a role (`owner`, `user`, …) and status (`active`, `invited`). The **Groups** tab manages group-based tenant/project grants:
+People are managed in one place, the **Principals** tab of the **IAM center**: it lists the tenant's people, service accounts, groups and API tokens, each person with a role (`owner`, `admin`, `project_admin`, `user`) and a status (`active`, `invited`, `disabled`). Owners and admins invite people, change roles, disable or delete accounts, manage group memberships and project grants, and mint or revoke tokens from the list and from a person's drawer. People who are neither owners nor admins and hold no `iam` permission do not see the IAM center; they manage their own profile, password and tokens under **My account**.
 
-![Members](/screenshots/multi-tenancy/02-members.png)
+A member's role, their own service permissions, the grants of their groups, the permissions set on them inside a project and the scope of their API tokens together decide what they can do; [Authorization](/guide/authorization) explains how they combine.
 
 ## Database Abstraction
 

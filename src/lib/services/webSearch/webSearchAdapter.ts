@@ -13,6 +13,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IProviderRecord } from '@/lib/database';
 import { DEFAULT_RESULTS, asSafeSearch, asString, clampCount } from './searchOptions';
@@ -28,6 +29,8 @@ interface AdapterCallResult {
 interface DriverCallInput extends WebSearchInput {
   credentials: Record<string, unknown>;
   settings: Record<string, unknown>;
+  /** Aborts the provider request (the agent turn's Stop). */
+  signal?: AbortSignal;
 }
 
 export async function callWebSearchProvider(
@@ -44,6 +47,8 @@ export async function callWebSearchProvider(
     safeSearch: input.safeSearch ?? asSafeSearch(settings.safeSearch),
     credentials,
     settings,
+    // A search an agent runs ends with its turn: a Stop aborts the provider request in flight.
+    signal: input.signal ?? currentTurnSignal(),
   };
 
   switch (record.driver) {
@@ -92,7 +97,7 @@ async function callBing(input: DriverCallInput): Promise<AdapterCallResult> {
   }
 
   const response = await withResilience(
-    () => fetch(url, { headers: { 'Ocp-Apim-Subscription-Key': apiKey } }),
+    () => fetch(url, { headers: { 'Ocp-Apim-Subscription-Key': apiKey }, signal: input.signal }),
     { key: 'websearch:bing' },
   );
   if (!response.ok) {
@@ -129,6 +134,7 @@ async function callBrave(input: DriverCallInput): Promise<AdapterCallResult> {
     () =>
       fetch(url, {
         headers: { Accept: 'application/json', 'X-Subscription-Token': apiKey },
+        signal: input.signal,
       }),
     { key: 'websearch:brave' },
   );
@@ -170,6 +176,7 @@ async function callSerper(input: DriverCallInput): Promise<AdapterCallResult> {
         method: 'POST',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: input.signal,
       }),
     { key: 'websearch:serper' },
   );
@@ -210,6 +217,7 @@ async function callTavily(input: DriverCallInput): Promise<AdapterCallResult> {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: input.signal,
       }),
     { key: 'websearch:tavily' },
   );
@@ -261,7 +269,7 @@ async function callSearxng(input: DriverCallInput): Promise<AdapterCallResult> {
   }
 
   const response = await withResilience(
-    () => safeFetch(url.toString(), { headers }),
+    () => safeFetch(url.toString(), { headers, signal: input.signal }),
     { key: 'websearch:searxng' },
   );
   if (!response.ok) {
@@ -312,6 +320,7 @@ async function callDuckDuckGo(input: DriverCallInput): Promise<AdapterCallResult
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
           Accept: 'text/html',
         },
+        signal: input.signal,
       }),
     { key: 'websearch:duckduckgo' },
   );

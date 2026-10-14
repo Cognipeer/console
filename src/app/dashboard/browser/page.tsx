@@ -5,10 +5,8 @@ import { useRouter } from 'next/navigation';
 import {
   Button,
   Group,
-  Modal,
   NumberInput,
   Select,
-  Stack,
   Switch,
   TextInput,
   Textarea,
@@ -16,6 +14,8 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconEye,
   IconPlus,
@@ -65,6 +65,8 @@ interface RowMetrics {
 }
 
 export default function BrowsersListPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
@@ -74,7 +76,6 @@ export default function BrowsersListPage() {
   const [query, setQuery] = useState('');
   const [createOpened, createHandlers] = useDisclosure(false);
   const [creating, setCreating] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<BrowserView | null>(null);
 
   const form = useForm<CreateForm>({
     initialValues: {
@@ -232,30 +233,29 @@ export default function BrowsersListPage() {
     }
   }
 
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/browser/browsers/${deleteTarget.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to delete');
-      }
-      notifications.show({
-        color: 'teal',
-        title: 'Deleted',
-        message: 'Browser removed',
-      });
-      setDeleteTarget(null);
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function confirmDelete(target: BrowserView) {
+    return deleteResource({
+      noun: tSafe('nouns.browser'),
+      name: target.name,
+      type: 'browser',
+      id: target.id,
+      extraWarning: tSafe('browserExtra'),
+      action: async () => {
+        const res = await fetch(`/api/browser/browsers/${target.id}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || 'Failed to delete');
+        }
+        notifications.show({
+          color: 'teal',
+          title: 'Deleted',
+          message: 'Browser removed',
+        });
+        await load();
+      },
+    });
   }
 
   const columns: DataGridColumn<BrowserView>[] = [
@@ -417,7 +417,7 @@ export default function BrowsersListPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(b),
+            onClick: () => void confirmDelete(b),
           },
         ]}
       />
@@ -556,28 +556,6 @@ export default function BrowsersListPage() {
         </FormSection>
       </FormShell>
 
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete browser"
-        centered
-        size="sm"
-      >
-        <Stack gap="md">
-          <span>
-            Delete browser <strong>{deleteTarget?.name}</strong>? Sessions and
-            agents must be removed first.
-          </span>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button color="red" onClick={confirmDelete}>
-              Delete
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </PageContainer>
   );
 }

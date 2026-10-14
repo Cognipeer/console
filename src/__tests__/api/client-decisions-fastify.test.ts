@@ -16,12 +16,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 
@@ -55,7 +57,6 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { authorizeServiceRequest, getPermissionServiceForPath } from '@/lib/security/rbac';
 import { enforceModelGuardrailChain, GuardrailBlockError } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -65,6 +66,7 @@ import { mapSegmentsBounded } from '@/lib/services/models/decisionService';
 import { selectDecisionRuntime } from '@/lib/providers/contracts/nativeDecisionRuntime';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -101,16 +103,31 @@ function decisionModel(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const CHAT_ANSWER = {
-  content: JSON.stringify({
+/** A native `ChatCompletionResponse` carrying `content`. */
+const nativeAnswer = (content: string, inputTokens = 0, outputTokens = 0) => ({
+  id: 'resp-1',
+  model: 'gpt-4o',
+  content,
+  toolCalls: [],
+  usage: {
+    inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
+    cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0,
+  },
+  finishReason: 'stop',
+  raw: {},
+});
+
+const CHAT_ANSWER = nativeAnswer(
+  JSON.stringify({
     answers: {
       mood: { happy: 0.7, upset: 0.3 },
       urgent: 0.1,
       severity: { 0: 0.5, 1: 0.5 },
     },
   }),
-  usage_metadata: { input_tokens: 1000, output_tokens: 50 },
-};
+  1000,
+  50,
+);
 
 const BODY = {
   model: 'triage',
@@ -130,18 +147,14 @@ describe('POST /client/v1/decisions', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T>(_db: string, operation: () => T) => operation(),
-    });
-    mockFn(getPermissionServiceForPath).mockReturnValue('models');
-    mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
 
     mockFn(getModelByKey).mockResolvedValue(decisionModel());
     // By default the guardrail passes the text through untouched.
     mockFn(enforceModelGuardrailChain).mockResolvedValue({ redactedText: undefined, results: [] });
 
     invoke = vi.fn().mockResolvedValue(CHAT_ANSWER);
-    chatRuntime = { createChatModel: vi.fn().mockReturnValue({ invoke }) };
+    chatRuntime = { createNativeChatClient: vi.fn().mockResolvedValue({ complete: invoke }) };
     chatRuntime.createDecisionRuntime = (config) => selectDecisionRuntime({ runtime: chatRuntime, config, provider: 'openai' });
     mockFn(buildModelRuntime).mockResolvedValue({ runtime: chatRuntime, record: {} });
 
@@ -180,7 +193,7 @@ describe('POST /client/v1/decisions', () => {
     expect(body.answers.severity.score).toBeCloseTo(0.5);
 
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke.mock.calls[0][1].response_format.json_schema.strict).toBe(true);
+    expect(invoke.mock.calls[0][0].responseFormat.type).toBe('json_schema');
   });
 
   it('records input and output tokens against the model price and settles the budget', async () => {
@@ -248,7 +261,7 @@ describe('POST /client/v1/decisions', () => {
       expect(sent).not.toContain('jane@example.com');
       expect(sent).not.toContain('555-0100');
       // The schema descriptions carry the instructions too — also redacted.
-      expect(JSON.stringify(invoke.mock.calls[0][1])).not.toContain('555-0100');
+      expect(JSON.stringify(invoke.mock.calls[0][0].responseFormat)).not.toContain('555-0100');
     });
 
     it('does not call the backend at all when a guardrail blocks', async () => {
@@ -356,7 +369,7 @@ describe('POST /client/v1/decisions', () => {
       mockFn(getModelByKey).mockResolvedValue(decisionModel({ settings: { decision: { mode: 'structured', supports: { image: true } } } }));
       const accepted = await post(withImage);
       expect(accepted.statusCode).toBe(200);
-      expect(JSON.stringify(invoke.mock.calls[0][0])).toContain('image_url');
+      expect(JSON.stringify(invoke.mock.calls[0][0])).toContain('"type":"image"');
     });
 
     it('an explicit supports.image:false beats isMultimodal', async () => {
@@ -367,7 +380,7 @@ describe('POST /client/v1/decisions', () => {
 
     it('answers a clear 400 for a provider family without a decision strategy', async () => {
       mockFn(getModelByKey).mockResolvedValue(decisionModel({ providerDriver: 'anthropic' }));
-      mockFn(buildModelRuntime).mockResolvedValue({ runtime: { createChatModel: vi.fn() }, record: {} });
+      mockFn(buildModelRuntime).mockResolvedValue({ runtime: { createNativeChatClient: vi.fn() }, record: {} });
       const response = await post(BODY);
       expect(response.statusCode).toBe(400);
       expect(parseJsonBody<any>(response.body).error.message).toBe(
@@ -377,7 +390,7 @@ describe('POST /client/v1/decisions', () => {
   });
 
   it('returns 502 on unparseable output WITHOUT retrying, and logs an error row', async () => {
-    invoke.mockResolvedValue({ content: 'definitely not json' });
+    invoke.mockResolvedValue(nativeAnswer('definitely not json'));
     const response = await post(BODY);
     expect(response.statusCode).toBe(502);
     expect(invoke).toHaveBeenCalledTimes(1);

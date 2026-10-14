@@ -1,25 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Badge,
-  Button,
-  Group,
-  JsonInput,
-  MultiSelect,
-  NumberInput,
-  Select,
-  Text,
-  TextInput,
-  Textarea,
-} from '@mantine/core';
+import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from '@/lib/services/models/upstreamApi';
+import { Button, NumberInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
-  getDefaultModelInputModalities,
   getDefaultModelOutputModalities,
+  type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
-import FormShell, {
+import {
+  inferredInputModalities,
+  inputModalitiesPayload,
+  isMultimodalFor,
+  shownInputModalities,
+} from '@/components/models/inputModalities';
+import {
   Checklist,
   ChipPicker,
   FormField,
@@ -30,14 +26,24 @@ import FormShell, {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
+import ModelFormLayout from './ModelFormLayout';
+import {
+  CapabilitiesSection,
+  GeneralSection,
+  LimitsSection,
+  PricingSection,
+  ProviderSection,
+  ReasoningSection,
+  RequestParamsSection,
+  UpstreamApiSection,
+} from './modelFormSections';
 import {
   detectUnsupportedParams,
   parseRequestDefaults,
-  REQUEST_DEFAULTS_PLACEHOLDER,
-  UNSUPPORTED_PARAM_OPTIONS,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
-import CatalogPriceFill from '@/components/models/CatalogPriceFill';
+import { EMPTY_REASONING_FORM, reasoningSettingsPatch, type ReasoningFormValue } from '@/components/models/reasoningForm';
+import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -51,7 +57,6 @@ const DEFAULT_PRICING = {
 const CAPABILITY_KEYS = {
   categories: 'model.categories',
   toolCalls: 'model.supports.tool_calls',
-  multimodal: 'model.supports.multimodal',
 } as const;
 
 type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
@@ -98,7 +103,8 @@ interface FormValues {
   description: string;
   category: ModelCategory;
   modelId: string;
-  isMultimodal: boolean;
+  /** An explicit choice of what the model can be sent; null = detected from the model id. */
+  inputModalities: ModelInputModality[] | null;
   supportsToolCalls: boolean;
   capabilities: {
     contextWindow: number | '';
@@ -116,6 +122,7 @@ interface FormValues {
     pagePer1K: number | '';
     imagePer1K: number | '';
   };
+  reasoning: ReasoningFormValue;
   settings: {
     temperature: number | '';
     maxTokens: number | '';
@@ -123,6 +130,7 @@ interface FormValues {
     autoDropUnsupportedParams: boolean;
     requestDefaults: string;
     allowUnknownPassthrough: boolean;
+    upstreamApi: UpstreamApi;
   };
   ocr: {
     mode: OcrMode;
@@ -161,9 +169,9 @@ function providerSupportsToolCalls(provider?: ModelProviderView) {
   return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.toolCalls]);
 }
 
-function providerSupportsMultimodal(provider?: ModelProviderView) {
-  return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.multimodal]);
-}
+const isLlmCategory = (category: ModelCategory) => CAPABILITY_CATEGORIES.includes(category);
+const definedOnly = (patch: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
 
 export default function CreateModelModal({
   opened,
@@ -187,7 +195,7 @@ export default function CreateModelModal({
       description: '',
       category: 'llm',
       modelId: '',
-      isMultimodal: false,
+      inputModalities: null,
       // Capabilities default ON: nearly every current chat model does all of
       // this, and an operator who knows their model does not is one toggle away
       // from saying so. Defaulting them off had the opposite failure mode —
@@ -209,6 +217,7 @@ export default function CreateModelModal({
         pagePer1K: '',
         imagePer1K: '',
       },
+      reasoning: { ...EMPTY_REASONING_FORM },
       settings: {
         temperature: '',
         maxTokens: '',
@@ -216,6 +225,7 @@ export default function CreateModelModal({
         autoDropUnsupportedParams: true,
         requestDefaults: '',
         allowUnknownPassthrough: false,
+        upstreamApi: 'chat',
       },
       ocr: {
         mode: 'vlm',
@@ -283,6 +293,16 @@ export default function CreateModelModal({
     [availableProviders, formValues.providerKey],
   );
 
+  // What the model id is known to accept. Every driver can be told that a model
+  // takes images — a driver's own "multimodal" capability describes what the
+  // driver itself can discover, not what the operator's model can read — so the
+  // boxes are never limited by the provider.
+  const inferredModalities = useMemo(
+    () => inferredInputModalities(formValues.category, formValues.modelId),
+    [formValues.category, formValues.modelId],
+  );
+  const effectiveModalities = shownInputModalities(formValues.inputModalities, inferredModalities);
+
   // Same registry the gateway consults at call time, so the form shows exactly
   // what will be dropped rather than a description of it.
   const autoDropped = useMemo(
@@ -344,21 +364,8 @@ export default function CreateModelModal({
     if (!providerSupportsToolCalls(selectedProvider)) {
       setFieldValue('supportsToolCalls', false);
     }
-    if (!providerSupportsMultimodal(selectedProvider)) {
-      setFieldValue('isMultimodal', false);
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProvider, formValues.category]);
-
-  const providerOptions = useMemo(
-    () =>
-      availableProviders.map((provider) => ({
-        value: provider.key,
-        label: provider.label,
-        disabled: provider.status === 'disabled',
-      })),
-    [availableProviders],
-  );
 
   const validProvider = Boolean(formValues.providerKey);
   const validIdentity = Boolean(formValues.name && formValues.modelId);
@@ -420,15 +427,15 @@ export default function CreateModelModal({
           description: values.description,
           category: values.category,
           modelId: values.modelId,
-          isMultimodal: values.isMultimodal,
+          isMultimodal: CAPABILITY_CATEGORIES.includes(values.category)
+            ? isMultimodalFor(effectiveModalities)
+            : false,
           supportsToolCalls: values.supportsToolCalls,
           capabilities: {
             ...(contextWindow !== undefined ? { contextWindow } : {}),
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-            inputModalities: getDefaultModelInputModalities(
-              values.category,
-              values.isMultimodal,
-            ),
+            // Only a choice someone made is stored; otherwise the model id decides.
+            ...(CAPABILITY_CATEGORIES.includes(values.category) ? inputModalitiesPayload(values.inputModalities) : {}),
             outputModalities: getDefaultModelOutputModalities(values.category),
             supportsReasoning: values.capabilities.supportsReasoning,
             supportsStructuredOutputs: values.capabilities.supportsStructuredOutputs,
@@ -462,6 +469,10 @@ export default function CreateModelModal({
             ...(values.settings.unsupportedParams.length
               ? { unsupportedParams: values.settings.unsupportedParams }
               : {}),
+            // Chat Completions is the default; only an explicit Responses pick is stored.
+            ...(values.settings.upstreamApi === 'responses' && supportsUpstreamApiChoice(selectedProvider?.driver)
+              ? { upstreamApi: 'responses' }
+              : {}),
             // Only persisted when switched off — detection is the default.
             ...(values.settings.autoDropUnsupportedParams === false
               ? { autoDropUnsupportedParams: false }
@@ -472,6 +483,7 @@ export default function CreateModelModal({
             ...(values.settings.allowUnknownPassthrough
               ? { allowUnknownPassthrough: true }
               : {}),
+            ...(isLlmCategory(values.category) ? definedOnly(reasoningSettingsPatch(values.reasoning, undefined)) : {}),
             // P1 decision models are always served by the structured-output emulator
             // over the chat model named below; `native` is reserved for later phases.
             ...(values.category === 'decision'
@@ -549,7 +561,7 @@ export default function CreateModelModal({
           value={
             [
               formValues.supportsToolCalls ? tWizard('review.capabilityTags.tools') : null,
-              formValues.isMultimodal ? tWizard('review.capabilityTags.vision') : null,
+              CAPABILITY_CATEGORIES.includes(formValues.category) && effectiveModalities.includes('image') ? tWizard('review.capabilityTags.vision') : null,
               formValues.capabilities.supportsReasoning
                 ? tWizard('review.capabilityTags.reasoning')
                 : null,
@@ -590,11 +602,16 @@ export default function CreateModelModal({
   );
 
   const noProviders = availableProviders.length === 0;
+  const dirty = opened && Boolean(formValues.name || formValues.key || formValues.modelId);
   const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
+  const isLlm = CAPABILITY_CATEGORIES.includes(formValues.category);
+  let sectionCounter = 0;
+  const sectionNumber = () => ++sectionCounter;
 
   return (
-    <FormShell
+    <ModelFormLayout
       open={opened}
+      dirty={dirty}
       onClose={onClose}
       icon={<IconBrain size={16} />}
       title="Deploy model"
@@ -609,17 +626,35 @@ export default function CreateModelModal({
         onClick: submit,
       }}
     >
-      <FormSection
-        number={1}
-        title="Provider"
-        description="Pick the model provider that will serve this endpoint."
-        done={validProvider}
-      >
-        {noProviders ? (
-          <div
-            className="ds-card ds-card-pad"
-            style={{ background: 'var(--ds-surface-1)' }}
-          >
+      <GeneralSection<ModelCategory>
+        number={sectionNumber()}
+        done={validIdentity}
+        nameProps={form.getInputProps('name')}
+        keyProps={form.getInputProps('key')}
+        keyHint="Leave blank to generate from the display name."
+        descriptionProps={form.getInputProps('description')}
+        category={{
+          options: ALL_CATEGORIES.filter((opt) => allowedCategories.includes(opt.value)),
+          value: formValues.category,
+          onChange: (v) => setFieldValue('category', v),
+        }}
+      />
+
+      <ProviderSection
+        number={sectionNumber()}
+        done={validProvider && Boolean(formValues.modelId)}
+        providers={availableProviders.map((p) => ({
+          key: p.key,
+          label: p.label,
+          status: p.status,
+          driver: p.driver,
+          description: p.description,
+        }))}
+        providerKey={formValues.providerKey}
+        onProviderChange={(key) => setFieldValue('providerKey', key)}
+        modelIdProps={form.getInputProps('modelId')}
+        emptyState={
+          <div className="ds-card ds-card-pad" style={{ background: 'var(--ds-surface-1)' }}>
             <span className="ds-muted" style={{ fontSize: 13 }}>
               No model providers are available in this project yet. Add one for
               this project, or assign an existing tenant provider to it from the
@@ -640,168 +675,44 @@ export default function CreateModelModal({
               </div>
             ) : null}
           </div>
-        ) : (
-          <>
-            <FormField label="Provider" required>
-              <Select
-                placeholder="Select a model provider"
-                data={providerOptions}
-                value={formValues.providerKey}
-                onChange={(value) => setFieldValue('providerKey', value ?? '')}
-                searchable
-              />
-            </FormField>
-            {selectedProvider ? (
-              <div
-                className="ds-card ds-card-pad-sm"
-                style={{ marginTop: 12, background: 'var(--ds-surface-1)' }}
-              >
-                <div className="ds-row ds-gap-sm" style={{ marginBottom: 4 }}>
-                  <span style={{ fontWeight: 600 }}>{selectedProvider.label}</span>
-                  <span
-                    className={`ds-badge ${selectedProvider.status === 'active' ? 'ds-badge-ok' : 'ds-badge-warn'}`}
-                  >
-                    {selectedProvider.status}
-                  </span>
-                </div>
-                {selectedProvider.description ? (
-                  <div
-                    className="ds-muted"
-                    style={{ fontSize: 12, marginBottom: 4 }}
-                  >
-                    {selectedProvider.description}
-                  </div>
-                ) : null}
-                <div className="ds-faint" style={{ fontSize: 11.5 }}>
-                  driver: <span className="ds-mono">{selectedProvider.driver}</span>{' '}
-                  · key: <span className="ds-mono">{selectedProvider.key}</span>
-                </div>
-              </div>
-            ) : null}
-          </>
-        )}
-      </FormSection>
+        }
+      />
 
-      <FormSection
-        number={2}
-        title="Identity"
-        description="How this model is identified across the console and SDK."
-        done={validIdentity}
-      >
-        <FormRow cols={2}>
-          <FormField label="Display name" required>
-            <TextInput
-              placeholder="Friendly model name"
-              {...form.getInputProps('name')}
-            />
-          </FormField>
-          <FormField
-            label="Key"
-            hint="Leave blank to generate from the display name."
-          >
-            <TextInput
-              placeholder="optional-model-key"
-              {...form.getInputProps('key')}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={2}>
-          <FormField label="Model ID" required>
-            <TextInput
-              placeholder="gpt-4o-mini"
-              {...form.getInputProps('modelId')}
-            />
-          </FormField>
-          <FormField label="Category">
-            <ChipPicker<ModelCategory>
-              options={ALL_CATEGORIES.filter((opt) =>
-                allowedCategories.includes(opt.value),
-              )}
-              value={formValues.category}
-              onChange={(v) => setFieldValue('category', v as ModelCategory)}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={1}>
-          <FormField label="Description" optional>
-            <Textarea
-              placeholder="Optional description"
-              autosize
-              minRows={2}
-              {...form.getInputProps('description')}
-            />
-          </FormField>
-        </FormRow>
-      </FormSection>
-
-      {CAPABILITY_CATEGORIES.includes(formValues.category) && (
-      <FormSection
-        number={3}
-        title="Capabilities"
-        description="What this model supports — determined by the provider but can be overridden."
-      >
-        <ToggleList>
-          <ToggleRow
-            label="Supports tool calls"
-            description="Allow the model to invoke registered tools via function calling."
-            checked={formValues.supportsToolCalls}
-            disabled={!providerSupportsToolCalls(selectedProvider)}
-            onChange={(v) => setFieldValue('supportsToolCalls', v)}
-          />
-          <ToggleRow
-            label="Multimodal (vision)"
-            description="Model accepts image inputs in addition to text."
-            checked={formValues.isMultimodal}
-            disabled={!providerSupportsMultimodal(selectedProvider)}
-            onChange={(v) => setFieldValue('isMultimodal', v)}
-          />
-          <ToggleRow
-            label={tWizard('fields.supportsReasoning.label')}
-            description={tWizard('fields.supportsReasoning.description')}
-            checked={formValues.capabilities.supportsReasoning}
-            onChange={(v) => setFieldValue('capabilities.supportsReasoning', v)}
-          />
-          <ToggleRow
-            label={tWizard('fields.supportsStructuredOutputs.label')}
-            description={tWizard('fields.supportsStructuredOutputs.description')}
-            checked={formValues.capabilities.supportsStructuredOutputs}
-            onChange={(v) => setFieldValue('capabilities.supportsStructuredOutputs', v)}
-          />
-        </ToggleList>
-        <FormRow cols={2}>
-          <FormField
-            label={tWizard('fields.contextWindow.label')}
-            optional
-            hint={tWizard('fields.contextWindow.description')}
-          >
-            <NumberInput
-              min={1}
-              step={1024}
-              thousandSeparator=","
-              placeholder={tWizard('fields.contextWindow.placeholder')}
-              {...form.getInputProps('capabilities.contextWindow')}
-            />
-          </FormField>
-          <FormField
-            label={tWizard('fields.maxOutputTokens.label')}
-            optional
-            hint={tWizard('fields.maxOutputTokens.description')}
-          >
-            <NumberInput
-              min={1}
-              step={1024}
-              thousandSeparator=","
-              placeholder={tWizard('fields.maxOutputTokens.placeholder')}
-              {...form.getInputProps('capabilities.maxOutputTokens')}
-            />
-          </FormField>
-        </FormRow>
-      </FormSection>
+      {isLlm && (
+        <CapabilitiesSection
+          number={sectionNumber()}
+          toolCalls={{
+            label: 'Supports tool calls',
+            description: 'Allow the model to invoke registered tools via function calling.',
+            checked: formValues.supportsToolCalls,
+            disabled: !providerSupportsToolCalls(selectedProvider),
+            onChange: (v) => setFieldValue('supportsToolCalls', v),
+          }}
+          reasoning={{
+            label: tWizard('fields.supportsReasoning.label'),
+            description: tWizard('fields.supportsReasoning.description'),
+            checked: formValues.capabilities.supportsReasoning,
+            onChange: (v) => setFieldValue('capabilities.supportsReasoning', v),
+          }}
+          structuredOutputs={{
+            label: tWizard('fields.supportsStructuredOutputs.label'),
+            description: tWizard('fields.supportsStructuredOutputs.description'),
+            checked: formValues.capabilities.supportsStructuredOutputs,
+            onChange: (v) => setFieldValue('capabilities.supportsStructuredOutputs', v),
+          }}
+          modalities={{
+            label: tWizard('fields.inputModalities.label'),
+            hint: tWizard('fields.inputModalities.description'),
+            value: formValues.inputModalities,
+            inferred: inferredModalities,
+            onChange: (next) => setFieldValue('inputModalities', next),
+          }}
+        />
       )}
 
       {formValues.category === 'ocr' && (
         <FormSection
-          number="3a"
+          number={sectionNumber()}
           title="OCR mode"
           description="Choose between a dedicated OCR provider (native) or a vision-capable chat model (VLM)."
           done={Boolean(formValues.ocr.mode)}
@@ -841,7 +752,7 @@ export default function CreateModelModal({
 
       {formValues.category === 'decision' && (
         <FormSection
-          number="3a"
+          number={sectionNumber()}
           title={tWizard('decision.title')}
           description={tWizard('decision.description')}
           done
@@ -871,9 +782,9 @@ export default function CreateModelModal({
         </FormSection>
       )}
 
-      <FormSection
-        number={4}
-        title="Pricing"
+      <PricingSection
+        number={sectionNumber()}
+        done={validPricing}
         description={
           formValues.category === 'stt'
             ? 'Per-1000-second pricing for transcription input.'
@@ -885,51 +796,17 @@ export default function CreateModelModal({
                   ? 'Per-1000-image pricing. Token fields apply to the models that also bill the prompt.'
                   : 'Per-million-token pricing for accounting and routing decisions.'
         }
-        done={validPricing}
+        modelId={formValues.modelId}
+        currencyProps={form.getInputProps('pricing.currency')}
+        inputProps={form.getInputProps('pricing.inputTokenPer1M')}
+        outputProps={form.getInputProps('pricing.outputTokenPer1M')}
+        cachedProps={form.getInputProps('pricing.cachedTokenPer1M')}
+        onApplyCatalog={(pricing) => {
+          setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
+          setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
+          setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
+        }}
       >
-        <FormRow cols={2}>
-          <FormField label="Currency">
-            <TextInput
-              placeholder="USD"
-              {...form.getInputProps('pricing.currency')}
-            />
-          </FormField>
-          <FormField
-            label="Input · per 1M tokens"
-            action={
-              <CatalogPriceFill
-                modelId={formValues.modelId}
-                onApply={(pricing) => {
-                  setFieldValue('pricing.inputTokenPer1M', pricing.inputTokenPer1M);
-                  setFieldValue('pricing.outputTokenPer1M', pricing.outputTokenPer1M);
-                  setFieldValue('pricing.cachedTokenPer1M', pricing.cachedTokenPer1M);
-                }}
-              />
-            }
-          >
-            <NumberInput
-              min={0}
-              decimalScale={4}
-              {...form.getInputProps('pricing.inputTokenPer1M')}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={2}>
-          <FormField label="Output · per 1M tokens">
-            <NumberInput
-              min={0}
-              decimalScale={4}
-              {...form.getInputProps('pricing.outputTokenPer1M')}
-            />
-          </FormField>
-          <FormField label="Cached · per 1M tokens" optional>
-            <NumberInput
-              min={0}
-              decimalScale={4}
-              {...form.getInputProps('pricing.cachedTokenPer1M')}
-            />
-          </FormField>
-        </FormRow>
         {formValues.category === 'stt' && (
           <FormRow cols={2}>
             <FormField label="Audio input · per 1K seconds" optional>
@@ -990,106 +867,70 @@ export default function CreateModelModal({
             </FormField>
           </FormRow>
         )}
-      </FormSection>
+      </PricingSection>
 
-      <FormSection
-        number={5}
-        title="Default parameters"
-        description="Used when callers don't specify their own. Can always be overridden per-request."
-        done
-      >
-        <FormRow cols={2}>
-          <FormField label="Temperature" optional>
-            <NumberInput
-              min={0}
-              max={2}
-              step={0.1}
-              decimalScale={2}
-              placeholder="Optional"
-              {...form.getInputProps('settings.temperature')}
-            />
-          </FormField>
-          <FormField label="Max tokens" optional>
-            <NumberInput
-              min={1}
-              placeholder="Optional"
-              {...form.getInputProps('settings.maxTokens')}
-            />
-          </FormField>
-        </FormRow>
+      <LimitsSection
+        number={sectionNumber()}
+        contextWindow={
+          isLlm
+            ? {
+                label: tWizard('fields.contextWindow.label'),
+                hint: tWizard('fields.contextWindow.description'),
+                placeholder: tWizard('fields.contextWindow.placeholder'),
+                props: form.getInputProps('capabilities.contextWindow'),
+              }
+            : undefined
+        }
+        maxOutputTokens={
+          isLlm
+            ? {
+                label: tWizard('fields.maxOutputTokens.label'),
+                hint: tWizard('fields.maxOutputTokens.description'),
+                placeholder: tWizard('fields.maxOutputTokens.placeholder'),
+                props: form.getInputProps('capabilities.maxOutputTokens'),
+              }
+            : undefined
+        }
+        maxTokens={{ props: form.getInputProps('settings.maxTokens') }}
+        temperatureProps={form.getInputProps('settings.temperature')}
+      />
 
-        <FormField
-          label="Detected automatically"
-          hint={
-            autoDropped.params.length
-              ? autoDropped.reason
-              : 'Nothing known against this provider and model id. Anything the provider still rejects goes in the list below.'
-          }
-        >
-          {autoDropped.params.length ? (
-            <Group gap={6}>
-              {autoDropped.params.map((param) => (
-                <Badge key={param} variant="light" color="gray" radius="sm">
-                  {param}
-                </Badge>
-              ))}
-            </Group>
-          ) : (
-            <Text size="sm" c="dimmed">None</Text>
+      {isLlm ? (
+        <ReasoningSection
+          number={sectionNumber()}
+          driver={selectedProvider?.driver}
+            modelId={form.values.modelId ?? undefined}
+            settings={formValues.settings}
+          value={formValues.reasoning}
+          onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
+          forcedNoneWithTools={Boolean(
+            detectForcedParams(selectedProvider?.driver, formValues.modelId, true).forced?.reasoning_effort,
           )}
-        </FormField>
+        />
+      ) : null}
 
-        <ToggleList>
-          <ToggleRow
-            label="Drop detected parameters automatically"
-            description="On by default. Turn off if the provider has started accepting a parameter this list still flags."
-            checked={formValues.settings.autoDropUnsupportedParams}
-            onChange={(checked) =>
-              setFieldValue('settings.autoDropUnsupportedParams', checked)
-            }
-          />
-        </ToggleList>
+      {isLlm && supportsUpstreamApiChoice(selectedProvider?.driver) ? (
+        <UpstreamApiSection
+          number={sectionNumber()}
+          value={formValues.settings.upstreamApi}
+          onChange={(next) => setFieldValue('settings.upstreamApi', next)}
+        />
+      ) : null}
 
-        <FormField
-          label="Also reject these"
-          optional
-          hint="Added on top of what was detected, for anything the registry does not know about this provider yet."
-        >
-          <MultiSelect
-            data={UNSUPPORTED_PARAM_OPTIONS}
-            searchable
-            clearable
-            placeholder="None"
-            {...form.getInputProps('settings.unsupportedParams')}
-          />
-        </FormField>
-
-        <FormField
-          label="Extra request body (JSON)"
-          optional
-          hint="Merged into every request to this model. For parameters outside the OpenAI schema — vLLM takes chat_template_kwargs, top_k, repetition_penalty. A caller's value wins over these."
-        >
-          <JsonInput
-            autosize
-            minRows={4}
-            formatOnBlur
-            validationError="Must be valid JSON"
-            placeholder={REQUEST_DEFAULTS_PLACEHOLDER}
-            {...form.getInputProps('settings.requestDefaults')}
-          />
-        </FormField>
-
-        <ToggleList>
-          <ToggleRow
-            label="Forward unrecognised caller parameters"
-            description="Off by default. When on, body fields the gateway does not know are passed to the provider as-is."
-            checked={formValues.settings.allowUnknownPassthrough}
-            onChange={(checked) =>
-              setFieldValue('settings.allowUnknownPassthrough', checked)
-            }
-          />
-        </ToggleList>
-      </FormSection>
-    </FormShell>
+      <RequestParamsSection
+        number={sectionNumber()}
+        autoDropped={autoDropped}
+        autoDrop={{
+          checked: formValues.settings.autoDropUnsupportedParams,
+          onChange: (checked) => setFieldValue('settings.autoDropUnsupportedParams', checked),
+        }}
+        unsupportedProps={form.getInputProps('settings.unsupportedParams')}
+        requestDefaultsProps={form.getInputProps('settings.requestDefaults')}
+        passthrough={{
+          checked: formValues.settings.allowUnknownPassthrough,
+          onChange: (checked) => setFieldValue('settings.allowUnknownPassthrough', checked),
+        }}
+      />
+    </ModelFormLayout>
   );
 }

@@ -1,0 +1,81 @@
+/**
+ * "My account": the page every signed-in person has, outside the IAM center -
+ * their profile, their own password (local accounts) and a way to their personal
+ * API tokens. Kept in its own file and spread into `en.ts`.
+ */
+export const accountPageEn = {
+  eyebrow: 'Account',
+  title: 'My account',
+  subtitle: 'Your profile, your password and your personal API tokens.',
+  loading: 'Loading your account…',
+  loadFailed: 'Your account could not be loaded',
+  retry: 'Try again',
+  roles: {
+    owner: 'Owner',
+    admin: 'Admin',
+    project_admin: 'Project admin',
+    user: 'User',
+  },
+  providers: {
+    local: 'Local account',
+    ldap: 'LDAP',
+    oidc: 'SSO (OIDC)',
+    saml: 'SSO (SAML)',
+  },
+  managed: {
+    title: 'Managed by {provider}',
+    body: 'Your name, email address and password are kept in your directory, so they are read-only here. Change them there.',
+  },
+  profile: {
+    title: 'Profile',
+    hint: 'How you appear in the console.',
+    name: 'Name',
+    email: 'Email address',
+    emailHint: 'A workspace administrator changes your email address.',
+    role: 'Role',
+    roleHint: 'A workspace administrator sets your role.',
+    source: 'Sign-in',
+    nameInvalid: 'Use 2 to 120 characters.',
+    save: 'Save changes',
+    saved: 'Profile saved',
+    noEmail: 'None (service account)',
+  },
+  password: {
+    title: 'Password',
+    hint: 'Change the password you sign in with.',
+    current: 'Current password',
+    next: 'New password',
+    confirm: 'Confirm new password',
+    rules: 'At least 8 characters, with an uppercase letter, a lowercase letter, a digit and a special character.',
+    rule: {
+      length: 'At least 8 characters',
+      upper: 'An uppercase letter',
+      lower: 'A lowercase letter',
+      digit: 'A digit',
+      special: 'A special character',
+    },
+    submit: 'Change password',
+    changed: 'Password changed',
+    mismatch: 'The passwords do not match',
+    currentRequired: 'Enter your current password',
+    weak: 'The new password does not meet the requirements',
+    managedTitle: 'Your password is managed elsewhere',
+    managedBody: 'Your account signs in through {provider}. Change your password there.',
+    serviceTitle: 'No password',
+    serviceBody: 'This is a service account. It cannot sign in, so it has no password.',
+  },
+  tokens: {
+    title: 'Your API tokens',
+    body: 'API tokens let scripts and applications act as you. You manage your own tokens on the API Tokens page; administrators manage other people\'s tokens in the IAM center.',
+    open: 'Open API tokens',
+  },
+  errors: {
+    directory_managed: 'This account is managed by your directory. Change it there.',
+    password_managed_externally: 'Your password is managed by your directory. Change it there.',
+    invalid_password: 'The new password does not meet the requirements.',
+    invalid_body: 'The request was not valid.',
+    rate_limited: 'Too many attempts. Try again later.',
+    wrongCurrent: 'The current password is not correct.',
+    generic: 'Something went wrong. Try again.',
+  },
+};

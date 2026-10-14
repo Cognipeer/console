@@ -381,6 +381,14 @@
     "POST /vector/migrations/:key/start",
     "PUT /browser/browsers/:idOrKey/profile",
     "PUT /client/v1/browser/browsers/:idOrKey/profile",
-    "PUT /tools/:toolId"
+    "PUT /tools/:toolId",
+    "GET ${base}/events",
+    "GET ${base}/:id",
+    "PATCH ${base}/:id",
+    "DELETE ${base}/:id",
+    "POST ${base}/:id/rotate-secret",
+    "POST ${base}/:id/test",
+    "GET ${base}/:id/deliveries",
+    "POST ${base}/deliveries/:deliveryId/redeliver"
   ]
 }

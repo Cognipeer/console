@@ -34,6 +34,8 @@ import {
 } from './browserSessionService';
 import { listBrowserFlows, runBrowserFlow } from './browserFlowService';
 import type { BrowserAction } from './types';
+import { abortErrorFrom } from '@/lib/core/resilience';
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 
 interface ToolBindCtx {
   tenantDbName: string;
@@ -50,6 +52,25 @@ interface ToolBindCtx {
   }) => void;
 }
 
+/**
+ * Settles with `op` or, as soon as `signal` fires, rejects with an AbortError so
+ * a stopped turn is not held by a page that is slow to load or an action that is
+ * waiting on an element. The underlying browser operation is left to finish on
+ * its own; its result is discarded.
+ */
+export function raceWithSignal<T>(op: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return op;
+  if (signal.aborted) {
+    op.catch(() => undefined);
+    return Promise.reject(abortErrorFrom(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortErrorFrom(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    op.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 function wrap<TInput>(
   ctx: ToolBindCtx,
   name: string,
@@ -57,7 +78,9 @@ function wrap<TInput>(
 ) {
   return async (input: TInput) => {
     try {
-      const output = await exec(input);
+      const signal = currentTurnSignal();
+      if (signal?.aborted) throw abortErrorFrom(signal);
+      const output = await raceWithSignal(exec(input), signal);
       ctx.onToolCall?.({ name, input, output });
       return output;
     } catch (err) {

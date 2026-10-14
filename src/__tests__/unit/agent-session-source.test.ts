@@ -8,7 +8,7 @@ describe('agent session source', () => {
     });
 
     it('keeps real traffic read-only', () => {
-        for (const source of ['api', 'a2a', 'schedule', 'evaluation', 'redteam']) {
+        for (const source of ['api', 'a2a', 'schedule', 'evaluation', 'redteam', 'portal']) {
             expect(isContinuableSession(source)).toBe(false);
         }
     });
@@ -16,6 +16,7 @@ describe('agent session source', () => {
     it('labels sources for the read-only notice', () => {
         expect(sessionSourceLabel('api')).toBe('API');
         expect(sessionSourceLabel('a2a')).toBe('A2A');
+        expect(sessionSourceLabel('portal')).toBe('Portal');
         expect(sessionSourceLabel(undefined)).toBe('unknown source');
         expect(sessionSourceLabel('something-new')).toBe('something-new');
     });

@@ -26,7 +26,8 @@
  * The helper warns and falls back to SQLite-only if the package is missing.
  */
 
-import { describe, it, beforeAll, afterAll } from 'vitest';
+import { describe, it, beforeAll, afterAll, aroundEach } from 'vitest';
+import type { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -46,6 +47,12 @@ const MONGO_AVAILABLE: boolean = (() => {
 })();
 
 type ProviderKind = 'sqlite' | 'mongodb';
+
+/** The providers' private per-request tenant bindings (same fields on SQLite and MongoDB). */
+type TenantBindings = {
+  tenantContext?: AsyncLocalStorage<unknown>;
+  tenantNameContext?: AsyncLocalStorage<unknown>;
+};
 
 type ProviderHandle = {
   kind: ProviderKind;
@@ -173,6 +180,18 @@ export function describeForEachProvider(
 
     afterAll(async () => {
       await handle?.teardown();
+    });
+
+    // Each test (with its beforeEach hooks) starts with no tenant bound. On
+    // Node 22 a `switchToTenant` in an earlier test's hook can stay bound for
+    // every later test and win over the tenant that test's hook switched to.
+    aroundEach(async (runTest) => {
+      const db = handle?.getDb() as unknown as TenantBindings | undefined;
+      if (!db?.tenantContext || !db.tenantNameContext) {
+        await runTest();
+        return;
+      }
+      await db.tenantContext.run(undefined, () => db.tenantNameContext!.run(undefined, () => runTest()));
     });
 
     body(() => {

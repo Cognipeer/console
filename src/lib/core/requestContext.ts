@@ -20,6 +20,16 @@ import { randomUUID } from 'crypto';
 export type RequestActorType = 'user' | 'api_token' | 'system';
 export type RequestSource = 'api' | 'dashboard' | 'system';
 
+/**
+ * How the request came to act for the user it is attributed to: an application's API token acted for a person whose
+ * identity a trusted issuer vouched for. `userId` of the context is then that person (the subject) and `apiTokenId`
+ * the application's token (the actor).
+ */
+export interface RequestVia {
+  kind: 'delegated';
+  issuer: string;
+}
+
 export interface RequestContext {
   requestId: string;
   tenantId?: string;
@@ -29,6 +39,7 @@ export interface RequestContext {
   apiTokenId?: string;
   actorType?: RequestActorType;
   source?: RequestSource;
+  via?: RequestVia;
   startedAt: number;
 }
 
@@ -51,6 +62,7 @@ export function runWithRequestContext<T>(
     apiTokenId: partial.apiTokenId,
     actorType: partial.actorType,
     source: partial.source,
+    via: partial.via,
     startedAt: partial.startedAt ?? Date.now(),
   };
   return storage.run(ctx, fn);

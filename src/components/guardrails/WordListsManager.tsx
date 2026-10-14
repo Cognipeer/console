@@ -18,6 +18,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconFilePlus,
   IconListDetails,
@@ -56,6 +58,8 @@ const LANGUAGE_OPTIONS = [
  * their key.
  */
 export default function WordListsManager({ opened, onClose }: WordListsManagerProps) {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [lists, setLists] = useState<WordListSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -187,20 +191,19 @@ export default function WordListsManager({ opened, onClose }: WordListsManagerPr
     }
   };
 
-  const handleDelete = async (list: WordListSummary) => {
-    try {
-      const res = await fetch(`/api/guardrails/word-lists/${list.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete word list');
-      notifications.show({ title: 'Deleted', message: `"${list.name}" removed`, color: 'teal' });
-      void load();
-    } catch (err) {
-      notifications.show({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to delete',
-        color: 'red',
-      });
-    }
-  };
+  const handleDelete = (list: WordListSummary) =>
+    deleteResource({
+      noun: tSafe('nouns.wordList'),
+      name: list.name,
+      type: 'guardrail-word-list',
+      id: list.id,
+      action: async () => {
+        const res = await fetch(`/api/guardrails/word-lists/${list.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete word list');
+        notifications.show({ title: 'Deleted', message: `"${list.name}" removed`, color: 'teal' });
+        void load();
+      },
+    });
 
   const entryCount = wordsText
     .split(/\r?\n|[,;\t]/)

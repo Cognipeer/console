@@ -88,24 +88,16 @@ function resolveLimits(runtime: IAgentRuntimeConfig | undefined): IAgentLimits {
 }
 
 /**
- * `reasoning.reflection` is tri-state on the SDK: absent keeps the profile
+ * Only `reflection` is read from `runtime.reasoning`: effort, budget and the
+ * thinking switches live next to the model now (`config.reasoningEffort`, see
+ * agentReasoning.ts) and reach the provider through the native model, not the
+ * SDK loop. `reflection` is tri-state on the SDK: absent keeps the profile
  * default, `false` disables it. `true` is expressed by leaving it absent, which
  * is why only the `false` case is emitted here.
  */
 function resolveReasoning(runtime: IAgentRuntimeConfig | undefined) {
-    const reasoning = runtime?.reasoning;
-    if (!reasoning || reasoning.enabled === false) return undefined;
-    const native = compact({
-        effort: reasoning.effort,
-        budgetTokens: reasoning.budgetTokens,
-        includeThoughts: reasoning.includeThoughts,
-    });
-    return compact({
-        enabled: true,
-        level: reasoning.level,
-        native: Object.keys(native).length > 0 ? native : undefined,
-        reflection: reasoning.reflection === false ? (false as const) : undefined,
-    });
+    if (runtime?.reasoning?.reflection !== false) return undefined;
+    return { enabled: true, reflection: false as const };
 }
 
 // Memory is resolved separately, in `agentMemoryAdapter.ts` — it needs a real

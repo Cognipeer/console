@@ -24,6 +24,8 @@
  * the run already has.
  */
 
+import { parseOutputLimitNotice } from './outputLimitNotice';
+import { clientToolMeta } from './agentClientTools';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     CostEstimator,
@@ -33,9 +35,22 @@ import type {
 } from '@cognipeer/agent-sdk';
 
 import { createLogger } from '@/lib/core/logger';
-import type { DatabaseProvider, IAgentConversation, IAgentTurnCompaction, IModelPricing } from '@/lib/database';
+import type {
+    DatabaseProvider,
+    IAgentConversation,
+    IAgentMessageAttachment,
+    IAgentTurnCompaction,
+    IModelPricing,
+} from '@/lib/database';
 
-import { chunkText } from './assembledStream';
+import { sdkContextWindow, type SdkContextWindowOptions } from './sdkContextWindow';
+import {
+    rebuildUserTurn,
+    recentImageAttachments,
+    referencedImageIds,
+    withEarlierImages,
+    type ContentPart,
+} from './sessionAttachmentText';
 
 const logger = createLogger('agent-turn-state');
 
@@ -76,6 +91,21 @@ type LooseMessage = Record<string, unknown> & {
     tool_calls?: Array<Record<string, unknown>>;
     tool_call_id?: string;
 };
+
+/** Plain text of a message's content, whether a string or an array of parts. */
+function chunkText(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+        .map((part) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+                return (part as { text: string }).text;
+            }
+            return '';
+        })
+        .join('');
+}
 
 function roleOf(message: LooseMessage): string | undefined {
     if (typeof message.role === 'string') return message.role;
@@ -202,6 +232,10 @@ function truncateText(value: unknown, limit: number): unknown {
  *  3. long tool results in the transcript itself.
  * Returns null when even that does not fit — the caller then stores nothing
  * and the next turn falls back to the text transcript.
+ *
+ * Images of attached files are not part of this: they are `session-file://`
+ * references in the state, never inline bytes, so they cost a few dozen
+ * characters each and cannot be what makes a state too large.
  */
 export function serializeForStorage(carried: CarriedState): string | null {
     let text = JSON.stringify(carried);
@@ -272,6 +306,15 @@ export async function loadConversationState(
 }
 
 /**
+ * The normal (repaired) snapshot `saveConversationState` stores for a state,
+ * or null when it is too large even trimmed. Exposed so a pause can budget
+ * its own copy against it: both live in one document.
+ */
+export function serializeCarriedState(state: AgentSdkSmartState | undefined): string | null {
+    return state ? serializeForStorage(pickCarried(state)) : null;
+}
+
+/**
  * Stores the state a turn ended in. Best-effort, like the transcript write it
  * follows: a failure here costs the next turn its memory of this one, not the
  * answer the caller already has.
@@ -286,11 +329,17 @@ export async function saveConversationState(
         state: AgentSdkSmartState | undefined;
         /** `conversation.messages.length` AFTER this turn was appended. */
         messageCount: number;
+        /**
+         * The full resumable state of a run that stopped for a person (see
+         * `agentPendingActions.serializePausedState`). Absent clears one left
+         * by an earlier pause — a finished turn never carries it forward.
+         */
+        pausedSnapshot?: string;
     },
 ): Promise<void> {
     try {
         if (!input.state) return;
-        const snapshot = serializeForStorage(pickCarried(input.state));
+        const snapshot = serializeCarriedState(input.state);
         if (snapshot === null) {
             logger.warn('Agent state is too large to store even trimmed; the next turn replays the transcript', {
                 conversationId: input.conversationId,
@@ -304,6 +353,7 @@ export async function saveConversationState(
             projectId: input.projectId,
             agentKey: input.agentKey,
             snapshot,
+            ...(input.pausedSnapshot ? { pausedSnapshot: input.pausedSnapshot } : {}),
             messageCount: input.messageCount,
             sizeBytes: snapshot.length,
         });
@@ -320,15 +370,66 @@ export async function saveConversationState(
  * there is none) plus the new user message, with an optional system prompt in
  * front — the playground passes its prompt as a message, the live path as an
  * option.
+ *
+ * A transcript replay keeps the files the person attached: a user message that
+ * has `attachments` is rebuilt with the same words the turn first carried them
+ * in (`rebuildUserTurn`) — the documents named for the session file tools, the
+ * images as references. And whichever way the history was built, the person's
+ * last `carryRecentImages` image-bearing messages are shown again with the new
+ * message when the model would no longer see them. "See" means the window the
+ * SDK builds each request from (`sdkContextWindow`), not the saved list: the
+ * SDK keeps the first user message and the latest turns, and a picture in an
+ * older message is still in the list long after it stopped being sent.
  */
 export function buildTurnInputState(input: {
     carried: CarriedState | null;
-    transcript: Array<{ role: string; content: string }>;
+    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[] }>;
     userMessage: string;
+    /**
+     * What the model is shown as the user turn when it is more than the text —
+     * the text with attached files, or content parts with images. Absent = `userMessage`.
+     */
+    userContent?: string | unknown[];
     systemPrompt?: string;
+    /** How earlier attachments are shown again. Absent = they are not (a stateless history). */
+    attachments?: {
+        supportsVision: boolean;
+        /** `attachments.carryRecentImages`; 0 = never. */
+        carryRecentImages: number;
+        /** Files the session still holds; an image whose file is gone is not carried. Absent = all. */
+        availableFileIds?: ReadonlySet<string>;
+        /**
+         * How the agent's context is windowed (`runtime.context`). An image counts as seen only when it
+         * sits inside that window. Absent = the whole history is taken as seen.
+         */
+        window?: Pick<SdkContextWindowOptions, 'policy' | 'lastTurnsToKeep'>;
+    };
 }): AgentSdkSmartState {
+    const replay = input.attachments;
     const history: AgentSdkMessage[] = input.carried?.messages
-        ?? input.transcript.map((m) => ({ role: m.role, content: m.content }) as AgentSdkMessage);
+        ?? input.transcript.map((m) => ({
+            role: m.role,
+            content: replay && m.role === 'user' && m.attachments?.length
+                ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
+                : m.content,
+        }) as AgentSdkMessage);
+
+    let userContent: string | unknown[] = input.userContent ?? input.userMessage;
+    if (replay && replay.supportsVision && replay.carryRecentImages > 0) {
+        const everything: Array<{ role?: string; content?: unknown }> = [
+            ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt }] : []),
+            ...history,
+            { role: 'user', content: userContent },
+        ];
+        const sent = replay.window
+            ? sdkContextWindow(everything, { ...replay.window, hasSummary: Boolean(input.carried?.summaryRecords?.length) })
+            : everything;
+        const visible = referencedImageIds(sent);
+        const missing = recentImageAttachments(input.transcript, replay.carryRecentImages)
+            .filter((image) => !visible.has(image.fileId))
+            .filter((image) => !replay.availableFileIds || replay.availableFileIds.has(image.fileId));
+        userContent = withEarlierImages(userContent as string | ContentPart[], missing);
+    }
     return {
         toolHistory: [],
         toolHistoryArchived: [],
@@ -338,7 +439,29 @@ export function buildTurnInputState(input: {
         messages: [
             ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt } as AgentSdkMessage] : []),
             ...history,
-            { role: 'user', content: input.userMessage } as AgentSdkMessage,
+            { role: 'user', content: userContent } as AgentSdkMessage,
+        ],
+    } as AgentSdkSmartState;
+}
+
+/**
+ * The input state for continuing a session with NO new user message: the carried
+ * state as it ended (the model resumes after its last tool results), with the
+ * system prompt in front when the surface hands it over as a message.
+ */
+export function buildContinueInputState(input: {
+    carried: CarriedState;
+    systemPrompt?: string;
+}): AgentSdkSmartState {
+    return {
+        toolHistory: [],
+        toolHistoryArchived: [],
+        summaries: [],
+        summaryRecords: [],
+        ...input.carried,
+        messages: [
+            ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt } as AgentSdkMessage] : []),
+            ...(input.carried.messages ?? []),
         ],
     } as AgentSdkSmartState;
 }
@@ -377,6 +500,12 @@ function isSyntheticText(message: LooseMessage): boolean {
     });
 }
 
+/** The open pause is a tool call only the page embedding the chat can answer. */
+function waitsOnHostPage(state: unknown): boolean {
+    const pending = (state as { pendingUserQuestions?: Array<{ status?: string; metadata?: Record<string, unknown> }> } | undefined)?.pendingUserQuestions;
+    return (pending ?? []).some((entry) => entry.status === 'pending' && clientToolMeta(entry) !== null);
+}
+
 export function describeTurnOutcome(
     result: Pick<AgentSdkInvokeResult, 'content' | 'state'>,
     /** How many messages the run started with — only text written after that counts. */
@@ -399,8 +528,22 @@ export function describeTurnOutcome(
         stopDetail = ctx.__awaitingApproval
             ? 'waiting for a tool approval'
             : ctx.__awaitingUserQuestion
-                ? 'waiting for an answer to a question'
+                ? (waitsOnHostPage(result.state) ? 'waiting for the host page to run a tool' : 'waiting for an answer to a question')
                 : undefined;
+    }
+
+    // The model could not fit an answer in its output limit even after a raised
+    // retry: the turn ended gracefully with a notice (gatewayChatModel.ts).
+    if (stopReason === 'completed') {
+        const notice = parseOutputLimitNotice(content);
+        if (notice) {
+            return {
+                stopReason: 'limit',
+                stopDetail: `maxOutputTokens${notice.limit ? ` (${notice.limit})` : ''} reached by the model`,
+                content,
+                partial: true,
+            };
+        }
     }
 
     if (stopReason === 'completed' || content.trim()) {
@@ -519,4 +662,14 @@ export function buildCostEstimator(
             cachedInputTokens: args.cachedInputTokens,
         }).totalCost;
     };
+}
+
+/**
+ * A turn the caller's signal aborted is a cancelled turn even when the SDK reports
+ * it as finished: a text stream that is cut short ends like a normal one, with no
+ * cancellation mark on the run. What was written so far stays as the answer.
+ */
+export function endedByCallerAbort(outcome: AgentTurnOutcome, signal: AbortSignal | undefined): AgentTurnOutcome {
+    if (!signal?.aborted || outcome.stopReason !== 'completed') return outcome;
+    return { ...outcome, stopReason: 'cancelled', stopDetail: 'aborted', partial: true };
 }

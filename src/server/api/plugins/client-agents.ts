@@ -1,5 +1,7 @@
+import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -22,6 +24,7 @@ import {
 import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   agentDefaultCallback,
+  apiErrorBody,
   backgroundDisabledErrorBody,
   invalidRequestErrorBody,
   lookupIdempotentAgentRun,
@@ -29,12 +32,22 @@ import {
   serializeAgentRun,
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
+import { resolveAgentConfig } from '@/lib/services/agents/agentService';
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
+import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
+import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
+import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
+import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
+import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
+import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
+  authorizationRefusalOf,
   getApiTokenContextForRequest,
   getHeaderValue,
   readJsonBody,
@@ -50,44 +63,20 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
+import { requestCanNameBucket } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import {
+  AgentModelError,
+  advertisedModelsForRequest,
+  rememberSessionModel,
+  requestedAgentModel,
+  resolveRunModelForRequest,
+  sendAgentModelError,
+} from './agent-model-authz';
+import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:client-agents');
-
-function extractUserMessage(input: unknown): string | null {
-  if (typeof input === 'string') {
-    return input;
-  }
-
-  if (Array.isArray(input)) {
-    for (let index = input.length - 1; index >= 0; index -= 1) {
-      const item = input[index];
-      if (!item || typeof item !== 'object') {
-        continue;
-      }
-
-      const candidate = item as {
-        content?: string | Array<Record<string, unknown>>;
-        role?: string;
-      };
-
-      if (candidate.role === 'user' && typeof candidate.content === 'string') {
-        return candidate.content;
-      }
-
-      if (candidate.role === 'user' && Array.isArray(candidate.content)) {
-        const textPart = candidate.content.find(
-          (part) => part.type === 'input_text' && typeof part.text === 'string',
-        );
-        if (textPart && typeof textPart.text === 'string') {
-          return textPart.text;
-        }
-      }
-    }
-  }
-
-  return null;
-}
 
 /**
  * Dual-prefix (§8, §12.3): `resp_<id>` is the synchronous scheme's id
@@ -105,6 +94,28 @@ function conversationIdFromResponseId(
   if (responseId.startsWith('resp_')) return { strippedId: responseId.slice(5), kind: 'resp' };
   if (responseId.startsWith('run_')) return { strippedId: responseId.slice(4), kind: 'run' };
   return null;
+}
+
+/**
+ * The session a Responses request continues, named by `session_id` or its
+ * OpenAI-style alias `conversation` (a string, or `{ id }`). Naming it twice is
+ * fine as long as both say the same session.
+ */
+export function readSessionReference(body: Record<string, unknown>): { id?: string } | { error: string } {
+  const named: string[] = [];
+  if (body.session_id !== undefined && body.session_id !== null) {
+    if (typeof body.session_id !== 'string' || body.session_id.trim() === '') return { error: 'session_id must be a session id (a string)' };
+    named.push(body.session_id.trim());
+  }
+  if (body.conversation !== undefined && body.conversation !== null) {
+    const raw = typeof body.conversation === 'object' && !Array.isArray(body.conversation)
+      ? (body.conversation as { id?: unknown }).id
+      : body.conversation;
+    if (typeof raw !== 'string' || raw.trim() === '') return { error: 'conversation must be a session id, or an object { id }' };
+    named.push(raw.trim());
+  }
+  if (named.length === 2 && named[0] !== named[1]) return { error: 'session_id and conversation name different sessions' };
+  return named.length > 0 ? { id: named[0] } : {};
 }
 
 function createResponsesHandler(usePublished: boolean) {
@@ -136,22 +147,40 @@ function createResponsesHandler(usePublished: boolean) {
         return reply.code(400).send({ error: 'Agent is not active' });
       }
 
-      const userMessage = extractUserMessage(body.input);
-      if (!userMessage) {
+      // The text, and the files (`input_file` / `input_image`) of the last user message.
+      const userInput = extractResponseUserInput(body.input);
+      const userMessage = userInput.text ?? '';
+      if (!userMessage && userInput.files.length === 0) {
         return reply.code(400).send({
           error: 'input field is required (string or array of message items)',
         });
       }
+      const attachmentsAvailable = attachmentsAvailability(agent.config);
+      if (userInput.files.length > 0 && !attachmentsAvailable.available) {
+        return reply.code(403).send(invalidRequestErrorBody(attachmentsUnavailableMessage(attachmentsAvailable.reason), 'attachments_disabled'));
+      }
+      // The session this request continues: `previous_response_id`, or `session_id` / `conversation`.
+      const sessionRef = readSessionReference(body);
+      if ('error' in sessionRef) return reply.code(400).send(invalidRequestErrorBody(sessionRef.error, 'invalid_request'));
+      if (userInput.files.some((file) => file.fileId)
+        && typeof body.previous_response_id !== 'string' && sessionRef.id === undefined) {
+        return reply.code(400).send(invalidRequestErrorBody(
+          'file_id names a file already uploaded to a session: continue that session with session_id (or previous_response_id), or send file_data / image_url.',
+          'attachment_not_found',
+        ));
+      }
 
       let conversationId: string | undefined;
+      let sessionConversation: IAgentConversation | null = null;
       // §12.15's hash must never depend on a conversationId that is FRESH
       // on this specific attempt — a caller retrying "start a new
       // conversation" (no previous_response_id) gets a brand-new
       // conversationId on every attempt, so including it in the hash would
       // make the SAME logical retry never match itself. Only stabilize the
       // hash on conversationId when the caller explicitly continued an
-      // EXISTING conversation via previous_response_id.
+      // EXISTING conversation via previous_response_id or session_id.
       let idempotencyConversationScope: string | null = null;
+      let resolvedConversationId: string | undefined;
       if (typeof body.previous_response_id === 'string') {
         // Dual-mode (§8, §12.3): a background/run response is polled by its
         // OWN `run_<runId>` id, and its embedded `result.id` is
@@ -171,18 +200,118 @@ function createResponsesHandler(usePublished: boolean) {
         const run = parsed
           ? await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId)
           : null;
-        const resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
-        const conversation = resolvedConversationId !== undefined
-          ? await getConversationById(ctx.tenantDbName, resolvedConversationId)
-          : null;
-        if (resolvedConversationId === undefined || !conversation
-          || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-          return reply.code(404).send({
-            error: 'previous_response_id does not match a valid conversation',
+        resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
+        if (resolvedConversationId === undefined) {
+          return reply.code(404).send({ error: 'previous_response_id does not match a valid conversation' });
+        }
+      }
+      // `session_id` / `conversation` name the same thing in the session's own words. With
+      // `previous_response_id` too they must agree: two different sessions is a mistake, not a choice.
+      if (sessionRef.id !== undefined) {
+        if (resolvedConversationId !== undefined && resolvedConversationId !== sessionRef.id) {
+          return reply.code(400).send(invalidRequestErrorBody(
+            'session_id and previous_response_id name different sessions: send one of them',
+            'session_conflict',
+          ));
+        }
+        resolvedConversationId = sessionRef.id;
+      }
+      if (resolvedConversationId !== undefined) {
+        const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId).catch(() => null);
+        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
+          return reply.code(404).send(sessionRef.id !== undefined && typeof body.previous_response_id !== 'string'
+            ? apiErrorBody('not_found_error', 'session_id does not match a session of this agent', 'session_not_found')
+            : { error: 'previous_response_id does not match a valid conversation' });
+        }
+        // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
+        // `agent.session_manage_others` and `agent.session_view_others` (the answer is built from what the session
+        // holds). Whichever route the request came in on (this one is `agents`, the OpenAI-shaped `/responses` is
+        // `models`), a token only reaches a session through this check.
+        const access = await decideSessionAccess(request, conversation, {
+          need: 'continue',
+          agent,
+          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+        });
+        if (!access.ok) return sendClientSessionRefusal(reply, request, access);
+        // Waiting on an approval or an answer, and the agent refuses new
+        // messages meanwhile: say so before any run is created.
+        const blocking = await pendingActionsBlockingMessage(ctx.tenantDbName, conversation, agent.config);
+        if (blocking) {
+          return reply.code(409).send({
+            error: {
+              type: 'pending_action',
+              code: 'pending_action',
+              message: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
+              pending_action_ids: blocking,
+            },
           });
         }
+        // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it
+        // with "no", so it takes the permission to answer.
+        const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+        if (cancelRefusal?.unavailable) {
+          return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
+        }
+        if (cancelRefusal) {
+          return reply.code(403).send(apiErrorBody(
+            'permission_error',
+            CANCEL_PENDING_FORBIDDEN_MESSAGE,
+            'action_forbidden',
+            cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : undefined,
+          ));
+        }
+        // The session has used up its own spend budget: nothing to run (402).
+        assertSessionBudgetAvailable(conversation);
         conversationId = resolvedConversationId;
+        sessionConversation = conversation;
         idempotencyConversationScope = resolvedConversationId;
+      }
+
+      // A spend budget for the session this request starts (`null` = none).
+      // A request that continues a session ignores the field altogether — not
+      // read, not validated, so a client that always sends its default budget
+      // keeps working on follow-up turns. That session's budget changes with
+      // PATCH /client/v1/agents/sessions/:conversationId.
+      let sessionBudget: IAgentSessionBudget | null | undefined;
+      if (!conversationId) {
+        if (body.budget === null) sessionBudget = null;
+        else if (body.budget !== undefined) {
+          const parsed = parseSessionBudget(body.budget);
+          if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
+          sessionBudget = parsed.budget;
+        }
+        // An agent whose admin set a session budget binds its API clients to it.
+        if (sessionBudget !== undefined) {
+          const violation = clientBudgetViolation(agent.config, sessionBudget);
+          if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
+        }
+      }
+
+      // `reasoning_effort` / `reasoning: { effort }`: the lowest rung of the reasoning precedence (the agent's
+      // own pick and the Model Hub default win), so a bad value is refused instead of silently ignored.
+      const reasoningRequest = parseAgentRequestReasoning(body);
+      if (reasoningRequest.error) {
+        return reply.code(400).send(invalidRequestErrorBody(reasoningRequest.error, 'invalid_reasoning'));
+      }
+
+      // Which of the agent's models this run uses (`agent_model` / header; the sticky model of the session otherwise).
+      // The config that will run decides the list: the published one for /agents/responses or a pinned version.
+      let modelChoice: AgentModelChoice | undefined;
+      const askedModel = requestedAgentModel(request, body);
+      if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
+        const runConfig = usePublished || requestedVersion !== undefined
+          ? (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId, requestedVersion)).config
+          : agent.config;
+        if (askedModel || runConfig.additionalModels?.length) {
+          try {
+            modelChoice = await resolveRunModelForRequest(request, {
+              agent, config: runConfig, projectId: ctx.projectId, requested: askedModel, conversation: sessionConversation,
+            });
+          } catch (error) {
+            if (error instanceof AgentModelError) return sendAgentModelError(reply, request, error);
+            throw error;
+          }
+        }
       }
 
       // Effective execution limits: min(env ceiling, tenant quota, the
@@ -235,12 +364,25 @@ function createResponsesHandler(usePublished: boolean) {
           projectId: ctx.projectId,
           agentKey: agent.key,
           userMessage,
+          idempotencyAttachments: namedFileIds(userInput.files),
           version: requestedVersion,
           idempotencyKey,
           idempotencyConversationScope,
         });
         if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
         if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
+      }
+
+      // A queued turn learns of an exhausted tenant spend limit here (429), not
+      // from a run that fails later — and before a conversation is created for it.
+      if (background) {
+        await assertQueuedTurnSpendAllowed({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey: agent.key,
+          userId: ctx.tokenRecord.userId,
+        });
       }
 
       if (!conversationId) {
@@ -252,8 +394,31 @@ function createResponsesHandler(usePublished: boolean) {
           agent.key,
           undefined,
           { source: 'api' },
+          sessionBudget,
         );
         conversationId = String(conversation._id);
+        sessionConversation = conversation;
+      }
+      // A queued run reads the choice from its session, so it is stored before the run is created.
+      if (modelChoice && sessionConversation) await rememberSessionModel(ctx.tenantDbName, sessionConversation, modelChoice);
+
+      // Files in the request become files of the session this turn runs on.
+      let attachments: string[] = [];
+      let namedAttachments: string[] = [];
+      if (userInput.files.length > 0 && sessionConversation) {
+        const stored = await storeResponseInputFiles({
+          files: userInput.files,
+          scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+          conversation: sessionConversation,
+          agentConfig: agent.config,
+          actor: {
+            userId: ctx.tokenRecord.userId,
+            licenseType: ctx.tenant.licenseType,
+            tokenId: ctx.tokenRecord._id?.toString() ?? ctx.token,
+          },
+        });
+        attachments = stored.attachments;
+        namedAttachments = stored.named;
       }
 
       const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
@@ -271,6 +436,7 @@ function createResponsesHandler(usePublished: boolean) {
           agentKey: agent.key,
           conversationId,
           userMessage,
+          ...(attachments.length > 0 ? { attachments, idempotencyAttachments: namedAttachments } : {}),
           userId: ctx.tokenRecord.userId,
           version: requestedVersion,
           usePublished,
@@ -310,8 +476,11 @@ function createResponsesHandler(usePublished: boolean) {
           usePublished,
           userId: ctx.tokenRecord.userId,
           userMessage,
+          ...(attachments.length > 0 ? { attachments } : {}),
           version: requestedVersion,
           runtimeContext,
+          ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
+          ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
         },
         syncTimeoutMs: limits.syncTimeoutMs,
       });
@@ -322,9 +491,14 @@ function createResponsesHandler(usePublished: boolean) {
         return reply.code(504).send(agentSyncTimeoutErrorBody());
       }
 
-      const { _conversation_messages, ...responseBody } = syncOutcome.response;
+      const { _conversation_messages, ...fullBody } = syncOutcome.response;
       void _conversation_messages;
-      return reply.code(200).send(responseBody);
+      // The agent's `showReasoning` already left the reasoning item out; `include_reasoning: false` lets
+      // a request narrow it further for itself (it can never bring back what the agent hid).
+      const responseBody = !shouldReturnReasoning(undefined, body)
+        ? { ...fullBody, output: (fullBody.output ?? []).filter((item) => item.type !== 'reasoning') }
+        : fullBody;
+      return reply.code(200).send(modelChoice ? { ...responseBody, cognipeer: { agent_model: modelChoice.modelKey } } : responseBody);
     } catch (error) {
       if (error instanceof AgentGuardrailBlockedError) {
         // Info, not error: a refused prompt is policy working as configured.
@@ -334,11 +508,12 @@ function createResponsesHandler(usePublished: boolean) {
         });
         return sendAgentGuardrailBlock(reply, error);
       }
-      logger.error('Client agent responses error', { error });
       // Which failure it was — a provider rejecting its key, a model that no
-      // longer exists, a rate limit — instead of one opaque 500 for all.
-      const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      // longer exists, a rate limit — instead of one opaque 500 for all. A
+      // refusal the caller can act on (a spent budget, a pending approval) is
+      // logged as such, without a stack; only a server fault is an error.
+      const classified = logAgentRouteError(logger, 'Client agent responses error', error);
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
   });
 }
@@ -353,13 +528,23 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId: ctx.projectId,
       });
 
+      // Only agents that list additional models are asked about them (one policy check per extra model).
+      const modelsByAgent = new Map<string, Awaited<ReturnType<typeof advertisedModelsForRequest>>>();
+      await Promise.all(agents.filter((agent) => agent.config.additionalModels?.length).map(async (agent) => {
+        const models = await advertisedModelsForRequest(request, { agent, tenantDbName: ctx.tenantDbName, projectId: ctx.projectId }).catch(() => undefined);
+        if (models) modelsByAgent.set(agent.key, models);
+      }));
+
       return reply.code(200).send({
         agents: agents.map((agent) => ({
+          ...(modelsByAgent.has(agent.key) ? { models: modelsByAgent.get(agent.key) } : {}),
           config: {
             maxTokens: agent.config.maxTokens,
             modelKey: agent.config.modelKey,
             temperature: agent.config.temperature,
             topP: agent.config.topP,
+            // false: the agent hides its reasoning text (agent-server / chat-ui honour it).
+            showReasoning: agentShowsReasoning(agent.config),
           },
           createdAt: agent.createdAt,
           description: agent.description,
@@ -384,6 +569,21 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // The models a caller may pick, when the agent offers more than its main one (those they may not use are left out).
+      const models = !agent.config.additionalModels?.length ? undefined : await advertisedModelsForRequest(request, {
+        agent: { ...agent, config: (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId).catch(() => null))?.config ?? agent.config },
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+      }).catch(() => undefined);
+
+      // What a client needs to decide whether to offer an attach button (and to warn about an image).
+      const attachments = await describeAgentAttachments({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        config: agent.config,
+      }).catch(() => null);
+
       return reply.code(200).send({
         agent: {
           config: {
@@ -391,12 +591,24 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             modelKey: agent.config.modelKey,
             temperature: agent.config.temperature,
             topP: agent.config.topP,
+            // false: the agent hides its reasoning text (agent-server / chat-ui honour it).
+            showReasoning: agentShowsReasoning(agent.config),
           },
           createdAt: agent.createdAt,
           description: agent.description,
           key: agent.key,
           name: agent.name,
           status: agent.status,
+          ...(models ? { models } : {}),
+          ...(attachments ? {
+            attachments: {
+              enabled: attachments.enabled,
+              max_files: attachments.maxFiles,
+              max_file_size_mb: attachments.maxFileSizeMb,
+              allowed_mime_types: attachments.allowedMimeTypes,
+              accepts_images: attachments.acceptsImages,
+            },
+          } : {}),
         },
       });
     } catch (error) {
@@ -432,7 +644,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
+        canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
       });
+      if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       const agent = await createAgentRecord(
@@ -450,6 +664,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ agent: redactAgent(agent) });
     } catch (error) {
+      // The engine could not decide who may name the bucket: 503, not a failure of ours.
+      const refusal = authorizationRefusalOf(error);
+      if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });
       logger.error('Create client agent error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -499,7 +716,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
-          });
+            canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
+          }, existing.config);
+          if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
         }
       }
@@ -518,6 +737,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ agent: redactAgent(agent) });
     } catch (error) {
+      const refusal = authorizationRefusalOf(error);
+      if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });
       logger.error('Update client agent error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

@@ -15,11 +15,14 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import CreateFileBucketModal from '@/components/files/CreateFileBucketModal';
 import type { FileBucketView } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
+import { bucketRefusalMessage } from './fileBrowse';
 
 function formatDate(value?: Date | string | null) {
   if (!value) {
@@ -47,6 +50,8 @@ export default function FileBucketManager({
   showRefreshButton = true,
   onCreateBucketRequest,
 }: FileBucketManagerProps) {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [modalOpen, setModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
@@ -109,17 +114,6 @@ export default function FileBucketManager({
     },
     onError: (error, bucket) => {
       console.error(error);
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : 'Unexpected error';
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete bucket',
-        message,
-      });
       if (bucket) {
         // Ensure stale data gets refreshed on failure
         void bucketsQuery.refetch();
@@ -132,14 +126,21 @@ export default function FileBucketManager({
       return;
     }
 
-    const confirmed = window.confirm(
-      `Delete bucket "${bucket.name}"? Files within the bucket must be removed first.`,
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    deleteBucket.mutate(bucket);
+    await deleteResource({
+      noun: tSafe('nouns.fileBucket'),
+      name: bucket.name,
+      type: 'file-bucket',
+      id: bucket.id,
+      extraWarning: tSafe('fileBucketExtra'),
+      action: async () => {
+        try {
+          await deleteBucket.mutateAsync(bucket);
+        } catch (error) {
+          // A bucket an agent stores its session files in is refused with the agents named; the dialog shows that reason.
+          throw new Error(bucketRefusalMessage(error));
+        }
+      },
+    });
   };
 
   const buckets = useMemo(

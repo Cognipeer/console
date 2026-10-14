@@ -4,6 +4,14 @@ import type { OcrRuntime } from './ocr';
 import type { ImageRuntime } from './image';
 import type { ModerationRuntime } from './moderation';
 import type { DecisionRuntime } from './decision';
+import type {
+  BaseProvider,
+  ChatCompletionChunk,
+  ChatCompletionRequest,
+  ChatCompletionResponse,
+  EmbeddingResponse,
+  ProviderConfig,
+} from '@cognipeer/agent-sdk';
 
 export type ModelRuntimeCategory = ModelCategory;
 
@@ -34,9 +42,81 @@ export interface ModelRuntimeConfig {
   options?: ModelRuntimeOptions;
 }
 
+/**
+ * What an agent-sdk native provider needs to talk to the same upstream this
+ * runtime talks to: credentials and endpoint, read from the SAME decrypted
+ * provider record every runtime method uses. The caller adds the
+ * transport (`fetch`, `timeoutMs`) and the per-model request settings.
+ */
+export interface NativeProviderSpec {
+  /** agent-sdk provider config, credentials and endpoint included. */
+  provider: ProviderConfig;
+  /**
+   * The upstream returns inline reasoning markup in `content` (OpenAI-compatible
+   * servers such as Bedrock's /openai/v1): the transport must normalize the
+   * response body before the SDK parses it.
+   */
+  normalizeInlineReasoning?: boolean;
+}
+
+/** Transport of a native client: the same fetch behaviour the caller has today (default: the global `fetch`). */
+export interface NativeTransport {
+  fetch?: typeof fetch;
+  /** Time to the response headers, per request; an open stream is never cut by it. */
+  timeoutMs?: number;
+}
+
+/** The normalized reasoning value (`unset = send nothing`). */
+export interface NativeReasoning {
+  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+}
+
+/** A unified request; `model` defaults to the client's model, unset sampling fields to the model record's. */
+export type NativeChatRequest = Omit<ChatCompletionRequest, 'model' | 'stream'> & { model?: string };
+
+/**
+ * A request-level chat client over an agent-sdk native provider. Per-model
+ * rules (requestDefaults / extraBody, unsupportedParams incl. the rules that
+ * depend on tools, the reasoning default, token-param naming) are applied to
+ * every request; what the request itself sets always wins.
+ */
+export interface NativeChatClient {
+  readonly driver: string;
+  readonly modelId: string;
+  readonly provider: BaseProvider;
+  /** The upstream may leak a reasoning block into `content` (Bedrock /openai/v1): the caller splits it. */
+  readonly normalizeInlineReasoning: boolean;
+  /** The finished request as the provider receives it (defaults folded in, made legal for the model). */
+  prepare(request: NativeChatRequest, options?: { stream?: boolean }): Promise<ChatCompletionRequest>;
+  complete(request: NativeChatRequest): Promise<ChatCompletionResponse>;
+  stream(request: NativeChatRequest): AsyncGenerator<ChatCompletionChunk, void, unknown>;
+}
+
+export interface NativeEmbedOptions {
+  dimensions?: number;
+  encodingFormat?: 'float' | 'base64';
+  inputType?: string;
+  batchSize?: number;
+  extra?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface NativeEmbedder {
+  readonly driver: string;
+  readonly modelId: string;
+  readonly provider: BaseProvider;
+  embed(texts: string[], options?: NativeEmbedOptions): Promise<EmbeddingResponse>;
+}
+
 export interface ModelProviderRuntime {
-  createChatModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
-  createEmbeddingModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
+  /** Native (agent-sdk) chat client: the gateway core's way to call the model. */
+  createNativeChatClient?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeChatClient>;
+  /** Native (agent-sdk) embedder. */
+  createNativeEmbedder?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeEmbedder>;
+  /** The provider an agent-sdk native client is built from. See `NativeProviderSpec`. */
+  createNativeProviderSpec?(config: ModelRuntimeConfig): NativeProviderSpec;
   createSttRuntime?(config: ModelRuntimeConfig): Promise<SttRuntime> | SttRuntime;
   createTtsRuntime?(config: ModelRuntimeConfig): Promise<TtsRuntime> | TtsRuntime;
   createOcrRuntime?(config: ModelRuntimeConfig): Promise<OcrRuntime> | OcrRuntime;

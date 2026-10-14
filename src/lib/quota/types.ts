@@ -1,7 +1,14 @@
 // Scopes: from general to specific
-export type QuotaScope = 'tenant' | 'user' | 'token' | 'resource' | 'provider';
+//
+// `group` (scopeId = a user-group id) applies to every member of the group; how
+// the group's counters are kept is `QuotaPolicy.groupMode`.
+export type QuotaScope = 'tenant' | 'group' | 'user' | 'token' | 'resource' | 'provider';
 
 // Domains: service areas
+//
+// `agent` limits agent RUNS (requests and tokens per caller). Unlike the other
+// domains it does not fall back to `global` policies, and a `resource`-scoped
+// policy (scopeId = the agent key) narrows it to one agent — see quotaGuard.ts.
 export type QuotaDomain =
   | 'global'
   | 'llm'
@@ -14,11 +21,47 @@ export type QuotaDomain =
   | 'ocr'
   | 'image'
   | 'moderation'
-  | 'decision';
+  | 'decision'
+  | 'agent';
+
+/**
+ * How a `group`-scoped policy counts.
+ *  - perMember (default): every member gets the limit; counters are per user.
+ *  - shared: the whole group draws from ONE counter.
+ */
+export type QuotaGroupMode = 'perMember' | 'shared';
+
+export const QUOTA_SCOPES: readonly QuotaScope[] = [
+  'tenant',
+  'group',
+  'user',
+  'token',
+  'resource',
+  'provider',
+];
+
+export const QUOTA_DOMAINS: readonly QuotaDomain[] = [
+  'global',
+  'llm',
+  'embedding',
+  'vector',
+  'file',
+  'tracing',
+  'stt',
+  'tts',
+  'ocr',
+  'image',
+  'moderation',
+  'decision',
+  'agent',
+];
+
+export const QUOTA_GROUP_MODES: readonly QuotaGroupMode[] = ['perMember', 'shared'];
 
 // Human-readable labels for UI
 export const QUOTA_SCOPE_LABELS: Record<QuotaScope, string> = {
   tenant: 'Tenant',
+  group: 'Group',
   user: 'User',
   token: 'API Token',
   resource: 'Resource',
@@ -38,6 +81,7 @@ export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
   image: 'Image Generation',
   moderation: 'Moderation',
   decision: 'Decision',
+  agent: 'Agent runs',
 };
 
 export interface QuotaRequestWindow {
@@ -126,9 +170,17 @@ export interface QuotaLimits {
 export interface QuotaPolicy {
   _id?: string;
   tenantId: string;
+  /**
+   * The project the policy belongs to. A policy of a kind listed in
+   * `isTenantWideKind` may leave it out and then applies in every project; for
+   * every other kind a missing projectId means the guard never loads it (the
+   * behaviour that predates groups, kept so existing tenants decide as before).
+   */
   projectId?: string;
   scope: QuotaScope;
   scopeId?: string;
+  /** Only meaningful for `scope: 'group'`; absent means `perMember`. */
+  groupMode?: QuotaGroupMode;
   domain: QuotaDomain;
   priority: number;
   limits: QuotaLimits;
@@ -142,3 +194,23 @@ export interface QuotaPolicy {
 }
 
 export type QuotaPolicyInput = Omit<QuotaPolicy, '_id' | 'tenantId' | 'createdAt' | 'updatedAt'>;
+
+/**
+ * Kinds of policy that may omit `projectId` and then apply tenant-wide: group
+ * limits (a group spans projects) and everything in the agent domain.
+ *
+ * Deliberately NOT "every policy without a project": the guard has only ever
+ * loaded project-bound policies, so a legacy tenant-wide row of an older kind
+ * (created through the API without a project) is inert today. Making it live
+ * would change decisions for existing tenants, which this additive feature must
+ * not do.
+ */
+export function isTenantWideKind(policy: Pick<QuotaPolicy, 'scope' | 'domain'>): boolean {
+  return policy.scope === 'group' || policy.domain === 'agent';
+}
+
+/** The effective group mode of a policy (`perMember` unless it says `shared`). */
+export function quotaGroupMode(policy: Pick<QuotaPolicy, 'scope' | 'groupMode'>): QuotaGroupMode | undefined {
+  if (policy.scope !== 'group') return undefined;
+  return policy.groupMode === 'shared' ? 'shared' : 'perMember';
+}

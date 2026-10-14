@@ -37,15 +37,15 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         db.prepare(`
           INSERT INTO ${TABLES.agentRuns}
           (id, mode, tenantId, tenantDbName, projectId, agentKey, conversationId,
-           userMessage, version, usePublished, runtimeContext,
-           idempotencyKey, idempotencyRequestHash, status, errorReason,
+           userMessage, attachments, version, usePublished, runtimeContext,
+           idempotencyKey, idempotencyRequestHash, status, errorReason, resumeActionIds,
            result, errorMessage, cancelRequestedAt, workerId, heartbeatAt,
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
-           @userMessage, @version, @usePublished, @runtimeContext,
-           @idempotencyKey, @idempotencyRequestHash, @status, @errorReason,
+           @userMessage, @attachments, @version, @usePublished, @runtimeContext,
+           @idempotencyKey, @idempotencyRequestHash, @status, @errorReason, @resumeActionIds,
            @result, @errorMessage, @cancelRequestedAt, @workerId, @heartbeatAt,
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
@@ -59,6 +59,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           agentKey: record.agentKey,
           conversationId: record.conversationId,
           userMessage: record.userMessage,
+          attachments: record.attachments?.length ? this.toJson(record.attachments) : null,
           version: record.version ?? null,
           usePublished: record.usePublished === undefined ? null : (record.usePublished ? 1 : 0),
           runtimeContext: record.runtimeContext ? this.toJson(record.runtimeContext) : null,
@@ -66,6 +67,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           idempotencyRequestHash: record.idempotencyRequestHash ?? null,
           status: record.status,
           errorReason: record.errorReason ?? null,
+          resumeActionIds: record.resumeActionIds?.length ? this.toJson(record.resumeActionIds) : null,
           result: record.result !== undefined && record.result !== null ? this.toJson(record.result) : null,
           errorMessage: record.errorMessage ?? null,
           cancelRequestedAt: record.cancelRequestedAt ? new Date(record.cancelRequestedAt).toISOString() : null,
@@ -163,9 +165,32 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       params.tenantId = tenantId;
       return this.updateAgentRunIf(
         id,
-        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status = 'running'`,
+        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')`,
         params,
       );
+    }
+
+    async requeueAgentRunForResume(
+      id: string,
+      tenantId: string,
+      resumeActionIds: string[],
+    ): Promise<IAgentRun | null> {
+      try {
+        return await this.updateAgentRunIf(id, `
+          UPDATE ${TABLES.agentRuns}
+          SET status = 'queued', resumeActionIds = @resumeActionIds, stopReason = NULL, result = NULL,
+              errorReason = NULL, errorMessage = NULL, workerId = NULL, cancelRequestedAt = NULL,
+              completedAt = NULL, updatedAt = @updatedAt
+          WHERE id = @id AND tenantId = @tenantId AND status = 'requires_action'
+        `, { id, tenantId, resumeActionIds: this.toJson(resumeActionIds), updatedAt: this.now() });
+      } catch (error) {
+        // The partial unique index: another run took the conversation's slot.
+        if (isSqliteUniqueConstraintError(error)) {
+          const held = await this.findAgentRunByIdRaw(id);
+          throw new AgentRunConflictError(held?.conversationId ?? id);
+        }
+        throw error;
+      }
     }
 
     async updateAgentRunCallback(
@@ -194,7 +219,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: now };
       const scalarFields = [
-        'status', 'errorReason', 'errorMessage', 'workerId',
+        'status', 'errorReason', 'stopReason', 'errorMessage', 'workerId',
         'callbackUrl', 'callbackSecret', 'callbackStatus', 'projectId',
         'idempotencyKey', 'idempotencyRequestHash',
       ];
@@ -212,6 +237,10 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         sets.push('runtimeContext = @runtimeContext');
         const rc = (data as { runtimeContext?: unknown }).runtimeContext;
         params.runtimeContext = rc === null ? null : this.toJson(rc);
+      }
+      if (data.resumeActionIds !== undefined) {
+        sets.push('resumeActionIds = @resumeActionIds');
+        params.resumeActionIds = data.resumeActionIds?.length ? this.toJson(data.resumeActionIds) : null;
       }
       if (data.callbackAttempts !== undefined) {
         sets.push('callbackAttempts = @callbackAttempts');
@@ -294,6 +323,27 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
+    async listAgentRunsWithUndeliveredCallbacks(
+      tenantId: string,
+      options: { updatedBefore: Date; maxAttempts: number; limit?: number },
+    ): Promise<IAgentRun[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`
+        SELECT * FROM ${TABLES.agentRuns}
+        WHERE tenantId = @tenantId AND callbackUrl IS NOT NULL
+          AND callbackStatus IN ('pending', 'failed') AND COALESCE(callbackAttempts, 0) < @maxAttempts
+          AND status IN ('succeeded', 'failed', 'canceled', 'requires_action')
+          AND updatedAt < @updatedBefore
+        ORDER BY updatedAt ASC LIMIT @limit
+      `).all({
+        tenantId,
+        maxAttempts: options.maxAttempts,
+        updatedBefore: options.updatedBefore.toISOString(),
+        limit: options.limit && options.limit > 0 ? options.limit : 100,
+      }) as SqliteRow[];
+      return rows.map((r) => this.mapAgentRun(r));
+    }
+
     async listAgentRuns(filter: {
       tenantId: string;
       projectId: string;
@@ -301,6 +351,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       conversationId?: string;
       status?: IAgentRun['status'][];
       mode?: IAgentRun['mode'];
+      userId?: string;
       limit?: number;
     }): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
@@ -309,6 +360,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (filter.agentKey) { conds.push('agentKey = @agentKey'); params.agentKey = filter.agentKey; }
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
       if (filter.mode) { conds.push('mode = @mode'); params.mode = filter.mode; }
+      if (filter.userId) { conds.push('userId = @userId'); params.userId = filter.userId; }
       if (filter.status && filter.status.length > 0) {
         const keys = filter.status.map((status, i) => { params[`status${i}`] = status; return `@status${i}`; });
         conds.push(`status IN (${keys.join(', ')})`);
@@ -373,6 +425,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         agentKey: row.agentKey as string,
         conversationId: row.conversationId as string,
         userMessage: row.userMessage as string,
+        attachments: row.attachments ? this.parseJson(row.attachments, [] as string[]) : null,
         version: row.version === null || row.version === undefined ? null : Number(row.version),
         usePublished: row.usePublished === null || row.usePublished === undefined ? undefined : Number(row.usePublished) === 1,
         runtimeContext: row.runtimeContext ? this.parseJson(row.runtimeContext, null as Record<string, unknown> | null) : null,
@@ -380,6 +433,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         idempotencyRequestHash: (row.idempotencyRequestHash as string) ?? null,
         status: row.status as IAgentRun['status'],
         errorReason: (row.errorReason as IAgentRun['errorReason']) ?? null,
+        stopReason: (row.stopReason as IAgentRun['stopReason']) ?? null,
+        resumeActionIds: row.resumeActionIds ? this.parseJson(row.resumeActionIds, [] as string[]) : null,
         result: row.result ? this.parseJson(row.result, null as Record<string, unknown> | null) : null,
         errorMessage: (row.errorMessage as string) ?? null,
         cancelRequestedAt: this.toDate(row.cancelRequestedAt) ?? null,

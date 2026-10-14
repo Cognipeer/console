@@ -37,6 +37,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import AlertRuleForm from '@/components/alerts/AlertRuleForm';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 
 interface AlertRule {
   _id: string;
@@ -223,6 +224,8 @@ export default function AlertsPage() {
   const [createPrefill, setCreatePrefill] = useState<Record<string, unknown> | undefined>();
   const [moduleFilter, setModuleFilter] = useState('all');
   const t = useTranslations('alerts');
+  const tq = useTranslations('common.confirm.qos');
+  const deleteResource = useDeleteResource();
   const searchParams = useSearchParams();
 
   // Deep-link support: ?create=1&module=models[&metric=error_rate] opens the
@@ -282,25 +285,26 @@ export default function AlertsPage() {
     }
   };
 
-  const handleDelete = async (ruleId: string) => {
-    try {
-      const res = await fetch(`/api/alerts/rules/${ruleId}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error('Failed to delete rule');
-      setRules((prev) => prev.filter((r) => r._id !== ruleId));
-      notifications.show({
-        title: t('ruleDeleted'),
-        message: t('ruleDeletedMessage'),
-        color: 'teal',
-      });
-    } catch {
-      notifications.show({
-        title: t('error'),
-        message: t('deleteError'),
-        color: 'red',
-      });
-    }
+  const handleDelete = async (rule: AlertRule) => {
+    const done = await deleteResource({
+      noun: tq('nouns.alertRule'),
+      name: rule.name,
+      type: 'alert-rule',
+      id: rule._id,
+      action: async () => {
+        const res = await fetch(`/api/alerts/rules/${rule._id}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) throw new Error(t('deleteError'));
+      },
+    });
+    if (!done) return;
+    setRules((prev) => prev.filter((r) => r._id !== rule._id));
+    notifications.show({
+      title: t('ruleDeleted'),
+      message: t('ruleDeletedMessage'),
+      color: 'teal',
+    });
   };
 
   const handleEdit = (rule: AlertRule) => {
@@ -523,7 +527,7 @@ export default function AlertsPage() {
                       <Menu.Item
                         color="red"
                         leftSection={<IconTrash size={14} />}
-                        onClick={() => handleDelete(rule._id)}
+                        onClick={() => handleDelete(rule)}
                       >
                         {t('delete')}
                       </Menu.Item>

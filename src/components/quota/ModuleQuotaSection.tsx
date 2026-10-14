@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Paper, Title, Text, Stack, Group, ThemeIcon, Collapse, ActionIcon, Badge, Modal, Button } from '@mantine/core';
+import { Paper, Title, Text, Stack, Group, ThemeIcon, Collapse, ActionIcon, Badge } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconChevronDown, IconChevronUp, IconShield } from '@tabler/icons-react';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
@@ -9,6 +9,7 @@ import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
 import { QuotaPolicyList, QuotaPolicyModal, type QuotaPolicyFormData } from '@/components/quota';
 import { useQuotaPolicies } from '@/hooks/useQuotaPolicies';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 
 interface ModuleQuotaSectionProps {
   domain: QuotaDomain;
@@ -32,13 +33,14 @@ export function ModuleQuotaSection({
   resourceOptions = [],
 }: ModuleQuotaSectionProps) {
   const t = useTranslations('settings.quotaSection');
+  const tq = useTranslations('common.confirm.qos');
+  const deleteResource = useDeleteResource();
   const tDomains = useTranslations('settings.quotaSection.domains');
   const tDescriptions = useTranslations('settings.quotaSection.descriptions');
   
   const [opened, { toggle }] = useDisclosure(!defaultCollapsed);
   const [modalOpened, setModalOpened] = useState(false);
   const [editingPolicy, setEditingPolicy] = useState<IQuotaPolicy | null>(null);
-  const [confirmDeletePolicy, setConfirmDeletePolicy] = useState<IQuotaPolicy | null>(null);
   
   const {
     policies,
@@ -67,15 +69,17 @@ export function ModuleQuotaSection({
     setModalOpened(true);
   };
 
-  const handleDelete = (policy: IQuotaPolicy) => {
-    setConfirmDeletePolicy(policy);
-  };
-
-  const confirmDelete = async () => {
-    if (confirmDeletePolicy) {
-      await deletePolicy(confirmDeletePolicy);
-      setConfirmDeletePolicy(null);
-    }
+  const handleDelete = async (policy: IQuotaPolicy) => {
+    const id = policy._id?.toString();
+    await deleteResource({
+      noun: tq('nouns.quotaPolicy'),
+      name: policy.label,
+      ...(id ? { type: 'quota-policy', id } : {}),
+      action: async () => {
+        const ok = await deletePolicy(policy);
+        if (!ok) throw new Error(tq('deleteFailed'));
+      },
+    });
   };
 
   const handleSubmit = async (data: QuotaPolicyFormData) => {
@@ -161,28 +165,6 @@ export function ModuleQuotaSection({
         allowedScopes={allowedScopes}
         resourceOptions={resourceOptions}
       />
-
-      {/* Delete Confirmation Modal */}
-      <Modal
-        opened={!!confirmDeletePolicy}
-        onClose={() => setConfirmDeletePolicy(null)}
-        title={t('deleteConfirm.title')}
-        size="sm"
-      >
-        <Stack gap="md">
-          <Text size="sm">
-            {t('deleteConfirm.message')}
-          </Text>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setConfirmDeletePolicy(null)}>
-              {t('deleteConfirm.cancel')}
-            </Button>
-            <Button color="red" onClick={confirmDelete} loading={saving}>
-              {t('deleteConfirm.confirm')}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </>
   );
 }

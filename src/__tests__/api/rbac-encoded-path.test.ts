@@ -1,15 +1,29 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyPluginAsync } from 'fastify';
-import { createMockDb } from '../helpers/db.mock';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
 
-import { getDatabase } from '@/lib/database';
+// The real policy engine decides on a real SQLite tenant (as in iam-enforce-gate.test.ts).
+vi.mock('@/lib/database', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/database')>();
+  return {
+    ...actual,
+    getDatabase: hoisted.getDatabase,
+    runWithTenantScope: async (tenantDbName: string, fn: (db: any) => unknown) => {
+      const db = await hoisted.getDatabase();
+      return db.runWithTenant(tenantDbName, () => fn(db));
+    },
+  };
+});
+
+import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
+import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
 import { getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
 import { getPermissionServiceForPath } from '@/lib/security/rbac';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { withApiRequestContext } from '@/server/api/fastify-utils';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
+import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 
 // A route behind the same session RBAC gate every dashboard plugin uses.
 const toolsLikePlugin: FastifyPluginAsync = async (app) => {
@@ -35,37 +49,39 @@ describe('canonicalizeRequestPathname', () => {
 
 describe('session RBAC gate with percent-encoded paths', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
-  let db: ReturnType<typeof createMockDb>;
+  let env: IamTestDb;
+  let headers: Record<string, string>;
 
-  const headers = {
-    'x-license-type': 'FREE',
-    'x-tenant-db-name': 'tenant_acme',
-    'x-tenant-id': 'tenant-1',
-    'x-tenant-slug': 'acme',
-    'x-user-id': 'user-1',
-    'x-user-role': 'user',
-  };
-
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    db = createMockDb();
-    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
-    db.findUserById.mockResolvedValue({
-      _id: 'user-1',
-      email: 'user@acme.com',
-      name: 'User',
-      role: 'user',
-      tenantId: 'tenant-1',
-      licenseId: 'FREE',
-      password: 'x',
-      servicePermissions: { tools: 'none' },
+  beforeAll(async () => {
+    env = await createIamTestDb('tenant_rbac_encoded');
+    hoisted.getDatabase.mockImplementation(async () => env.db);
+    const user = await env.db.createUser({
+      tenantId: env.tenantId, email: 'user@acme.com', name: 'User', password: '$2b$10$x', role: 'user',
+      licenseId: 'FREE', features: [], servicePermissions: { tools: 'none' },
     });
-    db.listGroupMembersByUser.mockResolvedValue([]);
+    headers = {
+      'x-license-type': 'FREE',
+      'x-tenant-db-name': env.tenantDbName,
+      'x-tenant-id': env.tenantId,
+      'x-tenant-slug': 'acme',
+      'x-user-id': String(user._id),
+      'x-user-role': 'user',
+      'x-user-email': 'user@acme.com',
+    };
+    resetPrincipalCacheForTests();
+    resetIamEngineForTests();
+    configureIamEngine({ validateRequests: false });
     app = await createFastifyApiTestApp(toolsLikePlugin);
+    await app.ready();
+    // rows must be older than the workspace's first decision
+    await new Promise((resolve) => setTimeout(resolve, 15));
   });
 
-  afterEach(async () => {
+  afterAll(async () => {
     await app.close();
+    resetIamEngineForTests();
+    resetPrincipalCacheForTests();
+    await env.cleanup();
   });
 
   it('denies the plain path for a user without the tools permission', async () => {

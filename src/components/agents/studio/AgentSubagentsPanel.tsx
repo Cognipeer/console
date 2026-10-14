@@ -18,6 +18,7 @@ import {
     Badge,
     Button,
     Card,
+    Checkbox,
     Group,
     Menu,
     Modal,
@@ -122,8 +123,13 @@ export default function AgentSubagentsPanel({
 
     const remove = (index: number) => {
         const next = subagents.filter((_, i) => i !== index);
-        onChange(next, next.length === 0 ? undefined : policy);
+        onChange(next, policy);
     };
+
+    // No policy and no roster means delegation was never configured: off.
+    const mode: AgentSubagentMode = policy?.mode ?? (subagents.length > 0 ? 'registry_only' : 'off');
+    const enabled = mode !== 'off';
+    const adhoc = mode === 'registry_and_adhoc';
 
     const patchPolicy = (patch: Partial<IAgentSubagentPolicy>) => onChange(subagents, { ...(policy ?? {}), ...patch });
     const patchDraft = (patch: Partial<IAgentSubagent>) =>
@@ -151,7 +157,12 @@ export default function AgentSubagentsPanel({
                 </Stack>
                 <Menu position="bottom-end">
                     <Menu.Target>
-                        <Button size="xs" leftSection={<IconPlus size={14} />} rightSection={<IconChevronDown size={12} />}>
+                        <Button
+                            size="xs"
+                            disabled={!enabled}
+                            leftSection={<IconPlus size={14} />}
+                            rightSection={<IconChevronDown size={12} />}
+                        >
                             Add sub-agent
                         </Button>
                     </Menu.Target>
@@ -177,10 +188,41 @@ export default function AgentSubagentsPanel({
                 </Menu>
             </Group>
 
+            <Card withBorder padding="sm" radius="md">
+                <Stack gap="xs">
+                    <Switch
+                        label="Enable sub-agents"
+                        description="Lets this agent hand tasks to other agents. Off = it answers everything itself."
+                        checked={enabled}
+                        onChange={(event) =>
+                            patchPolicy({
+                                mode: event.currentTarget.checked
+                                    ? adhoc
+                                        ? 'registry_and_adhoc'
+                                        : 'registry_only'
+                                    : 'off',
+                            })
+                        }
+                    />
+                    <Checkbox
+                        label="Can define its own agents"
+                        description="At run time the agent may create short-lived sub-agents on the fly (role, instructions, task), in addition to the ones listed below."
+                        checked={adhoc}
+                        disabled={!enabled}
+                        onChange={(event) =>
+                            patchPolicy({ mode: event.currentTarget.checked ? 'registry_and_adhoc' : 'registry_only' })
+                        }
+                    />
+                </Stack>
+            </Card>
+
             {subagents.length === 0 ? (
                 <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
                     <Text size="sm">
-                        No sub-agents. The agent answers everything itself. Add one when a task needs its own
+                        {adhoc
+                            ? 'No predefined sub-agents — the agent defines its own at run time. Add one here when'
+                            : 'No sub-agents. The agent answers everything itself. Add one when'}{' '}
+                         a task needs its own
                         prompt, its own tool surface, or its own context budget — a research pass whose 50
                         tool results should not land in the main transcript is the usual case.
                     </Text>
@@ -248,22 +290,11 @@ export default function AgentSubagentsPanel({
                 </Stack>
             )}
 
-            {subagents.length > 0 ? (
+            {enabled ? (
                 <Card withBorder padding="sm" radius="md">
                     <Stack gap="sm">
                         <Text size="sm" fw={600}>Delegation guards</Text>
                         <Group grow>
-                            <Select
-                                label="Mode"
-                                data={[
-                                    { value: 'off', label: 'off — no delegation' },
-                                    { value: 'registry_only', label: 'registry_only — only the list above' },
-                                    { value: 'registry_and_adhoc', label: 'registry_and_adhoc — also ad-hoc roles' },
-                                ]}
-                                value={policy?.mode ?? 'registry_only'}
-                                onChange={(next) => patchPolicy({ mode: (next as AgentSubagentMode) ?? 'registry_only' })}
-                                allowDeselect={false}
-                            />
                             <Select
                                 label="Child context"
                                 description="How much of the parent's transcript a child starts with."
@@ -307,7 +338,7 @@ export default function AgentSubagentsPanel({
                             label="Ad-hoc children may use the parent's tools"
                             checked={policy?.allowAdhocTools ?? false}
                             onChange={(event) => patchPolicy({ allowAdhocTools: event.currentTarget.checked })}
-                            disabled={(policy?.mode ?? 'registry_only') !== 'registry_and_adhoc'}
+                            disabled={!adhoc}
                         />
                     </Stack>
                 </Card>

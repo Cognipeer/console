@@ -153,8 +153,10 @@ async function getEmbeddings(
   projectId: string,
   embeddingModelKey: string,
   texts: string[],
+  signal?: AbortSignal,
 ): Promise<number[][]> {
   const result = await handleEmbeddingRequest({
+    ...(signal ? { signal } : {}),
     tenantDbName,
     modelKey: embeddingModelKey,
     projectId,
@@ -1196,7 +1198,9 @@ export async function queryRag(
   tenantId: string,
   projectId: string | undefined,
   request: RagQueryRequest,
+  options?: { signal?: AbortSignal },
 ): Promise<RagQueryResult> {
+  const signal = options?.signal;
   const startTime = Date.now();
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -1211,6 +1215,7 @@ export async function queryRag(
     projectId ?? '',
     ragModule.embeddingModelKey,
     [request.query],
+    signal,
   );
   const embeddingMs = Date.now() - embeddingStartedAt;
 
@@ -1255,7 +1260,7 @@ export async function queryRag(
         },
       } : {}),
     },
-  });
+  }, ...(signal ? [{ signal }] as const : []));
 
   // Time spent in the vector store alone. This used to be measured from the
   // very start of the request, which hid where the time actually went.
@@ -1442,6 +1447,8 @@ export async function queryRag(
       metadata: {
         embeddingMs,
         vectorLatencyMs,
+        // an application's token acted for the person in `userId` (the token is `apiTokenId`)
+        ...(attribution.via ? { via: attribution.via } : {}),
         ...(useReranker ? {
           reranked: true,
           rerankerKey: ragModule.rerankerKey,

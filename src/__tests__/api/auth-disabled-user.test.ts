@@ -60,6 +60,8 @@ const activeUser = {
   projectIds: [],
 };
 const disabledUser = { ...activeUser, status: 'disabled' as const, disabledAt: new Date() };
+// A person of a host application whose identity a trusted issuer vouched for: never signs in to the dashboard, by any door.
+const externalUser = { ...activeUser, _id: 'ext-1', kind: 'external' as const, canLogin: false, password: '!external-account' };
 
 describe('disabled users and the auth routes', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
@@ -132,6 +134,15 @@ describe('disabled users and the auth routes', () => {
       expect(db.registerUserInDirectory).not.toHaveBeenCalled();
     });
 
+    it('an external account never signs in, even if a lookup returned it and its flags said it could', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...externalUser, canLogin: true } as never);
+      const res = await login({ email: activeUser.email, password: 'pw-123456', slug: tenant.slug });
+      expectGenericFailure(res);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+      registerExternalAuthenticator(async () => ({ outcome: 'pass', user: { ...externalUser, canLogin: true } as unknown as IUser }));
+      expectGenericFailure(await login({ email: activeUser.email, password: 'pw-123456', slug: tenant.slug }));
+    });
+
     it('a legacy row with no status field and an explicitly active row still sign in', async () => {
       for (const user of [activeUser, { ...activeUser, status: 'active' as const }]) {
         db.findUserByEmail.mockResolvedValue(user as never);
@@ -164,6 +175,17 @@ describe('disabled users and the auth routes', () => {
       expect(r.setCookie).not.toHaveBeenCalled();
       expect(TokenManager.generateToken).not.toHaveBeenCalled();
       expect(ensureDefaultProject).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint a session for an external account, whichever authenticator called it', async () => {
+      const r = reply();
+      await issueSessionForAuthenticatedUser(
+        db as never, tenant as unknown as ITenant, { ...externalUser, canLogin: true } as unknown as IUser, request, r,
+      );
+      expect(r.code).toHaveBeenCalledWith(401);
+      expect(r.send).toHaveBeenCalledWith({ error: 'Invalid email or password' });
+      expect(r.setCookie).not.toHaveBeenCalled();
+      expect(TokenManager.generateToken).not.toHaveBeenCalled();
     });
 
     it('still issues one for an active user', async () => {
@@ -201,6 +223,25 @@ describe('disabled users and the auth routes', () => {
       expect(res.statusCode).toBe(200);
       expect(sendEmail).toHaveBeenCalledTimes(1);
     });
+
+    it.each(['oidc', 'ldap', 'saml'])('answers like an unknown email and sends nothing for an account managed by %s', async (authProvider) => {
+      db.findUserByEmail.mockResolvedValue({ ...activeUser, authProvider, externalId: 'ext-1' } as never);
+      const managedRes = await forgot();
+      db.findUserByEmail.mockResolvedValue(null);
+      const unknownRes = await forgot();
+
+      expect(managedRes.statusCode).toBe(200);
+      expect(managedRes.body).toBe(unknownRes.body);
+      expect(sendEmail).not.toHaveBeenCalled();
+    });
+
+    it('still mails an account whose provider is "local", or was never recorded', async () => {
+      for (const user of [{ ...activeUser, authProvider: 'local' }, activeUser]) {
+        db.findUserByEmail.mockResolvedValue(user as never);
+        expect((await forgot()).statusCode).toBe(200);
+      }
+      expect(sendEmail).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('POST /api/auth/reset-password', () => {
@@ -225,6 +266,32 @@ describe('disabled users and the auth routes', () => {
       expect(res.statusCode).toBe(400);
       expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Invalid reset token');
       expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it.each(['oidc', 'ldap', 'saml'])('rejects a valid token for an account managed by %s: no local password is ever planted', async (authProvider) => {
+      db.findUserById.mockResolvedValue({ ...activeUser, authProvider, externalId: 'ext-1' } as never);
+      const res = await reset(await resetToken(activeUser._id));
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Invalid reset token');
+      expect(db.updateUser).not.toHaveBeenCalled();
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invitation link once the invitee is managed by a directory', async () => {
+      const invitee = { ...activeUser, invitedBy: 'owner-1', invitedAt: new Date(), canLogin: true };
+      const url = await createInvitationUrl({ ...invitee } as unknown as IUser, tenant.slug);
+      const token = new URL(url).searchParams.get('token')!;
+      db.findUserById.mockResolvedValue({ ...invitee, authProvider: 'oidc', externalId: 'ext-1' } as never);
+      const res = await reset(token);
+      expect(res.statusCode).toBe(400);
+      expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('still resets the password of an account whose provider is "local"', async () => {
+      db.findUserById.mockResolvedValue({ ...activeUser, authProvider: 'local' } as never);
+      const res = await reset(await resetToken(activeUser._id));
+      expect(res.statusCode).toBe(200);
+      expect(db.updateUser).toHaveBeenCalledTimes(1);
     });
 
     it('rejects an invitation link for a disabled invitee', async () => {

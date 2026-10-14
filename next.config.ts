@@ -26,6 +26,9 @@ const nextConfig: NextConfig = {
     // on every build. Marking it external skips webpack's bundling/analysis
     // entirely (Node's native `require` handles the dynamic path fine).
     'bullmq',
+    // Cedar policy engine (WASM). Server-only, loaded lazily by src/lib/iam via
+    // the CJS entry; never bundle the .wasm into a Next chunk.
+    '@cedar-policy/cedar-wasm',
     // Optional vector / database driver packages — loaded dynamically only
     // when the matching provider is configured. Marking them external keeps
     // Next.js from trying to bundle them at build time when they may not be
@@ -71,6 +74,38 @@ const nextConfig: NextConfig = {
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),
+  },
+  // People, groups and API tokens are managed in the IAM center (Principals). The pages
+  // they used to live on are gone; old links and bookmarks land on the same place.
+  // Temporary (307) for now: browsers cache a permanent redirect for a long time.
+  async redirects() {
+    return [
+      {
+        source: '/dashboard/members',
+        destination: '/dashboard/iam?tab=principals&principalType=user',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/members/:userId',
+        destination: '/dashboard/iam?tab=principals&principalType=user&principalId=:userId',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings',
+        destination: '/dashboard/iam?tab=principals&principalType=user',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings/projects',
+        destination: '/dashboard/projects',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings/projects/:projectId',
+        destination: '/dashboard/projects/:projectId',
+        permanent: false,
+      },
+    ];
   },
   experimental: {
     serverActions: {

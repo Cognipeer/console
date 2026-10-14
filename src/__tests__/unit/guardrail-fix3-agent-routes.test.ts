@@ -47,14 +47,13 @@ const hoisted = vi.hoisted(() => ({
   resolveProjectContext: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+// The permission gate reads the caller inside a tenant scope: serve it from the same stubbed database.
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return { getDatabase, runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()) };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn().mockReturnValue('agents'),
-  authorizeServiceRequest: vi.fn().mockReturnValue({ allowed: true, service: 'agents', required: 'write' }),
-}));
 
 vi.mock('@/lib/services/projects/projectContext', () => ({
   resolveProjectContext: hoisted.resolveProjectContext,

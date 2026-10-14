@@ -20,7 +20,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   createdWithOutputSchema: [] as boolean[],
   scripted: { content: 'plain answer' } as { content: string; output?: unknown; outputError?: unknown },
 }));
@@ -31,8 +31,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/models/runtimeService', () => ({
-  buildModelRuntime: hoisted.buildModelRuntime,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -100,7 +101,6 @@ vi.mock('@cognipeer/agent-sdk', () => {
     CONSOLE_HOOK_MAP,
     GuardrailPhase: { Request: 'request', Response: 'response' },
     createSmartAgent,
-    fromLangchainModel: (model: unknown) => model,
     createTool: (spec: unknown) => spec,
     customSink: (config: unknown) => config,
   };
@@ -172,7 +172,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => ({}) } });
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
 });
 
 function run() {

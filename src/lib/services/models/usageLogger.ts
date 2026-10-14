@@ -133,6 +133,8 @@ export async function logModelUsage(
     routingBaselinePricing?: IModelPricing;
     /** Explicit attribution for call sites outside the request ALS scope. */
     attribution?: Partial<UsageAttribution>;
+    /** Agent the call runs for; the usage rollup's `agent` dimension. */
+    agentKey?: string;
     /** Raw provider finish reason for this call (e.g. `stop`, `length`,
      *  `tool_calls`) — a property of the call, not of token usage. Normalized
      *  via `normalizeFinishReason` before persisting. */
@@ -201,6 +203,7 @@ export async function logModelUsage(
     costUsd: pricingSnapshot.totalCost,
     units,
     attribution: payload.attribution,
+    ...(payload.agentKey ? { agentKey: payload.agentKey } : {}),
   });
 
   // Secret scrub first (known key names / outbound secret values), then a

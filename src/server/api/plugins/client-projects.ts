@@ -183,6 +183,10 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (target.role === 'owner' || target.role === 'admin') {
         return reply.code(400).send({ error: 'Owners and admins are implicitly assigned to all projects' });
       }
+      // A host application's person belongs to no project.
+      if (target.kind === 'external') {
+        return reply.code(400).send({ error: 'External users cannot be project members', code: 'external_user' });
+      }
       const role: ProjectRole = body.role === 'project_admin' ? 'project_admin' : 'member';
       const userProject = await db.upsertUserProject({
         tenantId: auth.tenantId, userId: String(target._id), projectId, role,

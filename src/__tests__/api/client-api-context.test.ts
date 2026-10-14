@@ -6,8 +6,9 @@
  * fastify-utils. These tests lock the contract that all of them inherit:
  *   - missing/invalid token → 401 (correct envelope per error style)
  *   - valid token → handler runs with `auth` and the tenant DB bound via runWithTenant
- *   - RBAC enforced for mapped paths (closing the historical chat/embeddings/
- *     ocr-jobs bypass); skippable via `{ rbac: false }`
+ *   - the authorization engine decides every route that resolves to a service
+ *     (closing the historical chat/embeddings/ocr-jobs bypass); skippable via
+ *     `{ rbac: false }`; a route that declares nothing is refused
  *   - OpenAI error envelope for `withOpenAiApiRequestContext`
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,14 +29,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -43,11 +44,12 @@ vi.mock('@/lib/core/lifecycle', () => ({
 
 import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
+import { authz } from '@/lib/iam/routeAuthz';
 import {
   withClientApiRequestContext,
   withOpenAiApiRequestContext,
 } from '@/server/api/fastify-utils';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -65,19 +67,39 @@ const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 
 async function buildApp() {
   return createFastifyApiTestApp(async (app) => {
+    // Signed in is all it takes: no permission service applies.
     app.get(
       '/client/v1/probe',
+      { config: authz.authenticated() },
       withClientApiRequestContext(async (_req, reply, auth) =>
         reply.send({ ok: true, tenant: auth.tenantDbName, userId: auth.tokenRecord.userId }),
       ),
     );
+    // A service the token's owner (a plain member) can use, and one only admins can.
+    app.get(
+      '/client/v1/probe-models',
+      { config: authz.service('models') },
+      withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })),
+    );
+    app.get(
+      '/client/v1/probe-members',
+      { config: authz.service('members') },
+      withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })),
+    );
     app.get(
       '/client/v1/probe-norbac',
+      { config: authz.service('members') },
       withClientApiRequestContext(
         async (_req, reply) => reply.send({ ok: true }),
         { rbac: false },
       ),
     );
+    // Declares nothing and no prefix maps it.
+    app.get(
+      '/client/v1/probe-undeclared',
+      withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })),
+    );
+    // Mapped by the /client/v1/chat prefix (service: models).
     app.get(
       '/client/v1/chat/probe',
       withOpenAiApiRequestContext(async (_req, reply) => reply.send({ ok: true })),
@@ -88,9 +110,7 @@ async function buildApp() {
 beforeEach(() => {
   vi.clearAllMocks();
   (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
-  (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue({ runWithTenant });
-  (getPermissionServiceForPath as ReturnType<typeof vi.fn>).mockReturnValue(null); // unmapped by default
-  (authorizeServiceRequest as ReturnType<typeof vi.fn>).mockReturnValue({ allowed: true });
+  (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant } as never));
 });
 
 describe('withClientApiRequestContext (canonical token wrapper)', () => {
@@ -118,25 +138,33 @@ describe('withClientApiRequestContext (canonical token wrapper)', () => {
     expect(runWithTenant).toHaveBeenCalledWith('tenant_acme', expect.any(Function));
   });
 
-  it('enforces RBAC: a mapped path the token user is not allowed → 403', async () => {
-    (getPermissionServiceForPath as ReturnType<typeof vi.fn>).mockReturnValue('models');
-    (authorizeServiceRequest as ReturnType<typeof vi.fn>).mockReturnValue({
-      allowed: false,
-      service: 'models',
-      required: 'write',
-    });
+  it('enforces the engine: a service the token user is not allowed → 403 with the decision', async () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'GET',
-      url: '/api/client/v1/probe',
+      url: '/api/client/v1/probe-members',
       headers: { authorization: 'Bearer tok_abc' },
     });
     expect(res.statusCode).toBe(403);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+      code: 'forbidden',
+      service: 'members',
+      required: 'read',
+      decisionId: expect.any(String),
+    });
   });
 
-  it('allows a mapped path when the token user IS authorized', async () => {
-    (getPermissionServiceForPath as ReturnType<typeof vi.fn>).mockReturnValue('models');
-    (authorizeServiceRequest as ReturnType<typeof vi.fn>).mockReturnValue({ allowed: true });
+  it('allows a service when the token user IS authorized', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/client/v1/probe-models',
+      headers: { authorization: 'Bearer tok_abc' },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('admits a route that only asks for a signed-in token (authenticated)', async () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'GET',
@@ -146,9 +174,18 @@ describe('withClientApiRequestContext (canonical token wrapper)', () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it('skips RBAC when { rbac: false } even on a mapped path', async () => {
-    (getPermissionServiceForPath as ReturnType<typeof vi.fn>).mockReturnValue('models');
-    (authorizeServiceRequest as ReturnType<typeof vi.fn>).mockReturnValue({ allowed: false });
+  it('refuses a route that declares nothing, and counts it', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/client/v1/probe-undeclared',
+      headers: { authorization: 'Bearer tok_abc' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'route_not_declared' });
+  });
+
+  it('skips the engine when { rbac: false } even on a service the token user lacks', async () => {
     const app = await buildApp();
     const res = await app.inject({
       method: 'GET',
@@ -156,7 +193,6 @@ describe('withClientApiRequestContext (canonical token wrapper)', () => {
       headers: { authorization: 'Bearer tok_abc' },
     });
     expect(res.statusCode).toBe(200);
-    expect(authorizeServiceRequest).not.toHaveBeenCalled();
   });
 });
 

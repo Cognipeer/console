@@ -23,6 +23,7 @@ import {
   IconSearch,
   IconSettings,
   IconSun,
+  IconUserCircle,
 } from '@tabler/icons-react';
 import ProjectPill from '@/components/projects/ProjectPill';
 import { useTranslations } from '@/lib/i18n';
@@ -33,6 +34,8 @@ interface TopbarV2Props {
     name: string;
     email: string;
     licenseType: string;
+    tenantName?: string;
+    tenantSlug?: string;
   };
   isTenantAdmin: boolean;
   supportEnabled?: boolean;
@@ -179,6 +182,21 @@ export default function TopbarV2({
         </Menu.Target>
         <Menu.Dropdown>
           <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
+          <div style={{ padding: '2px 12px 8px', display: 'grid', gap: 2, minWidth: 0 }} data-testid="topbar-account-identity">
+            <Text size="sm" fw={600} truncate>{user.email}</Text>
+            {user.tenantName ? (
+              <Text size="xs" c="dimmed" truncate>
+                {user.tenantName}{user.tenantSlug && user.tenantSlug !== user.tenantName ? ` · ${user.tenantSlug}` : ''}
+              </Text>
+            ) : null}
+          </div>
+          <Menu.Divider />
+          <Menu.Item
+            leftSection={<IconUserCircle size={14} />}
+            onClick={() => onNavigate('/dashboard/account')}
+          >
+            {tAccount('profile')}
+          </Menu.Item>
           <Menu.Item
             leftSection={<IconSettings size={14} />}
             onClick={() => onNavigate(settingsHref)}

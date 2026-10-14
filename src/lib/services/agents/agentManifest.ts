@@ -19,6 +19,7 @@ import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { assertMayNameBucket, type CanNameBucket } from './attachmentsBucketAccess';
 import type { ManifestResources } from './manifestResources';
 
 
@@ -92,6 +93,9 @@ function collectBindingDependencies(
 export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDependency[] {
     const out: AgentManifestDependency[] = [];
     if (spec.modelKey) out.push({ type: 'model', key: spec.modelKey, usedBy: 'spec.modelKey' });
+    for (const [index, extra] of (spec.additionalModels ?? []).entries()) {
+        if (extra?.modelKey) out.push({ type: 'model', key: extra.modelKey, usedBy: `spec.additionalModels[${index}]` });
+    }
     if (spec.promptKey) out.push({ type: 'prompt', key: spec.promptKey, usedBy: 'spec.promptKey' });
     for (const skill of spec.skills ?? []) out.push({ type: 'skill', key: skill, usedBy: 'spec.skills' });
     if (spec.knowledgeEngineKey) {
@@ -366,7 +370,14 @@ export async function applyAgentManifest(
         key?: string;
         name?: string;
         allowMissingDependencies?: boolean;
-    } = {},
+        /**
+         * May the caller name this bucket (by key) in an agent's settings? A Files decision about THAT bucket,
+         * asked before anything is written whenever the manifest sets or changes `attachments.bucketKey` - the
+         * same question the create and update routes ask. Required, so a new caller cannot leave it out; a
+         * refusal throws `BucketNamingForbiddenError`.
+         */
+        canNameBucket: CanNameBucket;
+    },
 ): Promise<AgentImportResult> {
     const issues = validateAgentManifest(manifest);
     if (issues.length > 0) throw new AgentManifestError('Manifest failed validation', issues);
@@ -389,11 +400,13 @@ export async function applyAgentManifest(
 
     if (existing) {
         if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`);
+        const incoming = sanitizeConfig(manifest.spec);
+        await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
         const updated = await db.updateAgent(String(existing._id), {
             name,
             description: manifest.metadata.description,
             // Masked secret values keep what this agent already stores.
-            config: sealAgentConfigSecrets(sanitizeConfig(manifest.spec), existing.config),
+            config: sealAgentConfigSecrets(incoming, existing.config),
             updatedBy: userId,
         });
         if (!updated) throw new AgentManifestError(`Agent "${key}" could not be updated`);
@@ -403,13 +416,15 @@ export async function applyAgentManifest(
 
     if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`);
 
+    const incoming = sanitizeConfig(manifest.spec);
+    await assertMayNameBucket(incoming, undefined, options.canNameBucket);
     const created = await db.createAgent({
         tenantId,
         projectId,
         key,
         name,
         description: manifest.metadata.description,
-        config: sealAgentConfigSecrets(sanitizeConfig(manifest.spec), undefined),
+        config: sealAgentConfigSecrets(incoming, undefined),
         // Imported agents start inactive: an import is a proposal until someone
         // opens it, checks the dependency list and publishes.
         status: 'draft',

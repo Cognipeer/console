@@ -19,6 +19,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconArrowLeft,
   IconArrowRight,
@@ -92,6 +94,8 @@ interface RunLogsState {
 }
 
 export default function VectorMigrationDetailPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const { key } = useParams<{ key: string }>();
   const router = useRouter();
   const [detail, setDetail] = useState<MigrationDetailResponse | null>(null);
@@ -211,18 +215,18 @@ export default function VectorMigrationDetailPage() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!window.confirm(`Delete migration "${detail?.migration.name}"? This cannot be undone.`)) return;
-    try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(key)}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to delete');
-      notifications.show({ color: 'green', title: 'Migration deleted', message: key });
-      router.push('/dashboard/vector/migrations');
-    } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to delete', message: err instanceof Error ? err.message : 'Unexpected error' });
-    }
-  };
+  const handleDelete = () =>
+    deleteResource({
+      noun: tSafe('nouns.vectorMigration'),
+      name: detail?.migration.name ?? key,
+      action: async () => {
+        const res = await fetch(`/api/vector/migrations/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error ?? 'Failed to delete');
+        notifications.show({ color: 'green', title: 'Migration deleted', message: key });
+        router.push('/dashboard/vector/migrations');
+      },
+    });
 
   const handleOpenRun = (attempt: number) => {
     void loadRunLogs(attempt, 0);

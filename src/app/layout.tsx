@@ -10,6 +10,7 @@ import { Notifications } from "@mantine/notifications";
 import { ReactQueryProvider } from "@/components/providers/ReactQueryProvider";
 import LicenseErrorHandler from "@/components/providers/LicenseErrorHandler";
 import { I18nProvider } from "@/lib/i18n";
+import { ConfirmProvider } from "@/components/common/confirm/ConfirmProvider";
 import { theme } from "@/theme/theme";
 
 const lexendDeca = Lexend_Deca({
@@ -82,7 +83,7 @@ export default function RootLayout({
             <ReactQueryProvider>
               <Notifications position="top-right" />
               <LicenseErrorHandler />
-              {children}
+              <ConfirmProvider>{children}</ConfirmProvider>
             </ReactQueryProvider>
           </I18nProvider>
         </MantineProvider>
