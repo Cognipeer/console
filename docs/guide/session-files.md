@@ -169,7 +169,7 @@ An agent with a [sandbox](/guide/sandbox) is told to write the files meant for t
 - **Other surfaces.** The same files ride on every way to call the agent, additively and only when there are files:
   - *Chat completions:* `output_files` on the body, `file_path` annotations on `message.annotations`; a streamed reply puts them as `files` on the closing chunk.
   - *Assistants:* the thread message's `attachments` (`[{ file_id, tools: [] }]`) and `file_ids`, plus `file_path` annotations (`text`, `start_index`, `end_index`, `file_path.file_id`) wherever the text names the file.
-  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = absolute download URL; fetch it with the same credentials), on `message/send` and `tasks/get`.
+  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = absolute download URL under `/api`; fetch it with the same credentials), on `message/send` and `tasks/get`.
   - *Resumed turns:* a turn that continues after an approval or client-tool answer collects `/outputs/` too.
   - *Event log:* an `agent.output_file` event per file, just before `agent.message`, so a live stream can show the file chip as the turn ends.
   - *History:* `GET /client/v1/agents/sessions/{id}/messages` (`?limit`, `?after=<index>`) lists the transcript; each message's `attachments` give `id`, `name`, `mime_type`, `size`, `origin` (`user_upload` or `agent_output`) and `download_url`, and `output_files` repeats the agent's. A client that reloads a session still shows the files.

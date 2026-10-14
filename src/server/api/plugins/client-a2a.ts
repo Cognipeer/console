@@ -128,7 +128,7 @@ export function a2aFileArtifacts(taskIdValue: string, files: ReadonlyArray<Clien
   return files.map((file, i) => ({
     artifactId: `${taskIdValue}_file_${i + 1}`,
     name: file.name,
-    parts: [{ kind: 'file', file: { name: file.name, mimeType: file.mime_type, uri: `${baseUrl}${file.download_url}` } }],
+    parts: [{ kind: 'file', file: { name: file.name, mimeType: file.mime_type, uri: `${baseUrl}/api${file.download_url}` } }],
     metadata: { fileId: file.id, size: file.size },
   }));
 }

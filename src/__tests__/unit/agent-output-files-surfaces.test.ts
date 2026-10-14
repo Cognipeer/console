@@ -67,7 +67,7 @@ describe('A2A', () => {
     expect(a2aFileArtifacts('task_c1_1', files, 'https://api.example.com')).toEqual([{
       artifactId: 'task_c1_1_file_1',
       name: 'report.pdf',
-      parts: [{ kind: 'file', file: { name: 'report.pdf', mimeType: 'application/pdf', uri: `https://api.example.com${url}` } }],
+      parts: [{ kind: 'file', file: { name: 'report.pdf', mimeType: 'application/pdf', uri: `https://api.example.com/api${url}` } }],
       metadata: { fileId: 'f1', size: 1234 },
     }]);
     expect(a2aFileArtifacts('t', [], 'https://x')).toEqual([]);
