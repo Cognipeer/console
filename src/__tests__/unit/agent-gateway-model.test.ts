@@ -455,6 +455,36 @@ describe('Anthropic thinking in an agent loop', () => {
     expect(assistant.content[0]).toMatchObject({ type: 'thinking', thinking: 'let me check', signature: 'SIG-9' });
   });
 
+  it('streamed, thinking deltas reach onReasoning while they arrive (and not when the call hides reasoning)', async () => {
+    const answerAfterThinking = () => sse([
+      { type: 'message_start', message: { id: 'msg_1', model: 'claude', usage: { input_tokens: 12 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'let me ' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'check' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'SIG-3' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Done.' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } },
+      { type: 'message_stop' },
+    ]);
+    useModels(claude({ modelId: 'claude-opus-5-0' }));
+    upstream = stubUpstream(answerAfterThinking);
+    const seen: string[] = [];
+    const visible = await runAgent(await build('claude', { reasoning: { effort: 'low' }, onReasoning: (text) => seen.push(text) }), { stream: true });
+    expect(visible.content).toBe('Done.');
+    expect(seen.join('')).toBe('let me check');
+    // Visible reasoning is asked for as a summary on Claude 5.x (adaptive thinking).
+    expect(upstream.calls[0].body.thinking).toMatchObject({ type: 'adaptive', display: 'summarized' });
+
+    const hidden: string[] = [];
+    upstream = stubUpstream(answerAfterThinking);
+    await runAgent(await build('claude', { reasoning: { effort: 'low' }, showReasoning: false, onReasoning: (text) => hidden.push(text) }), { stream: true });
+    expect(hidden).toEqual([]);
+    expect(upstream.calls[0].body.thinking?.display).not.toBe('summarized');
+  });
+
   it('Model Hub "return reasoning" off removes the thinking TEXT from what the agent outputs, not the signed block the loop replays', async () => {
     useModels(claude({ settings: { maxTokens: 9000, returnReasoning: false } }));
     let n = 0;

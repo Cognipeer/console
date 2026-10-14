@@ -276,6 +276,21 @@ describe('showReasoning', () => {
     expect(persistedAssistantTurn()).not.toHaveProperty('reasoning');
   });
 
+  it('false + operator view (Compare versions): the model is asked for the thinking text, and its stream is forwarded', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({ showReasoning: false }));
+    const onReasoningChunk = vi.fn();
+    const modelInputs = () => hoisted.buildGatewayChatModel.mock.calls.map((call) => call[0] as { showReasoning?: boolean; onReasoning?: unknown });
+
+    await executePlaygroundChatLocal({ ...base });
+    expect(modelInputs()[0].showReasoning).toBe(false);
+
+    hoisted.buildGatewayChatModel.mockClear();
+    const result = await executePlaygroundChatLocal({ ...base, revealReasoning: true, onReasoningChunk });
+    expect(modelInputs()[0].showReasoning).toBeUndefined();
+    expect(modelInputs()[0].onReasoning).toBe(onReasoningChunk);
+    expect(result.reasoning).toBe('secret thoughts');
+  });
+
   it('true: the playground stores it on the session like before', async () => {
     db.findAgentByKey.mockResolvedValue(agentWith({}));
     await executePlaygroundChatLocal({ ...base });
