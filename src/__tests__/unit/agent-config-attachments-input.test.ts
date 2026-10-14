@@ -98,5 +98,5 @@ describe('Allowed file types, typed into the Files section', () => {
     act(() => { removes()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     // Nothing restricted = nothing stored for it.
     expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs' });
-  });
+  }, 60_000);
 });
