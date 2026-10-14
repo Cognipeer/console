@@ -13680,7 +13680,7 @@ components:
           description: Key of the model to run on. Required for native agents.
         reasoningEffort:
           type: string
-          enum: [none, minimal, low, medium, high]
+          enum: [none, minimal, low, medium, high, xhigh, max]
           description: "Reasoning effort of the main model. Unset = \"Model default\": the Model Hub default, then the API request, then nothing. The old `runtime.reasoning` (enabled/level/effort/budget) is migrated into this on read and on save; only `runtime.reasoning.reflection` stays there."
         reasoningBudgetTokens:
           type: integer
@@ -13705,7 +13705,7 @@ components:
                 type: string
               reasoningEffort:
                 type: string
-                enum: [none, minimal, low, medium, high]
+                enum: [none, minimal, low, medium, high, xhigh, max]
                 description: Reasoning effort when a run uses this model. Unset = Model default.
               reasoningBudgetTokens:
                 type: integer
@@ -14517,7 +14517,7 @@ components:
           description: "Which of the agent's models answers this turn: its main model or one listed in `models` on the agent. Omit to use the session's last choice, else the main model. Not listed: `400` `model_not_allowed`. The `X-Cognipeer-Agent-Model` header does the same; the body wins."
         reasoning_effort:
           type: string
-          enum: [none, minimal, low, medium, high]
+          enum: [none, minimal, low, medium, high, xhigh, max]
           description: "Reasoning effort for the run. Lowest rung of the precedence: the agent's own pick for the model that answers wins, then the Model Hub default of that model, then this value, then nothing is sent (the provider's own default). An invalid value is `400` `invalid_reasoning`. Background runs ignore it."
         reasoning:
           type: object
@@ -14525,7 +14525,7 @@ components:
           properties:
             effort:
               type: string
-              enum: [none, minimal, low, medium, high]
+              enum: [none, minimal, low, medium, high, xhigh, max]
         include_reasoning:
           type: boolean
           description: "False leaves the reasoning output item out of this response. It can only narrow: what the agent's `showReasoning: false` hid stays hidden."
@@ -16581,7 +16581,7 @@ components:
           description: "When `model` names an agent that offers several models: which one answers (OpenAI SDKs: `extra_body`). The `X-Cognipeer-Agent-Model` header does the same; the body wins. Errors: `400` `model_not_allowed` (not offered by the agent). The response `model` stays the agent; the answering model is `cognipeer.agent_model`."
         reasoning_effort:
           type: string
-          enum: [none, minimal, low, medium, high]
+          enum: [none, minimal, low, medium, high, xhigh, max]
           description: "Reasoning effort. For a model: the Model Hub default of that model wins, then this value, then nothing is sent. For an agent: the agent's own pick wins, then the Model Hub default, then this value. `include_reasoning: false` hides the reasoning text from the response (it cannot show what the Model Hub or the agent hid)."
         reasoning:
           type: object
@@ -16589,7 +16589,7 @@ components:
           properties:
             effort:
               type: string
-              enum: [none, minimal, low, medium, high]
+              enum: [none, minimal, low, medium, high, xhigh, max]
         messages:
           type: array
           description: Ordered list of messages that make up the conversation.

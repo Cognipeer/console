@@ -158,17 +158,20 @@ describe('reasoning: translation helpers', () => {
 
   it('driver controls: effort levels, budgets, on/off', () => {
     expect(reasoningControlForDriver('openai').kind).toBe('effort');
-    expect(reasoningControlForDriver('azure').efforts).toContain('minimal');
+    // No model id (or one no rule names): the family default offers the whole ladder.
+    expect(reasoningControlForDriver('azure').efforts).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(reasoningControlForDriver('azure', 'gpt-6-luna').efforts).toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
     expect(reasoningControlForDriver('anthropic')).toMatchObject({ kind: 'budget', budget: true });
     expect(reasoningControlForDriver('bedrock').budget).toBe(true);
     expect(reasoningControlForDriver('vertex').kind).toBe('budget');
-    expect(reasoningControlForDriver('openai-compatible')).toMatchObject({ kind: 'toggle', efforts: ['none', 'medium'] });
+    expect(reasoningControlForDriver('openai-compatible', 'qwen3-32b')).toMatchObject({ kind: 'toggle', efforts: ['none', 'medium'] });
     expect(reasoningControlForDriver('mystery').kind).toBe('none');
     // An OpenAI reasoning model behind an OpenAI-compatible endpoint (Azure v1) gets the effort list.
     expect(reasoningControlForDriver('openai-compatible', 'gpt-5.6-luna').kind).toBe('effort');
-    expect(reasoningControlForDriver('openai-compatible', 'openai/o3-mini').efforts).toContain('minimal');
+    expect(reasoningControlForDriver('openai-compatible', 'openai/o3-mini').efforts).toEqual(['low', 'medium', 'high']);
     expect(reasoningControlForDriver('openai-compatible', 'qwen/qwen3.8-27b').kind).toBe('toggle');
-    expect(reasoningControlForDriver('openai-compatible', 'gpt-5-chat-latest').kind).toBe('toggle');
+    // gpt-5-chat is not a reasoning model
+    expect(reasoningControlForDriver('openai-compatible', 'gpt-5-chat-latest').kind).toBe('none');
   });
 
   it('model page description: effective value, visibility and the gpt-5 + tools rule', () => {
@@ -304,7 +307,7 @@ describe('reasoning: hiding on the chat-completions adapter', () => {
 
 describe('reasoning: hiding and precedence through handleChatCompletion', () => {
   const BASE = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', modelKey: 'm', projectId: 'proj-1' };
-  const makeModel = (settings: Record<string, unknown>, driver = 'openai', modelId = 'gpt-4o') => ({
+  const makeModel = (settings: Record<string, unknown>, driver = 'openai', modelId = 'o3') => ({
     _id: 'id', tenantId: 'tenant-1', projectId: 'proj-1', name: 'M', key: 'm',
     providerKey: 'p', providerDriver: driver, category: 'llm' as const, modelId,
     settings, pricing: { inputPer1k: 0, outputPer1k: 0 },
@@ -372,7 +375,7 @@ describe('reasoning: hiding and precedence through handleChatCompletion', () => 
     await call({}, {}, { reasoning_effort: 'low' });
     await call({ reasoningOverride: { effort: 'medium' } }, {}, {});
     await call({}, {}, {});
-    expect(upstream.calls.map((c) => c.body.reasoning_effort)).toEqual(['minimal', 'high', 'low', 'medium', undefined]);
+    expect(upstream.calls.map((c) => c.body.reasoning_effort)).toEqual(['low', 'high', 'low', 'medium', undefined]);
   });
 
   it('a request cannot claim the agent rung: the override is not read from a JSON field', async () => {

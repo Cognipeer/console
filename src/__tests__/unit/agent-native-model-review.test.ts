@@ -108,7 +108,8 @@ describe('unsupportedParams on the agent path', () => {
 
   it('without it the pick is sent', async () => {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key));
-    const { chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'gpt-4o', {}, { effort: 'low' });
+    // o3: a model the SDK rule table lists as reasoning (gpt-4o is not: the SDK leaves the effort off the wire)
+    const { chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'o3', {}, { effort: 'low' });
     await chatModel.invoke([{ role: 'user', content: 'hi' }]);
     expect(upstream.calls[0].body.reasoning_effort).toBe('low');
   });

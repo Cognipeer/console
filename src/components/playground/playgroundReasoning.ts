@@ -7,6 +7,7 @@ import {
   type ReasoningEffort,
 } from '@/lib/services/models/reasoning';
 import { requestReasoningEffortAccepted } from '@/lib/providers/unsupportedParams';
+import { sdkProviderForDriver } from '@/lib/services/models/modelRules';
 import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 
 /**
@@ -48,10 +49,12 @@ export function playgroundReasoningControl(
 ): PlaygroundReasoningControl | null {
   if (!model) return null;
   const control = reasoningControlForDriver(model.driver, model.modelId);
-  if (control.kind === 'none') return null;
-
   const pinned = readModelReasoning(model.settings);
-  if (pinned) return { kind: control.kind, efforts: [], pinned };
+  // What the operator pinned is sent as written, so it is shown even where the rule table lists no control.
+  if (pinned && model.driver && sdkProviderForDriver(model.driver)) {
+    return { kind: control.kind === 'none' ? 'effort' : control.kind, efforts: [], pinned };
+  }
+  if (control.kind === 'none') return null;
 
   const efforts = control.efforts.filter((effort) =>
     requestReasoningEffortAccepted(model.driver, model.modelId, effort),

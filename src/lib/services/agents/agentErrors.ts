@@ -13,7 +13,7 @@
  * fine; a 401 would tell them to fix their own token.
  */
 
-import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { MODEL_PARAMETER_UNSUPPORTED_CODE, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 
 export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
@@ -66,6 +66,8 @@ export interface AgentRunErrorBody {
      */
     type: string;
     code?: string | null;
+    /** `model_parameter_unsupported`: the request setting the model refused. */
+    param?: string;
     /** `pending_action` only: the approvals / questions the session is waiting on. */
     pendingActionIds?: string[];
     /** `budget_reached` only: what the session has spent and what its budget is (USD). */
@@ -301,11 +303,13 @@ export function classifyAgentRunError(
     return {
         status: normalized.status,
         error: {
-            message: where && normalized.status >= 500
+            // A model refusing a request setting is the agent's configuration to fix: say which model.
+            message: where && (normalized.status >= 500 || normalized.error.code === MODEL_PARAMETER_UNSUPPORTED_CODE)
                 ? `${normalized.error.message} (${where})`
                 : normalized.error.message,
             type: normalized.error.type,
             code: normalized.error.code ?? null,
+            ...(normalized.error.param ? { param: normalized.error.param } : {}),
         },
     };
 }

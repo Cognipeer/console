@@ -954,10 +954,8 @@ export default function AgentDetailPage() {
             title: t('config.additionalModels'),
             description: t('config.additionalModelsDescription'),
             placeholder: t('config.additionalModelsPlaceholder'),
-            label: t('config.additionalModelLabel'),
-            labelPlaceholder: t('config.additionalModelLabelPlaceholder'),
-            descriptionLabel: t('config.additionalModelDescription'),
-            descriptionPlaceholder: t('config.additionalModelDescriptionPlaceholder'),
+            modelColumn: t('config.additionalModelColumn'),
+            reasoningColumn: t('config.reasoningEffort'),
           }}
         />
 

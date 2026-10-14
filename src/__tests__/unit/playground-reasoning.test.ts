@@ -114,16 +114,21 @@ const optionLabels = (container: HTMLElement) =>
 describe('which levels the control offers', () => {
   it('follows the driver and, for OpenAI-family models, the model line', () => {
     expect(playgroundReasoningControl({ driver: 'anthropic', modelId: 'claude-sonnet-5' })?.efforts)
-      .toEqual(['none', 'low', 'medium', 'high']);
+      .toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(playgroundReasoningControl({ driver: 'anthropic', modelId: 'claude-sonnet-4-5' })?.efforts)
+      .toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
     expect(playgroundReasoningControl({ driver: 'openai', modelId: 'gpt-5.1' })?.efforts)
-      .toEqual(['none', 'minimal', 'low', 'medium', 'high']);
-    // `none` is a value only the GPT-5.1+ line takes.
+      .toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
+    // gpt-5 (the base line) has no off switch; the other lines list what their rule takes.
     expect(playgroundReasoningControl({ driver: 'azure', modelId: 'gpt-5' })?.efforts)
       .toEqual(['minimal', 'low', 'medium', 'high']);
-    // OpenAI-compatible engines only have on/off (and `none` is gated like any request effort).
+    // OpenAI-compatible engines whose rule is a toggle only have on/off.
     const toggle = playgroundReasoningControl({ driver: 'openai-compatible', modelId: 'qwen3-32b' });
     expect(toggle?.kind).toBe('toggle');
-    expect(toggle?.efforts).toEqual(['medium']);
+    expect(toggle?.efforts).toEqual(['none', 'medium']);
+    // A model no rule names offers the whole ladder; the SDK maps it at request time.
+    expect(playgroundReasoningControl({ driver: 'azure', modelId: 'my-deployment' })?.efforts)
+      .toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('offers nothing where the gateway would drop the effort or the driver has no reasoning', () => {
@@ -193,7 +198,7 @@ describe('model playground', () => {
   it('sends the chosen level as reasoning_effort, asks for the usage frame, and omits it for "Model default"', async () => {
     const bodies = stubChat([delta({ content: 'ok' })]);
     const c = mount(h(ModelPlayground, { modelKey: 'm', defaultUser: 'hi', modelInfo: claude }));
-    expect(optionLabels(c)).toEqual(['Model default', 'None (thinking off)', 'Low', 'Medium', 'High']);
+    expect(optionLabels(c)).toEqual(['Model default', 'None (thinking off)', 'Low', 'Medium', 'High', 'Extra high', 'Max']);
 
     await clickRun(c);
     expect(bodies[0]).not.toHaveProperty('reasoning_effort');

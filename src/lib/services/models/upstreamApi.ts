@@ -11,6 +11,8 @@
  * speaking the wire format their client asked for, whichever API serves the model.
  */
 
+import { resolveRuleForDriver } from './modelRules';
+
 export const UPSTREAM_APIS = ['chat', 'responses'] as const;
 export type UpstreamApi = (typeof UPSTREAM_APIS)[number];
 export const DEFAULT_UPSTREAM_API: UpstreamApi = 'chat';
@@ -46,4 +48,21 @@ export function validateUpstreamApi(settings: unknown, driver: string | undefine
     return `upstreamApi "responses" is only available for the OpenAI-schema drivers (${[...UPSTREAM_API_DRIVERS].join(', ')}); "${driver}" does not support it`;
   }
   return undefined;
+}
+
+/**
+ * Whether a reasoning picker should tell the operator that reasoning TEXT only comes back over the
+ * Responses API: OpenAI / Azure always, an OpenAI reasoning model (effort-style rule, not the permissive
+ * default) behind an openai-compatible endpoint, and only while the model's Upstream API is Chat Completions.
+ */
+export function reasoningTextNeedsResponses(
+  driver: string | undefined | null,
+  modelId: string | undefined,
+  settings: unknown,
+): boolean {
+  if (!driver || resolveUpstreamApi(settings) !== 'chat') return false;
+  if (driver === 'openai' || driver === 'azure') return true;
+  if (driver !== 'openai-compatible') return false;
+  const rule = resolveRuleForDriver(driver, modelId);
+  return Boolean(rule && !rule.isDefault && rule.reasoning.style === 'effort');
 }

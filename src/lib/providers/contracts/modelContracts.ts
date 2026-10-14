@@ -1,6 +1,7 @@
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
+import { resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import {
   type NormalizedReasoning,
   THINKING_ANSWER_HEADROOM,
@@ -118,16 +119,15 @@ export interface ModelSettingsOverrides {
 }
 
 /**
- * The model ids whose Chat Completions requests carry `max_completion_tokens`
- * instead of `max_tokens`: the o-series and the gpt-5 family (not `gpt-5-chat`).
+ * Whether the model's rule (agent-sdk table) makes Chat Completions requests carry
+ * `max_completion_tokens` instead of `max_tokens`.
  * The same answer is needed *before* a client is built, because an operator's
- * rename (`max_tokens` declared unsupported) must reach ids this rule does not
- * recognise - an Azure deployment, a vanity model id - through the request body.
+ * rename (`max_tokens` declared unsupported) must reach ids no rule recognises -
+ * an Azure deployment, a vanity model id - through the request body.
  */
 function emitsCompletionTokens(modelId: string | undefined): boolean {
   if (!modelId) return false;
-  if (/^o\d/.test(modelId)) return true;
-  return modelId.startsWith('gpt-5') && !modelId.startsWith('gpt-5-chat');
+  return resolveRuleForDriver('openai', modelId)?.maxTokensParam === 'max_completion_tokens';
 }
 
 /**

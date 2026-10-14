@@ -900,6 +900,7 @@ export default function CreateModelModal({
           number={sectionNumber()}
           driver={selectedProvider?.driver}
             modelId={form.values.modelId ?? undefined}
+            settings={formValues.settings}
           value={formValues.reasoning}
           onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
           forcedNoneWithTools={Boolean(

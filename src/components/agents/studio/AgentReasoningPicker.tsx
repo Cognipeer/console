@@ -9,8 +9,9 @@
  * Bedrock, Vertex) also get an optional budget field once a level is picked.
  */
 
-import { NumberInput, Select } from '@mantine/core';
+import { NumberInput, Select, Stack, Text } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
+import { reasoningTextNeedsResponses } from '@/lib/services/models/upstreamApi';
 import { REASONING_EFFORTS, reasoningControlForDriver, type ReasoningEffort } from '@/lib/services/models/reasoning';
 
 export interface ReasoningPickerModel {
@@ -68,9 +69,11 @@ export interface AgentReasoningPickerProps {
     onChange: (next: ReasoningPickerValue) => void;
     disabled?: boolean;
     testId?: string;
+    /** A row of a list: no visible labels (the list has a column header) and the budget stacks under the level. */
+    compact?: boolean;
 }
 
-export default function AgentReasoningPicker({ model, driverByProviderKey, value, onChange, disabled, testId }: AgentReasoningPickerProps) {
+export default function AgentReasoningPicker({ model, driverByProviderKey, value, onChange, disabled, testId, compact }: AgentReasoningPickerProps) {
     const t = useTranslations('agents.config');
     const tm = useTranslations('modelReasoning');
     const options = reasoningPickerOptions(model, driverByProviderKey);
@@ -83,13 +86,21 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
             label: options.kind === 'toggle' ? tm(`toggle.${effort}`) : tm(`effort.${effort}`),
         })),
     ];
+    // A stored level the model's rule does not list (the model changed since) stays visible: the SDK maps it at request time.
+    const stored = value.reasoningEffort;
+    if (stored && !options.efforts.includes(stored)) {
+        data.push({ value: stored, label: options.kind === 'toggle' ? tm(`toggle.${stored}`) : tm(`effort.${stored}`) });
+    }
 
-    return (
+    const driver = model?.providerDriver || (model?.providerKey ? driverByProviderKey[model.providerKey] : undefined);
+    const responsesHint = reasoningTextNeedsResponses(driver, model?.modelId, model?.settings);
+
+    const controls = (
         <>
             <Select
                 size="sm"
                 w={170}
-                label={t('reasoningEffort')}
+                label={compact ? undefined : t('reasoningEffort')}
                 aria-label={t('reasoningPickerAria', { model: model?.name ?? '' })}
                 data={data}
                 value={value.reasoningEffort ?? ''}
@@ -111,8 +122,10 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
                 <NumberInput
                     size="sm"
                     w={170}
-                    label={t('reasoningBudget')}
-                    description={t('reasoningBudgetHint')}
+                    label={compact ? undefined : t('reasoningBudget')}
+                    description={compact ? undefined : t('reasoningBudgetHint')}
+                    aria-label={t('reasoningBudget')}
+                    placeholder={compact ? t('reasoningBudget') : undefined}
                     min={1}
                     value={value.reasoningBudgetTokens ?? ''}
                     onChange={(next) => onChange({
@@ -122,6 +135,13 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
                     data-testid={testId ? `${testId}-budget` : undefined}
                 />
             ) : null}
+            {responsesHint ? (
+                <Text size="xs" c="dimmed" data-testid={testId ? `${testId}-responses-hint` : undefined}>
+                    {tm('hint.responsesOnly')}
+                </Text>
+            ) : null}
         </>
     );
+
+    return compact ? <Stack gap={4} w={170}>{controls}</Stack> : controls;
 }

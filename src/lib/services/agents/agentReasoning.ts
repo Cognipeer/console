@@ -17,6 +17,7 @@
  */
 
 import type { IAgentConfig, IAgentRuntimeConfig } from '@/lib/database/provider/types.domain';
+import { effortsOfRule, resolveRuleForDriver } from '@/lib/services/models/modelRules';
 import {
   normalizeReasoning,
   readModelReasoning,
@@ -225,9 +226,10 @@ export function titleReasoningForModel(
   const driver = model.providerDriver;
   const id = (model.modelId ?? '').toLowerCase();
   if (driver && OPENAI_FAMILY_DRIVERS.has(driver)) {
-    if (/^o\d/.test(id)) return { effort: 'low' };
-    if (/^gpt-5(?!-chat)(?:$|-)/.test(id)) return { effort: 'minimal' };
-    if (/^gpt-5\.(?!\d*-chat)/.test(id)) return { effort: 'none' };
+    // The lowest level the model's rule (agent-sdk table) takes: none, minimal or low. A model only a
+    // permissive default matched is left to the configured-reasoning rule below.
+    const rule = resolveRuleForDriver(driver, id);
+    if (rule && !rule.isDefault && rule.reasoning.style === 'effort') return { effort: effortsOfRule(rule)[0] };
   }
   const configured = readModelReasoning(model.settings);
   if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver);

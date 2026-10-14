@@ -309,9 +309,9 @@ export function anthropicRequestToOpenAi(
   } else if (body.thinking?.type === 'adaptive') {
     // Adaptive thinking carries its level in `output_config.effort`.
     const effort = body.output_config?.effort;
-    openAi.reasoning_effort = effort === 'low' || effort === 'medium' || effort === 'high'
+    openAi.reasoning_effort = effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' || effort === 'max'
       ? effort
-      : effort === 'max' || effort === 'xhigh' ? 'high' : 'medium';
+      : 'medium';
   } else if (body.thinking?.type === 'disabled') {
     openAi.reasoning_effort = 'none';
   }

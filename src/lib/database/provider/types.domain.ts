@@ -2133,7 +2133,7 @@ export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
 export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
 export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
 export type AgentReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
-export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface IAgentLimits {
   maxToolCalls?: number;

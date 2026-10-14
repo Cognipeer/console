@@ -13,27 +13,44 @@ import { tr } from '@/lib/i18n/messages/tr';
 
 const read = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 const drivers = { openaiProv: 'openai', claude: 'anthropic', gem: 'vertex', local: 'openai-compatible', odd: 'mystery' };
-const m = (providerKey: string, settings?: Record<string, unknown>) => ({ key: 'k', name: 'K', providerKey, settings });
+const m = (providerKey: string, settings?: Record<string, unknown>, modelId?: string) => ({ key: 'k', name: 'K', providerKey, settings, modelId });
+const LADDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 describe('options follow the chosen model', () => {
-  it('OpenAI-family: effort levels, no budget field', () => {
-    expect(reasoningPickerOptions(m('openaiProv'), drivers)).toMatchObject({
-      kind: 'effort', efforts: ['none', 'minimal', 'low', 'medium', 'high'], budget: false,
+  it('OpenAI-family: exactly the efforts of the model rule, no budget field', () => {
+    const efforts = (modelId: string, provider = 'openaiProv') => reasoningPickerOptions(m(provider, undefined, modelId), drivers)?.efforts;
+    expect(reasoningPickerOptions(m('openaiProv', undefined, 'gpt-6-luna'), drivers)).toMatchObject({ kind: 'effort', budget: false });
+    expect(efforts('gpt-6-luna')).toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
+    expect(efforts('gpt-5.6-luna')).toEqual(['none', 'low', 'medium', 'high', 'xhigh']);
+    expect(efforts('gpt-5')).toEqual(['minimal', 'low', 'medium', 'high']);
+    expect(efforts('o3')).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('a model no rule names (an Azure deployment) offers the whole ladder: the SDK maps at request time', () => {
+    expect(reasoningPickerOptions(m('openaiProv', undefined, 'my-prod-deployment'), { ...drivers, openaiProv: 'azure' })).toMatchObject({
+      kind: 'effort', efforts: LADDER, budget: false,
     });
+    expect(reasoningPickerOptions(m('openaiProv'), drivers)?.efforts).toEqual(LADDER);
   });
 
-  it('Anthropic / Vertex: levels plus a token budget', () => {
-    expect(reasoningPickerOptions(m('claude'), drivers)).toMatchObject({ kind: 'budget', budget: true, efforts: ['none', 'low', 'medium', 'high'] });
-    expect(reasoningPickerOptions(m('gem'), drivers)).toMatchObject({ kind: 'budget', budget: true });
+  it('Anthropic / Vertex: levels plus a token budget where the model thinks in tokens, adaptive levels otherwise', () => {
+    const claude = (modelId: string) => reasoningPickerOptions(m('claude', undefined, modelId), drivers);
+    expect(claude('claude-sonnet-5-5')).toMatchObject({ kind: 'budget', budget: false, efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] });
+    // opus 5.5 cannot be turned off
+    expect(claude('claude-opus-5-5')?.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(claude('claude-haiku-5-5')?.efforts).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(claude('claude-sonnet-4-5')).toMatchObject({ kind: 'budget', budget: true, efforts: LADDER });
+    expect(reasoningPickerOptions(m('gem', undefined, 'gemini-2.5-pro'), drivers)).toMatchObject({ kind: 'budget', budget: true });
   });
 
-  it('OpenAI-compatible engines: on / off only', () => {
-    expect(reasoningPickerOptions(m('local'), drivers)).toMatchObject({ kind: 'toggle', efforts: ['none', 'medium'] });
+  it('OpenAI-compatible engines: on / off for the models whose rule is a toggle', () => {
+    expect(reasoningPickerOptions(m('local', undefined, 'qwen3-32b'), drivers)).toMatchObject({ kind: 'toggle', efforts: ['none', 'medium'] });
+    expect(reasoningPickerOptions(m('local', undefined, 'gpt-6-luna'), drivers)).toMatchObject({ kind: 'effort' });
   });
 
   it('a Dynamic LLM offers every level (the routed model translates)', () => {
     expect(reasoningPickerOptions(m('dynamic', { dynamic: { strategy: 'rule-based' } }), drivers)?.efforts)
-      .toEqual(['none', 'minimal', 'low', 'medium', 'high']);
+      .toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('no picker for a provider without reasoning controls, or without a model', () => {
@@ -43,7 +60,7 @@ describe('options follow the chosen model', () => {
 });
 
 describe('the dropdown is not lost when the provider list cannot say the driver', () => {
-  const everyLevel = ['none', 'minimal', 'low', 'medium', 'high'];
+  const everyLevel = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
   it('the model record\'s own driver wins over (and replaces) the provider lookup', () => {
     expect(reasoningPickerOptions({ ...m('missing'), providerDriver: 'anthropic' }, {})).toMatchObject({ kind: 'budget', budget: true });

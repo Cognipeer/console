@@ -16,7 +16,10 @@
  * hid. Hiding never stops token accounting; the upstream still bills the tokens.
  */
 
-export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high'] as const;
+import { mapReasoningEffort } from '@cognipeer/agent-sdk/model-rules';
+import { EFFORT_BUDGETS, GEMINI_EFFORT_BUDGETS, effortsOfRule, resolveRuleForDriver } from './modelRules';
+
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export interface NormalizedReasoning {
@@ -175,12 +178,9 @@ export const ANTHROPIC_MIN_THINKING_BUDGET = 1024;
 /** Room kept for the visible answer above the thinking budget. */
 export const THINKING_ANSWER_HEADROOM = 4096;
 
-const EFFORT_BUDGET: Record<Exclude<ReasoningEffort, 'none'>, number> = {
-  minimal: 1024,
-  low: 2048,
-  medium: 8192,
-  high: 16384,
-};
+const EFFORT_BUDGET = EFFORT_BUDGETS;
+/** Vertex Gemini thinks up to this many tokens; xhigh / max map to the largest budget. */
+const VERTEX_MAX_THINKING_BUDGET = GEMINI_EFFORT_BUDGETS.max;
 
 /** Effort -> token budget for engines that think in tokens. 0 = thinking off. */
 export function reasoningBudget(reasoning: NormalizedReasoning | undefined): number | undefined {
@@ -194,7 +194,7 @@ export interface ThinkingTranslation {
   /** Body fragment, in Anthropic's wire shape. */
   thinking: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' } | { type: 'disabled' };
   /** `output_config` fragment: adaptive thinking carries its level here. */
-  outputConfig?: { effort: 'low' | 'medium' | 'high' };
+  outputConfig?: { effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' };
   /** max_tokens to send: always above the budget when thinking is on. */
   maxTokens?: number;
   /** Thinking forbids temperature / top_p. */
@@ -202,22 +202,11 @@ export interface ThinkingTranslation {
 }
 
 /**
- * Claude 5.x and fable models take `thinking: {type:'adaptive'}` + `output_config.effort`;
- * older ones take `enabled` + `budget_tokens`. Mirrors the SDK's `supportsAdaptiveThinking`:
- * this module is bundled into the Model Hub form, so it cannot import the SDK.
- * reasoning-adaptive-parity.test.ts keeps the two in step.
+ * Whether the model takes `thinking: {type:'adaptive'}` + `output_config.effort` (Claude 4.6+, 5.x, fable)
+ * instead of `enabled` + `budget_tokens` - the style of its rule in the SDK table.
  */
 export function supportsAdaptiveThinking(modelId: string | undefined): boolean {
-  if (typeof modelId !== 'string') return false;
-  const id = modelId.toLowerCase();
-  const at = id.indexOf('claude-');
-  if (at < 0) return false;
-  for (const tok of id.slice(at + 7).split('-')) {
-    if (tok === 'fable') return true;
-    if (/^\d{1,2}$/.test(tok)) return Number(tok) >= 5;
-    if (/^\d+$/.test(tok)) return false;
-  }
-  return false;
+  return resolveRuleForDriver('anthropic', modelId)?.reasoning.style === 'adaptive';
 }
 
 /**
@@ -239,9 +228,12 @@ export function translateAnthropicThinking(
       : { thinking: { type: 'disabled' }, maxTokens: currentMaxTokens, dropSampling: false };
   }
   if (supportsAdaptiveThinking(modelId)) {
-    const effort = reasoning?.effort
-      ? (reasoning.effort === 'minimal' ? 'low' : reasoning.effort as 'low' | 'medium' | 'high')
-      : budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high';
+    const asked: ReasoningEffort = reasoning?.effort
+      ?? (budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high');
+    // The model's rule decides what it takes (4.6 tops out at max, 4.7+ adds xhigh; 'minimal' is not offered).
+    const rule = resolveRuleForDriver('anthropic', modelId);
+    const mapped = rule ? mapReasoningEffort(rule, asked).effort : undefined;
+    const effort = (mapped ?? (asked === 'minimal' ? 'low' : asked)) as Exclude<ReasoningEffort, 'none' | 'minimal'>;
     return { thinking: { type: 'adaptive' }, outputConfig: { effort }, maxTokens: currentMaxTokens, dropSampling: true };
   }
 
@@ -273,7 +265,7 @@ export function translateVertexThinking(
   if (budget === undefined) return undefined;
   return {
     thinkingConfig: {
-      thinkingBudget: budget,
+      thinkingBudget: Math.min(budget, VERTEX_MAX_THINKING_BUDGET),
       includeThoughts: budget === 0 ? false : (reasoning?.includeThoughts ?? true),
     },
   };
@@ -294,41 +286,23 @@ export interface ReasoningControl {
 }
 
 /**
- * Which knobs a driver understands. OpenAI-family takes effort levels;
- * Anthropic / Bedrock / Vertex think in token budgets (levels are shortcuts);
- * OpenAI-compatible engines only have on/off.
+ * Which knobs a model understands, from its rule in the agent-sdk table (see modelRules.ts):
+ * exactly the rule's efforts (+ Off when the rule can turn reasoning off). A model that only
+ * matched a family's permissive default is offered the whole ladder - the SDK maps at request time.
+ * Budget-style engines (older Claude, Gemini) also take a token budget.
  */
-/** OpenAI reasoning families by model id (`o3`, `gpt-5.x`, `gpt-oss`), namespaced ids included (`openai/gpt-5`). */
-export function isOpenAiReasoningModelId(modelId: string | undefined): boolean {
-  if (!modelId) return false;
-  const id = (modelId.split('/').pop() ?? modelId).toLowerCase();
-  if (id.startsWith('gpt-5') && !id.startsWith('gpt-5-chat')) return true;
-  if (id.startsWith('gpt-oss')) return true;
-  return id.length > 1 && id[0] === 'o' && id[1] >= '0' && id[1] <= '9';
-}
-
 export function reasoningControlForDriver(driver: string | undefined, modelId?: string): ReasoningControl {
-  // An OpenAI reasoning model behind an OpenAI-compatible endpoint (Azure v1, a gateway) takes the full effort list.
-  if ((driver === 'openai-compatible' || driver === 'together') && isOpenAiReasoningModelId(modelId)) {
-    return { kind: 'effort', efforts: ['none', 'minimal', 'low', 'medium', 'high'], budget: false, includeThoughts: false };
-  }
-  switch (driver) {
-    case 'openai':
-    case 'azure':
-      return { kind: 'effort', efforts: ['none', 'minimal', 'low', 'medium', 'high'], budget: false, includeThoughts: false };
-    case 'anthropic':
-    case 'bedrock':
-      return { kind: 'budget', efforts: ['none', 'low', 'medium', 'high'], budget: true, includeThoughts: false };
-    case 'vertex':
-      // The Vertex client derives includeThoughts from the budget itself (on
-      // whenever the budget is above 0), so there is no separate switch to offer.
-      return { kind: 'budget', efforts: ['none', 'low', 'medium', 'high'], budget: true, includeThoughts: false };
-    case 'openai-compatible':
-    case 'together':
-      return { kind: 'toggle', efforts: ['none', 'medium'], budget: false, includeThoughts: false };
-    default:
-      return { kind: 'none', efforts: [], budget: false, includeThoughts: false };
-  }
+  const rule = resolveRuleForDriver(driver, modelId);
+  if (!rule) return { kind: 'none', efforts: [], budget: false, includeThoughts: false };
+  const efforts = effortsOfRule(rule);
+  const { style } = rule.reasoning;
+  if (style === 'none' || efforts.length === 0) return { kind: 'none', efforts: [], budget: false, includeThoughts: false };
+  // The Vertex client derives includeThoughts from the budget itself (on whenever the
+  // budget is above 0), so there is no separate switch to offer. Adaptive thinking has no token budget.
+  if (style === 'budget') return { kind: 'budget', efforts, budget: true, includeThoughts: false };
+  if (style === 'adaptive') return { kind: 'budget', efforts, budget: false, includeThoughts: false };
+  if (style === 'toggle') return { kind: 'toggle', efforts, budget: false, includeThoughts: false };
+  return { kind: 'effort', efforts, budget: false, includeThoughts: false };
 }
 
 /**

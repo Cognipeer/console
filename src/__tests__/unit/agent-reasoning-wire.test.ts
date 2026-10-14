@@ -57,9 +57,9 @@ const serve = () => { upstream = stubUpstream(() => json(completionBody({ conten
 const lastBody = () => upstream.calls.at(-1)!.body;
 
 /** Builds the model the way a run does and returns the `reasoning_effort` that went out. */
-async function sentEffort(input: { hub?: string; agent?: string; request?: string }) {
+async function sentEffort(input: { hub?: string; agent?: string; request?: string; modelId?: string }) {
   hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(
-    key, input.hub ? { reasoning: { effort: input.hub } } : {},
+    key, input.hub ? { reasoning: { effort: input.hub } } : {}, input.modelId,
   ));
   const { chatModel } = await buildAgentChatModel(
     'tenant_x', 't', 'p', 'gpt-4o', {},
@@ -81,7 +81,8 @@ describe('reasoning_effort on the wire', () => {
   it.each([
     ['agent + Model Hub + request: the agent wins', { agent: 'low', hub: 'high', request: 'minimal' }, 'low'],
     ['Model Hub + request: Model Hub wins', { hub: 'high', request: 'minimal' }, 'high'],
-    ['request only: the request is used', { request: 'minimal' }, 'minimal'],
+    ['request only: the request is used', { request: 'medium' }, 'medium'],
+    ['request only: a level the model lacks is clamped (o3 has no minimal)', { request: 'minimal' }, 'low'],
     ['agent over request', { agent: 'medium', request: 'low' }, 'medium'],
     ['agent over Model Hub', { agent: 'low', hub: 'high' }, 'low'],
     ['Model Hub only', { hub: 'medium' }, 'medium'],
@@ -91,7 +92,14 @@ describe('reasoning_effort on the wire', () => {
   });
 
   it('an agent "none" is sent (it is a value, not an absence)', async () => {
-    expect(await sentEffort({ agent: 'none', hub: 'high' })).toBe('none');
+    expect(await sentEffort({ agent: 'none', hub: 'high', modelId: 'gpt-5.6-luna' })).toBe('none');
+  });
+
+  it('a level the model lacks is mapped to the nearest lower one it takes', async () => {
+    expect(await sentEffort({ agent: 'max', modelId: 'gpt-6-luna' })).toBe('xhigh');
+    expect(await sentEffort({ agent: 'xhigh', modelId: 'o3' })).toBe('high');
+    // no off switch on o3: none is the lowest level it has
+    expect(await sentEffort({ agent: 'none', modelId: 'o3' })).toBe('low');
   });
 });
 

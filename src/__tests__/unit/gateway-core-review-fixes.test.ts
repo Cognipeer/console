@@ -235,17 +235,20 @@ describe('a request-sourced reasoning effort', () => {
     expect((await ask('gpt-5.2', { reasoning_effort: 'high' })).reasoning_effort).toBe('high');
   });
 
-  it('never sends none to a model that does not accept it, so /messages thinking:disabled is harmless there', async () => {
+  it('maps none to the lowest level for a model without an off switch, and drops it for one that does not reason', async () => {
     const translated = anthropicRequestToOpenAi({
       model: 'm', max_tokens: 100, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: 'x' }],
     } as never);
     expect((await ask('gpt-4o', translated as object)).reasoning_effort).toBeUndefined();
-    expect((await ask('o3', { reasoning_effort: 'none' })).reasoning_effort).toBeUndefined();
+    // o3 has no off switch: the SDK maps none to the lowest level it takes.
+    expect((await ask('o3', { reasoning_effort: 'none' })).reasoning_effort).toBe('low');
     expect((await ask('gpt-5.2', { reasoning_effort: 'none' })).reasoning_effort).toBe('none');
   });
 
   it('never gates the operator\'s own Model Hub pin', async () => {
-    expect((await ask('gpt-4o', {}, { reasoning: { effort: 'low' } })).reasoning_effort).toBe('low');
+    expect((await ask('o3', {}, { reasoning: { effort: 'low' } })).reasoning_effort).toBe('low');
+    // The rule table lists gpt-4o as a non-reasoning model: the SDK keeps the effort off the wire for it.
+    expect((await ask('gpt-4o', {}, { reasoning: { effort: 'low' } })).reasoning_effort).toBeUndefined();
   });
 
   it('leaves providers with their own reasoning envelope alone', () => {
