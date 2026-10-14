@@ -8,6 +8,7 @@ import type {
   IAgent,
   IAgentConversation,
   IAgentConversationListItem,
+  IAgentConversationSearchHit,
   AgentSessionRuntimeStatus,
   IAgentConversationState,
   IAgentPendingAction,
@@ -1484,6 +1485,20 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       createdBy?: string;
     },
   ): Promise<IAgentConversation[]>;
+  /**
+   * Conversations whose title or message text contains `search` (case-insensitive, literal), newest updated
+   * first, without transcripts, each with where it first matched. `agentKeys` limits it to those agents (an
+   * empty list matches nothing); `createdBy` to one person's sessions. A `search` shorter than 2 characters
+   * matches nothing; longer than 200 is cut.
+   */
+  searchAgentConversations(filters: {
+    projectId: string;
+    search: string;
+    agentKeys?: string[];
+    createdBy?: string;
+    limit?: number;
+    skip?: number;
+  }): Promise<IAgentConversationSearchHit[]>;
   /**
    * A page of a project's conversations, newest created first (`createdAt`, then
    * id), without their transcripts. `runtimeStatus: 'idle'` also matches a

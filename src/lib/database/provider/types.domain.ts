@@ -3150,6 +3150,19 @@ export interface IAgentConversation {
 /** A conversation as a list shows it: no transcript, just how many messages it holds. */
 export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
 
+/** Where a search text first matched in a conversation. */
+export interface IAgentConversationSearchMatch {
+  field: 'title' | 'message';
+  /** The matching message's id, when it has one. */
+  messageId?: string;
+  role?: 'user' | 'assistant';
+  /** Plain text, at most 160 characters, around the match, `…` at cut ends. */
+  snippet: string;
+}
+
+/** A conversation found by a search: a list item plus where it matched. */
+export type IAgentConversationSearchHit = IAgentConversationListItem & { searchMatch?: IAgentConversationSearchMatch };
+
 /**
  * The agent runtime's own state for a conversation, carried between turns.
  *
