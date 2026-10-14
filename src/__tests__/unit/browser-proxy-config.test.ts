@@ -63,4 +63,20 @@ describe('resolveBrowserProxyConfig', () => {
     expect(result).toEqual({ server: 'http://proxy.internal:8080' });
     expect(result).not.toHaveProperty('bypass');
   });
+
+  it('splits embedded basic-auth credentials out of the server URL — Chromium ignores them in --proxy-server', () => {
+    clearProxyEnv();
+    process.env.HTTPS_PROXY = 'http://svc%40corp:p%3Ass@proxy.internal:3128';
+    expect(resolveBrowserProxyConfig()).toEqual({
+      server: 'http://proxy.internal:3128',
+      username: 'svc@corp',
+      password: 'p:ss',
+    });
+  });
+
+  it('passes a scheme-less host:port through untouched', () => {
+    clearProxyEnv();
+    process.env.HTTPS_PROXY = 'proxy.internal:3128';
+    expect(resolveBrowserProxyConfig()).toEqual({ server: 'proxy.internal:3128' });
+  });
 });
