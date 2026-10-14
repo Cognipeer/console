@@ -907,6 +907,15 @@ describe('RAG Service', () => {
       await expect(queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq)).rejects.toThrow(/not found/i);
     });
 
+    it('hands the caller signal to the embedding call and the vector query', async () => {
+      const ac = new AbortController();
+      await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq, { signal: ac.signal });
+      expect(handleEmbeddingRequest).toHaveBeenCalledWith(expect.objectContaining({ signal: ac.signal }));
+      expect(queryVectorIndex).toHaveBeenLastCalledWith(
+        DB_NAME, TENANT_ID, PROJECT_ID, expect.anything(), { signal: ac.signal },
+      );
+    });
+
     it('embeds the query text', async () => {
       await queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq);
       expect(handleEmbeddingRequest).toHaveBeenCalledWith(

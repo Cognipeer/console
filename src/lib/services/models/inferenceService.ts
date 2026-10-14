@@ -336,8 +336,10 @@ export async function handleEmbeddingRequest(params: {
   modelKey: string;
   projectId: string;
   body: EmbeddingRequestBody;
+  /** Cancels the upstream embedding call (e.g. the agent turn was stopped). */
+  signal?: AbortSignal;
 }) {
-  const { tenantDbName, modelKey, projectId, body } = params;
+  const { tenantDbName, modelKey, projectId, body, signal } = params;
 
   if (!body?.input) {
     throw new Error('`input` is required');
@@ -383,14 +385,14 @@ export async function handleEmbeddingRequest(params: {
     return value;
   });
 
-  const embedOptions: NativeEmbedOptions = {};
+  const embedOptions: NativeEmbedOptions = signal ? { signal } : {};
   if (typeof body.dimensions === 'number' && body.dimensions > 0) embedOptions.dimensions = body.dimensions;
   if (body.encoding_format === 'float' || body.encoding_format === 'base64') embedOptions.encodingFormat = body.encoding_format;
   if (typeof body.input_type === 'string' && body.input_type) embedOptions.inputType = body.input_type;
 
   const embedded = await withResilience(
     () => embedder.embed(inputs, embedOptions),
-    { key: `embedding:${tenantDbName}:${model.providerKey}` },
+    { key: `embedding:${tenantDbName}:${model.providerKey}`, ...(signal ? { signal } : {}) },
   );
   const embeddings = embedded.vectors;
   const latencyMs = Date.now() - start;

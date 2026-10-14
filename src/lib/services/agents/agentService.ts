@@ -77,7 +77,7 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
-import { runWithTurnSignal } from '@/lib/core/turnSignal';
+import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';
 import { executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import {
     resolveAgentBindingMcpServer,
@@ -1117,7 +1117,7 @@ async function buildKnowledgeTools(
                     query: args.query,
                     topK: 5,
                     filter: args.filter,
-                });
+                }, { signal: currentTurnSignal() });
                 return result.matches
                     .filter((m) => m.content)
                     .map((m) => {

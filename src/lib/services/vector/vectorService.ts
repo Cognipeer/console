@@ -947,6 +947,7 @@ export async function queryVectorIndex(
   tenantId: string,
   projectId: string,
   request: VectorQueryRequest,
+  options?: { signal?: AbortSignal },
 ): Promise<VectorQueryResponse> {
   const { runtime, record } = await buildRuntimeContext(
     tenantDbName,
@@ -993,7 +994,7 @@ export async function queryVectorIndex(
   try {
     result = await withResilience(
       () => runtime.queryVectors(toRuntimeHandle(index), runtimeQuery),
-      { key: `vector-query:${request.providerKey}` },
+      { key: `vector-query:${request.providerKey}`, ...(options?.signal ? { signal: options.signal } : {}) },
     );
   } catch (error) {
     // A failed search still counts against the index's usage, and the rollup
