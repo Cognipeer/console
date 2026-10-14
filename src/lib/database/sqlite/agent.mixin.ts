@@ -10,6 +10,7 @@ import type {
   AgentSessionRuntimeStatus,
   IAgentConversation,
   IAgentConversationListItem,
+  IAgentConversationSearchHit,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentMessageFeedback,
@@ -21,6 +22,7 @@ import type {
   NewAgentSessionEvent,
 } from '../provider.interface';
 import { AgentSessionEventSeqConflictError } from '../provider/errors';
+import { findConversationSearchMatch, normalizeConversationSearch, toLikePattern } from '../provider/conversationSearch';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -444,6 +446,47 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         const { messages: _messages, ...conversation } = this.mapConversation(row);
         void _messages;
         return { ...conversation, messageCount: Number(row.messageCount ?? 0) };
+      });
+    }
+
+    async searchAgentConversations(filters: {
+      projectId: string;
+      search: string;
+      agentKeys?: string[];
+      createdBy?: string;
+      limit?: number;
+      skip?: number;
+    }): Promise<IAgentConversationSearchHit[]> {
+      const needle = normalizeConversationSearch(filters.search);
+      if (!needle || filters.agentKeys?.length === 0) return [];
+      const db = this.getTenantDb();
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = {
+        projectId: filters.projectId,
+        pattern: toLikePattern(needle),
+        limit: Math.max(1, Math.floor(filters.limit ?? 20)),
+        offset: Math.max(0, Math.floor(filters.skip ?? 0)),
+      };
+      if (filters.agentKeys) {
+        const names = filters.agentKeys.map((key, i) => { params[`agentKey${i}`] = key; return `@agentKey${i}`; });
+        conditions.push(`agentKey IN (${names.join(', ')})`);
+      }
+      if (filters.createdBy !== undefined) { conditions.push('createdBy = @createdBy'); params.createdBy = filters.createdBy; }
+      // The needle is only ever a bound LIKE pattern (its % _ \ escaped); message text is read out of the JSON
+      // transcript, so keys and escape sequences of the JSON itself never match.
+      conditions.push(`(title LIKE @pattern ESCAPE '\\' OR EXISTS (
+        SELECT 1 FROM json_each(${TABLES.agentConversations}.messages)
+        WHERE json_extract(json_each.value, '$.content') LIKE @pattern ESCAPE '\\'))`);
+      const rows = db.prepare(`
+        SELECT * FROM ${TABLES.agentConversations}
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY updatedAt DESC, id DESC
+        LIMIT @limit OFFSET @offset
+      `).all(params) as SqliteRow[];
+      return rows.map((row) => {
+        const { messages, ...conversation } = this.mapConversation(row);
+        const searchMatch = findConversationSearchMatch(conversation.title, messages, needle);
+        return { ...conversation, messageCount: messages.length, ...(searchMatch ? { searchMatch } : {}) };
       });
     }
 

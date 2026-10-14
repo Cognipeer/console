@@ -401,6 +401,8 @@ export type {
   IAgentConfig,
   IAgentConversation,
   IAgentConversationListItem,
+  IAgentConversationSearchHit,
+  IAgentConversationSearchMatch,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentMessageFeedback,

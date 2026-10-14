@@ -12,6 +12,7 @@ import type {
   AgentSessionRuntimeStatus,
   IAgentConversation,
   IAgentConversationListItem,
+  IAgentConversationSearchHit,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentMessageFeedback,
@@ -23,6 +24,7 @@ import type {
   NewAgentSessionEvent,
 } from '../provider.interface';
 import { AgentSessionEventSeqConflictError } from '../provider/errors';
+import { buildMongoConversationSearchCondition, findConversationSearchMatch, normalizeConversationSearch } from '../provider/conversationSearch';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -408,6 +410,42 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         ])
         .toArray();
       return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationListItem[];
+    }
+
+    async searchAgentConversations(filters: {
+      projectId: string;
+      search: string;
+      agentKeys?: string[];
+      createdBy?: string;
+      limit?: number;
+      skip?: number;
+    }): Promise<IAgentConversationSearchHit[]> {
+      const needle = normalizeConversationSearch(filters.search);
+      if (!needle || filters.agentKeys?.length === 0) return [];
+      const db = this.getTenantDb();
+      const match: Record<string, unknown> = {
+        projectId: filters.projectId,
+        ...buildMongoConversationSearchCondition(needle),
+      };
+      if (filters.agentKeys) match.agentKey = { $in: filters.agentKeys };
+      if (filters.createdBy !== undefined) match.createdBy = filters.createdBy;
+      let cursor = db
+        .collection(COLLECTIONS.agentConversations)
+        .find(match, { projection: { runtimeTurnId: 0 } })
+        .sort({ updatedAt: -1, _id: -1 });
+      if (filters.skip) cursor = cursor.skip(filters.skip);
+      cursor = cursor.limit(filters.limit ?? 20);
+      const docs = await cursor.toArray();
+      return docs.map((doc) => {
+        const { messages, ...rest } = doc as Record<string, unknown> & { messages?: IAgentConversation['messages']; title?: string };
+        const searchMatch = findConversationSearchMatch(rest.title, messages, needle);
+        return {
+          ...rest,
+          _id: String(doc._id),
+          messageCount: Array.isArray(messages) ? messages.length : 0,
+          ...(searchMatch ? { searchMatch } : {}),
+        };
+      }) as unknown as IAgentConversationSearchHit[];
     }
 
     // ── Agent session event log ──────────────────────────────────
