@@ -25,13 +25,17 @@ import {
 } from '../helpers/iamCenterUi';
 import { CAPS_ADMIN, CAPS_READ_ONLY, directoryRoutes, listHandler, PEOPLE } from '../helpers/iamDirectoryFixtures';
 
-const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
+const nav = vi.hoisted(() => ({
+  search: '',
+  cache: new Map<string, URLSearchParams>(),
+  router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
+}));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => {
     if (!nav.cache.has(nav.search)) nav.cache.set(nav.search, new URLSearchParams(nav.search));
     return nav.cache.get(nav.search)!;
   },
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => nav.router,
   usePathname: () => '/dashboard/iam',
 }));
 
@@ -49,6 +53,8 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   nav.search = '';
+  nav.router.push.mockClear();
+  nav.router.replace.mockClear();
 });
 
 vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
@@ -430,41 +436,21 @@ describe('the row menu', () => {
   });
 });
 
-describe('Escape', () => {
-  const escape = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-
-  it('closes the form on top first and the drawer only on the next press', async () => {
-    await renderTab({ search: 'tab=principals&principalType=user&principalId=u-ann&edit=profile' });
-    expect(q('.form-overlay')?.textContent).toContain('Edit profile');
-    expect(q('[role="dialog"]:not(.form-overlay)')).not.toBeNull();
-    escape();
-    await settle(120);
-    expect(q('.form-overlay')).toBeNull();
-    expect(search().get('edit')).toBeNull();
-    // the drawer is still there
-    expect(search().get('principalId')).toBe('u-ann');
-    expect(qa('[role="dialog"]').some((d) => d.textContent?.includes('Ann Lee'))).toBe(true);
-  });
-});
-
 describe('opening a principal', () => {
-  it('opens the drawer from a row and asks for the profile without the effective table first', async () => {
+  it('opens the page of a person from a row', async () => {
     await renderTab();
     await click(q('tbody tr button[aria-label^="Open details of Ann Lee"]'));
-    await settle(150);
-    const details = api.calls.filter((c) => c.path === '/api/iam/principals/user/u-ann');
-    expect(details[0]?.query).toEqual({ effective: '0' });
-    expect(search().get('principalType')).toBe('user');
-    expect(search().get('principalId')).toBe('u-ann');
-    expect(q('[role="dialog"]')?.textContent).toContain('Ann Lee');
+    await settle(50);
+    expect(nav.router.push).toHaveBeenCalledWith('/dashboard/iam/principals/user/u-ann');
   });
 
-  it('keeps the segment in the address bar when the drawer closes', async () => {
-    await renderTab({ search: 'tab=principals&principalType=user&principalId=u-ann' });
-    expect(q('[role="dialog"]')?.textContent).toContain('Ann Lee');
-    await click(q('button[aria-label="Close"]'));
-    await settle(80);
-    expect(search().get('principalId')).toBeNull();
-    expect(search().get('principalType')).toBe('user');
+  it('sends a link from before the pages (principalType and principalId in the list address) to the page', async () => {
+    await renderTab({ search: 'tab=principals&principalType=user&principalId=u-ann&edit=profile' });
+    expect(nav.router.replace).toHaveBeenCalledWith('/dashboard/iam/principals/user/u-ann?edit=profile');
+  });
+
+  it('keeps the list when there is no principal in the address', async () => {
+    await renderTab();
+    expect(nav.router.replace).not.toHaveBeenCalled();
   });
 });

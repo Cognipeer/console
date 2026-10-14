@@ -499,6 +499,23 @@ export const en = {
         back: 'Back to password sign-in',
         notFound: 'No single sign-on connection is set up for that email address.',
       },
+      errors: {
+        notFound: 'No single sign-on connection is set up for that email address.',
+        unavailable: 'Single sign-on is not available right now.',
+        expired: 'Your sign-in session expired. Please try again.',
+        invalidRequest: 'Something went wrong starting single sign-on. Please try again.',
+        idpError: 'The identity provider declined the sign-in request.',
+        noSubject: 'The identity provider did not return a usable identity.',
+        noEmail: 'The identity provider did not return a usable email address.',
+        emailNotVerified: 'Your identity provider email is not verified.',
+        accountLinkRefused: 'This identity cannot be linked to an existing account automatically. Contact your admin.',
+        loginDisabled: 'This account cannot sign in.',
+        clientAuthMethodMismatch:
+          'The identity provider expects a different client authentication method than this connection uses. An administrator can switch between client_secret_post and client_secret_basic in the Single Sign-On settings.',
+        clientAuthFailed:
+          "The identity provider rejected this application's client credentials. An administrator should check the client ID, client secret and client authentication method in the Single Sign-On settings.",
+        callbackFailed: 'Single sign-on failed. Please try again.',
+      },
     },
     footer: {
       cta: "Don't have an account?",
@@ -1400,6 +1417,14 @@ export const en = {
       search: 'Search principals',
       searching: 'Searching…',
       nothing: 'No matches',
+    },
+    page: {
+      backToList: 'Back to principals',
+      backTo: {
+        user: 'All people',
+        group: 'All groups',
+        token: 'All tokens',
+      },
     },
     drawer: {
       title: 'Access details',
@@ -2911,6 +2936,12 @@ export const en = {
         allowedNow: 'With the policies as they are now, this request would be allowed.',
         stillDenied: 'With the policies as they are now, it is still denied.',
       },
+    },
+    policyPage: {
+      back: 'All policies',
+      edit: 'Edit policy',
+      notFound: 'This policy no longer exists.',
+      loadFailed: 'The policy could not be loaded.',
     },
     drawer: {
       meta: 'Created {created} · Updated {updated} by {by}',

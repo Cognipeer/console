@@ -8,8 +8,7 @@ import {
   Badge,
   Button,
   CopyButton,
-  Drawer,
-  Group,
+    Group,
   Select,
   Skeleton,
   Stack,
@@ -79,13 +78,13 @@ const NS = 'iamPrincipals';
 
 // ── the detail view (pure: data in, markup out) ───────────────────────────
 
-/** What the signed-in person is, as far as the drawer's actions need to know. */
+/** What the signed-in person is, as far as the detail page's actions need to know. */
 export interface DetailViewer {
   /** The signed-in person: nobody changes their own role or disables themself. */
   userId: string | null;
 }
 
-/** The things a drawer can ask for; the container wires them to forms and confirmations. */
+/** The things the detail page can ask for; the container wires them to forms and confirmations. */
 export interface DetailHandlers {
   // a person
   editProfile: () => void;
@@ -126,7 +125,7 @@ export interface PrincipalDetailViewProps {
   onRetry: () => void;
   onOpen: (target: PrincipalTarget) => void;
   onBack?: () => void;
-  /** Wires the drawer's write actions; without it the drawer is read-only. */
+  /** Wires the page's write actions; without it the page is read-only. */
   handlers?: DetailHandlers;
   viewer?: DetailViewer;
   /** The members of a group (stateful, owned by the container). */
@@ -564,7 +563,7 @@ function describeLoadError(err: unknown, t: Translate): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export interface DrawerContext {
+export interface DetailContext {
   /** The signed-in person. */
   me: { userId: string; role: string } | null;
   /** The roles the signed-in person may hand out. */
@@ -572,23 +571,23 @@ export interface DrawerContext {
   /** May the signed-in person mint tokens for other people? */
   canMintForOthers: boolean;
   actions: PeopleActions;
-  /** The open full-screen form of the drawer's principal (mirrored into the address bar). */
+  /** The open full-screen form of this principal (mirrored into the address bar). */
   edit: EditKind | null;
   onEdit: (kind: EditKind | null) => void;
-  /** A person was created or changed: refresh the list behind the drawer. */
+  /** A person was created or changed. */
   onChanged: () => void;
-  /** A forms is open: Escape belongs to it. */
+  /** A form is open on the page. */
   onOverlayChange?: (open: boolean) => void;
-  /** Start minting a token for this person (opens the token form of the list). */
+  /** Start minting a token for this person. */
   onNewToken: (owner: { id: string; label: string }) => void;
-  /** The principal is gone (deleted): close the drawer. */
+  /** The principal is gone (deleted): leave its page. */
   onGone: () => void;
 }
 
-interface ContentProps {
+export interface ContentProps {
   target: PrincipalTarget;
   canManage: boolean;
-  context: DrawerContext;
+  context: DetailContext;
   onOpen: (target: PrincipalTarget) => void;
   onBack?: () => void;
 }
@@ -599,7 +598,7 @@ interface LoadState {
   error: string | null;
 }
 
-function PrincipalDetailContent({ target, canManage, context, onOpen, onBack }: ContentProps) {
+export function PrincipalDetailContent({ target, canManage, context, onOpen, onBack }: ContentProps) {
   const t = useTranslations(NS);
   const td = useTranslations('iamDirectory');
   const tNotifications = useTranslations('notifications');
@@ -903,63 +902,5 @@ function PrincipalDetailContent({ target, canManage, context, onOpen, onBack }: 
       ) : null}
 
     </>
-  );
-}
-
-// ── the drawer ────────────────────────────────────────────────────────────
-
-interface DrawerProps {
-  opened: boolean;
-  target: PrincipalTarget | null;
-  canManage: boolean;
-  canGoBack: boolean;
-  onBack: () => void;
-  onClose: () => void;
-  onOpen: (target: PrincipalTarget) => void;
-  context: DrawerContext;
-  /** False while a form or a confirmation is open: Escape belongs to it. */
-  closeOnEscape?: boolean;
-}
-
-/** Side drawer with the access details of one principal; groups, tokens and owners opened from it can go back. */
-export default function PrincipalDetailDrawer({
-  opened,
-  target,
-  canManage,
-  canGoBack,
-  onBack,
-  onClose,
-  onOpen,
-  context,
-  closeOnEscape = true,
-}: DrawerProps) {
-  const t = useTranslations(NS);
-  // Keep showing the last principal while the drawer slides out.
-  const [shown, setShown] = useState<PrincipalTarget | null>(target);
-  if (target && target !== shown) setShown(target);
-
-  const handleBack = useCallback(() => onBack(), [onBack]);
-
-  return (
-    <Drawer
-      opened={opened}
-      onClose={onClose}
-      position="right"
-      size="xl"
-      title={t('drawer.title')}
-      closeOnEscape={closeOnEscape}
-      closeButtonProps={{ 'aria-label': t('drawer.close') }}
-    >
-      {shown ? (
-        <PrincipalDetailContent
-          key={`${shown.type}:${shown.id}`}
-          target={shown}
-          canManage={canManage}
-          context={context}
-          onOpen={onOpen}
-          onBack={canGoBack ? handleBack : undefined}
-        />
-      ) : null}
-    </Drawer>
   );
 }
