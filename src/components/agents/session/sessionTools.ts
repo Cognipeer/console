@@ -32,7 +32,7 @@ export interface AgentToolConfig {
     knowledgeEngineKey?: string;
     subagents?: unknown[];
     skills?: unknown[];
-    memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
+    memory?: { enabled?: boolean; memoryStoreKey?: string; mounts?: { storeKey: string; access?: string }[]; tools?: 'off' | 'read' | 'readwrite' };
     sandbox?: {
         enabled?: boolean;
         templateKey?: string;
@@ -71,12 +71,12 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
     // Console-side memory tools — see `agentMemoryTools.ts`. Bound whenever
     // memory is on with a store, unless the operator turned them off.
     const memoryMode = config.memory?.tools ?? 'readwrite';
-    if (config.memory?.enabled && config.memory.memoryStoreKey && memoryMode !== 'off') {
+    if (config.memory?.enabled && (config.memory.memoryStoreKey || config.memory.mounts?.length) && memoryMode !== 'off') {
         const names = memoryMode === 'readwrite'
             ? ['memory_search', 'memory_write', 'memory_forget']
             : ['memory_search'];
         for (const name of names) {
-            tools.push({ name, origin: 'memory', sourceKey: config.memory.memoryStoreKey });
+            tools.push({ name, origin: 'memory', sourceKey: config.memory.mounts?.[0]?.storeKey ?? config.memory.memoryStoreKey });
         }
     }
 

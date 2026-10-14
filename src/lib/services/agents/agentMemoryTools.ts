@@ -58,6 +58,19 @@ export interface MemoryToolDeps {
     };
     /** False drops the write/forget tools, leaving recall read-only. */
     allowWrites: boolean;
+    /**
+     * Mounted stores. Absent or a single entry = today's single-store schema
+     * and behaviour (`store`/`scope` above). With several, the tools gain a
+     * `store` argument and each mount carries its own scope.
+     */
+    mounts?: MemoryToolMount[];
+}
+
+export interface MemoryToolMount {
+    key: string;
+    access: 'read_write' | 'read_only';
+    scope: 'session' | 'user' | 'workspace' | 'tenant';
+    store: MemoryStore;
 }
 
 /**
@@ -69,7 +82,29 @@ export interface MemoryToolDeps {
  * a model.
  */
 export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] {
-    const { store, scope, createToolFn, zod, guard, allowWrites } = deps;
+    const { createToolFn, zod, guard, allowWrites } = deps;
+    const mounts: MemoryToolMount[] = deps.mounts?.length
+        ? deps.mounts
+        : [{ key: 'default', access: 'read_write', scope: deps.scope, store: deps.store }];
+    const multi = mounts.length > 1;
+    const writable = mounts.filter((m) => m.access === 'read_write');
+    const storeKeys = mounts.map((m) => m.key).join(', ');
+
+    /** Resolves the `store` arg for a write; a string is a tool error returned to the model. */
+    const pickWritable = (name: unknown): MemoryToolMount | string => {
+        const wanted = typeof name === 'string' ? name.trim() : '';
+        if (!wanted) {
+            if (writable.length === 1) return writable[0];
+            return `Specify "store": one of ${writable.map((m) => m.key).join(', ') || '(none writable)'}.`;
+        }
+        const mount = mounts.find((m) => m.key === wanted);
+        if (!mount) return `Unknown memory store "${wanted}". Available: ${storeKeys}.`;
+        if (mount.access !== 'read_write') return `Memory store "${wanted}" is read-only; it cannot be written to or forgotten from.`;
+        return mount;
+    };
+    const storeArg: Record<string, import('zod').ZodTypeAny> = multi
+        ? { store: zod.string().optional().describe(`Memory store key. One of: ${storeKeys}.`) }
+        : {};
     const tools: AgentSdkToolInterface[] = [];
 
     tools.push(createToolFn({
@@ -84,22 +119,44 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
             query: zod.string().describe('What to look for, in natural language.'),
             limit: zod.number().int().min(1).max(MAX_SEARCH_LIMIT).optional()
                 .describe(`How many facts to return (default ${DEFAULT_SEARCH_LIMIT}).`),
+            ...(multi ? { store: zod.string().optional().describe(`Limit the search to one store (${storeKeys}); omit to search all.`) } : {}),
         }),
         func: guard.protect(
             { name: 'agent.memory.search', requestedName: 'memory_search' },
-            async (args: { query?: string; limit?: number }) => {
+            async (args: { query?: string; limit?: number; store?: string }) => {
                 const limit = Math.min(args.limit ?? DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
                 const query = typeof args.query === 'string' ? args.query.trim() : '';
+                let targets = mounts;
+                const only = typeof args.store === 'string' ? args.store.trim() : '';
+                if (multi && only) {
+                    const hit = mounts.find((m) => m.key === only);
+                    if (!hit) return `Unknown memory store "${only}". Available: ${storeKeys}.`;
+                    targets = [hit];
+                }
                 return orFallback('memory_search failed', 'Memory search is unavailable right now.', async () => {
                     // `semanticSearch` needs a query to embed; with none, the
                     // honest fallback is "the most recent facts", not an empty
                     // result the model would read as "nothing is remembered".
-                    const facts = query && typeof store.semanticSearch === 'function'
-                        ? await store.semanticSearch(scope, query, { limit })
-                        : await store.get(scope, { limit });
-                    if (facts.length === 0) return 'No stored memory matched.';
+                    const perStore = await Promise.all(targets.map(async (m) => {
+                        const facts = query && typeof m.store.semanticSearch === 'function'
+                            ? await m.store.semanticSearch(m.scope, query, { limit })
+                            : await m.store.get(m.scope, { limit });
+                        return facts.map((fact) => ({ mount: m, fact }));
+                    }));
+                    // Facts carry no cross-store score, so merge by rank:
+                    // each store's own relevance order, interleaved.
+                    const merged: { mount: MemoryToolMount; fact: (typeof perStore)[number][number]['fact'] }[] = [];
+                    for (let i = 0; merged.length < limit; i++) {
+                        let any = false;
+                        for (const list of perStore) {
+                            if (i < list.length && merged.length < limit) { merged.push(list[i]); any = true; }
+                        }
+                        if (!any) break;
+                    }
+                    if (merged.length === 0) return 'No stored memory matched.';
                     return JSON.stringify(
-                        facts.map((fact) => ({
+                        merged.map(({ mount, fact }) => ({
+                            ...(multi ? { store: mount.key } : {}),
                             key: fact.key,
                             value: fact.value,
                             confidence: fact.confidence,
@@ -128,15 +185,18 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
             value: zod.string().min(1).max(2000).describe('The fact itself, as one self-contained sentence.'),
             confidence: zod.number().min(0).max(1).optional()
                 .describe('How sure you are, 0–1. Default 0.8.'),
+            ...storeArg,
         }),
         func: guard.protect(
             { name: 'agent.memory.write', requestedName: 'memory_write' },
-            async (args: { key?: string; value?: string; confidence?: number }) => {
+            async (args: { key?: string; value?: string; confidence?: number; store?: string }) => {
                 const key = typeof args.key === 'string' ? args.key.trim() : '';
                 const value = typeof args.value === 'string' ? args.value.trim() : '';
                 if (!key || !value) return 'Both key and value are required.';
+                const target = pickWritable(args.store);
+                if (typeof target === 'string') return target;
                 return orFallback('memory_write failed', 'Could not save that to memory.', async () => {
-                    await store.upsert(scope, [{
+                    await target.store.upsert(target.scope, [{
                         key,
                         value,
                         sourceTurn: 0,
@@ -158,14 +218,17 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
         ].join(' '),
         schema: zod.object({
             key: zod.string().min(1).describe('The key of the fact to forget.'),
+            ...storeArg,
         }),
         func: guard.protect(
             { name: 'agent.memory.forget', requestedName: 'memory_forget' },
-            async (args: { key?: string }) => {
+            async (args: { key?: string; store?: string }) => {
                 const key = typeof args.key === 'string' ? args.key.trim() : '';
                 if (!key) return 'A key is required.';
+                const target = pickWritable(args.store);
+                if (typeof target === 'string') return target;
                 return orFallback('memory_forget failed', 'Could not update memory.', async () => {
-                    await store.markObsolete(scope, [key]);
+                    await target.store.markObsolete(target.scope, [key]);
                     return `Forgot "${key}".`;
                 });
             },
@@ -180,7 +243,7 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
  * memory tools alongside every other tool the run could call rather than
  * leaving three unexplained names in the timeline.
  */
-export function memoryToolDefinitions(allowWrites: boolean): TraceToolDefinition[] {
+export function memoryToolDefinitions(allowWrites: boolean, storeKeys: string[] = []): TraceToolDefinition[] {
     const definitions: TraceToolDefinition[] = [{
         name: 'memory_search',
         description: 'Search stored memory for facts about this user/conversation.',
@@ -194,6 +257,14 @@ export function memoryToolDefinitions(allowWrites: boolean): TraceToolDefinition
         },
     }];
 
+    const storeProp = storeKeys.length > 1
+        ? { store: { type: 'string', description: `Memory store key. One of: ${storeKeys.join(', ')}.` } }
+        : {};
+    (definitions[0].parameters as { properties: Record<string, unknown> }).properties = {
+        ...(definitions[0].parameters as { properties: Record<string, unknown> }).properties,
+        ...storeProp,
+    };
+
     if (!allowWrites) return definitions;
 
     definitions.push(
@@ -206,6 +277,7 @@ export function memoryToolDefinitions(allowWrites: boolean): TraceToolDefinition
                     key: { type: 'string', description: 'Short stable identifier.' },
                     value: { type: 'string', description: 'The fact, as one self-contained sentence.' },
                     confidence: { type: 'number', description: 'How sure you are, 0–1. Default 0.8.' },
+                    ...storeProp,
                 },
                 required: ['key', 'value'],
             },
@@ -215,7 +287,7 @@ export function memoryToolDefinitions(allowWrites: boolean): TraceToolDefinition
             description: 'Mark a stored fact obsolete by its key.',
             parameters: {
                 type: 'object',
-                properties: { key: { type: 'string', description: 'The key of the fact to forget.' } },
+                properties: { key: { type: 'string', description: 'The key of the fact to forget.' }, ...storeProp },
                 required: ['key'],
             },
         },
