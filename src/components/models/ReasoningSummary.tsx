@@ -1,6 +1,7 @@
 'use client';
 
-import { Badge, Group, Stack, Text } from '@mantine/core';
+import { Badge, Button, Group, Stack, Text } from '@mantine/core';
+import { IconPencil } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { detectUnsupportedParams } from '@/lib/providers/unsupportedParams';
 import { describeEffectiveReasoning, reasoningBudget } from '@/lib/services/models/reasoning';
@@ -9,6 +10,8 @@ interface ReasoningSummaryProps {
   settings: Record<string, unknown> | undefined;
   driver?: string;
   modelId?: string;
+  /** Opens the model's edit overlay at its Reasoning section. Omitted when the model has no such editor. */
+  onEdit?: () => void;
 }
 
 /**
@@ -16,7 +19,7 @@ interface ReasoningSummaryProps {
  * effective default, whether the text reaches callers, and the GPT-5 + tools
  * rule that overrides both when a request carries function tools.
  */
-export default function ReasoningSummary({ settings, driver, modelId }: ReasoningSummaryProps) {
+export default function ReasoningSummary({ settings, driver, modelId, onEdit }: ReasoningSummaryProps) {
   const t = useTranslations('modelReasoning');
   const forced = Boolean(detectUnsupportedParams(driver, modelId, true).forced?.reasoning_effort);
   const { reasoning, returned, forcedNoneWithTools } = describeEffectiveReasoning({
@@ -27,7 +30,20 @@ export default function ReasoningSummary({ settings, driver, modelId }: Reasonin
 
   return (
     <div className="ds-card ds-card-pad-lg" data-testid="model-reasoning-summary">
-      <div className="ds-h4" style={{ marginBottom: 12 }}>{t('detail.title')}</div>
+      <div className="ds-row-between" style={{ marginBottom: 12 }}>
+        <div className="ds-h4">{t('detail.title')}</div>
+        {onEdit ? (
+          <Button
+            variant="subtle"
+            size="xs"
+            leftSection={<IconPencil size={12} stroke={1.7} />}
+            onClick={onEdit}
+            data-testid="model-reasoning-edit"
+          >
+            {t('detail.edit')}
+          </Button>
+        ) : null}
+      </div>
       <Stack gap="xs">
         <div className="ds-row-between" style={{ fontSize: 12.5 }}>
           <span className="ds-muted">{t('detail.effective')}</span>

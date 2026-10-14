@@ -479,6 +479,8 @@ export default function ModelDetailPage() {
   // The editor opens in place (an overlay); `?edit=1` is how old /edit links arrive.
   const searchParams = useSearchParams();
   const [editOpen, setEditOpen] = useState(searchParams.get('edit') === '1');
+  // Which section the edit overlay opens at (the Reasoning "Edit" shortcut); the top otherwise.
+  const [editSection, setEditSection] = useState<'reasoning' | undefined>(undefined);
   const [routerCandidates, setRouterCandidates] = useState<{ llm: CandidateModel[]; decision: CandidateModel[] }>({
     llm: [],
     decision: [],
@@ -829,8 +831,12 @@ export default function ModelDetailPage() {
         <EditModelModal
           modelId={model._id}
           opened={editOpen}
-          onClose={() => setEditOpen(false)}
+          onClose={() => {
+            setEditOpen(false);
+            setEditSection(undefined);
+          }}
           onSaved={() => void fetchDetail()}
+          initialSection={editSection}
         />
       )}
       {/* Header */}
@@ -1036,6 +1042,14 @@ export default function ModelDetailPage() {
             void fetchDetail(true);
             void fetchLogs();
           }}
+          onEditReasoning={
+            isDynamic
+              ? undefined
+              : () => {
+                setEditSection('reasoning');
+                setEditOpen(true);
+              }
+          }
           onOpenLog={(l) => {
             setSelectedLog(l);
             openLogModal();
@@ -1051,6 +1065,7 @@ export default function ModelDetailPage() {
         <ModelPlayground
           modelKey={model.key}
           defaultUser={`Hello! Tell me what you can do.`}
+          modelInfo={{ driver: model.providerDriver, modelId: model.modelId, settings: model.settings }}
         />
       ) : null}
 
@@ -1328,6 +1343,8 @@ interface OverviewTabProps {
   setDateFilter: (v: ReturnType<typeof defaultDashboardDateFilter>) => void;
   refreshing: boolean;
   onRefresh: () => void;
+  /** Opens the edit overlay at its Reasoning section; undefined for a model with no such editor (Dynamic LLM). */
+  onEditReasoning?: () => void;
   onOpenLog: (l: UsageLogDto) => void;
 }
 
@@ -1346,6 +1363,7 @@ function OverviewTab({
   setDateFilter,
   refreshing,
   onRefresh,
+  onEditReasoning,
   onOpenLog,
 }: OverviewTabProps) {
   const periods: Array<{ id: 'last_day' | 'last_7_days' | 'last_30_days' | 'total'; label: string }> = [
@@ -1653,6 +1671,7 @@ function OverviewTab({
             settings={model.settings}
             driver={model.providerDriver}
             modelId={model.modelId}
+            onEdit={onEditReasoning}
           />
         ) : null}
 

@@ -310,10 +310,19 @@ export const tr: typeof en = {
       budget: '{tokens} token bütçe',
       returned: 'Akıl yürütme metni çağıranlara döner',
       hidden: 'Akıl yürütme metni çağıranlardan gizli',
+      edit: 'Düzenle',
     },
     playground: {
-      show: 'Akıl yürütmeyi göster',
-      label: 'Akıl yürütme',
+      control: {
+        label: 'Akıl yürütme',
+        modelDefault: 'Model varsayılanı',
+        hint: 'Bu çalıştırmada reasoning_effort olarak gönderilir. Model varsayılanı hiçbir şey göndermez.',
+        pinned: 'Modelde ayarlı (Düzenle > Akıl yürütme). Model varsayılanı bu kontrolün önüne geçer.',
+      },
+      hint: {
+        responsesOnly: 'Bu model akıl yürütme metnini yalnızca Responses upstream API\'sinde döndürür (Düzenle > Upstream API).',
+        tryHigher: 'Görünür akıl yürütme yok: daha yüksek bir seviye deneyin.',
+      },
     },
   },
   modelWizard: {

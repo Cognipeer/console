@@ -11,6 +11,8 @@ interface ReasoningSectionProps {
   onChange: (patch: Partial<ReasoningFormValue>) => void;
   /** The GPT-5 + tools rule applies to this model: it is shown, not editable. */
   forcedNoneWithTools?: boolean;
+  /** Opened from a "set the reasoning" shortcut: scroll here and focus the effort picker. */
+  focusOnMount?: boolean;
 }
 
 /**
@@ -25,6 +27,7 @@ export default function ReasoningSection({
   value,
   onChange,
   forcedNoneWithTools,
+  focusOnMount,
 }: ReasoningSectionProps) {
   const t = useTranslations('modelReasoning');
   const control = reasoningControlForDriver(driver);
@@ -38,7 +41,7 @@ export default function ReasoningSection({
   ];
 
   return (
-    <FormSection number={number} title={t('title')} description={t('description')} done>
+    <FormSection number={number} title={t('title')} description={t('description')} done focusOnMount={focusOnMount}>
       {control.kind === 'none' ? (
         <Text size="sm" c="dimmed">{t('unsupportedDriver')}</Text>
       ) : (

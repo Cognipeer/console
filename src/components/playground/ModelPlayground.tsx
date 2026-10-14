@@ -2,11 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ActionIcon, Button, CopyButton, Tooltip } from '@mantine/core';
-import { useTranslations } from '@/lib/i18n';
 import { notifications } from '@mantine/notifications';
+import type { ReasoningEffort } from '@/lib/services/models/reasoning';
+import PlaygroundReasoningControl, { PlaygroundReasoningHintNote } from './PlaygroundReasoningControl';
+import {
+  playgroundReasoningControl,
+  playgroundReasoningFields,
+  playgroundReasoningHint,
+  readReasoningTokens,
+  type PlaygroundModelInfo,
+  type PlaygroundReasoningHint,
+} from './playgroundReasoning';
 import {
   IconCheck,
-  IconBrain,
   IconCopy,
   IconPhoto,
   IconPlayerPlay,
@@ -19,33 +27,25 @@ interface ModelPlaygroundProps {
   modelKey: string;
   defaultSystem?: string;
   defaultUser?: string;
+  /** Driver, provider model id and settings: decide the Reasoning control and the "no reasoning text" hint. */
+  modelInfo?: PlaygroundModelInfo;
 }
 
 export default function ModelPlayground({
   modelKey,
   defaultSystem = 'You are a helpful assistant.',
   defaultUser = '',
+  modelInfo,
 }: ModelPlaygroundProps) {
   const [system, setSystem] = useState(defaultSystem);
   const [user, setUser] = useState(defaultUser);
   const [output, setOutput] = useState('');
   const [reasoning, setReasoning] = useState('');
   const [reasoningOpen, setReasoningOpen] = useState(true);
-  const tReasoning = useTranslations('modelReasoning');
-  // Operator view toggle only: it never changes what is requested, and it is
-  // always available. A model that hides its reasoning simply has nothing to show.
-  const [showReasoning, setShowReasoning] = useState(true);
-  useEffect(() => {
-    try {
-      if (window.localStorage.getItem('playground.showReasoning') === 'false') setShowReasoning(false);
-    } catch { /* storage can be blocked */ }
-  }, []);
-  const toggleShowReasoning = () => {
-    setShowReasoning((prev) => {
-      try { window.localStorage.setItem('playground.showReasoning', String(!prev)); } catch { /* ignore */ }
-      return !prev;
-    });
-  };
+  // Reasoning depth for this run. '' = "Model default": nothing is sent.
+  const [effort, setEffort] = useState<'' | ReasoningEffort>('');
+  const reasoningControl = playgroundReasoningControl(modelInfo);
+  const [reasoningHint, setReasoningHint] = useState<PlaygroundReasoningHint | null>(null);
   const [running, setRunning] = useState(false);
   const [temperature, setTemperature] = useState(0.2);
   // Reasoning models spend a large share of the budget on the thinking trace
@@ -84,12 +84,14 @@ export default function ModelPlayground({
     setOutput('');
     setReasoning('');
     setReasoningOpen(true);
+    setReasoningHint(null);
     setStats(null);
     const abort = new AbortController();
     abortRef.current = abort;
     const t0 = performance.now();
     let full = '';
     let fullReasoning = '';
+    let reasoningTokens = 0;
 
     try {
       type ContentPart =
@@ -117,9 +119,12 @@ export default function ModelPlayground({
           model: modelKey,
           messages,
           stream: true,
+          // The usage frame is how the playground learns the answer billed reasoning tokens.
+          stream_options: { include_usage: true },
           temperature,
           max_tokens: maxTokens,
           top_p: topP,
+          ...playgroundReasoningFields(reasoningControl, effort),
           ...(responseFormat === 'json_object'
             ? { response_format: { type: 'json_object' } }
             : {}),
@@ -161,6 +166,8 @@ export default function ModelPlayground({
             throw new Error(frameError.message || 'The model stopped mid-response');
           }
 
+          reasoningTokens = Math.max(reasoningTokens, readReasoningTokens(parsed?.usage));
+
           const choices = parsed?.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
           const choiceDelta = choices?.[0]?.delta ?? {};
           const reasoningDelta = extractReasoningDelta(choiceDelta);
@@ -172,8 +179,6 @@ export default function ModelPlayground({
           if (delta) {
             full += delta;
             setOutput(full);
-            // Collapse the thinking trace once the final answer starts.
-            if (fullReasoning) setReasoningOpen(false);
           }
         }
       }
@@ -181,6 +186,11 @@ export default function ModelPlayground({
       const ms = Math.round(performance.now() - t0);
       const tokens = approxTokens(full);
       setStats({ ms, tokens });
+      setReasoningHint(playgroundReasoningHint({
+        ...modelInfo,
+        hasReasoningText: fullReasoning.length > 0,
+        reasoningTokens,
+      }));
     } catch (error) {
       if ((error as Error).name === 'AbortError') return;
       console.error('Playground error', error);
@@ -200,6 +210,7 @@ export default function ModelPlayground({
   const clear = () => {
     setOutput('');
     setReasoning('');
+    setReasoningHint(null);
     setStats(null);
   };
 
@@ -376,17 +387,6 @@ export default function ModelPlayground({
             ) : null}
           </div>
           <div className="ds-row ds-gap-sm">
-          <Button
-            variant={showReasoning ? 'light' : 'subtle'}
-            size="xs"
-            leftSection={<IconBrain size={12} stroke={1.7} />}
-            aria-pressed={showReasoning}
-            aria-label={tReasoning('playground.show')}
-            onClick={toggleShowReasoning}
-            data-testid="playground-reasoning-toggle"
-          >
-            {tReasoning('playground.label')}
-          </Button>
           <CopyButton value={output} timeout={1500}>
             {({ copied, copy }) => (
               <Button
@@ -409,7 +409,7 @@ export default function ModelPlayground({
           </div>
         </div>
         <div className="ds-playground-output">
-          {reasoning && showReasoning ? (
+          {reasoning ? (
             <div
               style={{
                 marginBottom: output ? 12 : 0,
@@ -471,7 +471,7 @@ export default function ModelPlayground({
                 <span className="ds-playground-cursor" aria-hidden="true" />
               ) : null}
             </div>
-          ) : !(reasoning && showReasoning) ? (
+          ) : !reasoning ? (
             <div
               className="ds-faint"
               style={{ fontSize: 13, fontStyle: 'italic' }}
@@ -481,6 +481,7 @@ export default function ModelPlayground({
                 : 'Click "Run" to send a request.'}
             </div>
           ) : null}
+          <PlaygroundReasoningHintNote hint={running ? null : reasoningHint} />
         </div>
       </div>
 
@@ -515,6 +516,10 @@ export default function ModelPlayground({
           onChange={setTopP}
           format={(v) => v.toFixed(2)}
         />
+
+        {reasoningControl ? (
+          <PlaygroundReasoningControl control={reasoningControl} value={effort} onChange={setEffort} />
+        ) : null}
 
         <div>
           <div className="ds-eyebrow" style={{ marginBottom: 6 }}>

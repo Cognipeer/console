@@ -3376,10 +3376,19 @@ export const en = {
       budget: '{tokens} token budget',
       returned: 'Reasoning text is returned to callers',
       hidden: 'Reasoning text is hidden from callers',
+      edit: 'Edit',
     },
     playground: {
-      show: 'Show reasoning',
-      label: 'Reasoning',
+      control: {
+        label: 'Reasoning',
+        modelDefault: 'Model default',
+        hint: 'Sent as reasoning_effort with this run. Model default sends nothing.',
+        pinned: 'Set on the model (Edit > Reasoning). The model default wins over this control.',
+      },
+      hint: {
+        responsesOnly: 'This model returns reasoning text only on the Responses upstream (Edit > Upstream API).',
+        tryHigher: 'No visible reasoning: try a higher effort.',
+      },
     },
   },
   modelWizard: {

@@ -34,12 +34,25 @@ import {
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { useTranslations } from '@/lib/i18n';
+import type { ReasoningEffort } from '@/lib/services/models/reasoning';
+import PlaygroundReasoningControl, { PlaygroundReasoningHintNote } from './PlaygroundReasoningControl';
+import {
+  playgroundReasoningControl,
+  playgroundReasoningFields,
+  playgroundReasoningHint,
+  readReasoningTokens,
+  type PlaygroundReasoningHint,
+} from './playgroundReasoning';
 
 export interface ModelOption {
   key: string;
   name: string;
   category: 'llm' | 'embedding';
   provider?: string;
+  /** Provider driver, provider-side model id and Model Hub settings: they decide the Reasoning control. */
+  providerDriver?: string;
+  modelId?: string;
+  settings?: Record<string, unknown>;
 }
 
 export interface PlaygroundMessage {
@@ -47,6 +60,8 @@ export interface PlaygroundMessage {
   content: string;
   /** Reasoning / "thinking" trace emitted by reasoning models alongside content */
   reasoning?: string;
+  /** UI only (never sent): why this answer billed reasoning tokens but shows no reasoning text. */
+  reasoningHint?: PlaygroundReasoningHint;
 }
 
 export interface PlaygroundProps {
@@ -85,6 +100,8 @@ export function Playground({
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState('');
+  // Reasoning depth for the next message. '' = "Model default": nothing is sent.
+  const [effort, setEffort] = useState<'' | ReasoningEffort>('');
   const abortControllerRef = useRef<AbortController | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -98,11 +115,17 @@ export function Playground({
       const data = await response.json();
       const llmModels = (data.models ?? [])
         .filter((m: { category: string }) => m.category === 'llm')
-        .map((m: { key: string; name: string; category: string; provider?: string }) => ({
+        .map((m: {
+          key: string; name: string; category: string; provider?: string;
+          providerDriver?: string; modelId?: string; settings?: Record<string, unknown>;
+        }) => ({
           key: m.key,
           name: m.name,
           category: m.category as 'llm' | 'embedding',
           provider: m.provider,
+          providerDriver: m.providerDriver,
+          modelId: m.modelId,
+          settings: m.settings,
         }));
       setModels(llmModels);
       // Auto-select if initialModelKey matches or select first
@@ -150,6 +173,11 @@ export function Playground({
     }
   }, [messages, streamingContent]);
 
+  const selectedInfo = models.find((m) => m.key === selectedModel);
+  const reasoningControl = playgroundReasoningControl(
+    selectedInfo ? { driver: selectedInfo.providerDriver, modelId: selectedInfo.modelId, settings: selectedInfo.settings } : undefined,
+  );
+
   const handleSystemPromptChange = (value: string) => {
     setSystemPrompt(value);
     onSystemPromptChange?.(value);
@@ -175,7 +203,11 @@ export function Playground({
       if (systemPrompt.trim()) {
         chatMessages.push({ role: 'system', content: systemPrompt.trim() });
       }
-      chatMessages.push(...messages, userMessage);
+      // The hint is UI-only; everything else goes out as it always did.
+      chatMessages.push(
+        ...messages.map(({ role, content, reasoning }) => ({ role, content, reasoning })),
+        userMessage,
+      );
 
       const response = await fetch('/api/dashboard/playground/chat', {
         method: 'POST',
@@ -184,6 +216,9 @@ export function Playground({
           model: selectedModel,
           messages: chatMessages,
           stream: true,
+          // The usage frame is how the playground learns the answer billed reasoning tokens.
+          stream_options: { include_usage: true },
+          ...playgroundReasoningFields(reasoningControl, effort),
         }),
         signal: abortController.signal,
       });
@@ -200,6 +235,7 @@ export function Playground({
       const decoder = new TextDecoder();
       let fullContent = '';
       let fullReasoning = '';
+      let reasoningTokens = 0;
       partial.content = '';
       partial.reasoning = '';
 
@@ -217,6 +253,7 @@ export function Playground({
 
             try {
               const parsed = JSON.parse(data);
+              reasoningTokens = Math.max(reasoningTokens, readReasoningTokens(parsed.usage));
               const choiceDelta = parsed.choices?.[0]?.delta ?? {};
               const reasoningDelta = extractReasoningDelta(choiceDelta);
               if (reasoningDelta) {
@@ -245,6 +282,13 @@ export function Playground({
             role: 'assistant',
             content: fullContent,
             reasoning: fullReasoning || undefined,
+            reasoningHint: playgroundReasoningHint({
+              driver: selectedInfo?.providerDriver,
+              modelId: selectedInfo?.modelId,
+              settings: selectedInfo?.settings,
+              hasReasoningText: fullReasoning.length > 0,
+              reasoningTokens,
+            }) ?? undefined,
           },
         ]);
       }
@@ -363,6 +407,9 @@ export function Playground({
               }}
             />
           )}
+          {reasoningControl ? (
+            <PlaygroundReasoningControl control={reasoningControl} value={effort} onChange={setEffort} />
+          ) : null}
         </Stack>
 
         {/* Chat Area */}
@@ -468,10 +515,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const hasReasoning = !isUser && !isSystem && Boolean(message.reasoning?.trim());
-  // While streaming, keep the thinking trace open; collapse it once the answer arrives.
-  const [reasoningOpen, setReasoningOpen] = useState(
-    Boolean(isStreaming && !message.content),
-  );
+  // The thinking trace is shown, not tucked away; the header collapses it.
+  const [reasoningOpen, setReasoningOpen] = useState(true);
 
   return (
     <Box
@@ -542,6 +587,8 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           {message.content}
         </Text>
       )}
+
+      {message.reasoningHint && !isStreaming ? <PlaygroundReasoningHintNote hint={message.reasoningHint} /> : null}
     </Box>
   );
 }

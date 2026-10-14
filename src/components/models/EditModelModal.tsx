@@ -181,9 +181,11 @@ interface EditModelModalProps {
   onClose: () => void;
   /** Called after a successful save (the caller refreshes its list / detail). */
   onSaved: () => void;
+  /** Open scrolled to this section with its first control focused (a shortcut from the model page). */
+  initialSection?: 'reasoning';
 }
 
-export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved }: EditModelModalProps) {
+export default function EditModelModal({ modelId: editModelId, opened, onClose, onSaved, initialSection }: EditModelModalProps) {
   const t = useTranslations('modelEdit');
   const tWizard = useTranslations('modelWizard');
   const tNouns = useTranslations('common.confirm.nouns');
@@ -781,6 +783,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
           <ReasoningSection
             number={sectionNumber()}
             driver={selectedProvider?.driver}
+            focusOnMount={initialSection === 'reasoning'}
             value={reasoningFormFromSettings(form.values.settings)}
             onChange={(patch) => {
               const next = { ...reasoningFormFromSettings(form.values.settings), ...patch };

@@ -3,6 +3,7 @@
 import {
   ReactNode,
   useEffect,
+  useRef,
   useState,
   Children,
   isValidElement,
@@ -202,6 +203,7 @@ export default function FormShell({
 /* ─── Sub-components ──────────────────────────────────────────── */
 
 export function FormSection({
+  focusOnMount = false,
   number,
   title,
   description,
@@ -210,6 +212,8 @@ export function FormSection({
   collapsible = false,
   defaultOpen = true,
 }: {
+  /** Scroll this section into view and focus its first control as it appears (deep link into a long form). */
+  focusOnMount?: boolean;
   number?: number | string;
   title: ReactNode;
   description?: ReactNode;
@@ -221,8 +225,20 @@ export function FormSection({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const expanded = !collapsible || open;
+  const sectionRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!focusOnMount) return;
+    const section = sectionRef.current;
+    if (!section) return;
+    // After layout, so the overlay's scroll column has its final height.
+    const frame = requestAnimationFrame(() => {
+      section.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+      section.querySelector<HTMLElement>('input, select, textarea, button')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusOnMount]);
   return (
-    <section className="form-section">
+    <section className="form-section" ref={sectionRef} style={focusOnMount ? { scrollMarginTop: 16 } : undefined}>
       <header
         className="form-section-header"
         onClick={collapsible ? () => setOpen((o) => !o) : undefined}
