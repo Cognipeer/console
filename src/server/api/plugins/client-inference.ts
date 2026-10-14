@@ -1,4 +1,5 @@
 import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
@@ -192,6 +193,9 @@ async function handleAgentChatCompletion(input: {
   const { request, agent, auth, body, model, reply } = input;
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const streaming = body.stream === true;
+  // The agent's `showReasoning` is applied by the run itself; a request can only narrow it further
+  // (`include_reasoning: false` / `reasoning: { exclude: true }`), never bring back what the agent hid.
+  const includeReasoning = shouldReturnReasoning(undefined, body);
 
   const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, input.headers, {
     userId: auth.tokenRecord.userId,
@@ -287,7 +291,10 @@ async function handleAgentChatCompletion(input: {
         error: { message: result.error, type: 'invalid_request_error' },
       });
     }
-    return reply.code(200).send({ ...toChatCompletion({ id, model, ...result }), ...cognipeer });
+    return reply.code(200).send({
+      ...toChatCompletion({ id, model, ...result, ...(includeReasoning ? {} : { reasoning: undefined }) }),
+      ...cognipeer,
+    });
   }
 
   applyStreamHeaders(reply);
@@ -305,6 +312,7 @@ async function handleAgentChatCompletion(input: {
   };
 
   let streamed = '';
+  let streamedReasoning = '';
   let toolCallsSent = false;
   let stopReason: AgentChatResponse['stop_reason'];
   try {
@@ -314,11 +322,24 @@ async function handleAgentChatCompletion(input: {
         streamed += text;
         send(toChatChunk({ id, model, delta: text }));
       },
+      ...(includeReasoning
+        ? {
+          onReasoningChunk: (text: string) => {
+            streamedReasoning += text;
+            send(toChatChunk({ id, model, reasoning: text }));
+          },
+        }
+        : {}),
     });
 
     if ('error' in result) {
       send({ error: { message: result.error, type: 'invalid_request_error' } });
     } else {
+      // Thinking that did not stream (a routed run without relay, a model call that was not streamed)
+      // still comes out, ahead of the answer's missing tail.
+      if (includeReasoning && result.reasoning && !streamedReasoning) {
+        send(toChatChunk({ id, model, reasoning: result.reasoning }));
+      }
       // A run that streamed nothing (an agent bound to output.pre answers in
       // one guarded piece; a routed run without relay) must still deliver the
       // answer rather than an empty one followed by [DONE]. A relayed run may

@@ -85,6 +85,8 @@ export interface SessionTurnEvents {
   onCompaction(compaction: IAgentTurnCompaction): void;
   /** A text delta of the answer — live only. */
   onText(text: string): void;
+  /** A delta of the model's reasoning text — live only. */
+  onReasoning(text: string): void;
   /**
    * Emit any persisted event directly (bookkeeping that happens before the
    * model is called, like cancelling a pending request for a new message).
@@ -266,6 +268,14 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         if (isSuperseded()) return;
         ensureStarted();
         writer.emitLive('agent.message.delta', { text });
+      });
+    },
+
+    onReasoning(text) {
+      guarded('reasoning delta', () => {
+        if (isSuperseded()) return;
+        ensureStarted();
+        writer.emitLive('agent.reasoning.delta', { text });
       });
     },
 

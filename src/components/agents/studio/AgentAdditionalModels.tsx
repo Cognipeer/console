@@ -18,6 +18,8 @@ export interface AdditionalModelOption {
     name: string;
     modelId?: string;
     providerKey?: string;
+    providerDriver?: string;
+    capabilities?: { supportsReasoning?: boolean } | null;
     settings?: Record<string, unknown>;
 }
 

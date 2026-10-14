@@ -155,6 +155,8 @@ interface Model {
   modelId: string;
   category: string;
   providerKey?: string;
+  providerDriver?: string;
+  capabilities?: { supportsReasoning?: boolean } | null;
   settings?: Record<string, unknown>;
 }
 
@@ -529,7 +531,9 @@ export default function AgentDetailPage() {
         // still render as a (badged) row in the binding list, which keeps
         // disabled ones out of its picker instead.
         loadList('/api/guardrails', (d) => d.guardrails, setGuardrails, 'guardrails'),
-        loadList('/api/providers?scope=tenant', (d) => d.providers, setProviders, 'providers'),
+        // Project scope, not tenant scope: the tenant list is provider-admin only, and an
+        // empty map would hide the reasoning dropdown next to every model.
+        loadList('/api/providers', (d) => d.providers, setProviders, 'providers'),
         // Native agents only: a connected agent is an HTTP endpoint, and the
         // runtime refuses to flatten one into a sub-agent, so offering it here
         // would only produce a binding that silently drops at run time.

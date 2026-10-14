@@ -164,6 +164,11 @@ describe('reasoning: translation helpers', () => {
     expect(reasoningControlForDriver('vertex').kind).toBe('budget');
     expect(reasoningControlForDriver('openai-compatible')).toMatchObject({ kind: 'toggle', efforts: ['none', 'medium'] });
     expect(reasoningControlForDriver('mystery').kind).toBe('none');
+    // An OpenAI reasoning model behind an OpenAI-compatible endpoint (Azure v1) gets the effort list.
+    expect(reasoningControlForDriver('openai-compatible', 'gpt-5.6-luna').kind).toBe('effort');
+    expect(reasoningControlForDriver('openai-compatible', 'openai/o3-mini').efforts).toContain('minimal');
+    expect(reasoningControlForDriver('openai-compatible', 'qwen/qwen3.8-27b').kind).toBe('toggle');
+    expect(reasoningControlForDriver('openai-compatible', 'gpt-5-chat-latest').kind).toBe('toggle');
   });
 
   it('model page description: effective value, visibility and the gpt-5 + tools rule', () => {

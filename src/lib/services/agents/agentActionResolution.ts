@@ -148,6 +148,7 @@ export interface ResolveAgentActionInput {
     stream?: {
         onToolEvent?: (event: AgentToolCallEvent) => void;
         onTextChunk?: (text: string) => void;
+        onReasoningChunk?: (text: string) => void;
         onCompaction?: (compaction: IAgentTurnCompaction) => void;
         signal?: AbortSignal;
     };
@@ -686,6 +687,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
+                    ...(input.stream?.onReasoningChunk ? { onReasoningChunk: input.stream.onReasoningChunk } : {}),
                     ...(input.stream?.onCompaction ? { onCompaction: input.stream.onCompaction } : {}),
                     ...(watch ? { signal: watch.signal } : input.stream?.signal ? { signal: input.stream.signal } : {}),
                     onInvokeStart: () => { invoking = true; },

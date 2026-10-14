@@ -1784,6 +1784,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           ? {
             onToolEvent: stream.live('tool', (event) => event),
             onTextChunk: stream.live('text', (text: string) => ({ text })),
+            onReasoningChunk: stream.live('reasoning', (text: string) => ({ text })),
             onCompaction: stream.live('summary', (compaction) => compaction),
           }
           : {}),
@@ -2053,6 +2054,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             stream: {
               onToolEvent: live('tool', (event) => event),
               onTextChunk: live('text', (text: string) => ({ text })),
+              onReasoningChunk: live('reasoning', (text: string) => ({ text })),
               onCompaction: live('summary', (compaction) => compaction),
             },
           }
@@ -2200,7 +2202,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         history: readStatelessHistory(turn.body),
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
-        // Additive event: thought text as it streams. Older clients ignore it.
+        // The model's thinking as it happens (additive event: older clients ignore it).
         onReasoningChunk: (text) => send('reasoning', { text }),
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.

@@ -298,7 +298,20 @@ export interface ReasoningControl {
  * Anthropic / Bedrock / Vertex think in token budgets (levels are shortcuts);
  * OpenAI-compatible engines only have on/off.
  */
-export function reasoningControlForDriver(driver: string | undefined): ReasoningControl {
+/** OpenAI reasoning families by model id (`o3`, `gpt-5.x`, `gpt-oss`), namespaced ids included (`openai/gpt-5`). */
+export function isOpenAiReasoningModelId(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  const id = (modelId.split('/').pop() ?? modelId).toLowerCase();
+  if (id.startsWith('gpt-5') && !id.startsWith('gpt-5-chat')) return true;
+  if (id.startsWith('gpt-oss')) return true;
+  return id.length > 1 && id[0] === 'o' && id[1] >= '0' && id[1] <= '9';
+}
+
+export function reasoningControlForDriver(driver: string | undefined, modelId?: string): ReasoningControl {
+  // An OpenAI reasoning model behind an OpenAI-compatible endpoint (Azure v1, a gateway) takes the full effort list.
+  if ((driver === 'openai-compatible' || driver === 'together') && isOpenAiReasoningModelId(modelId)) {
+    return { kind: 'effort', efforts: ['none', 'minimal', 'low', 'medium', 'high'], budget: false, includeThoughts: false };
+  }
   switch (driver) {
     case 'openai':
     case 'azure':

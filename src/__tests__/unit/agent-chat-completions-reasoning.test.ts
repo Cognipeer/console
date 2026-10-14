@@ -115,3 +115,49 @@ describe('agent chat completions', () => {
     expect(hoisted.runAgentCompletion).not.toHaveBeenCalled();
   });
 });
+
+describe('agent chat completions: the thinking text', () => {
+  it('returns message.reasoning_content when the run produced it', async () => {
+    hoisted.runAgentCompletion.mockResolvedValue({ content: 'hello', conversationId: 'conv-1', reasoning: 'I considered it.' });
+    const res = await app.inject(chat({}));
+    expect(parseJsonBody<{ choices: Array<{ message: Record<string, unknown> }> }>(res.body).choices[0].message)
+      .toMatchObject({ content: 'hello', reasoning_content: 'I considered it.' });
+  });
+
+  it('include_reasoning: false narrows it out', async () => {
+    hoisted.runAgentCompletion.mockResolvedValue({ content: 'hello', conversationId: 'conv-1', reasoning: 'I considered it.' });
+    const res = await app.inject(chat({ include_reasoning: false }));
+    expect(parseJsonBody<{ choices: Array<{ message: Record<string, unknown> }> }>(res.body).choices[0].message)
+      .not.toHaveProperty('reasoning_content');
+  });
+
+  it('streams delta.reasoning_content live, and asks the run for it only when allowed', async () => {
+    hoisted.runAgentCompletion.mockImplementation(async (input: { onTextChunk?: (t: string) => void; onReasoningChunk?: (t: string) => void }) => {
+      input.onReasoningChunk?.('hm ');
+      input.onReasoningChunk?.('ok');
+      input.onTextChunk?.('hello');
+      return { content: 'hello', conversationId: 'conv-1', reasoning: 'hm ok' };
+    });
+    const res = await app.inject(chat({ stream: true }));
+    const deltas = res.body.split('\n\n')
+      .filter((block) => block.startsWith('data: {'))
+      .map((block) => JSON.parse(block.slice(6)).choices?.[0]?.delta ?? {});
+    expect(deltas.filter((d) => d.reasoning_content).map((d) => d.reasoning_content).join('')).toBe('hm ok');
+    expect(deltas.filter((d) => d.content).map((d) => d.content).join('')).toBe('hello');
+    // Streamed already: the final result does not send it a second time.
+    expect(deltas.filter((d) => d.reasoning_content)).toHaveLength(2);
+
+    hoisted.runAgentCompletion.mockClear();
+    await app.inject(chat({ stream: true, include_reasoning: false }));
+    expect(lastRun()).not.toHaveProperty('onReasoningChunk');
+  });
+
+  it('sends thinking that did not stream before the answer tail', async () => {
+    hoisted.runAgentCompletion.mockResolvedValue({ content: 'hello', conversationId: 'conv-1', reasoning: 'late thought' });
+    const res = await app.inject(chat({ stream: true }));
+    const deltas = res.body.split('\n\n')
+      .filter((block) => block.startsWith('data: {'))
+      .map((block) => JSON.parse(block.slice(6)).choices?.[0]?.delta ?? {});
+    expect(deltas[0]).toEqual({ reasoning_content: 'late thought' });
+  });
+});

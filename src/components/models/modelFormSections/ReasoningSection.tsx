@@ -7,6 +7,8 @@ import type { ReasoningFormValue } from '@/components/models/reasoningForm';
 interface ReasoningSectionProps {
   number: number;
   driver?: string;
+  /** Provider-side model id (an OpenAI reasoning model on a compatible endpoint gets the effort list). */
+  modelId?: string;
   value: ReasoningFormValue;
   onChange: (patch: Partial<ReasoningFormValue>) => void;
   /** The GPT-5 + tools rule applies to this model: it is shown, not editable. */
@@ -24,13 +26,14 @@ interface ReasoningSectionProps {
 export default function ReasoningSection({
   number,
   driver,
+  modelId,
   value,
   onChange,
   forcedNoneWithTools,
   focusOnMount,
 }: ReasoningSectionProps) {
   const t = useTranslations('modelReasoning');
-  const control = reasoningControlForDriver(driver);
+  const control = reasoningControlForDriver(driver, modelId);
 
   const options = [
     { value: '', label: t('notSet') },

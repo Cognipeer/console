@@ -62,7 +62,7 @@ export type SessionEventType =
   | 'budget.reached';
 
 /** Never persisted — published to live subscribers only. */
-export type SessionLiveEventType = 'agent.message.delta';
+export type SessionLiveEventType = 'agent.message.delta' | 'agent.reasoning.delta';
 
 /** Why a turn stopped, as events and the conversation record report it. */
 export type SessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error' | 'budget_reached';
@@ -447,20 +447,28 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Se
 
   // Live text deltas reach this node's followers per chunk, but cross to other
   // nodes (Redis) coalesced: one PUBLISH per ~100 ms / 512 chars, not per token.
-  let deltaText = '';
-  let deltaTimer: ReturnType<typeof setTimeout> | null = null;
-  const flushDeltas = () => {
-    if (deltaTimer) clearTimeout(deltaTimer);
-    deltaTimer = null;
-    if (!deltaText) return;
-    const text = deltaText;
-    deltaText = '';
+  // The answer's text and the model's reasoning text each coalesce on their own.
+  const deltaBuffers: Record<SessionLiveEventType, { text: string; timer: ReturnType<typeof setTimeout> | null }> = {
+    'agent.message.delta': { text: '', timer: null },
+    'agent.reasoning.delta': { text: '', timer: null },
+  };
+  const flushDelta = (type: SessionLiveEventType) => {
+    const delta = deltaBuffers[type];
+    if (delta.timer) clearTimeout(delta.timer);
+    delta.timer = null;
+    if (!delta.text) return;
+    const text = delta.text;
+    delta.text = '';
     bus.publish(conversationId, {
-      type: 'agent.message.delta',
+      type,
       data: { text },
       ...(runId ? { runId } : {}),
       createdAt: new Date().toISOString(),
     }, { scope: 'remote' });
+  };
+  const flushDeltas = () => {
+    flushDelta('agent.reasoning.delta');
+    flushDelta('agent.message.delta');
   };
 
   const writeBatch = async (events: BufferedEvent[]) => {
@@ -528,19 +536,20 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Se
 
     emitLive(type, data = {}) {
       if (closed) return;
-      if (type === 'agent.message.delta' && typeof data.text === 'string') {
+      if ((type === 'agent.message.delta' || type === 'agent.reasoning.delta') && typeof data.text === 'string') {
         bus.publish(conversationId, {
           type,
           data,
           ...(runId ? { runId } : {}),
           createdAt: new Date().toISOString(),
         }, { scope: 'local' });
-        deltaText += data.text;
-        if (deltaText.length >= DELTA_RELAY_CHARS) {
-          flushDeltas();
-        } else if (!deltaTimer) {
-          deltaTimer = setTimeout(flushDeltas, DELTA_RELAY_MS);
-          deltaTimer.unref?.();
+        const delta = deltaBuffers[type];
+        delta.text += data.text;
+        if (delta.text.length >= DELTA_RELAY_CHARS) {
+          flushDelta(type);
+        } else if (!delta.timer) {
+          delta.timer = setTimeout(() => flushDelta(type), DELTA_RELAY_MS);
+          delta.timer.unref?.();
         }
         return;
       }
@@ -567,9 +576,11 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Se
       closed = true;
       clearTimer();
       buffer = [];
-      deltaText = '';
-      if (deltaTimer) clearTimeout(deltaTimer);
-      deltaTimer = null;
+      for (const delta of Object.values(deltaBuffers)) {
+        delta.text = '';
+        if (delta.timer) clearTimeout(delta.timer);
+        delta.timer = null;
+      }
     },
 
     lastSeq: () => nextSeq - 1,

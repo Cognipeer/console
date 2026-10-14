@@ -47,7 +47,7 @@ export function playgroundReasoningControl(
   model: PlaygroundModelInfo | undefined,
 ): PlaygroundReasoningControl | null {
   if (!model) return null;
-  const control = reasoningControlForDriver(model.driver);
+  const control = reasoningControlForDriver(model.driver, model.modelId);
   if (control.kind === 'none') return null;
 
   const pinned = readModelReasoning(model.settings);

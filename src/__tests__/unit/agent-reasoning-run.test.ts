@@ -17,7 +17,8 @@ const hoisted = vi.hoisted(() => ({
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
   buildGatewayChatModel: vi.fn(),
-  scripted: { content: 'plain answer', reasoning: 'secret thoughts' } as { content: string; reasoning?: string },
+  scripted: { content: 'plain answer', reasoning: 'secret thoughts' } as { content: string; reasoning?: string; events?: Array<Record<string, unknown>> },
+  invokeConfigs: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
@@ -70,7 +71,10 @@ vi.mock('@cognipeer/agent-sdk', () => {
   };
 
   const createSmartAgent = () => ({
-    invoke: async (state: { messages: Array<{ role: string; content: unknown }> }) => {
+    invoke: async (state: { messages: Array<{ role: string; content: unknown }> }, config?: { onEvent?: (event: Record<string, unknown>) => void }) => {
+      hoisted.invokeConfigs.push((config ?? {}) as Record<string, unknown>);
+      // What a streaming model call reports while it runs (the SDK's `reasoning` events).
+      for (const event of hoisted.scripted.events ?? []) config?.onEvent?.(event);
       const answer = {
         role: 'assistant',
         content: hoisted.scripted.content,
@@ -281,13 +285,12 @@ describe('showReasoning', () => {
     const onReasoningChunk = vi.fn();
     const modelInputs = () => hoisted.buildGatewayChatModel.mock.calls.map((call) => call[0] as { showReasoning?: boolean; onReasoning?: unknown });
 
-    await executePlaygroundChatLocal({ ...base });
-    expect(modelInputs()[0].showReasoning).toBe(false);
-
-    hoisted.buildGatewayChatModel.mockClear();
+    // The playground path is the operator's view: the thinking text is requested even though the agent hides
+    // it (API callers of such an agent are covered by the agent API tests); live deltas come from the SDK's
+    // reasoning events, not a gateway hook.
     const result = await executePlaygroundChatLocal({ ...base, revealReasoning: true, onReasoningChunk });
     expect(modelInputs()[0].showReasoning).toBeUndefined();
-    expect(modelInputs()[0].onReasoning).toBe(onReasoningChunk);
+    expect(modelInputs()[0].onReasoning).toBeUndefined();
     expect(result.reasoning).toBe('secret thoughts');
   });
 
@@ -295,5 +298,62 @@ describe('showReasoning', () => {
     db.findAgentByKey.mockResolvedValue(agentWith({}));
     await executePlaygroundChatLocal({ ...base });
     expect(persistedAssistantTurn()).toMatchObject({ reasoning: 'secret thoughts' });
+  });
+});
+
+describe('live reasoning', () => {
+  const stepsOfThinking = [
+    { type: 'reasoning', text: 'Need the ' },
+    { type: 'reasoning', text: 'weather.' },
+    { type: 'tool_call', phase: 'start', name: 'weather', id: 't1' },
+    { type: 'reasoning', text: 'Got it.' },
+  ];
+
+  beforeEach(() => {
+    hoisted.invokeConfigs.length = 0;
+    hoisted.scripted = { content: 'plain answer', reasoning: 'the last message only', events: stepsOfThinking };
+  });
+
+  it('turns the model call into a stream and forwards the thinking, paragraph per model step', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({}));
+    const chunks: string[] = [];
+    const response = await executeAgentChatLocal({ ...base, onReasoningChunk: (text: string) => chunks.push(text) });
+    expect(hoisted.invokeConfigs.at(-1)).toMatchObject({ stream: true });
+    expect(chunks.join('')).toBe('Need the weather.\n\nGot it.');
+    // The whole turn's thinking, not just what the last message kept.
+    expect(reasoningItem(response)).toMatchObject({ summary: [{ text: 'Need the weather.\n\nGot it.' }] });
+  });
+
+  it('a caller that did not ask does not switch the model call into streaming', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({}));
+    await executeAgentChatLocal({ ...base });
+    expect(hoisted.invokeConfigs.at(-1)).not.toHaveProperty('stream');
+  });
+
+  it('showReasoning false: an API caller gets no live thinking and no stream for it', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({ showReasoning: false }));
+    const chunks: string[] = [];
+    await executeAgentChatLocal({ ...base, onReasoningChunk: (text: string) => chunks.push(text) });
+    expect(chunks).toEqual([]);
+    expect(hoisted.invokeConfigs.at(-1)).not.toHaveProperty('stream');
+  });
+
+  it('showReasoning false: the operator playground still gets it live and in the result, but does not store it', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({ showReasoning: false }));
+    const chunks: string[] = [];
+    const result = await executePlaygroundChatLocal({ ...base, onReasoningChunk: (text: string) => chunks.push(text) });
+    expect(chunks.join('')).toBe('Need the weather.\n\nGot it.');
+    expect(result.reasoning).toBe('Need the weather.\n\nGot it.');
+    expect(persistedAssistantTurn()).not.toHaveProperty('reasoning');
+  });
+
+  it('the playground model call is told to keep the thinking text even when the agent hides it', async () => {
+    db.findAgentByKey.mockResolvedValue(agentWith({ showReasoning: false }));
+    hoisted.buildGatewayChatModel.mockClear();
+    await executePlaygroundChatLocal({ ...base });
+    expect(hoisted.buildGatewayChatModel.mock.calls.at(-1)![0]).not.toHaveProperty('showReasoning');
+    hoisted.buildGatewayChatModel.mockClear();
+    await executeAgentChatLocal({ ...base });
+    expect(hoisted.buildGatewayChatModel.mock.calls.at(-1)![0]).toMatchObject({ showReasoning: false });
   });
 });

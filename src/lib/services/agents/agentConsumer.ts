@@ -44,12 +44,13 @@ export async function startAgentQueueConsumer(): Promise<void> {
   queue.consume(queueNameFor('agent'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'chat') {
       return withWorkerRelay(ctx.data, (relay, data) => {
-        // `onTextChunk` + `signal` are all a chat turn takes; tool/compaction
-        // events are a playground-only surface.
-        const { onTextChunk, signal } = agentRelayCallbacks(relay);
+        // `onTextChunk`, `onReasoningChunk` + `signal` are all a chat turn takes;
+        // tool/compaction events are a playground-only surface.
+        const { onTextChunk, onReasoningChunk, signal } = agentRelayCallbacks(relay);
         return executeAgentChatLocal({
           ...(data as unknown as AgentChatRequest),
           ...(onTextChunk ? { onTextChunk } : {}),
+          ...(onReasoningChunk ? { onReasoningChunk } : {}),
           ...(signal ? { signal } : {}),
         });
       });
