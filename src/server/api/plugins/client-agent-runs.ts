@@ -8,11 +8,10 @@
  * guesses the run id.
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getAgentRunStatus, getConversationById, requestAgentRunCancellation } from '@/lib/services/agents';
 import { agentRunNotFoundErrorBody, apiErrorBody, serializeAgentRun } from '@/lib/services/agents/agentRunService';
-import { getConversationById } from '@/lib/services/agents/agentService';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 import { withClientApiRequestContext } from '../fastify-utils';
 import { authorizeEndingOpenRequests } from './agent-approval-authz';
@@ -105,24 +104,38 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   // (`stop_reason: cancelled`) and the model call stops. Nothing running is a 200
   // with `cancelled: false`, not an error: a Stop that lands as the turn ends is normal.
   const cancelByConversation = async (
-    ctx: { tenantDbName: string; tenantId: string; projectId: string },
+    request: FastifyRequest,
+    reply: FastifyReply,
+    ctx: { tenantDbName: string; tenantId: string; projectId: string; tokenRecord: { userId?: unknown } },
     conversationId: string,
   ) => {
     const conversation = await getConversationById(ctx.tenantDbName, conversationId).catch(() => null);
     if (!conversation || conversation.projectId !== ctx.projectId) return null;
+    // Stopping a session is acting on it: the owner always may, anybody else needs `agent.session_manage_others`.
+    const refusal = await refuseSessionLinked(request, conversationId, 'manage', {
+      actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+    });
+    if (refusal) return sendClientSessionRefusal(reply, request, refusal);
+    // Ending an open approval is answering it "no": without that right the turn still stops, the approval stays.
+    const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
+    if (!verdict.allowed && verdict.unavailable) {
+      return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+    }
     return cancelConversationTurn({
       tenantDbName: ctx.tenantDbName,
       tenantId: ctx.tenantId,
       projectId: ctx.projectId,
       conversationId,
+      cancelActions: verdict.allowed,
     });
   };
 
   app.post('/client/v1/agents/conversations/:conversationId/cancel', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { conversationId } = request.params as { conversationId: string };
-      const outcome = await cancelByConversation(ctx, conversationId);
+      const outcome = await cancelByConversation(request, reply, ctx, conversationId);
       if (!outcome) return reply.code(404).send(agentRunNotFoundErrorBody());
+      if (reply.sent || !('cancelled' in outcome)) return reply;
       return reply.code(200).send({ conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
     } catch (error) {
       logger.error('Client conversation cancel error', { error });
@@ -141,8 +154,9 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       } else if (responseId.startsWith('resp_')) {
         conversationId = responseId.slice(5);
       }
-      const outcome = conversationId ? await cancelByConversation(ctx, conversationId) : null;
+      const outcome = conversationId ? await cancelByConversation(request, reply, ctx, conversationId) : null;
       if (!outcome) return reply.code(404).send(agentRunNotFoundErrorBody());
+      if (reply.sent || !('cancelled' in outcome)) return reply;
       return reply.code(200).send({ id: responseId, conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
     } catch (error) {
       logger.error('Client response cancel error', { error });

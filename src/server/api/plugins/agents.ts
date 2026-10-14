@@ -1662,14 +1662,6 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   /**
-   * Continue a session that stopped on its spend budget (after the budget was
-   * raised): the agent carries on from where it stopped, with no new user
-   * message. Without `?stream=1` the call returns when the turn has finished
-   * (JSON); with it, the turn is an SSE stream in the same event format as
-   * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
-   * way: the stream only opens once there is a turn to report.
-   */
-  /**
    * Stop: ends the session's running turn (what it had streamed is kept as the
    * answer, `cancelled`) and cancels the approvals/questions of a paused one.
    * Works for a turn started from anywhere — the playground, the API, a portal
@@ -1677,8 +1669,17 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    */
   app.post('/agents/:agentId/sessions/:sessionId/cancel', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
+      // Ending an open approval is answering it "no": without that right the turn still stops, the approval stays.
+      const verdict = await authorizeEndingOpenRequests(request, {
+        tenantDbName: scoped.session.tenantDbName,
+        conversation: scoped.conversation,
+        agent: scoped.agent,
+      });
+      if (!verdict.allowed && verdict.unavailable) {
+        return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+      }
       const outcome = await cancelConversationTurn({
         tenantDbName: scoped.session.tenantDbName,
         tenantId: scoped.session.tenantId,
@@ -1686,6 +1687,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         conversationId: String(scoped.conversation._id),
         agentKey: scoped.agent.key,
         requestedBy: scoped.session.userId,
+        cancelActions: verdict.allowed,
       });
       return reply.code(200).send(outcome);
     } catch (error) {
@@ -1693,6 +1695,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  /**
+   * Continue a session that stopped on its spend budget (after the budget was
+   * raised): the agent carries on from where it stopped, with no new user
+   * message. Without `?stream=1` the call returns when the turn has finished
+   * (JSON); with it, the turn is an SSE stream in the same event format as
+   * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
+   * way: the stream only opens once there is a turn to report.
+   */
   app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {

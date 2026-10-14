@@ -36,6 +36,11 @@ export interface CancelConversationTurnInput {
   agentKey?: string;
   /** Who asked, recorded on the actions this cancels. */
   requestedBy?: string;
+  /**
+   * Whether the open approvals/questions of a paused conversation are cancelled too (default true). A caller
+   * who may stop a turn but may not answer its approvals passes `false`: ending a request is answering it "no".
+   */
+  cancelActions?: boolean;
 }
 
 export interface CancelConversationTurnOutcome {
@@ -80,7 +85,7 @@ export async function cancelConversationTurn(input: CancelConversationTurnInput)
   // This node's own turn stops now, not on the next poll.
   if (rows.length > 0) abortLocalTurns(input.tenantId, input.conversationId);
 
-  const cancelledActions = await cancelOpenActions(input);
+  const cancelledActions = input.cancelActions === false ? false : await cancelOpenActions(input);
   return { cancelled: runIds.length > 0 || cancelledActions, runIds, cancelledActions };
 }
 
