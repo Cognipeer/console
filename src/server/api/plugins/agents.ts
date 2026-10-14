@@ -423,6 +423,19 @@ function parseAttachmentIds(value: unknown): string[] | null {
 }
 
 /**
+ * The earlier messages a stateless call (no `conversationId`) carries along. The server
+ * ignores them for a Session, which loads its own history.
+ */
+function readStatelessHistory(body: Record<string, unknown>): Array<{ role: string; content: string }> | undefined {
+  if (!Array.isArray(body.history)) return undefined;
+  return (body.history as Array<{ content?: unknown; role?: unknown } | null>).flatMap((item) => (
+    typeof item?.content === 'string' && typeof item.role === 'string'
+      ? [{ content: item.content, role: item.role }]
+      : []
+  ));
+}
+
+/**
  * What `/chat` and `/chat/stream` both check before a playground turn runs:
  * the message, the agent in scope, a writable session and its run slot. Null —
  * with the refusal already sent — when any of them is missing. Otherwise the
@@ -564,6 +577,8 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(typeof body.version === 'number' ? { version: body.version } : {}),
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+      // Operator view (Compare versions): thought text whatever the agent publishes to its API.
+      ...(body.showReasoning === true ? { revealReasoning: true } : {}),
       ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
       ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     },
@@ -2144,8 +2159,15 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     applyStreamHeaders(reply);
     reply.raw.flushHeaders?.();
 
+    // A stateless turn (no Session) has no run record for `…/cancel` to point at, so the client's
+    // Stop is closing the stream: the run ends with what it had streamed. A Session turn keeps
+    // running after a tab closes and is stopped through the session instead (`turnWatchFor`).
+    const disconnect = typeof turn.run.conversationId === 'string' ? undefined : new AbortController();
     let closed = false;
-    reply.raw.on('close', () => { closed = true; });
+    reply.raw.on('close', () => {
+      closed = true;
+      if (!reply.raw.writableEnded) disconnect?.abort();
+    });
     const send = (event: string, data: unknown, id?: number) => {
       if (closed) return;
       try {
@@ -2173,9 +2195,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const result = await runWithUsageSink(usage, () => executePlaygroundChatLocal({
         ...turn.run,
-        ...(watch ? { signal: watch.signal } : {}),
+        ...(watch ? { signal: watch.signal } : disconnect ? { signal: disconnect.signal } : {}),
+        // A stateless call (Compare versions) carries its own earlier messages.
+        history: readStatelessHistory(turn.body),
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
+        // Additive event: thought text as it streams. Older clients ignore it.
+        onReasoningChunk: (text) => send('reasoning', { text }),
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.
         onCompaction: (compaction) => send('summary', compaction),
@@ -2223,13 +2249,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           // Ignored server-side when conversationId is set (history loads from
           // the session instead) — still parsed so a stateless call (no
           // conversationId) keeps working exactly as before.
-          history: Array.isArray(body.history)
-            ? (body.history as Array<{ content?: unknown; role?: unknown } | null>).flatMap((item) => (
-              typeof item?.content === 'string' && typeof item.role === 'string'
-                ? [{ content: item.content, role: item.role }]
-                : []
-            ))
-            : undefined,
+          history: readStatelessHistory(body),
         });
       } finally {
         watch?.stop();
