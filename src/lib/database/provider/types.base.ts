@@ -941,6 +941,8 @@ export interface IFileRecord {
   expiresAt?: Date | null;
   /** Who uploaded it (session files); `createdBy` stays the principal the file service was called as. */
   uploadedBy?: string;
+  /** `agent_output`: a file the agent wrote to its sandbox's `/outputs/` and the platform collected after a turn. Absent = an upload. */
+  origin?: 'agent_output';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

@@ -146,3 +146,47 @@ export function toClientErrorBody(error: AgentRunErrorBody): Record<string, unkn
         ...(maxCostUsd !== undefined ? { max_cost_usd: maxCostUsd } : {}),
     };
 }
+
+// ── Files the agent produced ─────────────────────────────────────────────
+
+/** A file the agent wrote to its sandbox's `/outputs/`, as a client sees it. */
+export interface ClientOutputFile {
+    id: string;
+    name: string;
+    mime_type: string;
+    size: number;
+    /** Relative to the API origin: the session file content route. */
+    download_url: string;
+}
+
+/** An `output_text` annotation pointing at an output file (OpenAI `container_file_citation` / `file_path` compatible). */
+export interface ClientFileAnnotation {
+    type: 'file_path';
+    file_id: string;
+    filename: string;
+}
+
+interface OutputAttachmentLike {
+    fileId: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    origin?: string;
+}
+
+/** The `agent_output` attachments of an assistant message, as `output_files` (user uploads are not included). */
+export function toClientOutputFiles(conversationId: string, attachments: ReadonlyArray<OutputAttachmentLike> | undefined): ClientOutputFile[] {
+    return (attachments ?? [])
+        .filter((file) => file.origin === 'agent_output')
+        .map((file) => ({
+            id: file.fileId,
+            name: file.name,
+            mime_type: file.mimeType,
+            size: file.size,
+            download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+        }));
+}
+
+export function toFileAnnotations(files: ReadonlyArray<ClientOutputFile>): ClientFileAnnotation[] {
+    return files.map((file) => ({ type: 'file_path', file_id: file.id, filename: file.name }));
+}

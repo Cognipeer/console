@@ -1075,6 +1075,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.files, 'agentKey', 'agentKey TEXT');
     this.ensureTableColumn(db, TABLES.files, 'expiresAt', 'expiresAt TEXT');
     this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'origin', 'origin TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
     // A bucket's objects by key: the lookup of one object, the prefix / folder

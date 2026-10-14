@@ -386,6 +386,52 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
 }
 
 /**
+ * Stores a file the agent wrote to its sandbox's `/outputs/` (see agentSandboxOutputs.ts) as a session file of
+ * origin `agent_output`. Unlike an upload it needs no `attachments.enabled` and ignores the per-session file count
+ * and the MIME allow-list (those guard what a person sends); it does need the agent's bucket and the size limit.
+ * Throws on any refusal: the caller keeps a turn alive.
+ */
+export async function saveAgentOutputFile(input: {
+    scope: SessionFileScope;
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey'>;
+    agentConfig: IAgentConfig | undefined;
+    fileName: string;
+    contentType: string;
+    data: Buffer;
+    actorId: string;
+}): Promise<IAgentMessageAttachment> {
+    const cfg = resolveAttachmentsConfig(input.agentConfig?.attachments);
+    const bucketKey = await resolveSessionFilesBucket(input.scope, cfg);
+    if (input.data.length > Math.floor(cfg.maxFileSizeMb * 1024 * 1024)) {
+        throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, input.contentType));
+    }
+    const conversationId = String(input.conversation._id);
+    const result = await uploadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, {
+        bucketKey,
+        fileName: input.fileName,
+        contentType: input.contentType,
+        data: input.data,
+        createdBy: input.actorId,
+        convertToMarkdown: !isImageMime(input.contentType),
+        keyHint: sessionFileObjectKey({
+            folder: cfg.folder,
+            agentKey: input.conversation.agentKey,
+            conversationId,
+            uniqueName: generateFileRelativeKey(input.fileName),
+        }),
+        recordExtras: {
+            purpose: 'conversation',
+            conversationId,
+            agentKey: input.conversation.agentKey,
+            expiresAt: new Date(Date.now() + cfg.retentionDays * 86_400_000),
+            uploadedBy: input.actorId,
+            origin: 'agent_output',
+        },
+    });
+    return { ...toMessageAttachment(result.record), origin: 'agent_output' };
+}
+
+/**
  * A conversation's files, oldest first. With `withNames` each also says who uploaded it by
  * name (`uploadedByName`) — a screen's wish, so the model's own file tool does not pay for it.
  */
