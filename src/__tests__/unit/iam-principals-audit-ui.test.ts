@@ -183,12 +183,16 @@ async function render(
   await settle(250);
 }
 
+// The component's blob comes from fetch, which on some Node versions is Node's own Blob,
+// not jsdom's; jsdom's FileReader only reads the latter.
 const readBlob = (blob: Blob) =>
-  new Promise<string>((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.readAsText(blob);
-  });
+  typeof blob.text === 'function'
+    ? blob.text()
+    : new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.readAsText(blob);
+      });
 
 const rowsText = () => qa('table.ds-tbl tbody tr').map((r) => r.textContent ?? '');
 // the table's own requests: the pickers of the filter bar ask for 20 suggestions at a time

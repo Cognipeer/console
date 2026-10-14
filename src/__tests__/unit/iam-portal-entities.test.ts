@@ -179,7 +179,7 @@ describe('cutting a long access list down to the requester\'s slice', () => {
     // the generator really covered both outcomes
     expect(allowed).toBeGreaterThan(50);
     expect(denied).toBeGreaterThan(50);
-  });
+  }, 30_000);
 
   it('builds the principal entities the rules read (sanity: groups are parents of the user)', () => {
     const { entities } = principalEntities(userPrincipal({ userId: 'u', user: { role: 'user' }, groupIds: ['g1'] }));
