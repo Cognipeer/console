@@ -112,7 +112,7 @@ const openAiPerKey = () => (buildModelRuntime as ReturnType<typeof vi.fn>).mockI
     return { runtime: runtimes.get(providerKey) };
   },
 );
-const useModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
+const stubModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
 const apiKeyOf = (call: { headers: Record<string, string> }) => call.headers.authorization?.replace('Bearer ', '');
 const rows = () => (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
 
@@ -138,7 +138,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe('stage order', () => {
   it('runs input guardrails, cache lookup, the provider, the usage row, output guardrails, then the cache store', async () => {
     const order: string[] = [];
-    useModel(model({
+    stubModel(model({
       guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }, { key: 'gr-out', hooks: ['output.pre'] }],
       semanticCache: { indexKey: 'idx', threshold: 0.9 },
     }));
@@ -183,7 +183,7 @@ describe('stage order', () => {
 
 describe('native events of a streamed call', () => {
   it('yields start, deltas, the terminal step, the usage frame and a done event holding the whole answer', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => sse([
       chunk.reasoning('thinking '),
       chunk.text('Hel'),
@@ -221,7 +221,7 @@ describe('native events of a streamed call', () => {
 
   it('keeps the signed reasoning blocks and the tool call of an Anthropic thinking turn, for the next request of an agent loop', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5', settings: { reasoning: { effort: 'low' }, maxTokens: 9000 } }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5', settings: { reasoning: { effort: 'low' }, maxTokens: 9000 } }));
     const upstream = stubUpstream(() => sse([
       { type: 'message_start', message: { id: 'msg_1', model: 'claude', usage: { input_tokens: 12 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
@@ -268,7 +268,7 @@ describe('native events of a streamed call', () => {
   });
 
   it('never hides reasoning from a native caller, whatever the Model Hub switch says', async () => {
-    useModel(model({ settings: { returnReasoning: false } }));
+    stubModel(model({ settings: { returnReasoning: false } }));
     stubUpstream(() => sse([chunk.reasoning('private'), chunk.text('public'), chunk.finish('stop')]));
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     const events = await collect(outcome.stream!);
@@ -277,7 +277,7 @@ describe('native events of a streamed call', () => {
   });
 
   it('completes a lone "{" tool argument so the agent loop can parse it', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => sse([chunk.tool(0, { id: 'c1', name: 'now', arguments: '{' }), chunk.finish('tool_calls')]));
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     const events = await collect(outcome.stream!);
@@ -288,7 +288,7 @@ describe('native events of a streamed call', () => {
 
 describe('cancellation', () => {
   it('aborts the upstream of a non-streamed call', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream((call) => new Promise<Response>((_, reject) => {
       call.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
     }));
@@ -304,7 +304,7 @@ describe('cancellation', () => {
   });
 
   it('logs a streamed call whose signal aborts as cancelled, with the partial usage estimated, and settles it', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream((call) => {
       const live = controlledStream(call.signal);
       live.send(chunk.text('a partial answer'));
@@ -329,7 +329,7 @@ describe('cancellation', () => {
   });
 
   it('is cancelled before the provider is touched when the signal is already aborted', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json(completion()));
     const controller = new AbortController();
     controller.abort();
@@ -341,7 +341,7 @@ describe('cancellation', () => {
 
 describe('caller attribution', () => {
   it('writes ONE usage row per call, on the caller\'s route and with the caller\'s attribution', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => json(completion()));
 
     await executeModelCall({
@@ -356,7 +356,7 @@ describe('caller attribution', () => {
   });
 
   it('keeps the gateway\'s own route and no attribution key for an ordinary call', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => json(completion()));
     await executeModelCall({ ...BASE, request: ASK });
     await flush();
@@ -365,7 +365,7 @@ describe('caller attribution', () => {
   });
 
   it('names the caller\'s route on the stream and its guardrail evaluations too', async () => {
-    useModel(model({ outputGuardrailKey: 'gr' }));
+    stubModel(model({ outputGuardrailKey: 'gr' }));
     (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() => ({
       push: vi.fn(async (frame: unknown) => ({ emit: [frame], blocked: false })),
       end: vi.fn(async () => ({ emit: [], blocked: false })),
@@ -396,7 +396,7 @@ describe('input guardrails once per turn', () => {
   });
 
   it('evaluates the latest user message once for a turn, however many model calls the turn makes', async () => {
-    useModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
+    stubModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
     stubUpstream(() => json(completion()));
 
     await executeModelCall(turn());
@@ -407,7 +407,7 @@ describe('input guardrails once per turn', () => {
   });
 
   it('re-applies the redaction to the later calls of the turn, whose history still carries the original text', async () => {
-    useModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
+    stubModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
     (evaluateGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue({
       passed: true, blocked: false, action: 'redact', guardrailKey: 'gr-in', guardrailName: 'gr-in',
       findings: [{ type: 'pii' }], redactedText: 'my email is [EMAIL]',
@@ -422,7 +422,7 @@ describe('input guardrails once per turn', () => {
   });
 
   it('evaluates again for a new turn, a new message, or a caller that names no turn', async () => {
-    useModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
+    stubModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
     stubUpstream(() => json(completion()));
 
     await executeModelCall(turn());
@@ -435,7 +435,7 @@ describe('input guardrails once per turn', () => {
   });
 
   it('a blocked turn is not remembered as passed', async () => {
-    useModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
+    stubModel(model({ guardrails: [{ key: 'gr-in', hooks: ['input.pre'] }] }));
     (evaluateGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue({
       passed: false, blocked: true, action: 'block', guardrailKey: 'gr-in', guardrailName: 'Strict', findings: [{ block: true, message: 'no' }],
     });
@@ -450,7 +450,7 @@ describe('input guardrails once per turn', () => {
 describe('routing depth', () => {
   it('refuses a call that is already as deep as a Dynamic LLM chain may go', async () => {
     const router = model({ key: 'router', providerKey: 'dynamic', providerDriver: 'dynamic', settings: { dynamic: { strategy: 'rule-based', defaultModelKey: 'child' } } });
-    useModel(router);
+    stubModel(router);
     stubUpstream(() => json(completion()));
     await expect(executeModelCall({ ...BASE, modelKey: 'router', request: ASK, context: { routingDepth: 10 } }))
       .rejects.toThrow(/Dynamic routing depth exceeded/);
@@ -468,7 +468,7 @@ describe('replica failover', () => {
   afterEach(() => { Math.random = originalRandom; });
 
   it('moves a non-streamed call to the next replica when the first is down, and never reveals which served it', async () => {
-    useModel(pooled());
+    stubModel(pooled());
     const upstream = stubUpstream((call) => apiKeyOf(call) === 'a'
       ? json({ error: { message: 'overloaded' } }, 503)
       : json(completion({ content: 'from b' })));
@@ -483,7 +483,7 @@ describe('replica failover', () => {
   });
 
   it('fails over a stream only BEFORE the first byte', async () => {
-    useModel(pooled());
+    stubModel(pooled());
     stubUpstream((call) => apiKeyOf(call) === 'a'
       ? json({ error: { message: 'bad gateway' } }, 502)
       : sse([chunk.text('b is up'), chunk.finish('stop')]));
@@ -495,7 +495,7 @@ describe('replica failover', () => {
   });
 
   it('does not splice two completions: a stream that dies after its first byte stays failed', async () => {
-    useModel(pooled());
+    stubModel(pooled());
     const upstream = stubUpstream((call) => {
       const live = controlledStream(call.signal);
       live.send(chunk.text('half an answ'));
@@ -511,14 +511,14 @@ describe('replica failover', () => {
   });
 
   it('does not travel with the caller\'s own mistakes', async () => {
-    useModel(pooled());
+    stubModel(pooled());
     const upstream = stubUpstream(() => json({ error: { message: 'bad request', type: 'invalid_request_error' } }, 400));
     await expect(executeModelCall({ ...BASE, request: ASK })).rejects.toMatchObject({ statusCode: 400 });
     expect(upstream.calls).toHaveLength(1);
   });
 
   it('resolves the request rules for each replica\'s own model id', async () => {
-    useModel(model({
+    stubModel(model({
       providerKey: 'a',
       settings: { temperature: 0.5 },
       replicas: [{ providerKey: 'a', modelId: 'gpt-4o', weight: 1000 }, { providerKey: 'b', modelId: 'o3-mini', weight: 1 }],
@@ -538,21 +538,21 @@ describe('replica failover', () => {
 
 describe('retry layering', () => {
   it('lets the gateway\'s resilience own the retries: a 500 costs exactly its attempts, not attempts x SDK retries', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json({ error: { message: 'boom' } }, 500));
     await expect(executeModelCall({ ...BASE, request: ASK })).rejects.toMatchObject({ statusCode: 500 });
     expect(upstream.calls).toHaveLength(3);
   });
 
   it('does not retry a 400 at all', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json({ error: { message: 'bad', type: 'invalid_request_error' } }, 400));
     await expect(executeModelCall({ ...BASE, request: ASK })).rejects.toBeDefined();
     expect(upstream.calls).toHaveLength(1);
   });
 
   it('retries the opening of a stream too, and the retry gets a fresh request', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream((_call, index) => index === 0
       ? json({ error: { message: 'blip' } }, 503)
       : sse([chunk.text('ok'), chunk.finish('stop')]));
@@ -564,7 +564,7 @@ describe('retry layering', () => {
   });
 
   it('explains the error of a failed provider call with the status the upstream gave', async () => {
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => json({ error: { message: 'Rate limit reached', type: 'rate_limit_error', code: 'rate_limit_exceeded' } }, 429));
     await expect(handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }] } }))
       .rejects.toMatchObject({ statusCode: 429 });
@@ -573,7 +573,7 @@ describe('retry layering', () => {
 
 describe('the request rules of the Model Hub record reach the upstream, whoever calls', () => {
   it('requestDefaults are sent; the reserved keys among them are not', async () => {
-    useModel(model({ settings: { requestDefaults: { top_k: 40, model: 'evil', stream: true, messages: [], api_key: 'x' } } }));
+    stubModel(model({ settings: { requestDefaults: { top_k: 40, model: 'evil', stream: true, messages: [], api_key: 'x' } } }));
     const upstream = stubUpstream(() => json(completion()));
     await executeModelCall({ ...BASE, request: ASK });
     expect(upstream.calls[0].body).toMatchObject({ top_k: 40, model: 'gpt-4o', stream: false, messages: [{ role: 'user', content: 'hello' }] });
@@ -582,19 +582,19 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
 
   it('a caller\'s unknown fields pass through only when the model allows it, and never override the reserved ones', async () => {
     const wire = { messages: [{ role: 'user', content: 'hello' }], chat_template_kwargs: { enable_thinking: false }, model: 'evil' };
-    useModel(model({ settings: {} }));
+    stubModel(model({ settings: {} }));
     const closed = stubUpstream(() => json(completion()));
     await executeModelCall({ ...BASE, request: ASK, wire });
     expect(closed.calls[0].body).not.toHaveProperty('chat_template_kwargs');
 
-    useModel(model({ settings: { allowUnknownPassthrough: true } }));
+    stubModel(model({ settings: { allowUnknownPassthrough: true } }));
     const open = stubUpstream(() => json(completion()));
     await executeModelCall({ ...BASE, request: ASK, wire });
     expect(open.calls[0].body).toMatchObject({ chat_template_kwargs: { enable_thinking: false }, model: 'gpt-4o' });
   });
 
   it('strips the parameters the model declares unsupported, from the request as well as from the record', async () => {
-    useModel(model({ settings: { temperature: 0.4, unsupportedParams: ['temperature', 'top_p', 'presence_penalty'] } }));
+    stubModel(model({ settings: { temperature: 0.4, unsupportedParams: ['temperature', 'top_p', 'presence_penalty'] } }));
     const upstream = stubUpstream(() => json(completion()));
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], temperature: 0.9, top_p: 0.5, presence_penalty: 0.2, frequency_penalty: 0.1 } });
     expect(upstream.calls[0].body.temperature).toBeUndefined();
@@ -604,7 +604,7 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
   });
 
   it('forces reasoning_effort none next to function tools on GPT-5, and sends the effort otherwise', async () => {
-    useModel(model({ modelId: 'gpt-5.2', settings: { reasoning: { effort: 'high' }, maxTokens: 400 } }));
+    stubModel(model({ modelId: 'gpt-5.2', settings: { reasoning: { effort: 'high' }, maxTokens: 400 } }));
     const upstream = stubUpstream(() => json(completion()));
     const tool = { name: 'lookup', description: 'd', parameters: { type: 'object' } };
     await executeModelCall({ ...BASE, request: ASK });
@@ -614,7 +614,7 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
   });
 
   it('renames the token budget when the model declares max_tokens unsupported', async () => {
-    useModel(model({ modelId: 'vanity-model', settings: { unsupportedParams: ['max_tokens'] } }));
+    stubModel(model({ modelId: 'vanity-model', settings: { unsupportedParams: ['max_tokens'] } }));
     const upstream = stubUpstream(() => json(completion()));
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], max_tokens: 77 } });
     expect(upstream.calls[0].body.max_completion_tokens).toBe(77);
@@ -622,7 +622,7 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
   });
 
   it('opts out of stream_options when the model declares them unsupported', async () => {
-    useModel(model({ settings: { unsupportedParams: ['stream_options'] } }));
+    stubModel(model({ settings: { unsupportedParams: ['stream_options'] } }));
     const upstream = stubUpstream(() => sse([chunk.text('x'), chunk.finish('stop')]));
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     await collect(outcome.stream!);
@@ -631,7 +631,7 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
   });
 
   it('sends the usage option by default on a stream, so the usage row carries real counts', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => sse([chunk.text('x'), chunk.finish('stop')]));
     const outcome = await executeModelCall({ ...BASE, request: ASK, stream: true });
     await collect(outcome.stream!);
@@ -640,7 +640,7 @@ describe('the request rules of the Model Hub record reach the upstream, whoever 
 
   it('applies the same rules to a Bedrock Converse model: additionalModelRequestFields carries the extra body', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: bedrock });
-    useModel(model({ providerDriver: 'bedrock', modelId: 'amazon.nova-pro-v1:0', settings: { requestDefaults: { topK: 20 }, maxTokens: 300 } }));
+    stubModel(model({ providerDriver: 'bedrock', modelId: 'amazon.nova-pro-v1:0', settings: { requestDefaults: { topK: 20 }, maxTokens: 300 } }));
     const upstream = stubUpstream(() => json({
       output: { message: { role: 'assistant', content: [{ text: 'hi from nova' }] } },
       stopReason: 'end_turn',
@@ -667,7 +667,7 @@ describe('finish_reason on the wire, per driver', () => {
     ['guardrail_intervened', [{ text: 'blocked' }], 'content_filter'],
   ])('Bedrock %s is %s', async (stopReason, content, wire) => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: bedrock });
-    useModel(model({ providerDriver: 'bedrock', modelId: 'amazon.nova-pro-v1:0' }));
+    stubModel(model({ providerDriver: 'bedrock', modelId: 'amazon.nova-pro-v1:0' }));
     stubUpstream(() => bedrockAnswer(stopReason, content));
     const outcome = await executeModelCall({ ...BASE, request: ASK });
     await flush();
@@ -678,7 +678,7 @@ describe('finish_reason on the wire, per driver', () => {
 
   it('Anthropic\'s non-streamed turn: end_turn is stop, tool_use is tool_calls, and the row is normalized', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     stubUpstream(() => json({
       id: 'm', model: 'c', type: 'message', role: 'assistant',
       content: [{ type: 'tool_use', id: 'toolu_1', name: 'lookup', input: { q: 1 } }],
@@ -699,7 +699,7 @@ describe('finish_reason on the wire, per driver', () => {
 describe('a native request, as an agent makes it', () => {
   it('stamps the agent key onto the usage row so the rollup can bucket by agent', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     stubUpstream(() => json({
       id: 'm', model: 'c', type: 'message', role: 'assistant',
       content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
@@ -714,7 +714,7 @@ describe('a native request, as an agent makes it', () => {
   });
 
   it('carries messages with images, tools, tool choice and a response format to the upstream', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json(completion({ content: '{"a":1}' })));
     await executeModelCall({
       ...BASE,
@@ -753,7 +753,7 @@ describe('a native request, as an agent makes it', () => {
   });
 
   it('keeps an image detail hint and drops an unknown content part only for providers that cannot read it', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json(completion()));
     const future = { type: 'input_video', input_video: { url: 'https://x/y.mp4' } };
     const wireMessages = [{
@@ -770,7 +770,7 @@ describe('a native request, as an agent makes it', () => {
     ]);
 
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     const claude = stubUpstream(() => json({
       id: 'm', model: 'c', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }],
       stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
@@ -781,7 +781,7 @@ describe('a native request, as an agent makes it', () => {
   });
 
   it('answers a semantic cache hit natively too', async () => {
-    useModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 } }));
+    stubModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 } }));
     (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({
       hit: true,
@@ -795,7 +795,7 @@ describe('a native request, as an agent makes it', () => {
 
 describe('the stream gate and tool calls', () => {
   it('hands tool-call fragments through the gate with their framing intact, and writes parallel calls back apart', async () => {
-    useModel(model({ outputGuardrailKey: 'gr' }));
+    stubModel(model({ outputGuardrailKey: 'gr' }));
     const gate = {
       push: vi.fn(async (frame: unknown) => ({ emit: [frame], blocked: false })),
       end: vi.fn(async () => ({ emit: [], blocked: false })),
@@ -856,7 +856,7 @@ describe('the Messages edge on top of the core', () => {
 
   it('translates a streamed OpenAI-schema answer with a tool call into balanced Messages events', async () => {
     const { anthropicRequestToOpenAi, openAiStreamToAnthropic } = await import('@/lib/services/models/anthropicWire');
-    useModel(model());
+    stubModel(model());
     stubUpstream(() => sse([
       chunk.text('Let me check. '),
       chunk.tool(0, { id: 'call_1', name: 'lookup', arguments: '{"q":' }),
@@ -888,7 +888,7 @@ describe('the Messages edge on top of the core', () => {
   it('translates a non-streamed answer, with the stop reason of the upstream\'s own vocabulary', async () => {
     const { anthropicRequestToOpenAi, openAiResponseToAnthropic } = await import('@/lib/services/models/anthropicWire');
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     stubUpstream(() => json({
       id: 'm', model: 'c', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'cut off' }],
       stop_reason: 'max_tokens', usage: { input_tokens: 7, output_tokens: 3 },

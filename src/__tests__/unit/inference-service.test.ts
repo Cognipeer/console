@@ -167,7 +167,7 @@ const useRuntime = () => {
   (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime });
 };
 
-const useModel = (model: object) => {
+const stubModel = (model: object) => {
   (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
 };
 
@@ -216,7 +216,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('throws when model category is not llm', async () => {
-    useModel(makeEmbeddingModel());
+    stubModel(makeEmbeddingModel());
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
       runtime: makeEmbeddingRuntime(),
     });
@@ -227,7 +227,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('throws when runtime has no native chat client', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
       runtime: {},
     });
@@ -238,7 +238,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('propagates a failure to build the provider client', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
       runtime: {
         createNativeChatClient: vi.fn().mockRejectedValue(new Error('provider misconfigured')),
@@ -252,7 +252,7 @@ describe('handleChatCompletion', () => {
 
   it('returns response on successful non-streaming completion', async () => {
     const model = makeLlmModel();
-    useModel(model);
+    stubModel(model);
     const upstream = stubUpstream(() => json(completion({
       content: 'Hi!',
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
@@ -291,7 +291,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('settles the budget with the realized cost for a non-streaming completion too (F-05)', async () => {
-    useModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
+    stubModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
     stubUpstream(() => json(completion({
       usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
     })));
@@ -314,7 +314,7 @@ describe('handleChatCompletion', () => {
     // as its own field, and totalTokens must stay exactly what the upstream
     // reported (inputTokens + outputTokens), never inflated by reasoningTokens.
     const model = makeLlmModel();
-    useModel(model);
+    stubModel(model);
     stubUpstream(() => json(completion({
       content: 'Hi!',
       usage: {
@@ -347,7 +347,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('shows the reasoning as a subset of completion tokens on the wire', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => json(completion({
       content: 'Hi!',
       usage: {
@@ -375,7 +375,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('passes canonical OpenAI vision content to the provider', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => json(completion({ content: 'A small image' })));
     const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
 
@@ -399,7 +399,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('rejects an image part without a URL before any provider is called', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => json(completion()));
 
     await expect(handleChatCompletion({
@@ -410,7 +410,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('uses provided request_id in response', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => json(completion()));
 
     const result = await handleChatCompletion({
@@ -422,7 +422,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('generates a UUID when request_id is not provided', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => json(completion()));
 
     const result = await handleChatCompletion({
@@ -440,7 +440,7 @@ describe('handleChatCompletion', () => {
       semanticCache: { indexKey: 'cache-idx', threshold: 0.9 },
     });
     const cachedResponse = { id: 'cached-1', choices: [] };
-    useModel(model);
+    stubModel(model);
     (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({
       hit: true,
@@ -470,7 +470,7 @@ describe('handleChatCompletion', () => {
     const model = makeLlmModel({
       semanticCache: { indexKey: 'cache-idx', threshold: 0.9 },
     });
-    useModel(model);
+    stubModel(model);
     (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({ hit: false, response: null });
     stubUpstream(() => json(completion()));
@@ -490,7 +490,7 @@ describe('handleChatCompletion', () => {
     const model = makeLlmModel({
       semanticCache: { indexKey: 'cache-idx', threshold: 0.9 },
     });
-    useModel(model);
+    stubModel(model);
     (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (lookupCache as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cache timeout'));
     stubUpstream(() => json(completion()));
@@ -506,7 +506,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('returns a ReadableStream for streaming requests', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => sse([chunk.text('Hello'), chunk.text(' World')]));
 
     const result = await handleChatCompletion({
@@ -527,7 +527,7 @@ describe('handleChatCompletion', () => {
     // counter. A caller that wants the real cost has to be told through
     // `onUsageSettled`, since it isn't known until the stream this function
     // already returned finishes.
-    useModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
+    stubModel(makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }));
     stubUpstream(() => sse([
       chunk.text('Hello'),
       chunk.finish('stop'),
@@ -552,7 +552,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('asks the upstream for stream usage and emits it as a final usage-only chunk when requested', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => sse([
       chunk.text('Hello'),
       chunk.finish('stop'),
@@ -578,7 +578,7 @@ describe('handleChatCompletion', () => {
     // reasoningTokens is a SUBSET of completion_tokens (outputTokens) - it must
     // reach logModelUsage as its own field, and totalTokens must stay exactly
     // what the final usage frame reported, never inflated by reasoningTokens.
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => sse([
       chunk.text('Hello'),
       chunk.finish('length'),
@@ -619,7 +619,7 @@ describe('handleChatCompletion', () => {
     // OpenAI only emits `usage` when the caller asks for it, and then only on a
     // trailing choices-less frame. The upstream is still asked for it (the
     // usage row needs the real counts), but it never reaches the caller.
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream(() => sse([
       chunk.text('Hello'),
       chunk.finish('stop'),
@@ -642,7 +642,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('streams a tool-carrying request frame by frame rather than in one shot', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => sse([chunk.text('one'), chunk.text('two'), chunk.text('three')]));
 
     const result = await handleChatCompletion({
@@ -668,7 +668,7 @@ describe('handleChatCompletion', () => {
 
   describe('JSON mode - repairing a malformed provider response', () => {
     const setup = (content: string) => {
-      useModel(makeLlmModel());
+      stubModel(makeLlmModel());
       stubUpstream(() => json(completion({ content })));
     };
 
@@ -717,7 +717,7 @@ describe('handleChatCompletion', () => {
     });
 
     it('sends the caller response_format to the upstream verbatim, strict flag included', async () => {
-      useModel(makeLlmModel());
+      stubModel(makeLlmModel());
       const upstream = stubUpstream(() => json(completion({ content: '{"a":1}' })));
       const responseFormat = {
         type: 'json_schema',
@@ -735,7 +735,7 @@ describe('handleChatCompletion', () => {
       modelOverrides = {},
       onUsageSettled?: (cost: { currency: string; totalCost: number }) => void,
     ) => {
-      useModel(makeLlmModel(modelOverrides));
+      stubModel(makeLlmModel(modelOverrides));
       let live: ReturnType<typeof controlledStream> | undefined;
       const upstream = stubUpstream((call) => {
         live = controlledStream(call.signal);
@@ -812,7 +812,7 @@ describe('handleChatCompletion', () => {
     });
 
     it('honours an AbortSignal handed in by an in-process caller the same way', async () => {
-      useModel(makeLlmModel());
+      stubModel(makeLlmModel());
       stubUpstream((call) => {
         const live = controlledStream(call.signal);
         live.send(chunk.text('partial'));
@@ -852,7 +852,7 @@ describe('handleChatCompletion', () => {
 
     /** Streams `chunks` and reports whether the upstream call was aborted. */
     const startGatedStream = async (chunks: string[], modelOverrides = {}) => {
-      useModel(makeLlmModel({ outputGuardrailKey: 'no-pii', ...modelOverrides }));
+      stubModel(makeLlmModel({ outputGuardrailKey: 'no-pii', ...modelOverrides }));
       const upstream = stubUpstream(() => sse(chunks.map((content) => chunk.text(content))));
 
       const result = await handleChatCompletion({
@@ -1051,7 +1051,7 @@ describe('handleChatCompletion', () => {
       (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() =>
         makeGateStub({ pushes: [{ emit: [], blocked: true, verdict: BLOCK_VERDICT }] }),
       );
-      useModel(makeLlmModel({ outputGuardrailKey: 'no-pii' }));
+      stubModel(makeLlmModel({ outputGuardrailKey: 'no-pii' }));
       const upstream = stubUpstream(() => sse([chunk.text('leaked@example.com'), chunk.text(' more')]));
       const { executeModelCall } = await import('@/lib/services/models/inferenceService');
 
@@ -1079,7 +1079,7 @@ describe('handleChatCompletion', () => {
     // chunks as they land, or wait for the completion and replay it? Assert the
     // first content frame is readable *before* the provider has finished
     // producing - a buffered implementation cannot satisfy that.
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const GAP_MS = 40;
     const CHUNKS = 5;
     let producerFinishedAt = Number.POSITIVE_INFINITY;
@@ -1120,7 +1120,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('emits an explanatory SSE error when output budget ends without an answer', async () => {
-    useModel(makeLlmModel({ settings: { maxTokens: 512 } }));
+    stubModel(makeLlmModel({ settings: { maxTokens: 512 } }));
     stubUpstream(() => sse([
       chunk.finish('length'),
       chunk.usage({ prompt_tokens: 100, completion_tokens: 512, total_tokens: 612 }),
@@ -1151,7 +1151,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('emits a normalized SSE error when a provider stream fails', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     stubUpstream((call) => {
       const live = controlledStream(call.signal);
       live.send(chunk.text('Partial'));
@@ -1184,7 +1184,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('throws an output token limit error for an empty non-streaming length result', async () => {
-    useModel(makeLlmModel({ settings: { maxTokens: 512 } }));
+    stubModel(makeLlmModel({ settings: { maxTokens: 512 } }));
     stubUpstream(() => json(completion({ content: '', finish: 'length' })));
 
     await expect(handleChatCompletion({
@@ -1198,7 +1198,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('applies body overrides to the request the provider receives', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => json(completion({ content: 'Hi' })));
 
     await handleChatCompletion({
@@ -1220,7 +1220,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('forwards parallel tool options and normalizes strict nested schemas', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => json(completion({ content: '' })));
 
     await handleChatCompletion({
@@ -1269,7 +1269,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('passes a non-function tool and the tool choice to an OpenAI-schema upstream verbatim', async () => {
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => json(completion({ content: 'ok' })));
     const hosted = { type: 'web_search_preview' };
 
@@ -1296,7 +1296,7 @@ describe('handleChatCompletion', () => {
     // Open WebUI (native function calling by default) and Onyx send `tools` on
     // essentially every chat request. Turning provider streaming off for them
     // collapsed the whole answer into one SSE frame - "streaming is broken".
-    useModel(makeLlmModel());
+    stubModel(makeLlmModel());
     const upstream = stubUpstream(() => sse([chunk.text('hi')]));
 
     const result = await handleChatCompletion({
@@ -1316,7 +1316,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('disables provider streaming for tool calls only when the model opts in', async () => {
-    useModel(makeLlmModel({ settings: { disableStreamingWithTools: true } }));
+    stubModel(makeLlmModel({ settings: { disableStreamingWithTools: true } }));
     const upstream = stubUpstream(() => json(completion({
       content: '',
       toolCalls: [{ id: 'call_lookup', name: 'lookup', arguments: '{}' }],
@@ -1346,7 +1346,7 @@ describe('handleChatCompletion', () => {
   });
 
   it('emits an explanatory SSE error for an empty eager tool result', async () => {
-    useModel(makeLlmModel({ settings: { maxTokens: 512, disableStreamingWithTools: true } }));
+    stubModel(makeLlmModel({ settings: { maxTokens: 512, disableStreamingWithTools: true } }));
     const upstream = stubUpstream(() => json(completion({ content: '', finish: 'length' })));
 
     const result = await handleChatCompletion({
@@ -1414,7 +1414,7 @@ describe('handleChatCompletion', () => {
       modelOverrides: object,
       userText = 'my email is a@b.com',
     ) => {
-      useModel(makeLlmModel(modelOverrides));
+      stubModel(makeLlmModel(modelOverrides));
       stubUpstream(() => json(completion({ content: 'the answer' })));
       return handleChatCompletion({
         ...BASE_PARAMS,
@@ -1423,7 +1423,7 @@ describe('handleChatCompletion', () => {
     };
 
     const runStream = async (modelOverrides: object) => {
-      useModel(makeLlmModel(modelOverrides));
+      stubModel(makeLlmModel(modelOverrides));
       stubUpstream(() => sse([chunk.text('the answer')]));
 
       const result = await handleChatCompletion({

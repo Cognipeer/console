@@ -71,7 +71,7 @@ const model = (overrides: object = {}) => ({
 });
 const BASE = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', modelKey: 'm' };
 const ASK = { messages: [{ role: 'user' as const, content: 'hello' }] };
-const useModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
+const stubModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
 
 const responsesAnswer = () => json({
   id: 'resp_1', object: 'response', status: 'completed', model: 'gpt-5',
@@ -130,7 +130,7 @@ describe('upstreamApi setting', () => {
 
 describe('a chat-completions request over a Responses upstream', () => {
   it('goes to /responses and the client still receives a chat.completion, with reasoning when allowed', async () => {
-    useModel(model({ modelId: 'gpt-5', settings: { upstreamApi: 'responses' } }));
+    stubModel(model({ modelId: 'gpt-5', settings: { upstreamApi: 'responses' } }));
     const upstream = stubUpstream(() => responsesAnswer());
     const result = await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'hello' }] } });
     expect(upstream.calls[0].url).toMatch(/\/responses$/);
@@ -143,7 +143,7 @@ describe('a chat-completions request over a Responses upstream', () => {
   });
 
   it('asks the Responses upstream for a reasoning summary when the caller sets reasoning_effort (openai-compatible)', async () => {
-    useModel(model({ providerDriver: 'openai-compatible', modelId: 'gpt-5.6-luna', settings: { upstreamApi: 'responses' } }));
+    stubModel(model({ providerDriver: 'openai-compatible', modelId: 'gpt-5.6-luna', settings: { upstreamApi: 'responses' } }));
     const upstream = stubUpstream(() => responsesAnswer());
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'hello' }], reasoning_effort: 'high' } });
     expect(upstream.calls[0].url).toMatch(/\/responses$/);
@@ -151,7 +151,7 @@ describe('a chat-completions request over a Responses upstream', () => {
   });
 
   it('keeps the reasoning text out when the Model Hub hides it', async () => {
-    useModel(model({ modelId: 'gpt-5', settings: { upstreamApi: 'responses', returnReasoning: false } }));
+    stubModel(model({ modelId: 'gpt-5', settings: { upstreamApi: 'responses', returnReasoning: false } }));
     stubUpstream(() => responsesAnswer());
     const result = await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'hello' }] } });
     const body = (result as { response: any }).response ?? result;
@@ -159,7 +159,7 @@ describe('a chat-completions request over a Responses upstream', () => {
   });
 
   it('calls /chat/completions when the setting is unset, even for a model id that is Responses-first', async () => {
-    useModel(model({ modelId: 'gpt-5-codex', settings: {} }));
+    stubModel(model({ modelId: 'gpt-5-codex', settings: {} }));
     const upstream = stubUpstream(() => json(completion()));
     await executeModelCall({ ...BASE, request: ASK });
     expect(upstream.calls[0].url).toMatch(/\/chat\/completions$/);
@@ -169,7 +169,7 @@ describe('a chat-completions request over a Responses upstream', () => {
 describe('Claude thought text follows the visibility rule', () => {
   const claude = (settings: object = {}) => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-5-5', settings: { maxTokens: 9000, reasoning: { effort: 'low' }, ...settings } }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-5-5', settings: { maxTokens: 9000, reasoning: { effort: 'low' }, ...settings } }));
     return stubUpstream(() => json({
       id: 'msg_1', model: 'claude', type: 'message', role: 'assistant',
       content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 2 },
@@ -211,7 +211,7 @@ describe('Claude thought text follows the visibility rule', () => {
 describe('reasoning tokens reach the usage row', () => {
   it('records the thinking tokens the upstream reports', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-5-5', settings: { maxTokens: 9000, reasoning: { effort: 'low' } } }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-5-5', settings: { maxTokens: 9000, reasoning: { effort: 'low' } } }));
     stubUpstream(() => json({
       id: 'msg_1', model: 'claude', type: 'message', role: 'assistant',
       content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',

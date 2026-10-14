@@ -31,7 +31,7 @@ export function buildSnippet(text: string, index: number, length: number): strin
   const collapsed = (value: string) => value.replace(/\s+/g, ' ');
   const lead = Math.max(0, Math.floor((max - length) / 3));
   let start = Math.max(0, index - lead);
-  let end = Math.min(text.length, start + max);
+  const end = Math.min(text.length, start + max);
   start = Math.max(0, end - max);
   let slice = collapsed(text.slice(start, end));
   // Collapsing can leave a space at a cut end; keep the ellipsis next to text.

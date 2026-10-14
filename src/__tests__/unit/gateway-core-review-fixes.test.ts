@@ -107,7 +107,7 @@ const openAiPerKey = () => (buildModelRuntime as ReturnType<typeof vi.fn>).mockI
     return { runtime: runtimes.get(providerKey) };
   },
 );
-const useModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
+const stubModel = (m: object) => (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(m);
 const apiKeyOf = (call: { headers: Record<string, string> }) => call.headers.authorization?.replace('Bearer ', '');
 const rows = () => (logModelUsage as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[2]);
 
@@ -147,7 +147,7 @@ const tool = { name: 'lookup', description: 'd', parameters: { type: 'object' } 
 describe('extended thinking and a tool loop', () => {
   const useClaude = (settings: object = {}) => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5', settings: { maxTokens: 9000, ...settings } }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5', settings: { maxTokens: 9000, ...settings } }));
   };
   const answer = () => stubUpstream(() => json({
     id: 'msg_2', model: 'claude', type: 'message', role: 'assistant',
@@ -221,7 +221,7 @@ describe('extended thinking and a tool loop', () => {
 
 describe('a request-sourced reasoning effort', () => {
   const ask = (modelId: string, extra: object = {}, settings: object = {}) => {
-    useModel(model({ modelId, settings }));
+    stubModel(model({ modelId, settings }));
     const upstream = stubUpstream(() => json(completion()));
     return handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], ...extra } }).then(() => upstream.calls[0].body);
   };
@@ -260,7 +260,7 @@ describe('a request-sourced reasoning effort', () => {
 
 describe('the semantic cache', () => {
   const enableCache = () => {
-    useModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 } }));
+    stubModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 } }));
     (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
     stubUpstream(() => json(completion()));
   };
@@ -292,7 +292,7 @@ describe('the semantic cache', () => {
   it('keys an entry on whether reasoning is shown: it is stored as rendered', async () => {
     enableCache();
     await executeModelCall({ ...BASE, request: ASK });
-    useModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 }, settings: { returnReasoning: false } }));
+    stubModel(model({ semanticCache: { indexKey: 'i', threshold: 0.9 }, settings: { returnReasoning: false } }));
     await executeModelCall({ ...BASE, request: ASK });
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], include_reasoning: false } });
     const keyed = (buildCacheVariantKey as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].__returnReasoning);
@@ -339,7 +339,7 @@ describe('thinking blocks on the Messages edge', () => {
   });
 
   it('are left out of a stream the same way', async () => {
-    useModel(model());
+    stubModel(model());
     const run = async (emitThinking: boolean) => {
       stubUpstream(() => sse([chunk.reasoning('hmm'), chunk.text('hi'), chunk.finish('stop')]));
       const result = await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }] }, stream: true });
@@ -385,7 +385,7 @@ describe('file parts', () => {
   const content = [{ type: 'text', text: 'read it' }, { type: 'file', file: { file_id: 'file-abc' } }];
 
   it('sends an uploaded-file reference to an OpenAI-schema upstream as the caller wrote it', async () => {
-    useModel(model());
+    stubModel(model());
     const upstream = stubUpstream(() => json(completion()));
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content }] } });
     expect(upstream.calls[0].body.messages[0].content).toEqual(content);
@@ -393,7 +393,7 @@ describe('file parts', () => {
 
   it('does not break a provider that cannot read it', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
-    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     const upstream = stubUpstream(() => json({
       id: 'm', model: 'c', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }],
       stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
@@ -405,7 +405,7 @@ describe('file parts', () => {
 
 describe('the stream gate keeps what only a native consumer needs', () => {
   it('puts a tool call\'s thoughtSignature and the provider fields back on the steps the gate releases', async () => {
-    useModel(model({ outputGuardrailKey: 'gr' }));
+    stubModel(model({ outputGuardrailKey: 'gr' }));
     const gate = {
       push: vi.fn(async (frame: unknown) => ({ emit: [frame], blocked: false })),
       end: vi.fn(async () => ({ emit: [], blocked: false })),
