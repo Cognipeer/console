@@ -348,8 +348,8 @@ describe('finish_reason', () => {
     const { chunks } = await stream(anthropicStream(stop));
     expect(chunks.at(-1).choices[0].finish_reason).toBe(wire);
     expect(deltas(chunks).map((d) => d.content ?? '').join('')).toBe('Hello');
-    // ...while the usage row keeps the provider's own value for analytics.
-    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].finishReason).toBe(stop);
+    // ...and the usage row stores the same normalized value, so analytics compare across providers.
+    expect((logModelUsage as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].finishReason).toBe(wire);
   });
 
   it('frames an Anthropic tool_use stream as tool_calls with index + id + name', async () => {
