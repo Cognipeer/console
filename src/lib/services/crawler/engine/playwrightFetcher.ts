@@ -40,6 +40,12 @@ export interface PlaywrightFetchResult {
   fileBytes?: number;
   /** Raw bytes of a downloaded attachment. Present when `type === 'file'`. */
   fileBuffer?: Buffer;
+  /**
+   * URL the browser ended up on after server redirects and any client-side
+   * navigation (challenge reloads, JS redirects). Only set when it differs
+   * from the requested URL; relative links must resolve against this.
+   */
+  finalUrl?: string;
 }
 
 export class PlaywrightSession {
@@ -201,6 +207,13 @@ export class PlaywrightSession {
     const downloadWaiter = page
       .waitForEvent('download', { timeout })
       .catch(() => null);
+    // Navigation requests seen so far (the seed plus each redirect hop), kept
+    // only to make a failed/timed-out navigation diagnosable: a stall on a
+    // redirect hop otherwise looks identical to a stall on the final page.
+    const navChain: string[] = [];
+    page.on('request', (req) => {
+      if (req.isNavigationRequest() && navChain.length < 10) navChain.push(req.url());
+    });
     try {
       let response;
       try {
@@ -214,6 +227,9 @@ export class PlaywrightSession {
           if (download) {
             return await this.harvestDownload(download, url);
           }
+        }
+        if (err instanceof Error && navChain.length > 0) {
+          err.message = `${err.message.split('\n')[0]} [navigation chain: ${navChain.join(' -> ')}]`;
         }
         throw err;
       }
@@ -245,6 +261,7 @@ export class PlaywrightSession {
           contentType: contentType || mime.lookup(url) || 'application/octet-stream',
           fileBytes,
           fileBuffer,
+          finalUrl: response.url() !== url ? response.url() : undefined,
         };
       }
 
@@ -266,12 +283,14 @@ export class PlaywrightSession {
         }
         html = await this.settleAndCapture(page, timeout);
       }
+      const landedUrl = page.url();
       return {
         type: 'html',
         httpStatus: status,
         contentType: contentType || 'text/html',
         html,
         htmlBytes: Buffer.byteLength(html, 'utf8'),
+        finalUrl: landedUrl && landedUrl !== 'about:blank' && landedUrl !== url ? landedUrl : undefined,
       };
     } finally {
       signal?.removeEventListener('abort', onExternalAbort);

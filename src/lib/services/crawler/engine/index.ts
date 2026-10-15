@@ -9,9 +9,12 @@
  * lifted into a separate npm package in a future phase.
  */
 
-import { Semaphore, retry, isTransientFetchError } from './concurrency';
-import { deriveAttachmentFileName, fetchWithAxios, isFileByExtension } from './axiosFetcher';
-import { PlaywrightSession } from './playwrightFetcher';
+import {
+  deriveAttachmentFileName,
+  fetchWithAxios,
+  isFileByExtension,
+} from './axiosFetcher';
+import { Semaphore, isTransientFetchError, retry } from './concurrency';
 import { extractLinks, extractMeta, looksLikeJsShell } from './links';
 import { fileToMarkdown, htmlToMarkdown } from './markdown';
 import {
@@ -20,6 +23,7 @@ import {
   matchesAny,
   normalizeUrl,
 } from './normalize';
+import { PlaywrightSession } from './playwrightFetcher';
 import { assertSafeUrl } from './ssrf';
 import {
   DEFAULT_DOWNLOADABLE_MIMES,
@@ -52,7 +56,11 @@ class FetchStageError extends Error {}
 // time, the page is kept with no body (rather than the crawl stalling).
 const MARKDOWN_CONVERSION_TIMEOUT_MS = 60_000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`${label} timed out after ${ms}ms`));
@@ -95,13 +103,11 @@ export async function* crawl(
     ? plan.downloadableMimes
     : DEFAULT_DOWNLOADABLE_MIMES;
   const maxDepth = Math.min(Math.max(0, Math.floor(plan.maxDepth ?? 0)), 3);
-  const maxPages = Number.isFinite(plan.maxPages) && plan.maxPages > 0
-    ? Math.floor(plan.maxPages)
-    : 0;
-  const concurrency = Math.min(
-    Math.max(1, plan.http.maxConcurrency ?? 5),
-    16,
-  );
+  const maxPages =
+    Number.isFinite(plan.maxPages) && plan.maxPages > 0
+      ? Math.floor(plan.maxPages)
+      : 0;
+  const concurrency = Math.min(Math.max(1, plan.http.maxConcurrency ?? 5), 16);
   // Some sites (observed on tefas.gov.tr) intermittently drop the connection
   // with an empty response — a transient WAF/load-balancer blip, not a
   // permanent block: back-to-back manual requests during the same window
@@ -120,9 +126,10 @@ export async function* crawl(
 
   const visited = new Set<string>();
   const semaphore = new Semaphore(concurrency);
-  const session = plan.engine !== 'axios'
-    ? new PlaywrightSession(plan.http, downloadableMimes)
-    : null;
+  const session =
+    plan.engine !== 'axios'
+      ? new PlaywrightSession(plan.http, downloadableMimes)
+      : null;
 
   // ── per-host axios circuit breaker ───────────────────────────────
   // Sites that serve an incomplete TLS chain (missing intermediate) fail EVERY
@@ -153,7 +160,10 @@ export async function* crawl(
     // browser path.
     if (isTransientFetchError(err)) return;
     const host = getHostname(url);
-    axiosPermanentFailures.set(host, (axiosPermanentFailures.get(host) ?? 0) + 1);
+    axiosPermanentFailures.set(
+      host,
+      (axiosPermanentFailures.get(host) ?? 0) + 1,
+    );
   }
 
   function markAxiosChallengeHost(url: string): void {
@@ -171,9 +181,13 @@ export async function* crawl(
     htmlBytes?: number;
     fileBytes?: number;
     fileBuffer?: Buffer;
+    finalUrl?: string;
   }> {
     if (plan.engine === 'axios') {
-      return retry(() => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal), retries);
+      return retry(
+        () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
+        retries,
+      );
     }
     if (plan.engine === 'playwright') {
       if (!session) throw new Error('Playwright session unavailable');
@@ -204,7 +218,9 @@ export async function* crawl(
         try {
           return await retry(() => session.fetch(url, deps.signal), retries);
         } catch (pwErr) {
-          throw new Error(`All engines failed for ${url}: ${(pwErr as Error).message}`);
+          throw new Error(
+            `All engines failed for ${url}: ${(pwErr as Error).message}`,
+          );
         }
       }
     }
@@ -241,8 +257,13 @@ export async function* crawl(
           );
         }
         let pw: Awaited<ReturnType<typeof session.fetch>>;
+        // Navigate to where axios already ended up (e.g. example.com →
+        // www.example.com): re-walking a redirect chain in Chromium can hang
+        // on hosts whose edge answers the redirect hops differently for a
+        // browser, even though axios resolved them fine.
+        const target = r.finalUrl ?? url;
         try {
-          pw = await retry(() => session.fetch(url, deps.signal), retries);
+          pw = await retry(() => session.fetch(target, deps.signal), retries);
         } catch (err) {
           throw new FetchStageError(
             `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`,
@@ -263,7 +284,10 @@ export async function* crawl(
         // Playwright cleared the challenge — its context now holds the vendor
         // cookie. Route the rest of this host straight to Playwright.
         markAxiosChallengeHost(url);
-        return pw;
+        // Browser reports its own landing URL when it moved again; otherwise
+        // the redirect target we navigated to directly still differs from the
+        // requested URL and must be carried through.
+        return { ...pw, finalUrl: pw.finalUrl ?? (target !== url ? target : undefined) };
       }
       return r;
     } catch (err) {
@@ -342,7 +366,10 @@ export async function* crawl(
               attachmentBody = await withTimeout(
                 fileToMarkdown({
                   buffer: fetched.fileBuffer,
-                  fileName: deriveAttachmentFileName(item.url, fetched.contentType),
+                  fileName: deriveAttachmentFileName(
+                    item.url,
+                    fetched.contentType,
+                  ),
                   options: plan.markdownOptions,
                 }),
                 MARKDOWN_CONVERSION_TIMEOUT_MS,
@@ -368,16 +395,27 @@ export async function* crawl(
             };
           }
           const html = fetched.html ?? '';
+          // Resolve relative links / assets against where the content was
+          // actually served from, not the pre-redirect URL (e.g. /old-path →
+          // /new-dir/page makes `../x` land in the wrong place otherwise).
+          const pageUrl = fetched.finalUrl ?? item.url;
           const meta = extractMeta(html);
           const body = await withTimeout(
-            htmlToMarkdown({ html, url: item.url, options: plan.markdownOptions }),
+            htmlToMarkdown({
+              html,
+              url: pageUrl,
+              options: plan.markdownOptions,
+            }),
             MARKDOWN_CONVERSION_TIMEOUT_MS,
             `HTML markdown conversion for ${item.url}`,
           ).catch((err: unknown) => {
-            logger.warn('HTML markdown conversion failed; keeping page with no body', {
-              url: item.url,
-              error: (err as Error).message,
-            });
+            logger.warn(
+              'HTML markdown conversion failed; keeping page with no body',
+              {
+                url: item.url,
+                error: (err as Error).message,
+              },
+            );
             return '';
           });
           // Discover children only if autoCrawl and we have depth budget
@@ -385,7 +423,7 @@ export async function* crawl(
           if (plan.autoCrawl && maxDepth > 0 && item.depth < maxDepth) {
             children = extractLinks({
               html,
-              pageUrl: item.url,
+              pageUrl,
               rootDomain: item.rootDomain,
               scope: plan.scope,
               visited,
