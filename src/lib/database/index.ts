@@ -170,6 +170,7 @@ export type {
   IGroupMember,
   IGroupProject,
   ProjectRole,
+  ProjectMembershipSource,
   ITenant,
   IProject,
   IAuditLog,

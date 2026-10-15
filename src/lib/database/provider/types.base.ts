@@ -1281,9 +1281,17 @@ export interface IUserProject {
   /** Project-scoped service permission overrides — take precedence over tenant-level defaults. */
   servicePermissions?: UserServicePermissions;
   invitedBy?: string;
+  /**
+   * How the membership was granted. `directory` = applied by SSO/LDAP
+   * provisioning (`invitedBy` is then `directory:oidc` / `directory:ldap`).
+   * Absent on legacy rows — treat as `manual`.
+   */
+  source?: ProjectMembershipSource;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+export type ProjectMembershipSource = 'manual' | 'directory';
 
 // ── Groups / Teams ─────────────────────────────────────────────────────────
 
