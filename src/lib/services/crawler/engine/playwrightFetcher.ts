@@ -396,6 +396,7 @@ export class PlaywrightSession {
       contentType,
       fileBytes: fileBuffer.length,
       fileBuffer,
+      finalUrl: download.url() !== url ? download.url() : undefined,
     };
   }
 

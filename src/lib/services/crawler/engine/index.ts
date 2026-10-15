@@ -125,6 +125,9 @@ export async function* crawl(
   }
 
   const visited = new Set<string>();
+  // Landing URLs (post-redirect) whose content has already been taken by a
+  // fetched page — separate from `visited`, which tracks scheduled URLs.
+  const claimedLandingUrls = new Set<string>();
   const semaphore = new Semaphore(concurrency);
   const session =
     plan.engine !== 'axios'
@@ -256,38 +259,52 @@ export async function* crawl(
             `${url} looks JS-rendered or bot-challenged but no Playwright session is available`,
           );
         }
-        let pw: Awaited<ReturnType<typeof session.fetch>>;
-        // Navigate to where axios already ended up (e.g. example.com →
-        // www.example.com): re-walking a redirect chain in Chromium can hang
-        // on hosts whose edge answers the redirect hops differently for a
-        // browser, even though axios resolved them fine.
+        // Prefer navigating straight to where axios already ended up (e.g.
+        // example.com → www.example.com): re-walking a redirect chain in
+        // Chromium can hang on hosts whose edge answers the redirect hops
+        // differently for a browser, even though axios resolved them fine.
+        // But axios keeps no cookies between hops, so a site that sets one on
+        // the ORIGINAL URL before redirecting can reject (or challenge) the
+        // direct landing. When the direct attempt fails or is still a
+        // shell/challenge, retry the original URL so the browser walks the
+        // chain itself and collects those cookies.
         const target = r.finalUrl ?? url;
-        try {
-          pw = await retry(() => session.fetch(target, deps.signal), retries);
-        } catch (err) {
-          throw new FetchStageError(
-            `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`,
-          );
+        const candidates = target !== url ? [target, url] : [url];
+        let pw: Awaited<ReturnType<typeof session.fetch>> | undefined;
+        let usedUrl = url;
+        let failure = '';
+        for (const candidate of candidates) {
+          let attempt: Awaited<ReturnType<typeof session.fetch>>;
+          try {
+            attempt = await retry(() => session.fetch(candidate, deps.signal), retries);
+          } catch (err) {
+            failure = `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`;
+            if (deps.signal?.aborted) break;
+            continue;
+          }
+          // A real (stealth-hardened) browser navigation not throwing doesn't
+          // mean it got past the challenge — some anti-bot vendors serve the
+          // exact same "please enable JavaScript..." interstitial to headless
+          // Chromium too (seen on tefas.gov.tr). Re-run the same shell/
+          // challenge check on the Playwright result instead of trusting it
+          // unconditionally; otherwise the challenge page itself gets
+          // ingested as if it were the real content.
+          if (attempt.type === 'html' && attempt.html && looksLikeJsShell(attempt.html)) {
+            failure = `${url} still looks JS-rendered or bot-challenged after Playwright rendering`;
+            continue;
+          }
+          pw = attempt;
+          usedUrl = candidate;
+          break;
         }
-        // A real (stealth-hardened) browser navigation not throwing doesn't
-        // mean it got past the challenge — some anti-bot vendors serve the
-        // exact same "please enable JavaScript..." interstitial to headless
-        // Chromium too (seen on tefas.gov.tr). Re-run the same shell/
-        // challenge check on the Playwright result instead of trusting it
-        // unconditionally; otherwise the challenge page itself gets
-        // ingested as if it were the real content.
-        if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
-          throw new FetchStageError(
-            `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
-          );
-        }
+        if (!pw) throw new FetchStageError(failure);
         // Playwright cleared the challenge — its context now holds the vendor
         // cookie. Route the rest of this host straight to Playwright.
         markAxiosChallengeHost(url);
         // Browser reports its own landing URL when it moved again; otherwise
         // the redirect target we navigated to directly still differs from the
         // requested URL and must be carried through.
-        return { ...pw, finalUrl: pw.finalUrl ?? (target !== url ? target : undefined) };
+        return { ...pw, finalUrl: pw.finalUrl ?? (usedUrl !== url ? usedUrl : undefined) };
       }
       return r;
     } catch (err) {
@@ -360,10 +377,17 @@ export async function* crawl(
         await semaphore.acquire();
         try {
           const fetched = await fetchOne(item.url);
-          // The page was served from its redirect target: remember that too, so
-          // a link pointing straight at it (e.g. `/` → `www.example.com/`) isn't
-          // fetched a second time as a separate page.
-          if (fetched.finalUrl) visited.add(normalizeUrl(fetched.finalUrl));
+          // Claim the URL the content was actually served from. `visited`
+          // only knows what was SCHEDULED, so two queued aliases of one page
+          // (`/old` → `/new`, plus `/new` itself) both pass it inside the same
+          // concurrent batch. Claiming is check-and-add with no await between,
+          // so exactly one result per landing URL survives; the loser is
+          // dropped before conversion/yield and never counts toward maxPages.
+          // Also mark it visited so later links straight to it aren't queued.
+          const landingUrl = normalizeUrl(fetched.finalUrl ?? item.url);
+          if (claimedLandingUrls.has(landingUrl)) return null;
+          claimedLandingUrls.add(landingUrl);
+          visited.add(landingUrl);
           if (fetched.type === 'file') {
             let attachmentBody: string | undefined;
             if (fetched.fileBuffer) {

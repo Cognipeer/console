@@ -103,8 +103,11 @@ describe('engine/links', () => {
     expect(links).toContain('https://www.example.com/products');
     expect(links).toContain('https://example.com/contact');
     expect(links).toContain('https://www.example.com/relative');
-    expect(links.some((l) => l.includes('sub.example.com'))).toBe(false);
-    expect(links.some((l) => l.includes('notexample.com'))).toBe(false);
+    // Compare parsed hostnames, not URL substrings: only the apex and www
+    // survive; the real subdomain and the lookalike domain are dropped.
+    expect(new Set(links.map((l) => new URL(l).hostname))).toEqual(
+      new Set(['www.example.com', 'example.com']),
+    );
 
     // …and the reverse: seed on www, links back to the apex.
     expect(isSameOrSubdomain('example.com', 'www.example.com', false)).toBe(true);
