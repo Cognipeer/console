@@ -1,6 +1,6 @@
 # Webhooks
 
-A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
+A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires, an alert fires or resolves. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
 Manage them under **Agents → Webhooks** in the dashboard (`/dashboard/agents/webhooks`; the old `/dashboard/webhooks` address redirects there), or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
 
@@ -38,9 +38,37 @@ Agents → Webhooks shows only what the person may do: without Admin the page is
 | `feedback.recorded` | `sessionId`, `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback)). The comment itself is never sent. |
 | `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey` |
 | `schedule.fired`, `schedule.failed` | `scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?` |
+| `alert.fired` | `ruleId`, `ruleName`, `metric`, `entityType`, `entityKey`, `value`, `threshold`, `baseline`, `severity`, `incidentId`, `firedAt`: an [alert rule](/guide/monitoring#alerts-incidents) fired for an entity |
+| `alert.resolved` | the same fields as `alert.fired`, plus `resolvedAt`: the alert recovered (two clean evaluation windows) |
 | `webhook.test` | none (sent by **Send test event**) |
 
-A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`); `*` subscribes to everything.
+A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `alert.*`); `*` subscribes to everything.
+
+**Alert events.** One event is published per rule and entity when its alert fires and again when it resolves (reminders are not published). The event belongs to the project of the rule: an endpoint of that project, or a tenant-wide endpoint, receives it. `entityType` is `agent`, `model`, `tool`, `mcp` or `kb`, and `entityKey` is the agent name, model key, tool key, MCP server key or knowledge base key. Both are `null` for a rule without an entity target (the project-wide metrics and rules created before per-entity alerting). `value` is the metric over the evaluation window and `null` when it could not be judged. `threshold` is the rule's threshold for a threshold rule and `null` for the other condition types, `baseline` is the normal value for a baseline rule and `null` otherwise, and `severity` is `critical`, `warning` or `info`. `incidentId` points to the incident (`GET /api/alerts/incidents/{incidentId}`) or is `null` when it could not be created. For `alert.resolved`, `value` is the value at recovery and `firedAt` the moment the alert had fired.
+
+```json
+{
+  "id": "evt_0123456789abcdef01234567",
+  "type": "alert.fired",
+  "createdAt": "2026-10-15T09:42:11.382Z",
+  "projectId": "665e0f7a8b1d4c0012ab1111",
+  "data": {
+    "ruleId": "665f1c0e8b1d4c0012ab34cd",
+    "ruleName": "Agent error rate",
+    "metric": "agent_error_rate",
+    "entityType": "agent",
+    "entityKey": "pulse-main",
+    "value": 7.1,
+    "threshold": 5,
+    "baseline": null,
+    "severity": "warning",
+    "incidentId": "665f1c1a8b1d4c0012ab34ce",
+    "firedAt": "2026-10-15T09:42:11.000Z"
+  }
+}
+```
+
+A rule can also post to a webhook **channel** of its own (see [Monitoring](/guide/monitoring#notification-channels)). That is a separate mechanism: the body is `{ "type", "id": "alr_…", "occurredAt", "data" }` with the full notification (rule, entity, links and incident context), it is signed with the secret of that channel, and it is not retried. The subscriptions on this page are the way to receive alert events with retries, deliveries and auto-disable.
 
 ## What you receive
 
