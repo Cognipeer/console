@@ -34,7 +34,8 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { FeedbackError, recordMessageFeedback } from '@/lib/services/agents/agentFeedback';
-import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
+import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction, toClientTranscriptMessage } from '@/lib/services/agents/clientWire';
+import { messageIdOf } from '@/lib/services/agents/messageIds';
 import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, roundUsd, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
 import {
   SESSION_LIST_DEFAULT_LIMIT,
@@ -367,6 +368,33 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send(serializeSession(conversation, runtime));
     } catch (error) {
       logger.error('Client agent session get error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  }));
+
+  // ── Transcript ──
+  //
+  // `GET .../messages` lists the session's messages oldest first (`?limit` 1-200, default 100; `?after=<index>` pages on).
+  // A message's `attachments` carry each file's `origin` (`user_upload` | `agent_output`) and its `download_url`
+  // (the session file content route), so a client that reloads history still shows the files an agent produced.
+  app.get('/client/v1/agents/sessions/:conversationId/messages', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireSession(request, reply, ctx, 'view');
+      if (!conversation) return reply;
+      const query = request.query as { limit?: string; after?: string };
+      const limit = Math.min(Math.max(Math.floor(Number(query.limit)) || 100, 1), 200);
+      const after = Number.isInteger(Number(query.after)) ? Number(query.after) : -1;
+      const conversationId = String(conversation._id);
+      const all = conversation.messages ?? [];
+      const page = all
+        .map((message, index) => ({ message, index }))
+        .filter(({ index }) => index > after)
+        .slice(0, limit + 1);
+      const data = page.slice(0, limit).map(({ message, index }) =>
+        toClientTranscriptMessage(conversationId, index, message, messageIdOf(conversationId, index, message)));
+      return reply.code(200).send({ object: 'list', data, has_more: page.length > limit });
+    } catch (error) {
+      logger.error('Client agent session messages error', { error });
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     }
   }));

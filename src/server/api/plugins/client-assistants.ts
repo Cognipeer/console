@@ -64,6 +64,7 @@ import {
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { mergeClientConversationMetadata } from '@/lib/services/agents/conversationMetadata';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { toClientOutputFiles, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -160,13 +161,17 @@ export function toDate(value: unknown): Date {
 
 export function mergedMessages(
   conversation: IAgentConversation,
-): Array<{ role: string; content: string; timestamp: Date; pending: boolean }> {
-  const persisted = (conversation.messages || []).map((m) => ({
-    role: m.role,
-    content: m.content,
-    timestamp: toDate(m.timestamp),
-    pending: false,
-  }));
+): Array<{ role: string; content: string; timestamp: Date; pending: boolean; files?: ClientOutputFile[] }> {
+  const persisted = (conversation.messages || []).map((m) => {
+    const files = m.role === 'assistant' ? toClientOutputFiles(String(conversation._id), m.attachments) : [];
+    return {
+      role: m.role,
+      content: m.content,
+      timestamp: toDate(m.timestamp),
+      pending: false,
+      ...(files.length > 0 ? { files } : {}),
+    };
+  });
   const pending = readAssistantsMetadata(conversation).pendingMessages ?? [];
   return [
     ...persisted,
@@ -179,19 +184,44 @@ export function mergedMessages(
   ];
 }
 
+/**
+ * `file_path` annotations: one per place the text names an output file. The
+ * Assistants wire anchors an annotation to a span, so a file the text never
+ * names is only listed in the message's `attachments`.
+ */
+export function fileAnnotations(text: string, files: ReadonlyArray<ClientOutputFile>) {
+  const out: Array<{ type: 'file_path'; text: string; start_index: number; end_index: number; file_path: { file_id: string } }> = [];
+  for (const file of files) {
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(file.name, from);
+      if (at === -1) break;
+      out.push({ type: 'file_path', text: file.name, start_index: at, end_index: at + file.name.length, file_path: { file_id: file.id } });
+      from = at + file.name.length;
+    }
+  }
+  return out.sort((a, b) => a.start_index - b.start_index);
+}
+
 export function toMessageObject(
   conversationId: string,
   assistantIdValue: string,
   index: number,
-  entry: { role: string; content: string; timestamp: Date },
+  entry: { role: string; content: string; timestamp: Date; files?: ClientOutputFile[] },
 ) {
+  const files = entry.files ?? [];
   return {
     id: messageId(conversationId, index),
     object: 'thread.message' as const,
     created_at: Math.floor(entry.timestamp.getTime() / 1000),
     thread_id: threadId(conversationId),
     role: entry.role,
-    content: [{ type: 'text' as const, text: { value: entry.content, annotations: [] } }],
+    content: [{ type: 'text' as const, text: { value: entry.content, annotations: fileAnnotations(entry.content, files) } }],
+    // Files the agent produced (sandbox /outputs), the way the Assistants API lists a message's files.
+    // Download through the session file content route (`download_url` on /client/v1/agents/sessions).
+    ...(files.length > 0
+      ? { attachments: files.map((f) => ({ file_id: f.id, tools: [] })), file_ids: files.map((f) => f.id) }
+      : {}),
     assistant_id: entry.role === 'assistant' ? assistantIdValue : null,
     run_id: null,
     metadata: {},

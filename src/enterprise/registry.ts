@@ -373,6 +373,8 @@ export interface AgentSandboxRunner {
     },
   ): Promise<AgentSandboxExecResult>;
   readFile(ref: AgentSandboxRef, instanceId: string, path: string): Promise<string>;
+  /** Optional binary-safe read; without it the platform reads a file in base64 chunks through `exec`. */
+  readFileBytes?(ref: AgentSandboxRef, instanceId: string, path: string): Promise<Buffer>;
   writeFile(ref: AgentSandboxRef, instanceId: string, path: string, content: string): Promise<void>;
   listFiles(ref: AgentSandboxRef, instanceId: string, path: string): Promise<AgentSandboxFileEntry[]>;
   /** A link to what the sandbox serves on `port`. */

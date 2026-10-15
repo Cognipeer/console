@@ -173,3 +173,22 @@ curl -X POST "$CONSOLE_URL/api/client/v1/rag/modules/support-kb/query" \
 
 A filter the underlying vector store cannot push down is rejected rather than
 ignored, so a filtered query never silently returns unfiltered passages.
+
+## Attaching knowledge bases to an agent
+
+An agent can search several Knowledge Engine modules. In the agent editor, add one row per module under **Knowledge Engine**:
+
+| Field | Meaning |
+|---|---|
+| `key` | The Knowledge Engine module. |
+| `description` | Tells the model when to use it ("Use for: HR policies"). Strongly recommended with more than one module. |
+| `topK`, `minScore` | Optional per-module overrides. When unset, the module's own defaults apply. |
+| `filter` | Optional fixed metadata filter, AND-ed with any filter the model supplies. |
+| `enabled` | Set to `false` to keep the row but stop using it. |
+
+`knowledgeToolMode` chooses the tool surface:
+
+- `combined` (default): one `knowledge_search` queries every enabled module at once. Hits are merged by score (best 10 overall) and tagged `[kb: <key>, documentId: ..., file: ..., score: 0.xx]`. One `knowledge_read_document` / `knowledge_read_document_lines` pair takes an optional `kb` argument; the document must belong to a bound module.
+- `separate`: each module gets its own tools, suffixed with the module key (`knowledge_search_<key>`, `knowledge_read_document_<key>`, ...), with the description added to the tool description.
+
+The older single `knowledgeEngineKey` still works and is treated as one binding; when both are present, `knowledgeBindings` wins. Modules not visible to the agent's project are skipped with a warning.

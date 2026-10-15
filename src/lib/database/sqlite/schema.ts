@@ -749,6 +749,7 @@ export const TENANT_SCHEMA_SQL = `
     agentKey TEXT,
     expiresAt TEXT,
     uploadedBy TEXT,
+    origin TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,

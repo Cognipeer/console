@@ -157,6 +157,23 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 
 An attached file is shown wherever the message is: in the session page, in the **session detail** drawer's request inspector (a thumbnail for a picture, a chip with type icon and size for anything else; one that has expired is a muted *expired* chip) and in Observability traces for requests that carry pictures. They are one component, so they look the same everywhere. In a trace of an agent session, a picture the request names by reference (`session-file://…`) is drawn as a thumbnail from the session's content route, under the session's own access check; if the route refuses you or the file is gone (retention, deletion), the picture is shown as a chip with its name instead. A trace that is not an agent session's lists such pictures by name only.
 
+## Files the agent produces
+
+An agent with a [sandbox](/guide/sandbox) is told to write the files meant for the user to `/outputs/` (the folder is created on demand). At the end of each turn the platform saves the new or changed files there as session files and attaches them to the answer. The agent needs no preview link to hand a file over.
+
+- **Bucket required.** Outputs are stored in the agent's attachments bucket (the same one uploads use) and follow its *Max file size* and *Keep files for*. The *Accept attachments* switch does not need to be on. Without a bucket nothing is collected and the agent is not told about `/outputs/`.
+- **Limits.** At most 20 files per turn; a file over the size limit is skipped with a warning. A file is delivered again only when its size or modification time changes.
+- **Never fails the turn.** A file that cannot be saved is logged and listed in the message's `warnings`; the answer is returned as usual.
+- **Where you see them.** On the assistant message's `attachments` (each marked `origin: "agent_output"`), and in the file list of the session.
+- **API.** The `/responses` body gets an `output_files` array (`id`, `name`, `mime_type`, `size`, `download_url`) and `file_path` annotations (`file_id`, `filename`) on the `output_text`. `download_url` is the session file content route, `/client/v1/agents/sessions/{id}/files/{fileId}/content`. Both fields are absent when the turn produced no files.
+- **Other surfaces.** The same files ride on every way to call the agent, additively and only when there are files:
+  - *Chat completions:* `output_files` on the body, `file_path` annotations on `message.annotations`; a streamed reply puts them as `files` on the closing chunk.
+  - *Assistants:* the thread message's `attachments` (`[{ file_id, tools: [] }]`) and `file_ids`, plus `file_path` annotations (`text`, `start_index`, `end_index`, `file_path.file_id`) wherever the text names the file.
+  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = absolute download URL under `/api`; fetch it with the same credentials), on `message/send` and `tasks/get`.
+  - *Resumed turns:* a turn that continues after an approval or client-tool answer collects `/outputs/` too.
+  - *Event log:* an `agent.output_file` event per file, just before `agent.message`, so a live stream can show the file chip as the turn ends.
+  - *History:* `GET /client/v1/agents/sessions/{id}/messages` (`?limit`, `?after=<index>`) lists the transcript; each message's `attachments` give `id`, `name`, `mime_type`, `size`, `origin` (`user_upload` or `agent_output`) and `download_url`, and `output_files` repeats the agent's. A client that reloads a session still shows the files.
+
 ## Cleanup
 
 Files past their retention are removed by the hourly cleanup (object, markdown and record). Deleting a session removes its files at once; one that cannot be removed then is retried by the cleanup when it expires. A file that keeps failing does not hold the cleanup up: each sweep goes on to the files behind it. Changing *Keep files for* affects new files only.

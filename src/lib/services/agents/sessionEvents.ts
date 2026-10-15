@@ -53,6 +53,7 @@ export type SessionEventType =
   | 'agent.compaction'
   | 'action.required'
   | 'action.resolved'
+  | 'agent.output_file'
   | 'agent.message'
   | 'session.status_idle'
   | 'session.error'
@@ -333,6 +334,7 @@ const URGENT_TYPES = new Set<string>([
   'session.work_done',
   'action.required',
   'action.resolved',
+  'agent.output_file',
   'agent.message',
   'budget.reached',
 ]);

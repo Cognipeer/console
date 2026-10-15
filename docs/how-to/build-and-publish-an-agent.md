@@ -91,7 +91,7 @@ the right-hand column is the chat. Work down the card.
 | **Prompt Mode** | **Custom Prompt** — write the prompt here. **Select Prompt** — reference a saved template from [Prompt Studio](/guide/prompts). | `config.systemPrompt` or `config.promptKey` |
 | **System Prompt** | The prompt text, in Custom Prompt mode. | `config.systemPrompt` |
 | **Prompt Template** | The saved prompt, in Select Prompt mode. | `config.promptKey` |
-| **Knowledge Engine** | "Attach a Knowledge Engine module as a retrieval tool for the agent." Lists active modules. | `config.knowledgeEngineKey` |
+| **Knowledge Engine** | Attach one or more Knowledge Engine modules as retrieval tools. See [Attaching knowledge bases to an agent](/guide/rag#attaching-knowledge-bases-to-an-agent). | `config.knowledgeBindings`, `config.knowledgeToolMode` (legacy: `config.knowledgeEngineKey`) |
 | **Input Guardrail** | "Applied to user messages before processing." | `config.inputGuardrailKey` |
 | **Output Guardrail** | "Applied to assistant responses before returning." | `config.outputGuardrailKey` |
 | **Tools** → **Add Tools** | Opens the **Select Tools** dialog. See [step 3](#_3-give-it-tools). | `config.toolBindings` |

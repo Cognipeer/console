@@ -2453,6 +2453,18 @@ export interface IAgentAdditionalModel {
   reasoningBudgetTokens?: number;
 }
 
+export interface IAgentKnowledgeBinding {
+  /** RAG module key */
+  key: string;
+  /** Tells the model when to search this knowledge base. */
+  description?: string;
+  topK?: number;
+  minScore?: number;
+  filter?: Record<string, unknown>;
+  /** Defaults to true. */
+  enabled?: boolean;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
@@ -2488,8 +2500,12 @@ export interface IAgentConfig {
   temperature?: number;
   topP?: number;
   maxTokens?: number;
-  /** RAG module key – attached as a retrieval tool */
+  /** RAG module key – attached as a retrieval tool. Legacy single binding; `knowledgeBindings` wins when both are set. */
   knowledgeEngineKey?: string;
+  /** Several knowledge bases attached to this agent. */
+  knowledgeBindings?: IAgentKnowledgeBinding[];
+  /** 'combined' (default): one search tool over all KBs. 'separate': one tool set per KB. */
+  knowledgeToolMode?: 'combined' | 'separate';
   /**
    * Multi-guardrail binding. AUTHORITATIVE when present: the two deprecated
    * single-slot keys below are then ignored, not merged — see
@@ -2835,6 +2851,8 @@ export interface IAgentMessageAttachment {
   name: string;
   mimeType: string;
   size: number;
+  /** `agent_output`: written by the agent to its sandbox `/outputs/` (see agentSandboxOutputs.ts). Absent = a user upload. */
+  origin?: 'agent_output';
 }
 
 /** An earlier answer to the same question, kept when an answer is regenerated (newest last, at most 5). */

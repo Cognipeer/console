@@ -15,6 +15,7 @@
  */
 
 import { getConfig } from '@/lib/core/config';
+import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
 import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
@@ -513,7 +514,7 @@ export async function validateAgentConfig(input: {
         const model = await db.findModelByKey(key, projectId).catch(() => null);
         if (!model || model.category !== 'llm') continue;
         // A Dynamic LLM routes on its own rules; only a plain model can be known to lack a capability.
-        if (model.supportsToolCalls === false && ((config.toolBindings?.length ?? 0) > 0 || config.knowledgeEngineKey)) {
+        if (model.supportsToolCalls === false && ((config.toolBindings?.length ?? 0) > 0 || hasKnowledgeConfigured(config))) {
             issues.warnings.push({ field, message: `Model "${key}" does not support tool calls, but this agent uses tools` });
         }
         if (model.isMultimodal === false && config.attachments?.enabled === true) {
@@ -526,6 +527,27 @@ export async function validateAgentConfig(input: {
         if (!prompt) issues.errors.push({ field: 'promptKey', message: `Prompt "${config.promptKey}" does not exist` });
     }
     if (config.knowledgeEngineKey) await checkKnowledge('knowledgeEngineKey', config.knowledgeEngineKey);
+    if (config.knowledgeToolMode !== undefined && config.knowledgeToolMode !== 'combined' && config.knowledgeToolMode !== 'separate') {
+        issues.errors.push({ field: 'knowledgeToolMode', message: 'knowledgeToolMode must be "combined" or "separate"' });
+    }
+    if (config.knowledgeBindings !== undefined && !Array.isArray(config.knowledgeBindings)) {
+        issues.errors.push({ field: 'knowledgeBindings', message: 'knowledgeBindings must be an array' });
+    }
+    const seenKb = new Set<string>();
+    for (const [index, binding] of (Array.isArray(config.knowledgeBindings) ? config.knowledgeBindings : []).entries()) {
+        const field = `knowledgeBindings[${index}]`;
+        const key = typeof binding?.key === 'string' ? binding.key.trim() : '';
+        if (!key) { issues.errors.push({ field: `${field}.key`, message: 'Knowledge binding needs a key' }); continue; }
+        if (seenKb.has(key)) { issues.errors.push({ field: `${field}.key`, message: `Knowledge engine "${key}" is bound twice` }); continue; }
+        seenKb.add(key);
+        if (binding.topK !== undefined && !(Number.isInteger(binding.topK) && binding.topK >= 1 && binding.topK <= 50)) {
+            issues.errors.push({ field: `${field}.topK`, message: 'topK must be an integer between 1 and 50' });
+        }
+        if (binding.minScore !== undefined && !(typeof binding.minScore === 'number' && binding.minScore >= 0 && binding.minScore <= 1)) {
+            issues.errors.push({ field: `${field}.minScore`, message: 'minScore must be a number between 0 and 1' });
+        }
+        await checkKnowledge(`${field}.key`, key);
+    }
     if (config.memory?.enabled) {
         const mounts = config.memory.mounts?.length
             ? config.memory.mounts.map((m, i) => ({ key: m?.storeKey, field: `memory.mounts[${i}].storeKey` }))
