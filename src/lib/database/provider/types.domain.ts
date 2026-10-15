@@ -2668,8 +2668,27 @@ export type AgentSandboxMode = 'session' | 'ephemeral' | 'persist';
  * environment variables to each command — never stored on the sandbox
  * instance — and scrubbed from what the tools return to the model.
  */
+/** A file the operator preloads into the agent's sandbox (see docs/guide/sandbox.md). */
+export interface IAgentSandboxSeedFile {
+  id: string;
+  /** Original file name. */
+  name: string;
+  /** Absolute destination path in the sandbox, including the file name. */
+  path: string;
+  /** Where the bytes live: a Document Store file under `agent-assets/<agentKey>/`. */
+  fileRef: { bucketKey: string; objectKey: string };
+  size: number;
+  mimeType?: string;
+  /** SHA-256 of the bytes; lets a reused sandbox skip an unchanged file. */
+  sha256?: string;
+  /** Octal file mode, e.g. `0644`. Default `0644`. */
+  mode?: string;
+}
+
 export interface IAgentSandboxConfig {
   enabled?: boolean;
+  /** Files written into the sandbox when it starts, before the agent works. */
+  seedFiles?: IAgentSandboxSeedFile[];
   /** Sandbox template key. Absent → the tenant's default (`multi-base`). */
   templateKey?: string;
   /** Default `session`. */

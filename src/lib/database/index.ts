@@ -422,6 +422,7 @@ export type {
   IAgentSkillPolicy,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
+  IAgentSandboxSeedFile,
   IAgentExecutionConfig,
   IAgentAttachmentsConfig,
   IAgentClientToolConfig,
