@@ -15,7 +15,7 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
-import { toClientErrorBody } from '@/lib/services/agents/clientWire';
+import { toClientErrorBody, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -315,6 +315,7 @@ async function handleAgentChatCompletion(input: {
   let streamedReasoning = '';
   let toolCallsSent = false;
   let stopReason: AgentChatResponse['stop_reason'];
+  let files: ClientOutputFile[] | undefined;
   try {
     const result = await runAgentCompletion({
       ...common,
@@ -357,13 +358,14 @@ async function handleAgentChatCompletion(input: {
         }
       }
       stopReason = result.stopReason;
+      files = result.outputFiles;
       if (result.toolCalls?.length) {
         // Ends the stream the way OpenAI does when the model calls tools: the calls, then finish_reason "tool_calls".
         send({ ...toChatToolCallsChunk({ id, model, toolCalls: result.toolCalls }), conversation_id: result.conversationId });
         toolCallsSent = true;
       }
     }
-    if (!toolCallsSent) send({ ...toChatChunk({ id, model, finish: true, stopReason }), ...cognipeer });
+    if (!toolCallsSent) send({ ...toChatChunk({ id, model, finish: true, stopReason, files }), ...cognipeer });
   } catch (error) {
     const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
     send({ error: toClientErrorBody(classified.error) });

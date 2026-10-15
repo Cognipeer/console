@@ -2199,6 +2199,13 @@ export interface IAgentMemoryConfig {
   enabled?: boolean;
   /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
   memoryStoreKey?: string;
+  /**
+   * One or more stores ("mounts") the agent reads from / writes into. Several
+   * agents mounting the same store (+ a shared scope) share memory. When set
+   * this wins over the legacy `memoryStoreKey`; the FIRST mount is the primary
+   * store for the SDK's pre-injected recall and summary writes.
+   */
+  mounts?: IAgentMemoryMount[];
   scope?: AgentMemoryScope;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
@@ -2214,6 +2221,17 @@ export interface IAgentMemoryConfig {
    * something and silently not doing so is the worse surprise.
    */
   tools?: AgentMemoryToolMode;
+}
+
+export interface IAgentMemoryMount {
+  /** Key of an existing `IMemoryStore`. */
+  storeKey: string;
+  /** Default 'read_write'. A read_only mount is never written to or forgotten from. */
+  access?: 'read_write' | 'read_only';
+  /** What this store is for — shown to the model ("Use for: ..."). */
+  description?: string;
+  /** Overrides `memory.scope` for this mount. */
+  scope?: AgentMemoryScope;
 }
 
 /** 'read' drops the write/forget tools, for a curated store the agent must not pollute. */
@@ -2435,6 +2453,18 @@ export interface IAgentAdditionalModel {
   reasoningBudgetTokens?: number;
 }
 
+export interface IAgentKnowledgeBinding {
+  /** RAG module key */
+  key: string;
+  /** Tells the model when to search this knowledge base. */
+  description?: string;
+  topK?: number;
+  minScore?: number;
+  filter?: Record<string, unknown>;
+  /** Defaults to true. */
+  enabled?: boolean;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
@@ -2470,8 +2500,12 @@ export interface IAgentConfig {
   temperature?: number;
   topP?: number;
   maxTokens?: number;
-  /** RAG module key – attached as a retrieval tool */
+  /** RAG module key – attached as a retrieval tool. Legacy single binding; `knowledgeBindings` wins when both are set. */
   knowledgeEngineKey?: string;
+  /** Several knowledge bases attached to this agent. */
+  knowledgeBindings?: IAgentKnowledgeBinding[];
+  /** 'combined' (default): one search tool over all KBs. 'separate': one tool set per KB. */
+  knowledgeToolMode?: 'combined' | 'separate';
   /**
    * Multi-guardrail binding. AUTHORITATIVE when present: the two deprecated
    * single-slot keys below are then ignored, not merged — see
@@ -2836,6 +2870,8 @@ export interface IAgentMessageAttachment {
   name: string;
   mimeType: string;
   size: number;
+  /** `agent_output`: written by the agent to its sandbox `/outputs/` (see agentSandboxOutputs.ts). Absent = a user upload. */
+  origin?: 'agent_output';
 }
 
 /** An earlier answer to the same question, kept when an answer is regenerated (newest last, at most 5). */

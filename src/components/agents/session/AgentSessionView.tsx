@@ -180,6 +180,9 @@ function assistantFromResult(data: Record<string, unknown>, startedAt: number): 
         ...(Array.isArray(data.steps) && data.steps.length > 0
             ? { steps: data.steps as PlaygroundStep[] }
             : {}),
+        ...(Array.isArray(data.attachments) && data.attachments.length > 0
+            ? { attachments: data.attachments as ChatMessage['attachments'] }
+            : {}),
         ...(data.output !== undefined ? { output: data.output } : {}),
         ...(data.outputError ? { outputError: String(data.outputError) } : {}),
         ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
@@ -1228,6 +1231,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                     <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
                                                                 </>
                                                             )}
+                                                            {msg.role === 'assistant' && msg.attachments?.some((file) => file.origin === 'agent_output') ? (
+                                                                // Files the agent wrote to its sandbox /outputs/: chips that save through the session's content route.
+                                                                <MessageAttachments attachments={toAttachmentViews(msg.attachments.filter((file) => file.origin === 'agent_output'), { agentId, sessionId, files: sessionFiles })} />
+                                                            ) : null}
                                                             {msg.role === 'assistant' ? (
                                                                 <MessageFeedbackRow rows={feedbackForMessage(messageFeedback, persistedIndexOf(messages, i))} />
                                                             ) : null}

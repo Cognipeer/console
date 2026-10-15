@@ -30,9 +30,11 @@ export interface ConfiguredTool {
 export interface AgentToolConfig {
     toolBindings?: Array<{ source?: string; sourceKey?: string; toolNames?: string[] }>;
     knowledgeEngineKey?: string;
+    knowledgeBindings?: Array<{ key: string; enabled?: boolean }>;
+    knowledgeToolMode?: 'combined' | 'separate';
     subagents?: unknown[];
     skills?: unknown[];
-    memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
+    memory?: { enabled?: boolean; memoryStoreKey?: string; mounts?: { storeKey: string; access?: string }[]; tools?: 'off' | 'read' | 'readwrite' };
     sandbox?: {
         enabled?: boolean;
         templateKey?: string;
@@ -42,6 +44,8 @@ export interface AgentToolConfig {
 }
 
 /** Bound whenever a knowledge engine is attached — see `agentService.ts`. */
+import { knowledgeKeySlug, normalizeKnowledgeBindings } from '@/lib/services/agents/agentKnowledgeBindings';
+
 const KNOWLEDGE_TOOLS = [
     'knowledge_search',
     'knowledge_read_document',
@@ -62,21 +66,28 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
         }
     }
 
-    if (config.knowledgeEngineKey) {
+    const kbs = normalizeKnowledgeBindings(config);
+    if (kbs.length > 1 && config.knowledgeToolMode === 'separate') {
+        for (const kb of kbs) {
+            for (const name of KNOWLEDGE_TOOLS) {
+                tools.push({ name: `${name}_${knowledgeKeySlug(kb.key)}`, origin: 'knowledge', sourceKey: kb.key });
+            }
+        }
+    } else if (kbs.length > 0) {
         for (const name of KNOWLEDGE_TOOLS) {
-            tools.push({ name, origin: 'knowledge', sourceKey: config.knowledgeEngineKey });
+            tools.push({ name, origin: 'knowledge', sourceKey: kbs.map((k) => k.key).join(', ') });
         }
     }
 
     // Console-side memory tools — see `agentMemoryTools.ts`. Bound whenever
     // memory is on with a store, unless the operator turned them off.
     const memoryMode = config.memory?.tools ?? 'readwrite';
-    if (config.memory?.enabled && config.memory.memoryStoreKey && memoryMode !== 'off') {
+    if (config.memory?.enabled && (config.memory.memoryStoreKey || config.memory.mounts?.length) && memoryMode !== 'off') {
         const names = memoryMode === 'readwrite'
             ? ['memory_search', 'memory_write', 'memory_forget']
             : ['memory_search'];
         for (const name of names) {
-            tools.push({ name, origin: 'memory', sourceKey: config.memory.memoryStoreKey });
+            tools.push({ name, origin: 'memory', sourceKey: config.memory.mounts?.[0]?.storeKey ?? config.memory.memoryStoreKey });
         }
     }
 

@@ -80,6 +80,7 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   // agentService only looks the prompt up when there is no inline system prompt.
   if (!config.systemPrompt) edges.add('agent.prompt', config.promptKey, 'config.promptKey');
   edges.add('agent.knowledge', config.knowledgeEngineKey, 'config.knowledgeEngineKey');
+  asArray(config.knowledgeBindings).forEach((b, i) => edges.add('agent.knowledge', b.key, `config.knowledgeBindings[${i}].key`));
   addGuardrailEdges(edges, 'agent.guardrail', config, 'config.');
   addBindingEdges(edges, config.toolBindings, { tool: 'agent.tool', mcp: 'agent.mcp' }, 'config.');
   asArray(config.toolBindings).forEach((binding, i) => {
@@ -103,7 +104,11 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   if (sandbox && sandbox.enabled === true) edges.add('agent.sandboxTemplate', sandbox.templateKey, 'config.sandbox.templateKey');
 
   const memory = config.memory as Doc | undefined;
-  if (memory && memory.enabled !== false) edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
+  if (memory && memory.enabled !== false) {
+    edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
+    const mounts = Array.isArray(memory.mounts) ? (memory.mounts as Doc[]) : [];
+    mounts.forEach((m, i) => edges.add('agent.memory', m?.storeKey, `config.memory.mounts[${i}].storeKey`));
+  }
 
   if (Array.isArray(config.skills)) {
     config.skills.forEach((key: unknown, i: number) => edges.add('agent.skill', key, `config.skills[${i}]`));

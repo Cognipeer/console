@@ -23,7 +23,7 @@ import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
  */
 
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
-import { toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
+import { toClientErrorBody, toClientOutputFiles, toClientPendingAction, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
@@ -123,12 +123,24 @@ function parseTaskId(id: string): { conversationId: string; messageIndex: number
   return { conversationId: match[1], messageIndex: Number(match[2]) };
 }
 
+/** One A2A `file` part per output file; `uri` is the absolute session file content route (fetch it with the same credentials). */
+export function a2aFileArtifacts(taskIdValue: string, files: ReadonlyArray<ClientOutputFile>, baseUrl: string) {
+  return files.map((file, i) => ({
+    artifactId: `${taskIdValue}_file_${i + 1}`,
+    name: file.name,
+    parts: [{ kind: 'file', file: { name: file.name, mimeType: file.mime_type, uri: `${baseUrl}/api${file.download_url}` } }],
+    metadata: { fileId: file.id, size: file.size },
+  }));
+}
+
 function completedTask(
   id: string,
   contextId: string,
   assistantText: string,
   /** Why the run ended without a final answer (a run limit, a cancellation). */
   stop?: { reason: string; detail?: string },
+  /** Files the agent produced this turn, as extra artifacts. */
+  fileArtifacts: ReadonlyArray<Record<string, unknown>> = [],
 ): Record<string, unknown> {
   return {
     kind: 'task',
@@ -157,6 +169,7 @@ function completedTask(
         name: 'response',
         parts: [{ kind: 'text', text: assistantText }],
       },
+      ...fileArtifacts,
     ],
   };
 }
@@ -366,6 +379,7 @@ export async function handleA2aRpc(
           result.stop_reason && result.stop_reason !== 'completed'
             ? { reason: result.stop_reason, ...(result.stop_detail ? { detail: result.stop_detail } : {}) }
             : undefined,
+          a2aFileArtifacts(taskId(conversationId, messageIndex), result.output_files ?? [], externalBaseUrl(request)),
         ),
       ));
     }
@@ -396,6 +410,7 @@ export async function handleA2aRpc(
           parsed.conversationId,
           message.content,
           message.stopReason ? { reason: message.stopReason, ...(message.stopDetail ? { detail: message.stopDetail } : {}) } : undefined,
+          a2aFileArtifacts(requestedId, toClientOutputFiles(parsed.conversationId, message.attachments), externalBaseUrl(request)),
         ),
       ));
     }

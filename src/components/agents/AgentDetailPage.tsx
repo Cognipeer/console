@@ -58,6 +58,7 @@ import GuardrailBindingList, {
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
+import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
@@ -101,6 +102,7 @@ import type {
   IAgentAdditionalModel,
   IAgentClientToolConfig,
   IAgentRuntimeConfig,
+  IAgentKnowledgeBinding,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
   IAgentSubagent,
@@ -365,7 +367,8 @@ export default function AgentDetailPage() {
       promptMode: 'custom' as 'custom' | 'prompt',
       systemPrompt: '',
       promptKey: '',
-      knowledgeEngineKey: '',
+      knowledgeBindings: [] as IAgentKnowledgeBinding[],
+      knowledgeToolMode: 'combined' as 'combined' | 'separate',
     },
   });
 
@@ -385,7 +388,10 @@ export default function AgentDetailPage() {
           promptMode: cfg.promptKey ? 'prompt' : 'custom',
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
-          knowledgeEngineKey: cfg.knowledgeEngineKey || '',
+          knowledgeBindings: cfg.knowledgeBindings?.length
+            ? cfg.knowledgeBindings
+            : cfg.knowledgeEngineKey ? [{ key: cfg.knowledgeEngineKey }] : [],
+          knowledgeToolMode: cfg.knowledgeToolMode === 'separate' ? 'separate' : 'combined',
         });
         setToolBindings(cfg.toolBindings ?? []);
         // Old Advanced-tab reasoning is folded into the model's own fields (the server does it on read too).
@@ -632,7 +638,14 @@ export default function AgentDetailPage() {
       // fields were removed, nobody could see. Leaving them out lets the
       // model record's own settings govern; the next save clears any value
       // an older save wrote. topP went the same way.
-      knowledgeEngineKey: values.knowledgeEngineKey || undefined,
+      // Legacy single key is migrated into bindings on save.
+      knowledgeEngineKey: undefined,
+      knowledgeBindings: values.knowledgeBindings.filter((b) => b.key).length > 0
+        ? values.knowledgeBindings.filter((b) => b.key)
+        : undefined,
+      knowledgeToolMode: values.knowledgeBindings.filter((b) => b.key).length > 1
+        ? values.knowledgeToolMode
+        : undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
 
@@ -650,7 +663,7 @@ export default function AgentDetailPage() {
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
     nextConfig.skills = skills.length > 0 ? skills : undefined;
     nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
-    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
+    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey || memoryConfig?.mounts?.length ? memoryConfig : undefined;
     // Kept even when disabled, so turning the sandbox off does not throw away
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.
@@ -974,14 +987,12 @@ export default function AgentDetailPage() {
             sharing this one with the model picker. */}
 
         <ConfigBlock icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
-          <Select
-            description={t('config.knowledgeEngineDescription')}
-            placeholder={t('config.knowledgeEnginePlaceholder')}
-            data={ragModules.map((r) => ({ value: r.key, label: r.name }))}
-            searchable
-            clearable
-            leftSection={<IconDatabase size={14} />}
-            {...configForm.getInputProps('knowledgeEngineKey')}
+          <KnowledgeBindingsEditor
+            modules={ragModules}
+            bindings={configForm.values.knowledgeBindings}
+            mode={configForm.values.knowledgeToolMode}
+            onBindingsChange={(next) => configForm.setFieldValue('knowledgeBindings', next)}
+            onModeChange={(mode) => configForm.setFieldValue('knowledgeToolMode', mode)}
           />
         </ConfigBlock>
 
@@ -1381,7 +1392,8 @@ export default function AgentDetailPage() {
                 clientTools={clientToolsConfig}
                 toolConfig={{
                   toolBindings,
-                  knowledgeEngineKey: configForm.values.knowledgeEngineKey || undefined,
+                  knowledgeBindings: configForm.values.knowledgeBindings.filter((b) => b.key),
+                  knowledgeToolMode: configForm.values.knowledgeToolMode,
                   subagents,
                   skills,
                   memory: memoryConfig,

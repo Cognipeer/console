@@ -165,3 +165,17 @@ Query → Embed → Vector Search → Rank by score + importance → Return
 
 - **Inference Service** — For generating embeddings
 - **Vector Service** — For storing and querying vectors
+
+## Mounting memory stores on an agent
+
+An agent's **Memory** section lets you mount one or more stores (up to 5) instead of a single one. Each mount has:
+
+- **Store** - an existing store from this module.
+- **Access** - `read & write` or `read only`. Read-only mounts are never written to or forgotten from.
+- **Use for** - a short description; it is added to the agent's system prompt so the model knows which store holds what.
+- **Scope** - optional per-mount override of the agent's memory scope.
+
+The first mount is the primary store: it feeds the pre-injected recall and the automatic summary writes (skipped if it is read-only). With several mounts, `memory_search` takes an optional `store` (omitted = search all mounts, results interleaved by rank and tagged with their store), and `memory_write` / `memory_forget` take `store` (required when more than one mount is writable).
+
+**Sharing across agents:** several agents that mount the same store with the same scope read and write the same facts. For mounts, `workspace` scope is shared project-wide (not per agent) and `tenant` scope is shared by the whole store; `session` and `user` follow the conversation and caller. Agents with only the legacy single store key keep their per-agent `workspace` namespace. A legacy key is treated as the first read & write mount when you edit mounts.
+

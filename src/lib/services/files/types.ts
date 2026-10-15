@@ -69,7 +69,7 @@ export interface UploadFileRequest {
   /** The object's key inside the bucket; ending with `/` it names a folder and the file gets a generated name inside it. */
   keyHint?: string;
   /** Session-file tags written onto the record (`IFileRecord.purpose` and friends). */
-  recordExtras?: Partial<Pick<IFileRecord, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy'>>;
+  recordExtras?: Partial<Pick<IFileRecord, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy' | 'origin'>>;
 }
 
 export interface UploadFileResponse {

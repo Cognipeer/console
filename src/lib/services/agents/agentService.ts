@@ -28,7 +28,8 @@ import {
     resolveStructuredOutputSchema,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
-import { buildAgentMemoryOption } from './agentMemoryAdapter';
+import { buildAgentMemoryOption, buildMountedMemoryStores } from './agentMemoryAdapter';
+import { buildMemoryPromptSection } from './agentMemoryMounts';
 import type { IAgentConversationMessage, IAgentConversationStep, IAgentMessageVersion, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
@@ -36,6 +37,16 @@ import {
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
+import type { IAgentKnowledgeBinding } from '@/lib/database/provider/types.domain';
+import {
+    hasKnowledgeConfigured,
+    knowledgeKeySlug,
+    formatKnowledgeHit,
+    mergeKnowledgeHits,
+    normalizeKnowledgeBindings,
+    type KnowledgeBindingSource,
+    type KnowledgeHit,
+} from './agentKnowledgeBindings';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
@@ -106,7 +117,7 @@ import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
-import { toClientPendingAction, type ClientPendingAction } from './clientWire';
+import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
 import {
     agentTakesAttachments,
     assembleTurnAttachments,
@@ -151,6 +162,7 @@ import { addSessionTurnSpend, recordSessionTurnSpend } from './sessionBudgetServ
 import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
+import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
     buildCostEstimator,
@@ -1085,8 +1097,20 @@ async function buildKnowledgeTools(
     projectId: string,
     ragModuleKey: string,
     guard: AgentToolGuard,
+    opts: KnowledgeToolOptions = {},
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const { createTool } = await import('@cognipeer/agent-sdk');
+    const sfx = opts.suffix ? `_${opts.suffix}` : '';
+    const searchName = `knowledge_search${sfx}`;
+    const readName = `knowledge_read_document${sfx}`;
+    const readLinesName = `knowledge_read_document_lines${sfx}`;
+    const renamed = (text: string) => (sfx
+        ? text
+            .replace(/knowledge_search/g, searchName)
+            .replace(/knowledge_read_document_lines/g, readLinesName)
+            .replace(/knowledge_read_document(?!_)/g, readName)
+        : text);
+    const searchDescription = withDirective(renamed(CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION), opts.description);
     const { z } = await import('zod');
 
     const knowledgeModule = await resolveAgentKnowledgeModule(tenantDbName, ragModuleKey, projectId);
@@ -1100,8 +1124,8 @@ async function buildKnowledgeTools(
     const filterableFields = knowledgeModule.filterableFields ?? [];
 
     const searchTool = createTool({
-        name: 'knowledge_search',
-        description: CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION,
+        name: searchName,
+        description: searchDescription,
         schema: filterableFields.length > 0
             ? z.object({
                 query: z.string().describe('The search query'),
@@ -1110,13 +1134,14 @@ async function buildKnowledgeTools(
             })
             : z.object({ query: z.string().describe('The search query') }),
         func: guard.protect(
-            { name: agentToolPolicyName('knowledge', 'search'), requestedName: 'knowledge_search' },
+            { name: agentToolPolicyName('knowledge', 'search'), requestedName: searchName },
             async (args: { query: string; filter?: Record<string, unknown> }) => {
                 const result = await queryRag(tenantDbName, tenantId, moduleScope, {
                     ragModuleKey,
                     query: args.query,
-                    topK: 5,
-                    filter: args.filter,
+                    topK: opts.topK ?? (opts.suffix ? undefined : 5),
+                    ...(opts.minScore !== undefined ? { minScore: opts.minScore } : {}),
+                    filter: mergeKnowledgeFilters(opts.filter, args.filter),
                 }, { signal: currentTurnSignal() });
                 return result.matches
                     .filter((m) => m.content)
@@ -1142,15 +1167,15 @@ async function buildKnowledgeTools(
     }
 
     const readTool = createTool({
-        name: 'knowledge_read_document',
-        description: CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION,
+        name: readName,
+        description: sfx ? withDirective(renamed(CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION), opts.description) : CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION,
         schema: z.object({
             documentId: z.string().describe('The documentId from a knowledge_search result'),
         }),
         func: guard.protect(
             {
                 name: agentToolPolicyName('knowledge', 'read_document'),
-                requestedName: 'knowledge_read_document',
+                requestedName: readName,
             },
             async (args: { documentId: string }) => {
                 const document = await resolveOwnedDocument(args.documentId);
@@ -1167,8 +1192,8 @@ async function buildKnowledgeTools(
     });
 
     const readLinesTool = createTool({
-        name: 'knowledge_read_document_lines',
-        description: CONSOLE_AGENT_KNOWLEDGE_READ_LINES_DESCRIPTION,
+        name: readLinesName,
+        description: renamed(CONSOLE_AGENT_KNOWLEDGE_READ_LINES_DESCRIPTION),
         schema: z.object({
             documentId: z.string().describe('The documentId from a knowledge_search result'),
             offset: z.number().int().min(1).optional().describe('1-indexed line to start from (default 1)'),
@@ -1178,7 +1203,7 @@ async function buildKnowledgeTools(
         func: guard.protect(
             {
                 name: agentToolPolicyName('knowledge', 'read_document_lines'),
-                requestedName: 'knowledge_read_document_lines',
+                requestedName: readLinesName,
             },
             async (args: { documentId: string; offset?: number; limit?: number }) => {
                 const document = await resolveOwnedDocument(args.documentId);
@@ -1201,9 +1226,209 @@ async function buildKnowledgeTools(
     return {
         tools: [searchTool, readTool, readLinesTool],
         toolDefinitions: [
-            knowledgeSearchToolDefinition(filterableFields),
-            knowledgeReadToolDefinition(),
-            knowledgeReadLinesToolDefinition(),
+            { ...knowledgeSearchToolDefinition(filterableFields), name: searchName, description: searchDescription },
+            { ...knowledgeReadToolDefinition(), name: readName },
+            { ...knowledgeReadLinesToolDefinition(), name: readLinesName },
+        ],
+    };
+}
+
+interface KnowledgeToolOptions {
+    /** Tool-name suffix (separate mode). Unset = the legacy un-suffixed tools. */
+    suffix?: string;
+    description?: string;
+    topK?: number;
+    minScore?: number;
+    filter?: Record<string, unknown>;
+}
+
+function withDirective(base: string, description?: string): string {
+    const text = description?.trim();
+    return text ? `${base}\n\nUse for: ${text}` : base;
+}
+
+/** Binding filter AND-ed with whatever filter the model supplied. */
+function mergeKnowledgeFilters(
+    fixed?: Record<string, unknown>,
+    asked?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+    const hasFixed = fixed && Object.keys(fixed).length > 0;
+    if (!hasFixed) return asked;
+    if (!asked || Object.keys(asked).length === 0) return fixed;
+    return { $and: [fixed, asked] };
+}
+
+/**
+ * Knowledge tools for an agent config. One legacy key keeps the historical
+ * tools; several bindings become either one combined tool set or one set per KB.
+ */
+export async function buildAgentKnowledgeTools(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    source: KnowledgeBindingSource,
+    guard: AgentToolGuard,
+): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
+    const bindings = normalizeKnowledgeBindings(source);
+    if (bindings.length === 0) return { tools: [], toolDefinitions: [] };
+    const plain = bindings[0];
+    if (bindings.length === 1 && !plain.description && plain.topK === undefined
+        && plain.minScore === undefined && !plain.filter) {
+        return buildKnowledgeTools(tenantDbName, tenantId, projectId, plain.key, guard);
+    }
+    if (source.knowledgeToolMode === 'separate') {
+        const tools: AgentSdkToolInterface[] = [];
+        const toolDefinitions: TraceToolDefinition[] = [];
+        for (const binding of bindings) {
+            const built = await buildKnowledgeTools(tenantDbName, tenantId, projectId, binding.key, guard, {
+                suffix: knowledgeKeySlug(binding.key),
+                description: binding.description,
+                topK: binding.topK,
+                minScore: binding.minScore,
+                filter: binding.filter,
+            });
+            tools.push(...built.tools);
+            toolDefinitions.push(...built.toolDefinitions);
+        }
+        return { tools, toolDefinitions };
+    }
+    return buildCombinedKnowledgeTools(tenantDbName, tenantId, projectId, bindings, guard);
+}
+
+async function buildCombinedKnowledgeTools(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    bindings: IAgentKnowledgeBinding[],
+    guard: AgentToolGuard,
+): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
+    const { createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+
+    const visible: Array<{ binding: IAgentKnowledgeBinding; scope: string }> = [];
+    for (const binding of bindings) {
+        const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
+        if (!mod) {
+            logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: binding.key, projectId });
+            continue;
+        }
+        visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
+    }
+    if (visible.length === 0) return { tools: [], toolDefinitions: [] };
+    const byKey = new Map(visible.map((v) => [v.binding.key, v]));
+    const keys = visible.map((v) => v.binding.key);
+
+    const catalog = visible
+        .map((v) => `- ${v.binding.key}${v.binding.description?.trim() ? `: ${v.binding.description.trim()}` : ''}`)
+        .join('\n');
+    const searchDescription = `${CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION}\n\nThis searches ALL of these knowledge bases at once; each match is tagged with its kb:\n${catalog}`;
+    const readHint = ' Pass `kb` (the kb tag of the match) when more than one knowledge base is bound.';
+    const searchSchema = z.object({ query: z.string().describe('The search query') });
+    const kbArg = z.string().optional().describe(`Knowledge base key from the search result. One of: ${keys.join(', ')}`);
+
+    // The bound KB a read targets: explicit `kb`, or the only one, else ambiguous.
+    async function resolveOwned(documentId: string, kb?: string) {
+        const candidates = kb ? (byKey.has(kb) ? [byKey.get(kb)!] : []) : visible;
+        if (kb && candidates.length === 0) return { error: `Unknown knowledge base "${kb}". Use one of: ${keys.join(', ')}.` };
+        const document = await getRagDocument(tenantDbName, documentId);
+        if (!document) return { error: 'Document not found in the bound knowledge bases.' };
+        const owner = candidates.find((c) => c.binding.key === document.ragModuleKey
+            && !(c.scope && document.projectId && String(document.projectId) !== c.scope));
+        if (!owner) return { error: 'Document not found in the bound knowledge bases.' };
+        return { document, scope: owner.scope };
+    }
+
+    const searchTool = createTool({
+        name: 'knowledge_search',
+        description: searchDescription,
+        schema: searchSchema,
+        func: guard.protect(
+            { name: agentToolPolicyName('knowledge', 'search'), requestedName: 'knowledge_search' },
+            async (args: { query: string }) => {
+                const lists = await Promise.all(visible.map(async ({ binding, scope }) => {
+                    const result = await queryRag(tenantDbName, tenantId, scope, {
+                        ragModuleKey: binding.key,
+                        query: args.query,
+                        topK: binding.topK,
+                        ...(binding.minScore !== undefined ? { minScore: binding.minScore } : {}),
+                        filter: binding.filter,
+                    }, { signal: currentTurnSignal() });
+                    return result.matches.filter((m) => m.content).map((m): KnowledgeHit => ({
+                        kb: binding.key,
+                        documentId: m.documentId,
+                        fileName: m.fileName,
+                        score: m.score ?? 0,
+                        content: m.content ?? '',
+                    }));
+                }));
+                return mergeKnowledgeHits(lists.flat()).map(formatKnowledgeHit).join('\n\n---\n\n');
+            },
+        ),
+    });
+
+    const readTool = createTool({
+        name: 'knowledge_read_document',
+        description: CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION + readHint,
+        schema: z.object({
+            documentId: z.string().describe('The documentId from a knowledge_search result'),
+            kb: kbArg,
+        }),
+        func: guard.protect(
+            { name: agentToolPolicyName('knowledge', 'read_document'), requestedName: 'knowledge_read_document' },
+            async (args: { documentId: string; kb?: string }) => {
+                const owned = await resolveOwned(args.documentId, args.kb);
+                if ('error' in owned) return owned.error;
+                const result = await getRagDocumentFullText(tenantDbName, tenantId, owned.scope, owned.document);
+                if (!result) return 'Source text is not available for this document; it may need to be re-ingested.';
+                const notice = result.truncated
+                    ? `\n\n[Truncated at ${result.text.length} of ${result.totalChars} characters `
+                        + `(${result.totalLines} lines total). Use knowledge_read_document_lines to read the rest.]`
+                    : '';
+                return `# ${result.fileName}\n\n${result.text}${notice}`;
+            },
+        ),
+    });
+
+    const readLinesTool = createTool({
+        name: 'knowledge_read_document_lines',
+        description: CONSOLE_AGENT_KNOWLEDGE_READ_LINES_DESCRIPTION + readHint,
+        schema: z.object({
+            documentId: z.string().describe('The documentId from a knowledge_search result'),
+            kb: kbArg,
+            offset: z.number().int().min(1).optional().describe('1-indexed line to start from (default 1)'),
+            limit: z.number().int().min(1).max(1000).optional()
+                .describe('Number of lines to return (default 200, max 1000)'),
+        }),
+        func: guard.protect(
+            { name: agentToolPolicyName('knowledge', 'read_document_lines'), requestedName: 'knowledge_read_document_lines' },
+            async (args: { documentId: string; kb?: string; offset?: number; limit?: number }) => {
+                const owned = await resolveOwned(args.documentId, args.kb);
+                if ('error' in owned) return owned.error;
+                const result = await getRagDocumentTextLines(tenantDbName, tenantId, owned.scope, owned.document, {
+                    offset: args.offset,
+                    limit: args.limit,
+                });
+                if (!result) return 'Source text is not available for this document; it may need to be re-ingested.';
+                const more = result.hasMore
+                    ? `\n\n[Lines ${result.startLine}-${result.endLine} of ${result.totalLines}. `
+                        + `Call again with offset: ${result.endLine + 1} to continue.]`
+                    : '';
+                return `# ${result.fileName} (lines ${result.startLine}-${result.endLine} of ${result.totalLines})\n\n`
+                    + `${result.lines}${more}`;
+            },
+        ),
+    });
+
+    return {
+        tools: [searchTool, readTool, readLinesTool],
+        toolDefinitions: [
+            {
+                name: 'knowledge_search',
+                description: searchDescription,
+                parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query' } }, required: ['query'] },
+            },
+            { ...knowledgeReadToolDefinition(), description: CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION + readHint },
+            { ...knowledgeReadLinesToolDefinition(), description: CONSOLE_AGENT_KNOWLEDGE_READ_LINES_DESCRIPTION + readHint },
         ],
     };
 }
@@ -1548,7 +1773,7 @@ async function buildAgentSubagents(
 
         let systemPrompt = entry.systemPrompt;
         let toolBindings = entry.toolBindings;
-        let knowledgeEngineKey = entry.knowledgeEngineKey;
+        let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
 
         if (entry.kind === 'ref') {
@@ -1574,7 +1799,11 @@ async function buildAgentSubagents(
                 }
                 systemPrompt = entry.systemPrompt ?? resolved.config.systemPrompt;
                 toolBindings = resolved.config.toolBindings;
-                knowledgeEngineKey = resolved.config.knowledgeEngineKey;
+                knowledgeSource = {
+                    knowledgeEngineKey: resolved.config.knowledgeEngineKey,
+                    knowledgeBindings: resolved.config.knowledgeBindings,
+                    knowledgeToolMode: resolved.config.knowledgeToolMode,
+                };
                 modelKey = entry.modelKey ?? resolved.config.modelKey;
             } catch (error) {
                 logger.warn('Sub-agent reference could not be resolved; skipping', {
@@ -1587,12 +1816,12 @@ async function buildAgentSubagents(
         }
 
         const childTools: AgentSdkToolInterface[] = [];
-        if (knowledgeEngineKey) {
-            const knowledge = await buildKnowledgeTools(
+        if (hasKnowledgeConfigured(knowledgeSource)) {
+            const knowledge = await buildAgentKnowledgeTools(
                 input.tenantDbName,
                 input.tenantId,
                 input.projectId,
-                knowledgeEngineKey,
+                knowledgeSource,
                 input.guard,
             );
             childTools.push(...knowledge.tools);
@@ -3031,6 +3260,8 @@ export type AgentPlaygroundChatResult = Omit<IAgentConversationMessage, 'role' |
 export interface ResponseOutputText {
     type: 'output_text';
     text: string;
+    /** Files the agent produced this turn (`file_path`, as OpenAI's code interpreter cites its files). Additive. */
+    annotations?: ClientFileAnnotation[];
 }
 
 /** OpenAI Responses API–compatible output message */
@@ -3089,6 +3320,8 @@ export interface AgentChatResponse {
     output_parsed?: unknown;
     /** Why the structured contract failed (parse/validation); mutually exclusive with `output_parsed`. */
     output_error?: string;
+    /** Files the agent wrote to its sandbox's `/outputs/` this turn, saved as session files. Additive; absent when none. */
+    output_files?: ClientOutputFile[];
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
@@ -3461,9 +3694,9 @@ async function buildLocalAgentRun(input: {
     // RAG retrieval tools, and the instruction to use them first
     const tools: AgentSdkToolInterface[] = [];
     const toolDefinitions: TraceToolDefinition[] = [];
-    if (config.knowledgeEngineKey) {
-        const knowledgeTools = await buildKnowledgeTools(
-            tenantDbName, tenantId, projectId, config.knowledgeEngineKey, toolGuard,
+    if (hasKnowledgeConfigured(config)) {
+        const knowledgeTools = await buildAgentKnowledgeTools(
+            tenantDbName, tenantId, projectId, config, toolGuard,
         );
         tools.push(...knowledgeTools.tools);
         toolDefinitions.push(...knowledgeTools.toolDefinitions);
@@ -3503,8 +3736,17 @@ async function buildLocalAgentRun(input: {
         onWarning: (message) => warnings.add(message),
     });
     const memoryToolMode = config.memory?.tools ?? 'readwrite';
+    const memoryMountPrompt = buildMemoryPromptSection(config.memory);
+    if (memoryMountPrompt) systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memoryMountPrompt}` : memoryMountPrompt;
     if (memory?.store && memoryToolMode !== 'off') {
-        const allowWrites = memoryToolMode === 'readwrite';
+        const mountedStores = buildMountedMemoryStores(config.memory, {
+            tenantDbName, tenantId, projectId, agentKey,
+            conversationId: input.memoryConversationId,
+            userId: input.userId,
+            onWarning: (message) => warnings.add(message),
+        });
+        const mountScope = (m: (typeof mountedStores)[number]) => m.mount.scope;
+        const allowWrites = memoryToolMode === 'readwrite' && mountedStores.some((m) => m.mount.access === 'read_write');
         tools.push(...buildMemoryTools({
             store: memory.store,
             // 'workspace' is the SDK's OWN default when a config names no
@@ -3516,8 +3758,9 @@ async function buildLocalAgentRun(input: {
             zod: z,
             guard: toolGuard,
             allowWrites,
+            mounts: mountedStores.map((m) => ({ key: m.mount.storeKey, access: m.mount.access, scope: mountScope(m), store: m.store })),
         }));
-        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
     }
 
     // Files attached to the session: the agent can list them and read them page
@@ -3571,7 +3814,12 @@ async function buildLocalAgentRun(input: {
         zod: z,
         protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
         onWarning: (message) => warnings.add(message),
+        outputs: { agentConfig: config, actorId },
     });
+    // Files the agent writes to /outputs/ are delivered after the turn; that needs a session to attach them to and a bucket.
+    if (sandboxTools.tools.length > 0 && input.conversation && resolveAttachmentsConfig(config.attachments).bucketKey) {
+        systemPrompt = withSandboxOutputsPrompt(systemPrompt);
+    }
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
@@ -3737,6 +3985,7 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        collectOutputs: sandboxTools.collectOutputs,
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
     };
@@ -4006,6 +4255,11 @@ function sessionStopReason(
  * The OpenAI Responses–shaped reply to one exchange. `outcome` is absent for a
  * connected agent, which reports no stop reason at all.
  */
+/** `agent.output_file` event payloads of a turn's output attachments. */
+function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAgentMessageAttachment>): Array<Record<string, unknown>> {
+    return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
+}
+
 function toAgentChatResponse(input: {
     conversationId: string;
     priorMessageCount: number;
@@ -4031,6 +4285,7 @@ function toAgentChatResponse(input: {
         : `msg_${Date.now().toString(36)}`;
     const reasoningId = `rs_${Date.now().toString(36)}`;
     const stopped = outcome && outcome.stopReason !== 'completed' ? outcome : undefined;
+    const outputFiles = answerIndex >= 0 ? toClientOutputFiles(input.conversationId, input.messages[answerIndex]?.attachments) : [];
 
     return {
         id: responseId,
@@ -4041,7 +4296,7 @@ function toAgentChatResponse(input: {
             ...(reasoning
                 ? [{ id: reasoningId, type: 'reasoning' as const, summary: [{ type: 'summary_text' as const, text: reasoning }] }]
                 : []),
-            { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content }] },
+            { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content, ...(outputFiles.length > 0 ? { annotations: toFileAnnotations(outputFiles) } : {}) }] },
         ],
         status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
         ...(requiresAction
@@ -4066,6 +4321,7 @@ function toAgentChatResponse(input: {
         version: input.version,
         ...(input.outputParsed !== undefined ? { output_parsed: input.outputParsed } : {}),
         ...(input.outputError ? { output_error: input.outputError } : {}),
+        ...(outputFiles.length > 0 ? { output_files: outputFiles } : {}),
         _conversation_messages: input.messages,
     };
 }
@@ -4294,7 +4550,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4460,6 +4716,10 @@ async function runAgentChatTurn(
         // anyway, however complete the answer looks.
         const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
 
+        // Files the agent left in the sandbox's /outputs/ ride on the answer (never fails the turn).
+        const outputFiles = supersededByDeadlineOrCancel ? { attachments: [], warnings: [] } : await collectOutputs();
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         // The run stopped for a person: keep what it needs to continue.
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !supersededByDeadlineOrCancel) {
@@ -4494,6 +4754,7 @@ async function runAgentChatTurn(
                 content: outcome.content,
                 ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
                 ...(steps.length > 0 ? { steps } : {}),
+                ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                     : {}),
@@ -4535,6 +4796,7 @@ async function runAgentChatTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        for (const event of outputFileEvents(conversationId, outputFiles.attachments)) turnEvents.emitInTurn('agent.output_file', event);
         for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
         await turnEvents.finish({
             // A turn the deadline or an async cancel already decided was not
@@ -4910,7 +5172,7 @@ async function runPlaygroundChatTurn(
     const history = sessionConversation
         ? sessionConversation.messages.map((m) => ({
             role: m.role,
-            content: m.content,
+            content: m.content ?? '',
             ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         }))
         : request.history;
@@ -4998,7 +5260,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5154,6 +5416,10 @@ async function runPlaygroundChatTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        // Files the agent left in the sandbox's /outputs/ ride on the answer (never fails the turn).
+        const outputFiles = sessionConversation ? await collectOutputs() : { attachments: [], warnings: [] };
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         const playgroundResult: AgentPlaygroundChatResult = {
             content: outcome.content,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
@@ -5164,6 +5430,7 @@ async function runPlaygroundChatTurn(
             ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
             latencyMs: Date.now() - invokeStartedAt,
             steps: extractPlaygroundSteps(result, priorExecutionIds),
+            ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
             version: ranVersion,
             ...answeredWithMetadata(model.key, Boolean(modelChoice), routedModel()),
             ...(outcome.stopReason !== 'completed'
@@ -5233,6 +5500,7 @@ async function runPlaygroundChatTurn(
                     ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
                 });
             }
+            for (const event of outputFileEvents(String(sessionConversation._id), outputFiles.attachments)) turnEvents?.emitInTurn('agent.output_file', event);
             for (const action of pause?.actions ?? []) turnEvents?.emitInTurn('action.required', actionRequiredEventData(action));
             await turnEvents?.finish({
                 stopReason: sessionStopReason(outcome.stopReason, pause, budget),
@@ -5288,6 +5556,7 @@ async function persistSessionTurn(
                 timestamp: now,
                 ...(result.reasoning ? { reasoning: result.reasoning } : {}),
                 ...(result.steps && result.steps.length > 0 ? { steps: result.steps } : {}),
+                ...(result.attachments && result.attachments.length > 0 ? { attachments: result.attachments } : {}),
                 ...(result.output !== undefined ? { output: result.output } : {}),
                 ...(result.outputError ? { outputError: result.outputError } : {}),
                 ...(result.usage ? { usage: result.usage } : {}),
@@ -5630,7 +5899,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5849,6 +6118,10 @@ async function runAgentResumeTurn(
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
         }
 
+        // Files the agent left in /outputs/ while the run continued (never fails the turn).
+        const outputFiles = superseded ? { attachments: [], warnings: [] } : await collectOutputs();
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         const assistantMessage: IAgentConversation['messages'][number] = {
             role: 'assistant',
             content: outcome.content,
@@ -5856,6 +6129,7 @@ async function runAgentResumeTurn(
             ...answeredWithMetadata(model.key, additionalModelKeys(config).length > 0, routedModel()),
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
             ...(steps.length > 0 ? { steps } : {}),
+            ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
@@ -5890,6 +6164,7 @@ async function runAgentResumeTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        for (const event of outputFileEvents(conversationId, outputFiles.attachments)) turnEvents.emitInTurn('agent.output_file', event);
         for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
         const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget);
         await turnEvents.finish({

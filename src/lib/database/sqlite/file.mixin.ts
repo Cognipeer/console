@@ -21,11 +21,11 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         INSERT INTO ${TABLES.files}
         (id, tenantId, projectId, providerKey, bucketKey, key, name, size, contentType, checksum, etag,
          metadata, markdownKey, markdownStatus, markdownError, markdownSize, markdownContentType,
-         purpose, conversationId, agentKey, expiresAt, uploadedBy,
+         purpose, conversationId, agentKey, expiresAt, uploadedBy, origin,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @providerKey, @bucketKey, @key, @name, @size, @contentType, @checksum, @etag,
          @metadata, @markdownKey, @markdownStatus, @markdownError, @markdownSize, @markdownContentType,
-         @purpose, @conversationId, @agentKey, @expiresAt, @uploadedBy,
+         @purpose, @conversationId, @agentKey, @expiresAt, @uploadedBy, @origin,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -50,6 +50,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         agentKey: record.agentKey ?? null,
         expiresAt: record.expiresAt ? new Date(record.expiresAt).toISOString() : null,
         uploadedBy: record.uploadedBy ?? null,
+        origin: record.origin ?? null,
         createdBy: record.createdBy,
         updatedBy: record.updatedBy ?? null,
         createdAt: now,
@@ -335,6 +336,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         ...(r.agentKey ? { agentKey: r.agentKey as string } : {}),
         ...(r.expiresAt ? { expiresAt: this.toDate(r.expiresAt) } : {}),
         ...(r.uploadedBy ? { uploadedBy: r.uploadedBy as string } : {}),
+        ...(r.origin ? { origin: r.origin as 'agent_output' } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),
