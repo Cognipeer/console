@@ -32,6 +32,7 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'sandbox_list_files',
     'sandbox_preview_link',
     'web_search',
+    'web_fetch',
     // Read an attached session file (sessionFiles.ts).
     'session_files_list',
     'session_files_read',

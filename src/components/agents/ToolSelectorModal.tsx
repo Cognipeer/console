@@ -29,6 +29,7 @@ import {
   IconTool,
   IconBrowser,
   IconWorldSearch,
+  IconWorldDownload,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
@@ -53,7 +54,7 @@ interface ToolSourceGroup {
 
 /**
  * System tools whose whole binding is one config field picked from a
- * `Select` (a browser, a web search instance) rather than a checkbox list of
+ * `Select` (a browser, a web search instance, a crawler) rather than a checkbox list of
  * discrete tool names. Each renders as its own group, in this order.
  */
 const SYSTEM_TOOLS = [
@@ -82,6 +83,19 @@ const SYSTEM_TOOLS = [
     emptyPlaceholder: 'No web search instances available',
     hint: 'Selecting an instance adds the Web Search system tool to this agent.',
     nothingFound: 'No web search instances',
+  },
+  {
+    sourceKey: 'crawler',
+    field: 'crawlerKey',
+    icon: IconWorldDownload,
+    name: 'Web Fetch',
+    description: 'Fetch a single page in real time through a configured Crawler (its engine, headers and auth) and return it as markdown.',
+    toolDescription: 'Fetch one web page live and return its content as markdown. Limited to the hosts the crawler is configured for.',
+    label: 'Crawler',
+    placeholder: 'Select a crawler to add Web Fetch',
+    emptyPlaceholder: 'No crawlers available',
+    hint: 'Selecting a crawler adds the Web Fetch system tool to this agent. Pages are limited to the crawler\'s seed hosts and allow list.',
+    nothingFound: 'No crawlers',
   },
 ] as const;
 
@@ -235,6 +249,14 @@ export function ToolSelectorModal({
         web_search: providers
           .filter((p) => p.status === 'active')
           .map((p) => ({ value: p.key, label: `${p.label} (${p.key})` })),
+      }));
+
+      const crawlersRes = await fetch('/api/crawler/crawlers?status=active', { cache: 'no-store' });
+      const crawlers: Array<{ key: string; name: string }> =
+        crawlersRes.ok ? ((await crawlersRes.json()).crawlers ?? []) : [];
+      setSystemOptions((prev) => ({
+        ...prev,
+        crawler: crawlers.map((c) => ({ value: c.key, label: `${c.name} (${c.key})` })),
       }));
 
       allGroups.unshift(...SYSTEM_TOOLS.map((tool) => ({

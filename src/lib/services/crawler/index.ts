@@ -18,6 +18,8 @@ export {
   removeCrawlerUrls,
   listCrawlerUrls,
 } from './crawlerService';
+export { buildWebFetchAgentTools } from './agentTools';
+export { crawlerHasCredentials, crawlerHasHostScope } from './singlePage';
 export { startCrawlerQueueConsumer } from './crawlerConsumer';
 export { reconcileOrphanedCrawlJobs } from './crawlerJobReconciler';
 export {

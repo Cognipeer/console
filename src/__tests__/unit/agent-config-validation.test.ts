@@ -27,6 +27,12 @@ vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
     resolveSandboxAvailability: vi.fn(async () => sandboxAvailability.value),
 }));
 
+const getCrawler = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/services/crawler', async (importActual) => ({
+    ...(await importActual<typeof import('@/lib/services/crawler')>()),
+    getCrawler,
+}));
+
 import {
     invalidConfigBody,
     validateAgentConfig,
@@ -62,6 +68,35 @@ beforeEach(() => {
 
 const validate = (config: IAgentConfig) => validateAgentConfig({ tenantDbName: 't', projectId: 'p', config, agentKey: 'me' });
 const fields = (issues: Array<{ field: string }>) => issues.map((issue) => issue.field);
+
+describe('web_fetch (crawler system tool) binding', () => {
+    const bind = (crawlerKey?: string) => ({
+        modelKey: 'gpt-main',
+        toolBindings: [{ source: 'system' as const, sourceKey: 'crawler', toolNames: ['crawler'], config: crawlerKey ? { crawlerKey } : {} }],
+    });
+    const withTenant = (config: IAgentConfig) => validateAgentConfig({ tenantDbName: 't', tenantId: 'tn', projectId: 'p', config, agentKey: 'me' });
+
+    it('needs a crawler picked', () => {
+        expect(fields(validateAgentConfigShape(bind() as IAgentConfig).errors)).toContain('toolBindings[0].config.crawlerKey');
+    });
+
+    it('accepts an active crawler pinned to hosts, even with credentials', async () => {
+        getCrawler.mockResolvedValue({ key: 'docs', status: 'active', seeds: ['https://a.test'], scope: {}, http: { bearerToken: '********' } });
+        expect((await withTenant(bind('docs') as IAgentConfig)).errors).toEqual([]);
+    });
+
+    it('rejects a missing or inactive crawler', async () => {
+        getCrawler.mockResolvedValue(null);
+        expect(fields((await withTenant(bind('gone') as IAgentConfig)).errors)).toContain('toolBindings[0].config.crawlerKey');
+        getCrawler.mockResolvedValue({ key: 'docs', status: 'paused', seeds: ['https://a.test'], scope: {}, http: {} });
+        expect((await withTenant(bind('docs') as IAgentConfig)).errors.some((e) => e.message.includes('not active'))).toBe(true);
+    });
+
+    it('rejects a credentialed crawler with no seed hosts or allow list (the model picks the URL)', async () => {
+        getCrawler.mockResolvedValue({ key: 'docs', status: 'active', seeds: [], scope: {}, http: { bearerToken: '********' } });
+        expect((await withTenant(bind('docs') as IAgentConfig)).errors.some((e) => e.message.includes('credentials'))).toBe(true);
+    });
+});
 
 describe('validateAgentConfig', () => {
     it('accepts a correct config', async () => {

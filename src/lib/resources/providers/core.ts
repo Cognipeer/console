@@ -90,6 +90,8 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
       edges.add('agent.browser', c.browserId, `config.toolBindings[${i}].config.browserId`);
     } else if (binding.sourceKey === 'web_search') {
       edges.add('agent.webSearchProvider', c.providerKey, `config.toolBindings[${i}].config.providerKey`);
+    } else if (binding.sourceKey === 'crawler') {
+      edges.add('agent.crawler', c.crawlerKey, `config.toolBindings[${i}].config.crawlerKey`);
     }
   });
 

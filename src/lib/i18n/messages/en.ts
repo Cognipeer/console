@@ -6476,6 +6476,7 @@ export const en = {
       'agent.skill': 'Skill',
       'agent.browser': 'Browser',
       'agent.webSearchProvider': 'Web search provider',
+      'agent.crawler': 'Crawler',
       'model.provider': 'Provider',
       'model.replicaProvider': 'Replica provider',
       'model.guardrail': 'Guardrail',
