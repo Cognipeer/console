@@ -360,6 +360,10 @@ export async function* crawl(
         await semaphore.acquire();
         try {
           const fetched = await fetchOne(item.url);
+          // The page was served from its redirect target: remember that too, so
+          // a link pointing straight at it (e.g. `/` → `www.example.com/`) isn't
+          // fetched a second time as a separate page.
+          if (fetched.finalUrl) visited.add(normalizeUrl(fetched.finalUrl));
           if (fetched.type === 'file') {
             let attachmentBody: string | undefined;
             if (fetched.fileBuffer) {

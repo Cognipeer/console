@@ -9,6 +9,7 @@ import {
   isSkippableExtension,
   isSupportedHttpUrl,
   matchesAny,
+  isSameOrSubdomain,
 } from '@/lib/services/crawler/engine/normalize';
 import { extractLinks } from '@/lib/services/crawler/engine/links';
 import { assertSafeUrl, isPrivateHost } from '@/lib/services/crawler/engine/ssrf';
@@ -82,6 +83,33 @@ describe('engine/links', () => {
       visited: new Set(),
     });
     expect(links.some((l) => l.includes('sub.example.com'))).toBe(true);
+  });
+
+  it('treats www and the apex as the same site (seed redirects example.com → www.example.com)', () => {
+    const wwwHtml = `
+      <a href="https://www.example.com/products">Products</a>
+      <a href="https://example.com/contact">Contact</a>
+      <a href="/relative">Rel</a>
+      <a href="https://sub.example.com/x">Sub</a>
+      <a href="https://notexample.com/x">Lookalike</a>
+    `;
+    const links = extractLinks({
+      html: wwwHtml,
+      pageUrl: 'https://www.example.com/',
+      rootDomain: 'example.com',
+      scope: { sameDomainOnly: true, includeSubdomains: false },
+      visited: new Set(),
+    });
+    expect(links).toContain('https://www.example.com/products');
+    expect(links).toContain('https://example.com/contact');
+    expect(links).toContain('https://www.example.com/relative');
+    expect(links.some((l) => l.includes('sub.example.com'))).toBe(false);
+    expect(links.some((l) => l.includes('notexample.com'))).toBe(false);
+
+    // …and the reverse: seed on www, links back to the apex.
+    expect(isSameOrSubdomain('example.com', 'www.example.com', false)).toBe(true);
+    expect(isSameOrSubdomain('sub.example.com', 'www.example.com', false)).toBe(false);
+    expect(isSameOrSubdomain('sub.example.com', 'www.example.com', true)).toBe(true);
   });
 
   it('respects allowList over sameDomainOnly', () => {
