@@ -16,6 +16,7 @@
 
 import { getConfig } from '@/lib/core/config';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
+import { getCrawler, crawlerHasCredentials, crawlerHasHostScope } from '@/lib/services/crawler';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
 import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
@@ -50,7 +51,7 @@ const PLANNING_MODES = new Set(['off', 'todo', 'planner_executor', 'reasoning_th
 const REPLAN_POLICIES = new Set(['never', 'on_failure', 'on_conflict', 'every_n_steps']);
 const PROFILES = new Set(['fast', 'balanced', 'deep', 'research']);
 const TOOL_RESPONSE_POLICIES = new Set(['keep_full', 'keep_structured', 'summarize_archive', 'drop']);
-const SYSTEM_TOOLS = new Set(['browser_use', 'web_search']);
+const SYSTEM_TOOLS = new Set(['browser_use', 'web_search', 'crawler']);
 
 type Issues = AgentConfigValidation;
 
@@ -415,6 +416,8 @@ function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBin
             issues.errors.push({ field: `${field}.sourceKey`, message: `Unknown system tool "${binding.sourceKey}"` });
         } else if (binding.sourceKey === 'browser_use' && typeof binding.config?.browserId !== 'string') {
             issues.errors.push({ field: `${field}.config.browserId`, message: 'Pick the browser the agent should use' });
+        } else if (binding.sourceKey === 'crawler' && typeof binding.config?.crawlerKey !== 'string') {
+            issues.errors.push({ field: `${field}.config.crawlerKey`, message: 'Pick the crawler the agent should fetch pages with' });
         }
         return;
     }
@@ -566,7 +569,7 @@ export async function validateAgentConfig(input: {
         else if (skill.status !== 'active') issues.warnings.push({ field: 'skills', message: `Skill "${key}" is not active and is skipped` });
     }
 
-    await checkBindingReferences(issues, input.tenantDbName, projectId, 'toolBindings', config.toolBindings);
+    await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, 'toolBindings', config.toolBindings);
 
     for (const [index, entry] of (config.subagents ?? []).entries()) {
         const field = `subagents[${index}]`;
@@ -588,7 +591,7 @@ export async function validateAgentConfig(input: {
             }
         }
         if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);
-        await checkBindingReferences(issues, input.tenantDbName, projectId, `${field}.toolBindings`, entry.toolBindings);
+        await checkBindingReferences(issues, input.tenantDbName, input.tenantId, projectId, `${field}.toolBindings`, entry.toolBindings);
     }
 
     return issues;
@@ -598,6 +601,7 @@ export async function validateAgentConfig(input: {
 async function checkBindingReferences(
     issues: Issues,
     tenantDbName: string,
+    tenantId: string | undefined,
     projectId: string,
     prefix: string,
     bindings: IAgentToolBinding[] | undefined,
@@ -605,7 +609,19 @@ async function checkBindingReferences(
     for (const [index, binding] of (bindings ?? []).entries()) {
         const field = `${prefix}[${index}]`;
         if (!binding?.sourceKey) continue;
-        if (binding.source === 'tool') {
+        if (binding.source === 'system' && binding.sourceKey === 'crawler') {
+            const crawlerKey = binding.config?.crawlerKey;
+            if (typeof crawlerKey !== 'string' || !tenantId) continue;
+            const crawler = await getCrawler({ tenantDbName, tenantId, projectId }, crawlerKey).catch(() => null);
+            if (!crawler) {
+                issues.errors.push({ field: `${field}.config.crawlerKey`, message: `Crawler "${crawlerKey}" does not exist in this project` });
+            } else if (crawler.status !== 'active') {
+                issues.errors.push({ field: `${field}.config.crawlerKey`, message: `Crawler "${crawlerKey}" is not active` });
+            } else if (crawlerHasCredentials(crawler.http) && !crawlerHasHostScope(crawler)) {
+                // The model picks the URL: credentials may only ride along to hosts the crawler is pinned to.
+                issues.errors.push({ field: `${field}.config.crawlerKey`, message: `Crawler "${crawlerKey}" has credentials but no seed URLs or allow list, so an agent cannot use it to fetch pages` });
+            }
+        } else if (binding.source === 'tool') {
             // Resolved exactly as the runtime resolves it (`buildBoundTools`):
             // this project's row, else the tenant-wide one — never another project's.
             const tool = await resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId).catch(() => null);

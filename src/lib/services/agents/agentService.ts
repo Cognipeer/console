@@ -97,6 +97,7 @@ import {
 } from './bindingResolution';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
+import { buildWebFetchAgentTools } from '@/lib/services/crawler';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import {
     buildToolDefinitionsSection,
@@ -342,6 +343,7 @@ function knowledgeReadLinesToolDefinition(): TraceToolDefinition {
  *   agent.tool.<toolKey>.<actionKey>       unified tool-system actions
  *   agent.browser.<toolName>               the browser_use system tools
  *   agent.websearch.<toolName>             the web_search system tool
+ *   agent.crawler.<toolName>               the web_fetch system tool
  *
  * The browser/websearch segment is the tool's own name VERBATIM (`agent.browser.
  * browser_navigate`, `agent.websearch.web_search`), redundant prefix and all.
@@ -2189,6 +2191,25 @@ export async function buildBoundTools(
             }));
             tools.push(...webSearchTools.tools);
             definitions.push(...webSearchTools.definitions);
+        } else if (binding.source === 'system' && binding.sourceKey === 'crawler') {
+            // ── System tool: Web Fetch (single page through a crawler) ──
+            // Stateless like web_search; the crawler is loaded per call so an
+            // edit or deactivation takes effect without rebinding.
+            const crawlerKey = typeof binding.config?.crawlerKey === 'string'
+                ? (binding.config.crawlerKey as string)
+                : undefined;
+            if (!crawlerKey) {
+                logger.warn('crawler binding missing crawlerKey, skipping');
+                continue;
+            }
+            const webFetchTools = adoptBuiltTools(guard, 'crawler', buildWebFetchAgentTools({
+                tenantDbName,
+                tenantId,
+                projectId,
+                crawlerKey,
+            }));
+            tools.push(...webFetchTools.tools);
+            definitions.push(...webFetchTools.definitions);
         }
     }
 
@@ -2196,7 +2217,7 @@ export async function buildBoundTools(
 }
 
 /**
- * Guards system tools built elsewhere (browser, web search) after the fact,
+ * Guards system tools built elsewhere (browser, web search, web fetch) after the fact,
  * under `agent.<surface>.<toolName>`. The browser tools are the agent's only
  * tools that navigate and type into a live browser, i.e. the surface
  * `tool_access.sideEffects` most wants to name.
@@ -2206,7 +2227,7 @@ export async function buildBoundTools(
  */
 function adoptBuiltTools(
     guard: AgentToolGuard,
-    surface: 'browser' | 'websearch',
+    surface: 'browser' | 'websearch' | 'crawler',
     built: readonly unknown[],
 ): { tools: AgentSdkToolInterface[]; definitions: TraceToolDefinition[] } {
     const tools = (built as AgentSdkToolInterface[]).map((tool) => protectBuiltTool(

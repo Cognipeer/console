@@ -58,7 +58,7 @@ const DEFAULT_HTTP: ICrawlerHttpConfig = {
   retries: 2,
 };
 
-async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
+export async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   return db;
@@ -249,7 +249,7 @@ export async function listCrawlers(
   return records.map((r) => serializeCrawler(r));
 }
 
-async function loadCrawler(
+export async function loadCrawler(
   db: DatabaseProvider,
   ctx: CrawlerContext,
   idOrKey: string,

@@ -163,6 +163,9 @@ kind('agent.webSearchProvider', 'agent', 'provider', 'provider-assignment', 'war
   inactiveBreaks: true, requiresActive: true, targetAttribute: { key: 'type', value: 'websearch' },
 });
 
+// web_fetch.config.crawlerKey: fetchPageWithCrawler throws for a missing or non-active crawler.
+kind('agent.crawler', 'agent', 'crawler', 'project-then-tenant', 'warning', { inactiveBreaks: true, requiresActive: true });
+
 // The bucket an agent keeps its session files in (`attachments.bucketKey`): a session file is an ordinary
 // Document Store file in that bucket, looked up in the agent's own project (inspectFileBucket). A missing or
 // disabled bucket refuses uploads (409 storage_unavailable) while the agent itself still runs: reduced, not broken.

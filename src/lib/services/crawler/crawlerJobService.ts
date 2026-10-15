@@ -48,7 +48,7 @@ async function runWithTenantDb<T>(
   return fn(db);
 }
 
-function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
+export function snapshotToPlan(snapshot: ICrawlPlanSnapshot): CrawlPlan {
   // The plan snapshot's `http` is sealed at rest (see `httpConfigSecrets.ts`)
   // — this is the one place execution is allowed to recover the plaintext
   // bearer token / basic-auth password / cookie values to actually reach

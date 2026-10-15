@@ -4704,6 +4704,7 @@ export const tr: typeof en = {
       'agent.skill': 'Yetenek (skill)',
       'agent.browser': 'Browser',
       'agent.webSearchProvider': 'Web arama sağlayıcısı',
+      'agent.crawler': 'Crawler',
       'model.provider': 'Sağlayıcı',
       'model.replicaProvider': 'Replika sağlayıcısı',
       'model.guardrail': 'Guardrail',
