@@ -113,7 +113,11 @@ export function deriveRuleSeverity(input: RuleSeverityInput): IncidentSeverity {
     const cfg = condition.baseline;
     const ratio = input.baseline?.ratio ?? null;
     const z = input.baseline?.z ?? null;
-    if (cfg && ((ratio !== null && ratio >= 2 * cfg.minRatio) || (z !== null && z >= 2 * cfg.minZ))) return 'critical';
+    if (!cfg) return 'warning';
+    // Direction-aware: a drop reads ratio < 1 and a negative z (EE judgeDeviation), a rise ratio > 1 and a positive z.
+    const up = (ratio !== null && ratio >= 2 * cfg.minRatio) || (z !== null && z >= 2 * cfg.minZ);
+    const down = (ratio !== null && cfg.minRatio > 0 && ratio <= 1 / (2 * cfg.minRatio)) || (z !== null && z <= -2 * cfg.minZ);
+    if (cfg.direction === 'up' ? up : cfg.direction === 'down' ? down : up || down) return 'critical';
     return 'warning';
   }
 
@@ -414,6 +418,49 @@ export class IncidentService {
   ): Promise<number> {
     const db = await getTenantDatabase(tenantDbName);
     return db.countIncidents(tenantId, options);
+  }
+
+  /**
+   * Display names of the people an incident list or detail refers to
+   * (acknowledged / assigned / resolved by). ONE read of the tenant's users,
+   * and only when the page names somebody. 'system' (automatic resolution) and
+   * ids that match no user are absent; emails are never exposed.
+   */
+  static async resolveUserNames(
+    tenantDbName: string,
+    incidents: Array<Pick<IIncident, 'acknowledgedBy' | 'assignedTo' | 'resolvedBy'>>,
+  ): Promise<Map<string, string>> {
+    const wanted = new Set<string>();
+    for (const incident of incidents) {
+      for (const id of [incident.acknowledgedBy, incident.assignedTo, incident.resolvedBy]) {
+        if (typeof id === 'string' && id && id !== 'system') wanted.add(id);
+      }
+    }
+    const names = new Map<string, string>();
+    if (wanted.size === 0) return names;
+    try {
+      const db = await getTenantDatabase(tenantDbName);
+      for (const user of await db.listUsers()) {
+        const id = String(user._id ?? '');
+        const name = typeof user.name === 'string' ? user.name.trim() : '';
+        if (id && name && wanted.has(id)) names.set(id, name);
+      }
+    } catch { /* names are a convenience: the ids still identify the people */ }
+    return names;
+  }
+
+  /** The incident with `acknowledgedByName`, `assignedToName` and `resolvedByName` (string | null). */
+  static withUserNames<T extends Pick<IIncident, 'acknowledgedBy' | 'assignedTo' | 'resolvedBy'>>(
+    incident: T,
+    names: Map<string, string>,
+  ): T & { acknowledgedByName: string | null; assignedToName: string | null; resolvedByName: string | null } {
+    const nameOf = (id: string | null | undefined) => (id ? names.get(id) ?? null : null);
+    return {
+      ...incident,
+      acknowledgedByName: nameOf(incident.acknowledgedBy),
+      assignedToName: nameOf(incident.assignedTo),
+      resolvedByName: nameOf(incident.resolvedBy),
+    };
   }
 
   /** Incident counts per status for one project (every status present). */

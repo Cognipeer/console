@@ -2,8 +2,8 @@
  * Prometheus exporter — tracing + entity health families.
  *
  * These used to be computed from the newest 50 tracing sessions and typed as
- * counters; they are now typed 24h window gauges read from the tracing
- * aggregate and the entity_metrics rollup, cached briefly per tenant.
+ * counters; they are now typed 24h window gauges read from the entity_metrics
+ * rollup, cached briefly per tenant.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,22 +29,6 @@ function entityRow(over: Record<string, unknown>) {
 
 function primeDb(): MockDb {
   const db = createMockDb();
-  db.aggregateAgentTracingDashboard.mockResolvedValue({
-    recentSessions: [],
-    recentAgents: [],
-    recentAgentsTotal: 0,
-    analytics: {
-      totals: { sessionsCount: 5, totalInputTokens: 1200, totalOutputTokens: 300 },
-      tools: { totals: { totalCalls: 0, errorCalls: 0, successCalls: 0, errorRate: 0 }, items: [] },
-      statuses: [
-        { status: 'success', count: 4 },
-        { status: 'error', count: 1 },
-      ],
-      models: [],
-      agents: [],
-      daily: [],
-    },
-  } as unknown as Awaited<ReturnType<MockDb['aggregateAgentTracingDashboard']>>);
   db.aggregateEntityMetrics.mockImplementation((async (q: { groupBy: string[]; entityType?: string }) => {
     if (q.groupBy.includes('entityKey')) {
       return [
@@ -54,7 +38,7 @@ function primeDb(): MockDb {
       ];
     }
     return [
-      entityRow({ entityType: 'agent', requests: 13, errors: 2 }),
+      entityRow({ entityType: 'agent', requests: 13, errors: 2, abandoned: 1, inputTokens: 1200, outputTokens: 300 }),
       entityRow({ entityType: 'model', requests: 400, errors: 7 }),
     ];
   }) as unknown as MockDb['aggregateEntityMetrics']);
@@ -75,18 +59,15 @@ describe('collectPrometheusMetrics — tracing and entity health', () => {
     vi.useRealTimers();
   });
 
-  it('exposes tracing sessions as a typed 24h gauge from the tracing aggregate, not the newest 50 sessions', async () => {
+  it('exposes finished tracing sessions as a typed 24h gauge from the entity rollup, not a tenant-wide tracing scan', async () => {
     const text = await collectPrometheusMetrics('tenant_db', 'tenant-1');
 
     expect(text).toContain('# TYPE console_tracing_sessions_total gauge');
-    expect(text).toContain('# HELP console_tracing_sessions_total Number of agent tracing sessions per status in the last 24 hours.');
-    expect(text).toContain('console_tracing_sessions_total{status="success"} 4');
-    expect(text).toContain('console_tracing_sessions_total{status="error"} 1');
+    expect(text).toContain('console_tracing_sessions_total{status="success"} 10');
+    expect(text).toContain('console_tracing_sessions_total{status="error"} 2');
+    expect(text).toContain('console_tracing_sessions_total{status="abandoned"} 1');
     expect(db.listAgentTracingSessions).not.toHaveBeenCalled();
-
-    const [filters] = db.aggregateAgentTracingDashboard.mock.calls[0];
-    const span = new Date(filters!.to!).getTime() - new Date(filters!.from!).getTime();
-    expect(span).toBe(DAY_MS);
+    expect(db.aggregateAgentTracingDashboard).not.toHaveBeenCalled();
   });
 
   it('exposes token totals as 24h gauges instead of counters', async () => {
@@ -131,17 +112,14 @@ describe('collectPrometheusMetrics — tracing and entity health', () => {
 
     await collectPrometheusMetrics('tenant_db', 'tenant-1');
     expect(db.aggregateEntityMetrics).toHaveBeenCalledTimes(2);
-    expect(db.aggregateAgentTracingDashboard).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date('2026-10-15T12:00:20Z'));
     await collectPrometheusMetrics('tenant_db', 'tenant-1');
     expect(db.aggregateEntityMetrics).toHaveBeenCalledTimes(2);
-    expect(db.aggregateAgentTracingDashboard).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date('2026-10-15T12:02:00Z'));
     await collectPrometheusMetrics('tenant_db', 'tenant-1');
     expect(db.aggregateEntityMetrics).toHaveBeenCalledTimes(4);
-    expect(db.aggregateAgentTracingDashboard).toHaveBeenCalledTimes(2);
   });
 
   it('keeps tenants apart in the cache', async () => {
@@ -160,25 +138,24 @@ describe('collectPrometheusMetrics — tracing and entity health', () => {
       collectPrometheusMetrics('tenant_db', 'tenant-1'),
     ]);
 
-    expect(db.aggregateAgentTracingDashboard).toHaveBeenCalledTimes(1);
     expect(db.aggregateEntityMetrics).toHaveBeenCalledTimes(2);
   });
 
-  it('degrades per family: a failing tracing aggregate does not drop the entity gauges', async () => {
-    db.aggregateAgentTracingDashboard.mockRejectedValue(new Error('tracing store down'));
+  it('serves empty session gauges as zeros when the tenant has no agent rows', async () => {
+    db.aggregateEntityMetrics.mockResolvedValue([]);
 
     const text = await collectPrometheusMetrics('tenant_db', 'tenant-1');
 
-    expect(text).not.toContain('console_tracing_sessions_total');
-    expect(text).toContain('console_entity_requests_24h{entity_type="agent"} 13');
+    expect(text).toContain('console_tracing_sessions_total{status="success"} 0');
+    expect(text).toContain('console_tracing_input_tokens_24h 0');
   });
 
-  it('degrades per family: a failing entity rollup does not drop the tracing gauges', async () => {
+  it('drops the health families when the entity rollup is unavailable', async () => {
     db.aggregateEntityMetrics.mockRejectedValue(new Error('rollup unavailable'));
 
     const text = await collectPrometheusMetrics('tenant_db', 'tenant-1');
 
-    expect(text).toContain('console_tracing_sessions_total{status="success"} 4');
+    expect(text).not.toContain('console_tracing_sessions_total');
     expect(text).not.toContain('console_entity_requests_24h');
   });
 });

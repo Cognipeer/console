@@ -42,6 +42,7 @@ import { getMetricDef, type AlertMetricDef } from './metricCatalog';
 import { createModeGate, type ModeGate } from './modeAvailability';
 import { IncidentService, deriveRuleSeverity } from './incidentService';
 import { buildIncidentContext } from './incidentContext';
+import { evaluationShapeOf } from './ruleShape';
 
 const logger = createLogger('alert-evaluator');
 
@@ -51,6 +52,27 @@ const HOUR_MS = 3_600_000;
 export const RESOLVE_AFTER_OK_EVALUATIONS = 2;
 /** Upper bound of targets one rule fans out to (the busiest entities win). */
 export const MAX_RULE_TARGETS = 2000;
+/** Targets of one rule handled at the same time (each may wait on a slow channel). */
+export const TARGET_CONCURRENCY = 8;
+/**
+ * Notifying actions (fire / resolve / re-notify) one rule performs per sweep. The rest wait for the
+ * next tick (their state is kept so nothing is lost), so an outage hitting hundreds of entities
+ * cannot hold a sweep hostage to a dead channel.
+ */
+export const MAX_ACTIONS_PER_RULE_SWEEP = 50;
+/** Incident contexts (extra reads per fire) built per rule and sweep; later fires of a storm go without. */
+export const MAX_CONTEXTS_PER_RULE_SWEEP = 10;
+/** Entities with traffic over a lookback, shared by rules and sweeps (key includes the aligned window start). */
+const HISTORY_CACHE_MAX = 200;
+const historyCache = new Map<string, Map<string, number>>();
+
+/** Forget the cached lookback histories (tests). */
+export function __resetEvaluatorCachesForTests(): void {
+  historyCache.clear();
+}
+
+/** Aggregates shared by the rules of one sweep (same project, entity type, window). */
+export type AggregateMemo = Map<string, Promise<Map<string, EntityMetricCounters>>>;
 
 /**
  * Evaluate a single condition: `actualValue <op> threshold`
@@ -110,6 +132,10 @@ export interface EvaluateRuleOptions {
   gate: ModeGate;
   /** Keys that already have a non-ok state: they stay targets so silent entities can resolve. */
   stateKeys?: string[];
+  /** Keys whose state is firing: an absence alert on them lasts until traffic returns. */
+  firingKeys?: string[];
+  /** Window aggregates shared with the other rules of the sweep. */
+  memo?: AggregateMemo;
 }
 
 function defaultMinSamples(mode: AlertConditionMode): number {
@@ -130,6 +156,9 @@ function selectedKeys(rule: IAlertRule): string[] | null {
 /** Whether a computed value can be judged at all. */
 function judgeable(def: AlertMetricDef, value: number | null, sampleCount: number, minSamples: number, mode: AlertConditionMode): boolean {
   if (value === null) return false;
+  // A count metric's sample count IS its value: a floor on it would blind baseline-drop rules for
+  // 1..minSamples-1 events. The baseline judges history sufficiency itself.
+  if (mode === 'baseline' && def.unit === 'count') return true;
   // "Less than" and baseline-drop rules on counts must see an empty window as 0.
   if (def.zeroWhenEmpty && sampleCount === 0 && (mode === 'threshold' || mode === 'baseline')) return true;
   return sampleCount >= minSamples;
@@ -208,6 +237,55 @@ export async function evaluateRuleTargets(
   };
 }
 
+function aggregateShared(memo: AggregateMemo | undefined, input: Parameters<typeof aggregateEntityCounters>[0]) {
+  if (!memo) return aggregateEntityCounters(input);
+  const key = JSON.stringify([
+    input.tenantDbName, input.tenantId, input.projectId, input.entityType, input.fromMs, input.toMs,
+    input.entityKeys ? [...input.entityKeys].sort() : null,
+  ]);
+  let hit = memo.get(key);
+  if (!hit) {
+    hit = aggregateEntityCounters(input);
+    memo.set(key, hit);
+  }
+  return hit;
+}
+
+/**
+ * Requests per entity over `[fromMs - lookbackMs, fromMs)`. The history only changes when a rollup
+ * bucket closes, and `fromMs` is bucket-aligned, so one read serves every sweep of that bucket.
+ */
+async function lookbackRequests(
+  scope: { tenantDbName: string; tenantId: string; projectId: string; entityType: EntityMetricType },
+  fromMs: number,
+  lookbackMs: number,
+  selected: string[] | null,
+  memo: AggregateMemo | undefined,
+): Promise<Map<string, number>> {
+  const cacheKey = JSON.stringify([
+    scope.tenantDbName, scope.tenantId, scope.projectId, scope.entityType, fromMs, lookbackMs, selected ? [...selected].sort() : null,
+  ]);
+  const cached = historyCache.get(cacheKey);
+  if (cached) return cached;
+  const history = await aggregateShared(memo, {
+    ...scope,
+    fromMs: fromMs - lookbackMs,
+    toMs: fromMs,
+    entityKeys: selected ?? undefined,
+  });
+  const requests = new Map<string, number>();
+  for (const [key, counters] of history) requests.set(key, counters.requests);
+  if (historyCache.size >= HISTORY_CACHE_MAX) {
+    const oldest = historyCache.keys().next().value;
+    if (oldest !== undefined) historyCache.delete(oldest);
+  }
+  historyCache.set(cacheKey, requests);
+  return requests;
+}
+
+/** How far back a baseline-drop rule looks for entities that fell silent. */
+const BASELINE_SILENCE_LOOKBACK_MS = 24 * HOUR_MS;
+
 async function evaluateEntityRule(
   ctx: EvaluationContext,
   rule: IAlertRule,
@@ -228,24 +306,30 @@ async function evaluateEntityRule(
     entityType,
   };
 
-  const current = await aggregateEntityCounters({ ...scope, fromMs, toMs, entityKeys: selected ?? undefined });
+  const current = await aggregateShared(options.memo, { ...scope, fromMs, toMs, entityKeys: selected ?? undefined });
 
   // Absence candidates: entities that normally have traffic in a window of this size.
   let candidates: Set<string> | null = null;
+  const firing = new Set(options.firingKeys ?? []);
   if (mode === 'absence') {
     const absence = rule.condition.absence ?? { lookbackHours: 24, minExpectedPerWindow: 1 };
     const lookbackMs = absence.lookbackHours * HOUR_MS;
-    const history = await aggregateEntityCounters({
-      ...scope,
-      fromMs: fromMs - lookbackMs,
-      toMs: fromMs,
-      entityKeys: selected ?? undefined,
-    });
+    const history = await lookbackRequests(scope, fromMs, lookbackMs, selected, options.memo);
     const windows = Math.max(lookbackMs / (rule.windowMinutes * MINUTE_MS), 1);
     candidates = new Set();
-    for (const [key, counters] of history) {
-      if (counters.requests / windows >= (absence.minExpectedPerWindow ?? 1)) candidates.add(key);
+    for (const [key, requests] of history) {
+      if (requests / windows >= (absence.minExpectedPerWindow ?? 1)) candidates.add(key);
     }
+  }
+
+  // A baseline "drop" must also see entities that went completely silent: they have no row in the
+  // current window, so they join as zero-valued targets (like absence does).
+  let silent: Set<string> | null = null;
+  const baselineDirection = rule.condition.baseline?.direction;
+  if (mode === 'baseline' && def.zeroWhenEmpty && baselineDirection !== 'up' && !selected) {
+    const history = await lookbackRequests(scope, fromMs, BASELINE_SILENCE_LOOKBACK_MS, null, options.memo);
+    silent = new Set();
+    for (const [key, requests] of history) if (requests > 0 && !current.has(key)) silent.add(key);
   }
 
   let keys: string[];
@@ -256,7 +340,8 @@ async function evaluateEntityRule(
     // the cap then drops the least busy of the rest.
     const pinned = new Set<string>();
     for (const key of options.stateKeys ?? []) if (key) pinned.add(key);
-    const rest = [...(candidates ?? current.keys())].filter((key) => !pinned.has(key));
+    const base = candidates ?? (silent ? new Set([...current.keys(), ...silent]) : current.keys());
+    const rest = [...base].filter((key) => !pinned.has(key));
     rest.sort((a, b) => (current.get(b)?.requests ?? 0) - (current.get(a)?.requests ?? 0));
     keys = [...pinned, ...rest];
   }
@@ -276,7 +361,9 @@ async function evaluateEntityRule(
         entityKey: key,
         value: requests,
         sampleCount: requests,
-        breached: Boolean(candidates?.has(key)) && requests === 0,
+        // A firing alert stays breached while the entity is silent, whether or not its traffic has
+        // aged out of the lookback: only returning traffic resolves an absence alert.
+        breached: requests === 0 && (Boolean(candidates?.has(key)) || firing.has(key)),
         noData: false,
       });
     }
@@ -372,8 +459,17 @@ export interface StateStepInput {
   forMinutes: number;
   cooldownMinutes: number;
   renotifyMinutes: number;
-  /** Which direction is worse for the peak value. */
-  worse: 'max' | 'min';
+  /** Which direction is worse for the peak value ('farthest': the largest deviation from `baseline`). */
+  worse: 'max' | 'min' | 'farthest';
+  /** The baseline the value is judged against ('farthest' peaks). */
+  baseline?: number | null;
+  /**
+   * The data window this evaluation judged (entity rules: the rollup bucket end). Ticks come every
+   * minute but entity windows advance every 5, so ok evaluations only count once per distinct window.
+   */
+  windowKey?: number | null;
+  /** Last firing known from before alert states existed (the cooldown of an upgraded rule). */
+  seedLastFiredAt?: Date | null;
 }
 
 export interface StateStep {
@@ -385,10 +481,20 @@ export interface StateStep {
   action: StateAction;
 }
 
-function worseOf(worse: 'max' | 'min', a: number | null, b: number | null): number | null {
+function worseOf(worse: 'max' | 'min' | 'farthest', a: number | null, b: number | null, baseline?: number | null): number | null {
   if (a === null) return b;
   if (b === null) return a;
+  if (worse === 'farthest') {
+    if (baseline === null || baseline === undefined) return Math.max(a, b);
+    return Math.abs(b - baseline) > Math.abs(a - baseline) ? b : a;
+  }
   return worse === 'max' ? Math.max(a, b) : Math.min(a, b);
+}
+
+/** The data window a stored state last judged (see StateStepInput.windowKey). */
+function storedWindowKey(prev: IAlertState | null): number | null {
+  const value = (prev?.detail as Record<string, unknown> | null | undefined)?.windowKey;
+  return typeof value === 'number' ? value : null;
 }
 
 /**
@@ -416,7 +522,9 @@ export function advanceAlertState(input: StateStepInput): StateStep {
     if (phase === 'pending') {
       const elapsedMin = (nowMs - phaseSince.getTime()) / MINUTE_MS;
       if (elapsedMin >= input.forMinutes) {
-        const lastFired = prev?.lastFiredAt ? new Date(prev.lastFiredAt).getTime() : null;
+        const lastFired = prev?.lastFiredAt
+          ? new Date(prev.lastFiredAt).getTime()
+          : (input.seedLastFiredAt ? input.seedLastFiredAt.getTime() : null);
         const inCooldown = lastFired !== null && nowMs - lastFired < input.cooldownMinutes * MINUTE_MS;
         if (!inCooldown) {
           phase = 'firing';
@@ -426,7 +534,7 @@ export function advanceAlertState(input: StateStepInput): StateStep {
         }
       }
     } else if (phase === 'firing') {
-      peakValue = worseOf(input.worse, peakValue, input.value);
+      peakValue = worseOf(input.worse, peakValue, input.value, input.baseline);
       const lastNotified = prev?.lastNotifiedAt ? new Date(prev.lastNotifiedAt).getTime() : null;
       if (input.renotifyMinutes > 0 && lastNotified !== null && nowMs - lastNotified >= input.renotifyMinutes * MINUTE_MS) {
         action = 'renotify_due';
@@ -436,7 +544,8 @@ export function advanceAlertState(input: StateStepInput): StateStep {
     return { phase, phaseSince, breachStreak, okStreak: 0, peakValue, action };
   }
 
-  const okStreak = (prev?.okStreak ?? 0) + 1;
+  const sameWindow = input.windowKey !== undefined && input.windowKey !== null && storedWindowKey(prev) === input.windowKey;
+  const okStreak = sameWindow ? Math.max(prev?.okStreak ?? 0, 1) : (prev?.okStreak ?? 0) + 1;
   if (prevPhase === 'pending') {
     return { phase: 'ok', phaseSince: now, breachStreak: 0, okStreak, peakValue: null, action: 'none' };
   }
@@ -450,9 +559,17 @@ export function advanceAlertState(input: StateStepInput): StateStep {
 }
 
 /** Which way a value gets worse for this rule (peak = the worst value seen while firing). */
-function worseDirection(rule: IAlertRule, def: AlertMetricDef | undefined): 'max' | 'min' {
-  if (ruleMode(rule) === 'threshold') {
+function worseDirection(rule: IAlertRule, def: AlertMetricDef | undefined): 'max' | 'min' | 'farthest' {
+  const mode = ruleMode(rule);
+  if (mode === 'threshold') {
     return rule.condition.operator === 'lt' || rule.condition.operator === 'lte' ? 'min' : 'max';
+  }
+  if (mode === 'baseline') {
+    // The breach direction is the rule's own: a spike peaks high and a drop low, whatever "good" means.
+    const direction = rule.condition.baseline?.direction;
+    if (direction === 'up') return 'max';
+    if (direction === 'down') return 'min';
+    return 'farthest';
   }
   return def?.goodDirection === 'up' ? 'min' : 'max';
 }
@@ -484,6 +601,8 @@ interface RuleRuntime {
   entityType: EntityMetricType | null;
   now: Date;
   projectName: () => Promise<string>;
+  /** Incident contexts this rule may still build in this sweep. */
+  contextBudget: { left: number };
 }
 
 function buildNotification(
@@ -606,6 +725,8 @@ async function fireTarget(runtime: RuleRuntime, target: TargetEvaluation, peakVa
 
   let context: IIncidentContext | undefined;
   try {
+    if (runtime.contextBudget.left <= 0) throw new Error('context budget of this sweep used up');
+    runtime.contextBudget.left -= 1;
     context = await buildIncidentContext({
       db,
       tenantDbName: ctx.tenantDbName,
@@ -618,7 +739,7 @@ async function fireTarget(runtime: RuleRuntime, target: TargetEvaluation, peakVa
       nowMs: now.getTime(),
     });
   } catch (error) {
-    logger.warn(`Could not build the incident context for rule "${rule.name}"`, {
+    logger.warn(`No incident context for rule "${rule.name}"${entityKey ? ` [${entityKey}]` : ''}`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -778,24 +899,29 @@ async function renotifyTarget(runtime: RuleRuntime, target: TargetEvaluation, st
   return true;
 }
 
-function stateDetail(target: TargetEvaluation): Record<string, unknown> | null {
+function stateDetail(target: TargetEvaluation, windowKey: number | null): Record<string, unknown> | null {
   const detail: Record<string, unknown> = {};
   if (target.insufficientData) detail.insufficientData = true;
   if (target.z !== undefined && target.z !== null) detail.z = target.z;
   if (target.ratio !== undefined && target.ratio !== null) detail.ratio = target.ratio;
   if (target.burnShort !== undefined && target.burnShort !== null) detail.burnShort = target.burnShort;
   if (target.burnLong !== undefined && target.burnLong !== null) detail.burnLong = target.burnLong;
+  if (windowKey !== null) detail.windowKey = windowKey;
   return Object.keys(detail).length > 0 ? detail : null;
 }
 
 /**
  * Evaluate all active alert rules for a given tenant.
  *
+ * `deadlineMs` (epoch ms) bounds the work: past it no further rule is started and no
+ * further notification is sent (their targets keep their state and are handled by the next
+ * sweep), so one tenant can never outlast the scheduler lock or starve the others.
+ *
  * Returns how many alerts fired (new incidents) in this sweep.
  */
 export async function evaluateTenantAlerts(
   ctx: EvaluationContext,
-  options: { ruleFilter?: (rule: IAlertRule) => boolean | Promise<boolean> } = {},
+  options: { ruleFilter?: (rule: IAlertRule) => boolean | Promise<boolean>; deadlineMs?: number } = {},
 ): Promise<number> {
   const db = await getTenantDatabase(ctx.tenantDbName);
 
@@ -812,6 +938,7 @@ export async function evaluateTenantAlerts(
   if (rules.length === 0) return 0;
 
   const gate = createModeGate(ctx.tenantId);
+  const memo: AggregateMemo = new Map();
   const projectNames = new Map<string, Promise<string>>();
   const projectNameFor = (projectId: string) => {
     let pending = projectNames.get(projectId);
@@ -832,8 +959,12 @@ export async function evaluateTenantAlerts(
   const now = new Date();
 
   for (const rule of rules) {
+    if (options.deadlineMs !== undefined && Date.now() > options.deadlineMs) {
+      logger.warn(`Tenant ${ctx.tenantSlug}: evaluation budget exhausted; the remaining rules wait for the next tick`);
+      break;
+    }
     try {
-      firedCount += await evaluateRule(ctx, db, rule, { now, gate, projectNameFor });
+      firedCount += await evaluateRule(ctx, db, rule, { now, gate, projectNameFor, memo, deadlineMs: options.deadlineMs });
     } catch (err) {
       logger.error(`Error evaluating rule "${rule.name}" for tenant ${ctx.tenantSlug}`, {
         error: err instanceof Error ? err.message : err,
@@ -844,11 +975,28 @@ export async function evaluateTenantAlerts(
   return firedCount;
 }
 
+/** The rule was deleted, disabled or reshaped (its states would now mean something else) since it was loaded. */
+async function ruleChangedUnderneath(db: DatabaseProvider, rule: IAlertRule, ruleId: string): Promise<boolean> {
+  try {
+    const current = await db.findAlertRuleById(ruleId);
+    if (!current || current.enabled === false) return true;
+    return evaluationShapeOf(current) !== evaluationShapeOf(rule);
+  } catch {
+    return false;
+  }
+}
+
 async function evaluateRule(
   ctx: EvaluationContext,
   db: DatabaseProvider,
   rule: IAlertRule,
-  shared: { now: Date; gate: ModeGate; projectNameFor: (projectId: string) => Promise<string> },
+  shared: {
+    now: Date;
+    gate: ModeGate;
+    projectNameFor: (projectId: string) => Promise<string>;
+    memo?: AggregateMemo;
+    deadlineMs?: number;
+  },
 ): Promise<number> {
   const { now } = shared;
   const ruleId = String(rule._id);
@@ -858,8 +1006,18 @@ async function evaluateRule(
   const states = await db.listAlertStates({ ruleId, limit: 5000 });
   const stateByKey = new Map(states.map((state) => [state.entityKey, state]));
   const nonOkKeys = states.filter((state) => state.phase !== 'ok' && state.entityKey).map((state) => state.entityKey);
+  const firingKeys = states.filter((state) => state.phase === 'firing' && state.entityKey).map((state) => state.entityKey);
 
-  const evaluation = await evaluateRuleTargets(ctx, rule, { nowMs: now.getTime(), gate: shared.gate, stateKeys: nonOkKeys });
+  const evaluation = await evaluateRuleTargets(ctx, rule, {
+    nowMs: now.getTime(),
+    gate: shared.gate,
+    stateKeys: nonOkKeys,
+    firingKeys,
+    memo: shared.memo,
+  });
+
+  // The sweep may have been waiting on slower rules: do not write states of a rule that is gone or edited since.
+  if (await ruleChangedUnderneath(db, rule, ruleId)) return 0;
 
   if (evaluation.modeUnavailable) {
     // Rule-level marker for the UI; entity states are left as they are.
@@ -910,18 +1068,34 @@ async function evaluateRule(
     entityType: evaluation.entityType,
     now,
     projectName: () => shared.projectNameFor(rule.projectId),
+    contextBudget: { left: MAX_CONTEXTS_PER_RULE_SWEEP },
   };
 
   const forMinutes = Math.max(0, rule.condition.forMinutes ?? 0);
   const renotifyMinutes = Math.max(0, rule.renotifyMinutes ?? 0);
   const cooldownMinutes = Math.max(0, rule.cooldownMinutes ?? 0);
   const worse = worseDirection(rule, def);
-  let fired = 0;
+  const windowKey = def?.source === 'entity'
+    ? entityEvaluationWindow(now.getTime(), rule.windowMinutes).toMs
+    : null;
+  // An upgraded legacy rule has no state row yet: its cooldown still runs from its last firing.
+  const legacySeed = rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt) : null;
 
-  for (const target of evaluation.targets) {
+  let fired = 0;
+  let actions = 0;
+  let deferred = 0;
+  let aborted = false;
+  const staleKeys: string[] = [];
+
+  const overBudget = () =>
+    actions >= MAX_ACTIONS_PER_RULE_SWEEP
+    || (shared.deadlineMs !== undefined && Date.now() > shared.deadlineMs);
+
+  const handleTarget = async (target: TargetEvaluation): Promise<void> => {
     try {
       const prev = stateByKey.get(target.entityKey) ?? null;
-      const step = advanceAlertState({
+      const seed = !prev && target.entityKey === '' ? legacySeed : null;
+      let step = advanceAlertState({
         prev,
         breached: target.breached,
         value: target.value,
@@ -930,18 +1104,46 @@ async function evaluateRule(
         cooldownMinutes,
         renotifyMinutes,
         worse,
+        baseline: target.baseline ?? null,
+        windowKey,
+        seedLastFiredAt: seed,
       });
+
+      // Too many notifications for one sweep: keep the state that retries next tick, send nothing now.
+      if (step.action !== 'none' && overBudget()) {
+        deferred += 1;
+        if (step.action === 'fire') {
+          step = {
+            ...step,
+            phase: 'pending',
+            phaseSince: prev?.phase === 'pending' && prev.phaseSince ? new Date(prev.phaseSince) : now,
+            action: 'none',
+          };
+        } else if (step.action === 'resolve') {
+          step = {
+            ...step,
+            phase: 'firing',
+            phaseSince: prev?.phaseSince ? new Date(prev.phaseSince) : now,
+            action: 'none',
+          };
+        } else {
+          step = { ...step, action: 'none' };
+        }
+      }
 
       let incidentId = prev?.incidentId ?? null;
       let eventId = prev?.eventId ?? null;
       let firedAt = prev?.firedAt ?? null;
-      let lastFiredAt = prev?.lastFiredAt ?? null;
+      let lastFiredAt = prev?.lastFiredAt ?? seed ?? null;
       let lastNotifiedAt = prev?.lastNotifiedAt ?? null;
       const phase = step.phase;
       const phaseSince = step.phaseSince;
       let peakValue = step.peakValue;
+      let acted = false;
 
       if (step.action === 'fire') {
+        actions += 1;
+        acted = true;
         const outcome = await fireTarget(runtime, target, peakValue);
         incidentId = outcome.incidentId;
         eventId = outcome.eventId;
@@ -950,13 +1152,30 @@ async function evaluateRule(
         lastNotifiedAt = now;
         fired += 1;
       } else if (step.action === 'resolve') {
+        actions += 1;
+        acted = true;
         await resolveTarget(runtime, target, prev as IAlertState);
         incidentId = null;
         eventId = null;
         firedAt = null;
         peakValue = null;
       } else if (step.action === 'renotify_due') {
+        actions += 1;
+        acted = true;
         if (await renotifyTarget(runtime, target, prev as IAlertState)) lastNotifiedAt = now;
+      }
+
+      // A notification can take seconds: the rule may have been deleted, disabled or reshaped meanwhile.
+      if (aborted) return;
+      if (acted && await ruleChangedUnderneath(db, rule, ruleId)) {
+        aborted = true;
+        if (step.action === 'fire' && incidentId) {
+          try {
+            await IncidentService.addSystemNote(ctx.tenantDbName, incidentId, 'Rule changed while this alert fired; it will not resolve automatically');
+          } catch { /* informational */ }
+        }
+        await db.deleteAlertStates({ ruleId });
+        return;
       }
 
       // Keep the incident's worst value current while the alert keeps firing.
@@ -966,10 +1185,18 @@ async function evaluateRule(
         } catch { /* informational only */ }
       }
 
+      // A healthy entity needs a row only while its cooldown runs; afterwards the row goes.
+      const cooledDown = lastFiredAt === null
+        || now.getTime() - new Date(lastFiredAt).getTime() >= cooldownMinutes * MINUTE_MS;
+      if (phase === 'ok' && target.entityKey !== '' && cooledDown) {
+        if (prev) staleKeys.push(target.entityKey);
+        return;
+      }
+
       // Healthy entities leave no row behind; a row exists only once an entity has been non-ok.
       const wasNonOk = prev !== null && prev.phase !== 'ok';
-      const persist = step.phase !== 'ok' || wasNonOk || target.entityKey === '';
-      if (!persist) continue;
+      const persist = phase !== 'ok' || wasNonOk || target.entityKey === '';
+      if (!persist) return;
 
       await db.upsertAlertState({
         tenantId: ctx.tenantId,
@@ -991,12 +1218,48 @@ async function evaluateRule(
         lastFiredAt,
         lastNotifiedAt,
         peakValue,
-        detail: stateDetail(target),
+        detail: stateDetail(target, windowKey),
       });
     } catch (error) {
       logger.error(`Error handling "${rule.name}"${target.entityKey ? ` [${target.entityKey}]` : ''}`, {
         error: error instanceof Error ? error.message : error,
       });
+    }
+  };
+
+  // Targets are independent; a few at a time keeps one slow channel from serialising the whole rule.
+  const queue = evaluation.targets;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (!aborted) {
+      const index = next;
+      next += 1;
+      if (index >= queue.length) return;
+      await handleTarget(queue[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(TARGET_CONCURRENCY, queue.length) }, () => worker()));
+
+  if (aborted) return fired;
+
+  if (deferred > 0) {
+    logger.warn(`Rule "${rule.name}": ${deferred} notification(s) deferred to the next tick`, { tenant: ctx.tenantSlug });
+  }
+
+  // Rows of entities that are healthy, out of cooldown and no longer targets are only clutter.
+  const targetKeys = new Set(queue.map((target) => target.entityKey));
+  for (const state of states) {
+    if (state.phase !== 'ok' || !state.entityKey || targetKeys.has(state.entityKey)) continue;
+    if ((state.detail as Record<string, unknown> | null | undefined)?.licenseRequired === true) continue;
+    const last = state.lastFiredAt ? new Date(state.lastFiredAt).getTime() : null;
+    if (last === null || now.getTime() - last >= cooldownMinutes * MINUTE_MS) staleKeys.push(state.entityKey);
+  }
+  for (let i = 0; i < staleKeys.length; i += 200) {
+    try {
+      await db.deleteAlertStates({ ruleId, entityKeys: staleKeys.slice(i, i + 200) });
+    } catch (error) {
+      logger.warn('Could not purge settled alert states', { error: error instanceof Error ? error.message : String(error) });
+      break;
     }
   }
 

@@ -32,7 +32,7 @@ import {
   sealChannels,
   sendChannelMessage,
 } from '@/lib/services/alerts/channels';
-import { buildAlertEmailData } from '@/lib/services/alerts/channels/emailChannel';
+import { buildAlertEmailData, resetAlertEmailUserCache } from '@/lib/services/alerts/channels/emailChannel';
 import { buildSlackPayload } from '@/lib/services/alerts/channels/slackChannel';
 import { buildTeamsPayload, escapeTeamsMarkdown } from '@/lib/services/alerts/channels/teamsChannel';
 import { pagerDutyDedupKey } from '@/lib/services/alerts/channels/pagerDutyChannel';
@@ -96,6 +96,7 @@ function expectNoSecrets(value: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetAlertEmailUserCache();
   h.logLines.length = 0;
   h.safeFetch.mockResolvedValue(response(200, 'ok'));
   h.assertPublicUrl.mockResolvedValue(new URL('https://hooks.example.com'));
@@ -124,6 +125,21 @@ describe('buildNotificationMessage', () => {
       Window: '15 minutes', 'Fired at': '2026-10-15 12:30 UTC', 'Version change': '1.4.0 → 1.5.0',
     });
     expect(fields['Top error']).toBe('Upstream timeout (12x)');
+  });
+
+  it('says how long before the alert the new version was first seen, in every rendering', () => {
+    const n = notification({
+      context: { mode: 'threshold', windowMinutes: 15, versionChange: { from: '1.4.0', to: '1.5.0', firstSeenAt: '2026-10-15T12:12:00Z' } },
+    });
+    const expected = '1.4.0 → 1.5.0 (first seen 18 min before this fired)';
+    const fields = Object.fromEntries(buildNotificationMessage(n).fields.map((f) => [f.label, f.value]));
+    expect(fields['Version change']).toBe(expected);
+    expect(buildAlertEmailData(n, ctx).versionChange).toBe(expected);
+    // a timestamp after the alert (clock skew) or a missing one leaves the plain change
+    const later = notification({
+      context: { mode: 'threshold', windowMinutes: 15, versionChange: { from: '1.4.0', to: '1.5.0', firstSeenAt: '2026-10-15T12:45:00Z' } },
+    });
+    expect(buildAlertEmailData(later, ctx).versionChange).toBe('1.4.0 → 1.5.0');
   });
 
   it('uses the right operator symbol and wording for a "less than" rule', () => {

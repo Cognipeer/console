@@ -39,7 +39,7 @@ import {
   TOOL_DEFINITIONS_SECTION_KIND,
 } from '@/lib/services/tracingToolDefinitions';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
-import { countTraceErrors, deriveSessionStatus, isErrorTraceEvent } from '@/lib/shared/traceHealth';
+import { countTraceErrors, deriveSessionStatus, isErrorTraceEvent, isExplicitClientStatus } from '@/lib/shared/traceHealth';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -982,6 +982,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         source: 'custom' as const,
         startedAt: payload.startedAt ? new Date(payload.startedAt) : new Date(),
         status: batchStatus,
+        // A status the client supplied is never overridden by a late error event (only a derived one is).
+        statusExplicit: isExplicitClientStatus(payload.status),
         summary: sessionSummary,
         tenantId: ctx.tenantId,
         threadId: typeof payload.threadId === 'string' && payload.threadId.trim()
@@ -1289,6 +1291,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         endedAt: undefined,
         modelsUsed: mergeUnique(existing?.modelsUsed, sessionDoc.modelsUsed),
         status: 'in_progress',
+        // The run is open again: an earlier leg's client end status no longer describes it.
+        statusExplicit: false,
         ...(sessionDoc.threadId ? { threadId: sessionDoc.threadId } : {}),
         ...(sessionDoc.traceId ? { traceId: sessionDoc.traceId } : {}),
         ...(sessionDoc.rootSpanId ? { rootSpanId: sessionDoc.rootSpanId } : {}),
@@ -1466,11 +1470,14 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           toolsUsed: collectEventToolNames(event),
         }, ctx.projectId);
 
-        // An error that lands after the session was already counted as finished flips it to 'error' in the
-        // database; book the difference.
+        // An error that lands after the session finished flips it to 'error' in the database; book the
+        // difference. No `metricsOutcome` precondition: /end may still be pricing the session (it has not
+        // persisted its marker yet), and the SDK does not wait for /events. The outcome bookkeeping runs
+        // under a per-session lock, re-reads the stored status and marker, and is idempotent, so this call
+        // either waits for /end's booking and corrects it, or books the (already flipped) status itself.
         if (errorCounts.errorEvents > 0) {
           const after = await backgroundDb.findAgentTracingSessionById(sessionId, ctx.projectId);
-          if (after?.metricsOutcome && isTerminalSessionStatus(after.status)) {
+          if (after && isTerminalSessionStatus(after.status)) {
             await recordAgentSessionOutcome({
               tenantDbName: ctx.tenantDbName,
               tenantId: ctx.tenantId,
@@ -1578,7 +1585,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           nonSinkErrors: countNonSinkErrors(mergedErrors),
           ended: true,
         });
-        return { mergedSummary, mergedErrors, status };
+        // Remembered with the status: a late error event flips a derived status but never a client-supplied one.
+        const statusExplicit = isExplicitClientStatus(payload.status);
+        return { mergedSummary, mergedErrors, status, statusExplicit };
       };
       const { status } = mergeEnd(session);
 
@@ -1592,6 +1601,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           endedAt,
           errors: merged.mergedErrors,
           status: merged.status,
+          statusExplicit: merged.statusExplicit,
           summary: merged.mergedSummary,
           totalBytesIn: getSummaryNumber(merged.mergedSummary, 'totalBytesIn'),
           totalBytesOut: getSummaryNumber(merged.mergedSummary, 'totalBytesOut'),

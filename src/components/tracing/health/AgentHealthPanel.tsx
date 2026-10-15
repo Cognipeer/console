@@ -81,7 +81,11 @@ export default function AgentHealthPanel({ agentName, dateFilter, refreshKey = 0
   const status = current ? state.status : 'loading';
   const data = current && state.status !== 'error' ? state.data : null;
   const refreshing = status === 'loading' && data !== null;
-  const alerts = data?.alerts ?? null;
+  const alertsUnavailable = data?.alertsAvailable === false;
+  // An unreadable alert state is never shown as counts: zero firing would read as all-clear.
+  const alerts = alertsUnavailable ? null : (data?.alerts ?? null);
+  const hasAlertActivity = Boolean(alerts && (alerts.firing > 0 || alerts.pending > 0));
+  const noAlertRule = Boolean(data) && !alertsUnavailable && !hasAlertActivity && alerts?.covered === false;
 
   return (
     <section className="ds-col ds-gap-md" aria-label={t('panel.title')} aria-busy={status === 'loading'}>
@@ -106,6 +110,24 @@ export default function AgentHealthPanel({ agentName, dateFilter, refreshKey = 0
               {t('panel.alertsPending', { count: alerts.pending })}
             </span>
           ) : null}
+          {alertsUnavailable ? (
+            <span className="ds-badge" title={t('panel.alertsUnknown')} data-testid="agent-alerts-unknown">
+              <span className="ds-badge-dot" />
+              {t('health.unknown')}
+            </span>
+          ) : null}
+          {noAlertRule ? (
+            <Link
+              href={buildCreateAgentAlertHref(agentName)}
+              className="ds-badge"
+              style={{ textDecoration: 'none' }}
+              title={t('health.noRuleHint')}
+              data-testid="agent-no-alert-rule"
+            >
+              <span className="ds-badge-dot" />
+              {t('health.noRule')}
+            </Link>
+          ) : null}
           <Button
             component={Link}
             href={buildCreateAgentAlertHref(agentName)}
@@ -126,6 +148,12 @@ export default function AgentHealthPanel({ agentName, dateFilter, refreshKey = 0
           </Button>
         </div>
       </div>
+
+      {alertsUnavailable ? (
+        <Alert color="yellow" variant="light" icon={<IconAlertCircle size={16} />} data-testid="agent-alerts-unavailable">
+          <span style={{ fontSize: 13 }}>{t('agents.alertsUnavailable')}</span>
+        </Alert>
+      ) : null}
 
       {current && state.status === 'error' ? (
         <Alert

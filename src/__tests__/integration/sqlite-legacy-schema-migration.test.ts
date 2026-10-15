@@ -338,17 +338,25 @@ describe('Legacy tenant DB schema migration', () => {
     const checks = {
       incidentsRuleEntity: has('idx_incidents_rule_entity'),
       incidentsProjectStatus: has('idx_incidents_project_status_firedAt'),
+      incidentsProjectEntity: has('idx_incidents_project_entity_firedAt'),
+      incidentsAlertEvent: has('idx_incidents_alertEventId'),
       sessionsStale: has('idx_tracing_sessions_status_updatedAt'),
       entityMetrics: has('entity_metrics'),
       alertStates: has('alert_states'),
+      alertStatesRule: has('idx_alert_states_rule'),
+      alertStatesProjectPhase: has('idx_alert_states_project_phase_notenant'),
     };
     db.close();
     expect(checks).toEqual({
       incidentsRuleEntity: true,
       incidentsProjectStatus: true,
+      incidentsProjectEntity: true,
+      incidentsAlertEvent: true,
       sessionsStale: true,
       entityMetrics: true,
       alertStates: true,
+      alertStatesRule: true,
+      alertStatesProjectPhase: true,
     });
   });
 

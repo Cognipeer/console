@@ -83,6 +83,25 @@ describe('deriveRuleSeverity', () => {
     ] as const)('%j -> %s', (baseline, expected) => {
       expect(deriveRuleSeverity({ rule: rule(condition), value: 1, baseline })).toBe(expected);
     });
+    it('a drop is critical at the mirrored thresholds (ratio <= 1/(2*minRatio) or z <= -2*minZ)', () => {
+      const down = {
+        ...condition,
+        baseline: { ...(condition as { baseline: object }).baseline, direction: 'down' },
+      } as IAlertCondition;
+      expect(deriveRuleSeverity({ rule: rule(down), value: 1, baseline: { ratio: 0.2, z: -1 } })).toBe('critical');
+      expect(deriveRuleSeverity({ rule: rule(down), value: 1, baseline: { ratio: 0.9, z: -6.5 } })).toBe('critical');
+      expect(deriveRuleSeverity({ rule: rule(down), value: 1, baseline: { ratio: 0.3, z: -4 } })).toBe('warning');
+      // A rise never makes a "down" rule critical.
+      expect(deriveRuleSeverity({ rule: rule(down), value: 1, baseline: { ratio: 5, z: 9 } })).toBe('warning');
+    });
+    it('two-sided rules are critical in either direction', () => {
+      const both = {
+        ...condition,
+        baseline: { ...(condition as { baseline: object }).baseline, direction: 'both' },
+      } as IAlertCondition;
+      expect(deriveRuleSeverity({ rule: rule(both), value: 1, baseline: { ratio: 0.2, z: -1 } })).toBe('critical');
+      expect(deriveRuleSeverity({ rule: rule(both), value: 1, baseline: { ratio: 4, z: 1 } })).toBe('critical');
+    });
     it('is a warning without baseline data', () => {
       expect(deriveRuleSeverity({ rule: rule(condition), value: 1 })).toBe('warning');
     });

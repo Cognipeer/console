@@ -378,6 +378,28 @@ describeForEachProvider('Agent tracing session error counters and late-error fli
     },
   );
 
+  it('does not flip a session whose end status was supplied by the client', async () => {
+    const db = getDb();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await db.createAgentTracingSession({ ...seedDoc(seed), status: 'success', statusExplicit: true } as any);
+    await db.applyAgentTracingSessionEvent(seed.sessionId, { eventType: 'tool_call', errorEvents: 1, toolErrors: 1 }, seed.projectId);
+
+    const session = await db.findAgentTracingSessionById(seed.sessionId, seed.projectId);
+    expect(session?.status).toBe('success');
+    expect(session?.errorEvents).toBe(1);
+  });
+
+  it('flips again once an update marks the status as derived', async () => {
+    const db = getDb();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await db.createAgentTracingSession({ ...seedDoc(seed), status: 'success', statusExplicit: true } as any);
+    await db.updateAgentTracingSession(seed.sessionId, { statusExplicit: false }, seed.projectId);
+    await db.applyAgentTracingSessionEvent(seed.sessionId, { eventType: 'tool_call', errorEvents: 1 }, seed.projectId);
+
+    const session = await db.findAgentTracingSessionById(seed.sessionId, seed.projectId);
+    expect(session?.status).toBe('error');
+  });
+
   it('does not flip a finished session on events without errors', async () => {
     const db = getDb();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -442,7 +464,10 @@ describeForEachProvider('Stale agent tracing sessions (finalizer primitives)', (
   });
 
   /** Creates a session, then back-dates its last activity (`updatedAt`) like an idle run. */
-  async function seedIdle(sessionId: string, opts: { status?: string; idleMs: number; startedAgoMs?: number; projectId?: string }) {
+  async function seedIdle(
+    sessionId: string,
+    opts: { status?: string; idleMs: number; startedAgoMs?: number; projectId?: string; source?: string },
+  ) {
     const db = getDb();
     const startedAt = new Date(Date.now() - (opts.startedAgoMs ?? opts.idleMs + HOUR));
     await db.createAgentTracingSession({
@@ -450,6 +475,7 @@ describeForEachProvider('Stale agent tracing sessions (finalizer primitives)', (
       sessionId,
       projectId: opts.projectId ?? seed.projectId,
       status: opts.status ?? 'in_progress',
+      ...(opts.source !== undefined ? { source: opts.source } : {}),
       startedAt,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
@@ -488,6 +514,39 @@ describeForEachProvider('Stale agent tracing sessions (finalizer primitives)', (
 
     const limited = await db.listStaleAgentTracingSessions({ updatedBefore: new Date(Date.now() - 6 * HOUR), limit: 1 });
     expect(limited.map((s) => s.sessionId)).toEqual([`${seed.sessionId}-older`]);
+  });
+
+  it('restricts the listing to one source, applied before the limit', async () => {
+    const db = getDb();
+    // The oldest idle sessions belong to other sources: they must not use up the limit of an OTLP-only listing.
+    await seedIdle(`${seed.sessionId}-custom-1`, { idleMs: 20 * HOUR, source: 'custom' });
+    await seedIdle(`${seed.sessionId}-custom-2`, { idleMs: 19 * HOUR, source: 'custom' });
+    await seedIdle(`${seed.sessionId}-legacy`, { idleMs: 18 * HOUR });
+    await seedIdle(`${seed.sessionId}-otlp-1`, { idleMs: 10 * HOUR, source: 'otlp' });
+    await seedIdle(`${seed.sessionId}-otlp-2`, { idleMs: 8 * HOUR, source: 'otlp' });
+    await seedIdle(`${seed.sessionId}-otlp-fresh`, { idleMs: 1 * HOUR, source: 'otlp' });
+    await seedIdle(`${seed.sessionId}-otlp-done`, { idleMs: 30 * HOUR, source: 'otlp', status: 'success' });
+    const updatedBefore = new Date(Date.now() - 6 * HOUR);
+
+    const otlp = await db.listStaleAgentTracingSessions({ updatedBefore, limit: 100, source: 'otlp' });
+    expect(otlp.map((s) => s.sessionId)).toEqual([`${seed.sessionId}-otlp-1`, `${seed.sessionId}-otlp-2`]);
+    expect(otlp.every((s) => s.source === 'otlp' && s.status === 'in_progress')).toBe(true);
+
+    const limited = await db.listStaleAgentTracingSessions({ updatedBefore, limit: 1, source: 'otlp' });
+    expect(limited.map((s) => s.sessionId)).toEqual([`${seed.sessionId}-otlp-1`]);
+
+    expect((await db.listStaleAgentTracingSessions({ updatedBefore, limit: 100, source: 'custom' })).map((s) => s.sessionId))
+      .toEqual([`${seed.sessionId}-custom-1`, `${seed.sessionId}-custom-2`]);
+    expect(await db.listStaleAgentTracingSessions({ updatedBefore, limit: 100, source: 'no-such-source' })).toEqual([]);
+
+    // Without a source every source is listed, oldest first (the abandon pass).
+    expect((await db.listStaleAgentTracingSessions({ updatedBefore, limit: 100 })).map((s) => s.sessionId)).toEqual([
+      `${seed.sessionId}-custom-1`,
+      `${seed.sessionId}-custom-2`,
+      `${seed.sessionId}-legacy`,
+      `${seed.sessionId}-otlp-1`,
+      `${seed.sessionId}-otlp-2`,
+    ]);
   });
 
   it('abandons a stale session: status, endedAt = last activity, durationMs = last activity - startedAt', async () => {

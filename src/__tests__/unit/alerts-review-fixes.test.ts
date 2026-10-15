@@ -187,6 +187,13 @@ describe('userLabel', () => {
     expect(userLabel('6650ab12cd34ef567890abcd', directory, labels)).toBe('6650ab12…');
     expect(userLabel(null, directory, labels)).toBe('—');
   });
+  it('prefers the name the server resolved, so viewers who cannot list users see names', () => {
+    expect(userLabel('6650ab12cd34ef567890abcd', directory, labels, 'Linus')).toBe('Linus');
+    expect(userLabel('u2', directory, labels, 'Grace H.')).toBe('Grace H.');
+    expect(userLabel('6650ab12cd34ef567890abcd', directory, labels, null)).toBe('6650ab12…');
+    expect(userLabel('u1', directory, labels, 'Ada L.')).toBe('You');
+    expect(userLabel('system', directory, labels, 'x')).toBe('system');
+  });
 });
 
 describe('a stored rule without channels', () => {
@@ -319,7 +326,9 @@ describe('AlertHistoryPage', () => {
     await settle(150);
     expect(text()).toContain('You');
     expect(text()).toContain('0 requests');
-    expect(text()).not.toContain('u1');
+    // Leaf texts, not the page text: "You" next to a relative time like "10 hours ago" reads "You10…".
+    const leaves = qa<HTMLElement>('*').filter((el) => el.childElementCount === 0).map((el) => el.textContent?.trim() ?? '');
+    expect(leaves.some((leaf) => /\bu1\b/.test(leaf))).toBe(false);
   });
 });
 

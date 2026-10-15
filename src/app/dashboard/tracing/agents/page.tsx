@@ -56,6 +56,8 @@ interface HealthResponse {
   range: { fromMs: number; toMs: number; bucketMs: number; sparkFromMs?: number };
   agents: AgentHealthApiRow[];
   total: number;
+  /** False when the alert read failed: the rows' alert state is unknown, not all-clear. Absent on an older server. */
+  alertsAvailable?: boolean;
 }
 
 interface DirectoryResponse {
@@ -123,6 +125,12 @@ function SortHeader({
     </button>
   );
 }
+
+/**
+ * The sortable headers are buttons, which the browser exempts from the grid's uppercase header style; a plain
+ * header gets the same treatment so the whole row reads in one case.
+ */
+const PLAIN_HEADER_STYLE = { textTransform: 'none', letterSpacing: 'normal' } as const;
 
 const NUMBER_STYLE = { fontSize: 12.5, fontVariantNumeric: 'tabular-nums' } as const;
 
@@ -207,7 +215,7 @@ export default function TracingAgentsPage() {
   const range = healthData?.range ?? null;
 
   const rows = useMemo(
-    () => mergeAgentRows(healthData?.agents ?? [], directory),
+    () => mergeAgentRows(healthData?.agents ?? [], directory, healthData?.alertsAvailable),
     [healthData, directory],
   );
 
@@ -263,7 +271,7 @@ export default function TracingAgentsPage() {
     good: 'up' | 'down' | 'none',
   ) => {
     const delta = computeDelta(current, previous, kind, good);
-    if (!delta || delta.direction === 'flat') return null;
+    if (!delta || !delta.significant) return null;
     const color = delta.tone === 'bad' ? 'var(--ds-err)' : delta.tone === 'good' ? 'var(--ds-ok)' : undefined;
     return (
       <div className="ds-faint" style={{ fontSize: 11, color }} data-tone={delta.tone}>
@@ -296,7 +304,8 @@ export default function TracingAgentsPage() {
       key: 'health',
       label: sortHeader(t('agents.col.health'), 'health'),
       render: (a) => {
-        const phase = a.alert.phase;
+        // An unreadable alert state never shows a firing/pending phase that may be stale.
+        const phase = a.alertState === 'unknown' ? null : a.alert.phase;
         const severity = a.alert.severity ? t(`health.severity.${a.alert.severity}`) : null;
         if (phase === 'firing') {
           const badge = (
@@ -323,6 +332,29 @@ export default function TracingAgentsPage() {
               <span className="ds-badge-dot" />
               {t('health.pending')}
             </span>
+          );
+        }
+        if (a.alertState === 'unknown') {
+          return (
+            <span className="ds-badge" title={t('health.unknownHint')}>
+              <span className="ds-badge-dot" />
+              {t('health.unknown')}
+            </span>
+          );
+        }
+        if (a.alertState === 'uncovered') {
+          return (
+            <Link
+              href={buildCreateAgentAlertHref(a.name)}
+              onClick={(event) => event.stopPropagation()}
+              className="ds-badge"
+              style={{ textDecoration: 'none' }}
+              title={t('health.noRuleHint')}
+              aria-label={`${t('health.noRule')}: ${t('agents.actions.createAlert')}`}
+            >
+              <span className="ds-badge-dot" />
+              {t('health.noRule')}
+            </Link>
           );
         }
         return (
@@ -403,7 +435,7 @@ export default function TracingAgentsPage() {
     },
     {
       key: 'trend',
-      label: t('agents.col.trend'),
+      label: <span style={PLAIN_HEADER_STYLE}>{t('agents.col.trend')}</span>,
       width: 130,
       render: (a) => {
         const requests = a.spark && a.spark.requests.length > 1 ? a.spark.requests : null;
@@ -480,6 +512,12 @@ export default function TracingAgentsPage() {
         </Alert>
       ) : null}
 
+      {healthData?.alertsAvailable === false ? (
+        <Alert color="yellow" variant="light" icon={<IconAlertCircle size={16} />} data-testid="agents-alerts-unavailable">
+          <span style={{ fontSize: 13 }}>{t('agents.alertsUnavailable')}</span>
+        </Alert>
+      ) : null}
+
       {directoryError ? (
         <Alert color="yellow" variant="light" icon={<IconAlertCircle size={16} />} data-testid="agents-directory-error">
           <div className="ds-row-between" style={{ gap: 12 }}>
@@ -513,6 +551,7 @@ export default function TracingAgentsPage() {
               { value: 'firing', label: t('health.firing') },
               { value: 'pending', label: t('health.pending') },
               { value: 'ok', label: t('health.ok') },
+              { value: 'uncovered', label: t('health.noRule') },
             ],
           },
           ...(directoryError

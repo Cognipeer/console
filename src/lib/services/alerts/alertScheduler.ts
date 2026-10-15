@@ -31,6 +31,12 @@ const SCHEDULER_LOCK_KEY = 'scheduler:alert-evaluation';
  */
 const SCHEDULER_LOCK_TTL_SECONDS = 10 * 60;
 const SWEEP_BUDGET_MS = (SCHEDULER_LOCK_TTL_SECONDS - 30) * 1000;
+/**
+ * One tenant may use this much of a sweep. Past it, its remaining notifications and rules wait for
+ * the next tick, so a tenant with a dead channel or a notification storm cannot starve the others.
+ * The lock has no renewal, so the evaluators also stop at the sweep budget (inside the lock TTL).
+ */
+const TENANT_BUDGET_MS = 5 * 60 * 1000;
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
@@ -100,6 +106,7 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
             companyName: tenant.companyName,
           },
           {
+            deadlineMs: Math.min(startedAt.getTime() + SWEEP_BUDGET_MS, Date.now() + TENANT_BUDGET_MS),
             ruleFilter: async (rule) => {
               const ruleId = String(rule._id ?? '');
               if (!ruleId) return false;

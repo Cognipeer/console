@@ -99,6 +99,8 @@ export interface TimelineEntry {
   at: string;
   /** Acting user id (or 'system'); the author name for a note. */
   by?: string | null;
+  /** The server-resolved name of `by`, when it sent one. */
+  byName?: string | null;
   /** Resolved by the system (auto-resolve), not by a person. */
   system?: boolean;
   content?: string;
@@ -107,9 +109,9 @@ export interface TimelineEntry {
 /** Fired, acknowledged, resolved, closed and every note, oldest first. */
 export function timelineEntries(incident: IncidentDto): TimelineEntry[] {
   const entries: TimelineEntry[] = [{ kind: 'fired', at: incident.firedAt }];
-  if (incident.acknowledgedAt) entries.push({ kind: 'acknowledged', at: incident.acknowledgedAt, by: incident.acknowledgedBy ?? null });
+  if (incident.acknowledgedAt) entries.push({ kind: 'acknowledged', at: incident.acknowledgedAt, by: incident.acknowledgedBy ?? null, byName: incident.acknowledgedByName ?? null });
   if (incident.resolvedAt) {
-    entries.push({ kind: 'resolved', at: incident.resolvedAt, by: incident.resolvedBy ?? null, system: resolvedBySystem(incident) });
+    entries.push({ kind: 'resolved', at: incident.resolvedAt, by: incident.resolvedBy ?? null, byName: incident.resolvedByName ?? null, system: resolvedBySystem(incident) });
   }
   if (incident.closedAt) entries.push({ kind: 'closed', at: incident.closedAt });
   for (const note of incident.notes ?? []) {

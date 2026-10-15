@@ -4,6 +4,8 @@
  * CALL time, and nothing registered means the community behaviour.
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   __resetAlertExtensionsForTests,
@@ -99,5 +101,14 @@ describe('collector registry and the seam', () => {
     registerAlertMetricCollector(appgwLike);
     __resetAlertExtensionsForTests();
     expect(getCollectorForMetric('appgw_requests')).toBeUndefined();
+  });
+});
+
+describe('alert-extensions module shape', () => {
+  it('imports types only: the overlay registers at load time, before the .env files load, so the seam must not log or read config', () => {
+    const source = readFileSync(path.join(process.cwd(), 'src/enterprise/alert-extensions.ts'), 'utf8');
+    const imports = source.split('\n').filter((line) => /^import\s/.test(line));
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter((line) => !line.startsWith('import type '))).toEqual([]);
   });
 });

@@ -387,10 +387,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     delta: AgentTracingSessionEventDelta,
     projectId?: string,
   ): Promise<void>;
-  /** Sessions still 'in_progress' whose last activity is older than `updatedBefore` (tenant-wide, oldest first). */
+  /**
+   * Sessions still 'in_progress' whose last activity is older than `updatedBefore` (tenant-wide, oldest first).
+   * `source` (e.g. 'otlp') restricts the scan to one ingest source, so a source-specific pass is not crowded out
+   * of `limit` by other sources' idle sessions.
+   */
   listStaleAgentTracingSessions(input: {
     updatedBefore: Date;
     limit: number;
+    source?: string;
   }): Promise<IAgentTracingSession[]>;
   /**
    * Compare-and-set: marks a session 'abandoned' (endedAt = last activity,

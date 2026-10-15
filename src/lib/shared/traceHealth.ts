@@ -101,6 +101,13 @@ export interface DeriveSessionStatusInput {
   ended: boolean;
 }
 
+/** True when `clientStatus` is a usable client-supplied end status (the one `deriveSessionStatus` returns as-is). */
+export function isExplicitClientStatus(clientStatus: string | null | undefined): boolean {
+  const raw = typeof clientStatus === 'string' ? clientStatus.trim() : '';
+  const lowered = raw.toLowerCase();
+  return raw !== '' && lowered !== 'unknown' && lowered !== 'in_progress';
+}
+
 /**
  * Session status.
  *  - An explicit client status wins, so a recovered session the client calls

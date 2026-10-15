@@ -292,7 +292,7 @@ export function conditionMode(condition: Pick<AlertConditionDto, 'mode'> | undef
 }
 
 export const MODE_COLORS: Record<AlertConditionMode, string> = {
-  threshold: 'gray',
+  threshold: 'dark',
   baseline: 'violet',
   absence: 'orange',
   slo_burn: 'red',

@@ -39,10 +39,13 @@ export function buildCreateAgentAlertHref(agentName: string): string {
   });
 }
 
-/** The open incidents of the alert rules on one agent. */
+/**
+ * The incidents of the alert rules on one agent. Every status, not `open`: a firing rule keeps its incident
+ * through acknowledged and investigating, which an `open` filter would hide.
+ */
 export function buildAgentIncidentsHref(agentName: string): string {
   const params = new URLSearchParams();
-  params.set('status', 'open');
+  params.set('status', 'all');
   params.set('module', 'agents');
   params.set('entityKey', agentName);
   return `/dashboard/alerts/incidents?${params.toString()}`;

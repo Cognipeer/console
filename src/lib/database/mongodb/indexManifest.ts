@@ -269,6 +269,9 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   incidents: [
     { key: { projectId: 1, status: 1, firedAt: -1 }, options: { name: 'idx_incidents_project_status_firedAt' } },
     { key: { ruleId: 1, entityKey: 1 }, options: { name: 'idx_incidents_rule_entity' } },
+    // listIncidents filtered by entity (newest first) and findIncidentByAlertEventId.
+    { key: { projectId: 1, entityKey: 1, firedAt: -1 }, options: { name: 'idx_incidents_project_entity_firedAt' } },
+    { key: { alertEventId: 1 }, options: { name: 'idx_incidents_alertEventId' } },
   ],
   files: [
     { key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } },

@@ -123,6 +123,12 @@ describe('formatBucketLabel', () => {
     expect(formatBucketLabel(t, 300_000, 6 * HOUR, 'en')).toMatch(/^\d{2}:\d{2}$/);
     expect(formatBucketLabel(t, HOUR, 48 * HOUR, 'en')).toMatch(/Oct.*\d{2}:\d{2}/);
   });
+
+  it('names a day bucket by its UTC date, in whatever time zone the viewer is', () => {
+    // The API aligns day buckets to UTC midnight: west of UTC that instant is the previous local evening.
+    expect(formatBucketLabel(Date.UTC(2026, 9, 14), 86_400_000, 30 * 86_400_000, 'en')).toBe('Oct 14');
+    expect(formatBucketLabel(Date.UTC(2026, 9, 15), 86_400_000, 30 * 86_400_000, 'en')).toBe('Oct 15');
+  });
 });
 
 describe('detectAvailability: only what the entity has', () => {
@@ -160,7 +166,7 @@ describe('detectAvailability: only what the entity has', () => {
 describe('snapMarkers', () => {
   const rows = buildChartRows(payload(), 'en');
 
-  it('places a marker on the bucket it falls into and merges a second one of the same type', () => {
+  it('places a marker on the bucket it falls into and merges a second one of the same type under the newest', () => {
     const markers = snapMarkers(
       [
         { t: FROM + 2 * HOUR + 600_000, type: 'version', label: 'v2', href: '/x' },
@@ -173,8 +179,9 @@ describe('snapMarkers', () => {
     expect(markers).toHaveLength(2);
     const version = markers.find((m) => m.type === 'version')!;
     expect(version.x).toBe(rows[2]!.label);
-    expect(version.label).toBe('v2 +1');
-    expect(version.href).toBe('/x');
+    // the newest version of the bucket names it (the one running at its end); the earlier one is counted
+    expect(version.label).toBe('v3 +1');
+    expect(version.href).toBeUndefined();
     expect(markers.find((m) => m.type === 'incident')!.x).toBe(rows[2]!.label);
   });
 
@@ -189,21 +196,26 @@ describe('snapMarkers', () => {
     const single = snapMarkers(many, rows, HOUR, 10);
     // Six markers in the same bucket collapse into one.
     expect(single).toHaveLength(1);
-    expect(single[0]!.label).toBe('v0 +5');
+    expect(single[0]!.label).toBe('v5 +5');
   });
 });
 
-describe('computeDelta: good and bad depend on the metric, small moves are flat', () => {
+describe('computeDelta: good and bad depend on the metric, the direction is always the real one', () => {
   it('compares rates in percentage points', () => {
-    expect(computeDelta(10, 4, 'percent', 'down')).toEqual({ direction: 'up', magnitude: 6, unit: 'pp', tone: 'bad' });
-    expect(computeDelta(2, 4, 'percent', 'down')).toEqual({ direction: 'down', magnitude: 2, unit: 'pp', tone: 'good' });
-    expect(computeDelta(4.2, 4, 'percent', 'down')).toMatchObject({ direction: 'flat', tone: 'neutral' });
+    expect(computeDelta(10, 4, 'percent', 'down')).toEqual({ direction: 'up', magnitude: 6, unit: 'pp', tone: 'bad', significant: true });
+    expect(computeDelta(2, 4, 'percent', 'down')).toEqual({ direction: 'down', magnitude: 2, unit: 'pp', tone: 'good', significant: true });
+    // Inside the noise band the move keeps its real direction and color, but is not significant.
+    expect(computeDelta(4.3, 4, 'percent', 'down')).toMatchObject({ direction: 'up', tone: 'bad', significant: false });
+    expect(computeDelta(3.7, 4, 'percent', 'down')).toMatchObject({ direction: 'down', tone: 'good', significant: false });
+    expect(computeDelta(4.02, 4, 'percent', 'down')).toMatchObject({ direction: 'flat', tone: 'neutral', significant: false });
   });
 
   it('compares everything else in percent', () => {
-    expect(computeDelta(1500, 1000, 'ms', 'down')).toEqual({ direction: 'up', magnitude: 50, unit: 'pct', tone: 'bad' });
-    expect(computeDelta(500, 1000, 'ms', 'down')).toEqual({ direction: 'down', magnitude: 50, unit: 'pct', tone: 'good' });
-    expect(computeDelta(102, 100, 'count', 'none')).toMatchObject({ direction: 'flat' });
+    expect(computeDelta(1500, 1000, 'ms', 'down')).toEqual({ direction: 'up', magnitude: 50, unit: 'pct', tone: 'bad', significant: true });
+    expect(computeDelta(500, 1000, 'ms', 'down')).toEqual({ direction: 'down', magnitude: 50, unit: 'pct', tone: 'good', significant: true });
+    expect(computeDelta(103.5, 100, 'ms', 'down')).toMatchObject({ direction: 'up', tone: 'bad', significant: false });
+    expect(computeDelta(102, 100, 'count', 'none')).toMatchObject({ direction: 'up', tone: 'neutral', significant: false });
+    expect(computeDelta(100, 100, 'count', 'none')).toMatchObject({ direction: 'flat', tone: 'neutral' });
   });
 
   it('never colors traffic volume', () => {
@@ -211,7 +223,7 @@ describe('computeDelta: good and bad depend on the metric, small moves are flat'
   });
 
   it('says "new" for a metric that had nothing before and flat for nothing at all', () => {
-    expect(computeDelta(3, 0, 'count', 'down')).toEqual({ direction: 'up', magnitude: null, unit: 'new', tone: 'bad' });
+    expect(computeDelta(3, 0, 'count', 'down')).toEqual({ direction: 'up', magnitude: null, unit: 'new', tone: 'bad', significant: true });
     expect(computeDelta(0, 0, 'count', 'down')).toMatchObject({ direction: 'flat', tone: 'neutral' });
   });
 
@@ -221,9 +233,12 @@ describe('computeDelta: good and bad depend on the metric, small moves are flat'
   });
 
   it('writes the delta with its sign and unit', () => {
-    expect(deltaText({ direction: 'up', magnitude: 12.4, unit: 'pct', tone: 'bad' }, 'new', 'en')).toBe('+12%');
-    expect(deltaText({ direction: 'down', magnitude: 3.4, unit: 'pp', tone: 'good' }, 'new', 'en')).toBe('-3.4 pp');
-    expect(deltaText({ direction: 'up', magnitude: null, unit: 'new', tone: 'bad' }, 'new', 'en')).toBe('new');
+    const base = { significant: true } as const;
+    expect(deltaText({ ...base, direction: 'up', magnitude: 12.4, unit: 'pct', tone: 'bad' }, 'new', 'en')).toBe('+12%');
+    expect(deltaText({ ...base, direction: 'down', magnitude: 3.4, unit: 'pp', tone: 'good' }, 'new', 'en')).toBe('\u22123.4 pp');
+    expect(deltaText({ ...base, direction: 'up', magnitude: 3.5, unit: 'pct', tone: 'bad', significant: false }, 'new', 'en')).toBe('+3.5%');
+    expect(deltaText({ ...base, direction: 'flat', magnitude: 0, unit: 'pct', tone: 'neutral' }, 'new', 'en')).toBe('0%');
+    expect(deltaText({ ...base, direction: 'up', magnitude: null, unit: 'new', tone: 'bad' }, 'new', 'en')).toBe('new');
   });
 });
 

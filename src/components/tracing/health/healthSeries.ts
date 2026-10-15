@@ -38,7 +38,10 @@ export interface EntityHealthSeriesPayload {
   markers?: HealthMarker[];
   /** True when earlier markers may be missing (the version read behind them was bounded). */
   markersPartial?: boolean;
-  alerts?: { firing: number; pending: number } | null;
+  /** `covered`: an enabled alert rule watches the entity; absent on an older server. */
+  alerts?: { firing: number; pending: number; covered?: boolean } | null;
+  /** False when the alert read failed: `alerts` is then not an all-clear. Absent on an older server (available). */
+  alertsAvailable?: boolean;
 }
 
 const isNum = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -74,13 +77,14 @@ export interface HealthChartRow {
 
 /**
  * X axis label of a bucket: time only for sub-hour buckets inside half a day, date and time for hours,
- * date for days. Local time, since the buckets are instants.
+ * date for days. Local time for time-of-day labels, since those buckets are instants; day buckets are UTC days
+ * (the API aligns them to UTC midnight), so their date is read in UTC to name the day the bucket holds.
  */
 export function formatBucketLabel(t: number, bucketMs: number, spanMs: number, locale?: string): string {
   const date = new Date(t);
   if (!Number.isFinite(date.getTime())) return '';
   if (bucketMs >= 86_400_000) {
-    return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(date);
+    return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date);
   }
   if (bucketMs < 3_600_000 && spanMs <= 12 * 3_600_000) {
     return new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
@@ -235,8 +239,9 @@ export interface ChartMarker {
 }
 
 /**
- * Markers at the bucket they fall into, one per bucket and type (a second one in the same bucket is counted
- * into the first's label). Markers outside the series are dropped; at most `limit` newest are kept.
+ * Markers at the bucket they fall into, one per bucket and type: the newest of a bucket gives the label (for
+ * versions, the one running at its end) and the earlier ones are counted into it. Markers outside the series are
+ * dropped; at most `limit` newest are kept.
  */
 export function snapMarkers(
   markers: HealthMarker[] | undefined,
@@ -260,6 +265,9 @@ export function snapMarkers(
     const known = merged.get(key);
     if (known) {
       known.extra += 1;
+      known.t = marker.t;
+      known.label = marker.label;
+      known.href = marker.href;
       continue;
     }
     merged.set(key, {
@@ -285,19 +293,26 @@ export type KpiKind = 'count' | 'percent' | 'ms' | 'usd';
 export type DeltaTone = 'good' | 'bad' | 'neutral';
 
 export interface KpiDelta {
+  /** The real direction of the change; `flat` only when it rounds to zero at the displayed precision. */
   direction: 'up' | 'down' | 'flat';
   /** Percent change (`pct`), percentage-point change (`pp`), or null for `new` (nothing before). */
   magnitude: number | null;
   unit: 'pct' | 'pp' | 'new';
   tone: DeltaTone;
+  /** False for a move inside the noise band; compact views (the agents list) leave those out. */
+  significant: boolean;
 }
 
 const FLAT_RELATIVE_PCT = 5;
 const FLAT_POINTS = 0.5;
 
+/** Decimals `deltaText` shows for a magnitude. */
+const deltaDigits = (magnitude: number): number => (magnitude < 10 && magnitude !== 0 ? 1 : 0);
+
 /**
  * Change against the previous period. Rates compare in percentage points, everything else in percent.
- * `good` says which direction is an improvement (`none`: neither, e.g. traffic volume). Small moves are flat.
+ * `good` says which direction is an improvement (`none`: neither, e.g. traffic volume). The direction is always
+ * the real one, so a small move still reads as up or down; `significant` marks the ones past the noise band.
  */
 export function computeDelta(
   current: number | null | undefined,
@@ -308,27 +323,42 @@ export function computeDelta(
   if (!isNum(current) || !isNum(previous)) return null;
   const toneOf = (direction: 'up' | 'down' | 'flat'): DeltaTone =>
     direction === 'flat' || good === 'none' ? 'neutral' : direction === good ? 'good' : 'bad';
+  const directionOf = (change: number): 'up' | 'down' | 'flat' => {
+    const scale = 10 ** deltaDigits(Math.abs(change));
+    return Math.round(Math.abs(change) * scale) === 0 ? 'flat' : change > 0 ? 'up' : 'down';
+  };
 
   if (kind === 'percent') {
     const diff = current - previous;
-    const direction = Math.abs(diff) < FLAT_POINTS ? 'flat' : diff > 0 ? 'up' : 'down';
-    return { direction, magnitude: Math.abs(diff), unit: 'pp', tone: toneOf(direction) };
+    const direction = directionOf(diff);
+    return {
+      direction,
+      magnitude: Math.abs(diff),
+      unit: 'pp',
+      tone: toneOf(direction),
+      significant: Math.abs(diff) >= FLAT_POINTS,
+    };
   }
   if (previous === 0) {
-    if (current === 0) return { direction: 'flat', magnitude: 0, unit: 'pct', tone: 'neutral' };
-    return { direction: 'up', magnitude: null, unit: 'new', tone: toneOf('up') };
+    if (current === 0) return { direction: 'flat', magnitude: 0, unit: 'pct', tone: 'neutral', significant: false };
+    return { direction: 'up', magnitude: null, unit: 'new', tone: toneOf('up'), significant: true };
   }
   const relative = ((current - previous) / Math.abs(previous)) * 100;
-  const direction = Math.abs(relative) < FLAT_RELATIVE_PCT ? 'flat' : relative > 0 ? 'up' : 'down';
-  return { direction, magnitude: Math.abs(relative), unit: 'pct', tone: toneOf(direction) };
+  const direction = directionOf(relative);
+  return {
+    direction,
+    magnitude: Math.abs(relative),
+    unit: 'pct',
+    tone: toneOf(direction),
+    significant: Math.abs(relative) >= FLAT_RELATIVE_PCT,
+  };
 }
 
-/** "+12%", "-3.4 pp", or the caller's word for a metric that had nothing before. */
+/** "+12%", "−3.4 pp" (a real minus sign), or the caller's word for a metric that had nothing before. */
 export function deltaText(delta: KpiDelta, newLabel: string, locale?: string): string {
   if (delta.unit === 'new' || delta.magnitude === null) return newLabel;
-  const sign = delta.direction === 'up' ? '+' : delta.direction === 'down' ? '-' : '';
-  const digits = delta.magnitude < 10 && delta.magnitude !== 0 ? 1 : 0;
-  const number = new Intl.NumberFormat(locale, { maximumFractionDigits: digits }).format(delta.magnitude);
+  const sign = delta.direction === 'up' ? '+' : delta.direction === 'down' ? '\u2212' : '';
+  const number = new Intl.NumberFormat(locale, { maximumFractionDigits: deltaDigits(delta.magnitude) }).format(delta.magnitude);
   return delta.unit === 'pp' ? `${sign}${number} pp` : `${sign}${number}%`;
 }
 

@@ -3,7 +3,7 @@
  * 'abandoned' status in the service-level consumers. The end-to-end paths
  * (HTTP ingest, finalizer) are covered by integration/tracing-entity-health-ingest.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   recordEntityMetric: vi.fn((_input: Record<string, unknown>) => undefined),
@@ -132,6 +132,99 @@ describe('recordTraceEventMetrics', () => {
       ...base, source: 'tracing', pricerLoader,
       events: [{ id: 'z', type: 'tool_call', status: 'error', toolName: 't', timestamp: at() }],
     })).resolves.toBeUndefined();
+  });
+});
+
+describe('recordTraceEventMetrics booking time of client-sent events', () => {
+  const HOUR = 3_600_000;
+  const NOW = Date.UTC(2026, 9, 15, 12, 0, 0);
+  const stamped = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
+  const sum = (rows: Array<Record<string, unknown>>, field: string) => rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
+
+  beforeEach(() => {
+    hoisted.recordEntityMetric.mockClear();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('books an event 10 h old at now - 3 h on the agent, model and tool rows, keeping its counts', async () => {
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader,
+      events: [
+        { id: 'old-ai', type: 'ai_call', status: 'success', model: 'm', durationMs: 5, timestamp: stamped(-10 * HOUR) },
+        { id: 'old-tool', type: 'tool_call', status: 'error', error: 'x', toolName: 't', timestamp: stamped(-10 * HOUR) },
+      ],
+    });
+
+    expect(byType('agent').length).toBeGreaterThan(0);
+    expect(byType('model')).toHaveLength(1);
+    expect(byType('tool')).toHaveLength(1);
+    expect(calls().every((row) => row.at === NOW - 3 * HOUR)).toBe(true);
+    // Only the time moved: nothing is dropped.
+    expect(sum(byType('agent'), 'aiCalls')).toBe(1);
+    expect(sum(byType('agent'), 'toolCalls')).toBe(1);
+    expect(sum(byType('agent'), 'toolErrors')).toBe(1);
+    expect(byType('tool')[0]).toMatchObject({ entityKey: 't', outcome: 'error' });
+  });
+
+  it('keeps an event 2 min in the future at its own time and books one 30 min ahead at now + 5 min', async () => {
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader,
+      events: [
+        { id: 'soon', type: 'tool_call', status: 'success', toolName: 'soon-tool', timestamp: stamped(2 * 60_000) },
+        { id: 'later', type: 'tool_call', status: 'success', toolName: 'later-tool', timestamp: stamped(30 * 60_000) },
+      ],
+    });
+
+    const toolAt = (key: string) => byType('tool').find((row) => row.entityKey === key)?.at;
+    expect(toolAt('soon-tool')).toBe(NOW + 2 * 60_000);
+    expect(toolAt('later-tool')).toBe(NOW + 5 * 60_000);
+    // The agent counters follow the same clamp, one row per event.
+    expect(byType('agent').map((row) => row.at)).toEqual([NOW + 2 * 60_000, NOW + 5 * 60_000]);
+  });
+
+  it('keeps every time inside the window as given, whatever the 3 h bound', async () => {
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader,
+      events: [
+        { id: 'a', type: 'tool_call', status: 'success', toolName: 'one-hour', timestamp: stamped(-HOUR) },
+        { id: 'b', type: 'tool_call', status: 'success', toolName: 'three-hours', timestamp: stamped(-3 * HOUR) },
+        { id: 'c', type: 'tool_call', status: 'success', toolName: 'no-time' },
+      ],
+    });
+    const toolAt = (key: string) => byType('tool').find((row) => row.entityKey === key)?.at;
+    expect(toolAt('one-hour')).toBe(NOW - HOUR);
+    expect(toolAt('three-hours')).toBe(NOW - 3 * HOUR);
+    // No usable time: the rollup books it at "now" itself.
+    const noTime = byType('tool').find((row) => row.entityKey === 'no-time');
+    expect(noTime).toBeDefined();
+    expect(noTime?.at).toBeUndefined();
+  });
+
+  it('still skips anything older than a day, and leaves hosted runs their own times', async () => {
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader,
+      events: [{ id: 'ancient', type: 'tool_call', status: 'success', toolName: 'ancient', timestamp: stamped(-25 * HOUR) }],
+    });
+    expect(calls()).toHaveLength(0);
+
+    // A long hosted run reports its early events well past 3 h: those are the console's own times, not client input.
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'hosted',
+      pricerLoader,
+      events: [{ id: 'long-run', type: 'tool_call', status: 'success', toolName: 'hosted-tool', timestamp: stamped(-10 * HOUR) }],
+    });
+    expect(byType('agent').map((row) => row.at)).toEqual([NOW - 10 * HOUR]);
   });
 });
 

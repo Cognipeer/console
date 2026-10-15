@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 
-import { describeForEachProvider } from './db-parity.helper';
+import { describeForEachProvider, listTenantIndexNames, sqliteQueryPlan } from './db-parity.helper';
 import type { IAlertEvent, IAlertRule, IIncident } from '@/lib/database';
 
 type Seed = { tenantId: string; projectId: string; otherProjectId: string };
@@ -385,6 +385,32 @@ describeForEachProvider('Alert rules, events and incidents', (getDb) => {
       const found = await db.findIncidentByAlertEventId('evt-xyz');
       expect(found?.alertEventId).toBe('evt-xyz');
       expect(typeof found?._id).toBe('string');
+    });
+
+    it('indexes the entity-filtered list (newest first) and the alert event lookup', async () => {
+      const db = getDb();
+      // MongoDB ensures its indexes on the first write; SQLite creates them after its column migrations.
+      await db.createIncident(incident(seed, { alertEventId: 'evt-idx', entityKey: 'a' }));
+      const names = await listTenantIndexNames(db, 'incidents');
+      expect(names).toEqual(expect.arrayContaining([
+        'idx_incidents_project_status_firedAt',
+        'idx_incidents_rule_entity',
+        'idx_incidents_project_entity_firedAt',
+        'idx_incidents_alertEventId',
+      ]));
+
+      // The exact shapes listIncidents (project + entity, newest first) and findIncidentByAlertEventId run. SQLite only.
+      const list = sqliteQueryPlan(
+        db,
+        'SELECT * FROM incidents WHERE tenantId = @tenantId AND projectId = @projectId AND entityKey = @entityKey ORDER BY firedAt DESC LIMIT 50 OFFSET 0',
+        { tenantId: seed.tenantId, projectId: seed.projectId, entityKey: 'a' },
+      );
+      if (list !== null) {
+        expect(list).toContain('USING INDEX idx_incidents_project_entity_firedAt');
+        expect(list).not.toContain('TEMP B-TREE');
+      }
+      const byEvent = sqliteQueryPlan(db, 'SELECT * FROM incidents WHERE alertEventId = @alertEventId', { alertEventId: 'evt-idx' });
+      if (byEvent !== null) expect(byEvent).toContain('USING INDEX idx_incidents_alertEventId');
     });
   });
 });

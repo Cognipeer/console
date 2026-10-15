@@ -77,46 +77,10 @@ async function buildHealthWindowFamilies(
   const fromMs = toMs - HEALTH_WINDOW_MS;
   const families: MetricFamily[] = [];
 
-  // Typed gauges over the last 24h from the tracing aggregate. They used to be
-  // computed from the newest 50 sessions and exposed as counters, which was
-  // neither a window nor monotonic.
-  try {
-    const { analytics } = await db.aggregateAgentTracingDashboard({
-      from: new Date(fromMs).toISOString(),
-      to: new Date(toMs).toISOString(),
-    });
-    families.push(
-      {
-        name: 'console_tracing_sessions_total',
-        help: 'Number of agent tracing sessions per status in the last 24 hours.',
-        type: 'gauge',
-        samples: analytics.statuses.map(({ status, count }) => ({
-          labels: { status: status || 'unknown' },
-          value: count,
-        })),
-      },
-      // Renamed from console_tracing_{input,output}_tokens_total: these are
-      // 24h window gauges, not monotonic counters, so the _total suffix misled
-      // rate() queries. Dashboards on the old names need updating.
-      {
-        name: 'console_tracing_input_tokens_24h',
-        help: 'Input tokens across agent tracing sessions in the last 24 hours.',
-        type: 'gauge',
-        samples: [{ value: analytics.totals.totalInputTokens }],
-      },
-      {
-        name: 'console_tracing_output_tokens_24h',
-        help: 'Output tokens across agent tracing sessions in the last 24 hours.',
-        type: 'gauge',
-        samples: [{ value: analytics.totals.totalOutputTokens }],
-      },
-    );
-  } catch {
-    // non-fatal
-  }
-
   // Entity health rollup, tenant-wide (every project). Two grouped reads
-  // regardless of how many entities exist.
+  // regardless of how many entities exist. The tracing session gauges come from
+  // the agent rows of the same rollup: the tracing sessions collection has no
+  // tenant-wide time index, so aggregating it here scanned every session.
   try {
     const [byType, agents] = await Promise.all([
       db.aggregateEntityMetrics({ tenantId, fromMs, toMs, groupBy: ['entityType'] }),
@@ -128,7 +92,36 @@ async function buildHealthWindowFamilies(
         groupBy: ['entityKey'],
       }),
     ]);
+    const agentTotals = byType.find((row) => row.entityType === 'agent');
+    const finished = agentTotals?.requests ?? 0;
+    const failed = agentTotals?.errors ?? 0;
+    const abandoned = agentTotals?.abandoned ?? 0;
     families.push(
+      {
+        name: 'console_tracing_sessions_total',
+        help: 'Number of finished agent tracing sessions per status in the last 24 hours (running sessions are not counted until they end).',
+        type: 'gauge',
+        samples: [
+          { labels: { status: 'success' }, value: Math.max(finished - failed - abandoned, 0) },
+          { labels: { status: 'error' }, value: Math.max(failed, 0) },
+          { labels: { status: 'abandoned' }, value: Math.max(abandoned, 0) },
+        ],
+      },
+      // Renamed from console_tracing_{input,output}_tokens_total: these are
+      // 24h window gauges, not monotonic counters, so the _total suffix misled
+      // rate() queries. Dashboards on the old names need updating.
+      {
+        name: 'console_tracing_input_tokens_24h',
+        help: 'Input tokens across agent tracing sessions finished in the last 24 hours.',
+        type: 'gauge',
+        samples: [{ value: agentTotals?.inputTokens ?? 0 }],
+      },
+      {
+        name: 'console_tracing_output_tokens_24h',
+        help: 'Output tokens across agent tracing sessions finished in the last 24 hours.',
+        type: 'gauge',
+        samples: [{ value: agentTotals?.outputTokens ?? 0 }],
+      },
       // Counts distinct agents from the entity rollup, so hosted agents are
       // included alongside externally traced ones.
       {

@@ -11,6 +11,7 @@
 import { useMemo, type ReactNode } from 'react';
 import Link from 'next/link';
 import { ChartTooltip, CompositeChart, type CompositeChartSeries } from '@mantine/charts';
+import { usePlotArea, useXAxisScale } from 'recharts';
 import { IconArrowDown, IconArrowUp } from '@tabler/icons-react';
 import Spark from '@/components/common/ui/Spark';
 import { useLocale, useTranslations } from '@/lib/i18n';
@@ -32,6 +33,7 @@ import {
   type KpiId,
   type KpiSpec,
 } from './healthSeries';
+import { layoutMarkerLabels } from './markerLabels';
 
 const colorVar = (token: string) => `var(--mantine-color-${token.replace('.', '-')})`;
 
@@ -171,32 +173,103 @@ export function createRowTooltip(rows: Map<string, HealthChartRow>, entries: Too
   return RowTooltip;
 }
 
-const MARKER_LABEL_MAX = 18;
+const MARKER_TAG_MAX = 14;
+const MARKER_FONT_SIZE = 11;
+/** Rough width of one character at `MARKER_FONT_SIZE`, for the label layout. */
+const MARKER_CHAR_WIDTH = 6.4;
+const MARKER_ROW_HEIGHT = 14;
+/** Space between a marker's dot and its tag, and the least space between two tags in a row. */
+const MARKER_TEXT_GAP = 6;
 
-function markerLines(markers: ChartMarker[], withLabels: boolean) {
+/** Marker lines only: the labels are drawn by `MarkerLabels`, which knows the plot area. */
+function markerLines(markers: ChartMarker[]) {
   return markers.map((marker) => ({
     x: marker.x,
     color: marker.type === 'incident' ? COLORS.incident : COLORS.version,
     strokeDasharray: '4 4',
-    label: withLabels
-      ? marker.label.length > MARKER_LABEL_MAX
-        ? `${marker.label.slice(0, MARKER_LABEL_MAX - 1)}…`
-        : marker.label
-      : undefined,
-    labelPosition: 'insideTopLeft' as const,
   }));
 }
+
+interface MarkerLabelsProps {
+  markers: ChartMarker[];
+  /** Short text on the chart: the version tag, or a compact word for an incident. */
+  tagOf: (marker: ChartMarker) => string;
+  /** Full text of the tooltip. */
+  titleOf: (marker: ChartMarker) => string;
+}
+
+/**
+ * Tags on top of the marker lines. They stay inside the plot area (flipping to the left of the line near the
+ * right edge, clear of the right axis), take a second row when two are close, and fall back to the bare tag
+ * when neither row has room. Every tag carries the full text as its tooltip.
+ */
+function MarkerLabels({ markers, tagOf, titleOf }: MarkerLabelsProps) {
+  const plot = usePlotArea();
+  const scale = useXAxisScale();
+  if (!plot || !scale) return null;
+
+  const positioned = markers.flatMap((marker) => {
+    const x = scale(marker.x, { position: 'middle' });
+    return typeof x === 'number' && Number.isFinite(x) ? [{ marker, x }] : [];
+  });
+  const text = (marker: ChartMarker) => {
+    const tag = tagOf(marker);
+    return tag.length > MARKER_TAG_MAX ? `${tag.slice(0, MARKER_TAG_MAX - 1)}…` : tag;
+  };
+  const placements = new Map(
+    layoutMarkerLabels(
+      positioned.map(({ marker, x }) => ({ key: marker.key, x, text: text(marker) })),
+      { left: plot.x, right: plot.x + plot.width, charWidth: MARKER_CHAR_WIDTH, rows: 2, pad: MARKER_TEXT_GAP },
+    ).map((placement) => [placement.key, placement]),
+  );
+
+  return (
+    <g data-marker-labels="">
+      {positioned.map(({ marker, x }) => {
+        const placement = placements.get(marker.key);
+        if (!placement) return null;
+        const color = colorVar(marker.type === 'incident' ? COLORS.incident : COLORS.version);
+        const y = plot.y + MARKER_FONT_SIZE + placement.row * MARKER_ROW_HEIGHT;
+        return (
+          <g key={marker.key} data-marker={marker.key}>
+            <title>{titleOf(marker)}</title>
+            <circle cx={x} cy={plot.y + 3} r={3} fill={color} />
+            {placement.visible ? (
+              <text
+                x={placement.anchor === 'start' ? x + MARKER_TEXT_GAP : x - MARKER_TEXT_GAP}
+                y={y}
+                textAnchor={placement.anchor}
+                fontSize={MARKER_FONT_SIZE}
+                fill={color}
+                stroke="var(--mantine-color-body)"
+                strokeWidth={3}
+                paintOrder="stroke"
+              >
+                {placement.text}
+              </text>
+            ) : null}
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+/** Traffic bars sit behind the error rate: light enough that the normal range and the line read through them. */
+const TRAFFIC_BAR_OPACITY = 0.45;
 
 const BAND_AREA_PROPS = (series: CompositeChartSeries) => {
   if (series.name.endsWith('BandBase')) {
     return { stackId: 'band', fill: 'none', stroke: 'none', strokeWidth: 0, dot: false, activeDot: false } as const;
   }
   if (series.name.endsWith('BandRange')) {
+    // The dashed edge keeps the range visible where it overlaps tall traffic bars.
     return {
       stackId: 'band',
       fillOpacity: 0.16,
-      stroke: 'none',
-      strokeWidth: 0,
+      stroke: colorVar(COLORS.band),
+      strokeWidth: 1,
+      strokeDasharray: '4 3',
       dot: false,
       activeDot: false,
     } as const;
@@ -223,7 +296,7 @@ function LegendRow({ items }: { items: LegendItem[] }) {
               height: item.shape === 'band' || item.shape === 'block' ? 10 : 3,
               borderRadius: 2,
               background: colorVar(item.color),
-              opacity: item.shape === 'band' ? 0.4 : 1,
+              opacity: item.shape === 'band' ? 0.4 : item.shape === 'block' ? TRAFFIC_BAR_OPACITY : 1,
               display: 'inline-block',
             }}
           />
@@ -374,6 +447,9 @@ export function EntityHealthCharts({ series, requestsLabel, chartHeight = 220 }:
 
   const xAxisProps = { minTickGap: 28 };
   const markerKinds = (marker: ChartMarker) => (marker.type === 'incident' ? t('charts.markerIncident') : t('charts.markerVersion'));
+  // An incident's name is long and already in the list below, so the chart only tags it; a version tag is short.
+  const markerTag = (marker: ChartMarker) => (marker.type === 'incident' ? t('charts.markerIncident') : marker.label);
+  const markerTitle = (marker: ChartMarker) => `${markerKinds(marker)}: ${marker.label} · ${markerTime(marker.t, locale)}`;
 
   return (
     <div className="ds-col ds-gap-md">
@@ -410,9 +486,12 @@ export function EntityHealthCharts({ series, requestsLabel, chartHeight = 220 }:
               }}
               xAxisProps={xAxisProps}
               areaProps={BAND_AREA_PROPS}
-              referenceLines={markerLines(markers, true)}
+              barProps={{ fillOpacity: TRAFFIC_BAR_OPACITY }}
+              referenceLines={markerLines(markers)}
               tooltipProps={{ content: createRowTooltip(byLabel, trafficEntries) as never }}
-            />
+            >
+              <MarkerLabels markers={markers} tagOf={markerTag} titleOf={markerTitle} />
+            </CompositeChart>
           </ChartCard>
 
           {availability.latency ? (
@@ -432,7 +511,7 @@ export function EntityHealthCharts({ series, requestsLabel, chartHeight = 220 }:
                 valueFormatter={(value) => formatHealthMs(value, locale)}
                 xAxisProps={xAxisProps}
                 areaProps={BAND_AREA_PROPS}
-                referenceLines={markerLines(markers, false)}
+                referenceLines={markerLines(markers)}
                 tooltipProps={{ content: createRowTooltip(byLabel, durationEntries) as never }}
               />
               {availability.latencyBand || availability.errorBand ? (
@@ -457,7 +536,7 @@ export function EntityHealthCharts({ series, requestsLabel, chartHeight = 220 }:
                 tickLine="x"
                 valueFormatter={(value) => formatHealthPercent(value, locale)}
                 xAxisProps={xAxisProps}
-                referenceLines={markerLines(markers, false)}
+                referenceLines={markerLines(markers)}
                 tooltipProps={{ content: createRowTooltip(byLabel, toolEntries) as never }}
               />
             </ChartCard>

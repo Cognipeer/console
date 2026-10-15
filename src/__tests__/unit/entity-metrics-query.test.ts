@@ -28,6 +28,7 @@ import {
   getEntitySeries,
   getEntitySummaries,
   listActiveEntityKeys,
+  __resetEntityHealthCachesForTests,
 } from '@/lib/services/entityMetrics/entityHealthService';
 import { ALERT_METRIC_CATALOG } from '@/lib/services/alerts/metricCatalog';
 
@@ -187,7 +188,27 @@ beforeEach(() => {
   aggregate.handler = async () => [];
 });
 
+beforeEach(() => {
+  __resetEntityHealthCachesForTests();
+  aggregate.calls.length = 0;
+});
+
 describe('getEntitySummaries', () => {
+  it('has no previous period when retention covers only part of it (a 30-day range with 45-day retention)', async () => {
+    const now = Date.now();
+    const toMs = now - (now % HOUR);
+    aggregate.handler = async () => [row({ entityKey: 'a', requests: 10 })];
+
+    const thirty = await getEntitySummaries({ ...scope, entityType: 'agent', fromMs: toMs - 30 * DAY, toMs });
+    expect(aggregate.calls).toHaveLength(1);
+    expect(thirty[0]!.previous).toBeNull();
+
+    aggregate.calls.length = 0;
+    const seven = await getEntitySummaries({ ...scope, entityType: 'agent', fromMs: toMs - 7 * DAY, toMs });
+    expect(aggregate.calls).toHaveLength(2);
+    expect(seven[0]!.previous?.requests).toBe(10);
+  });
+
   it('issues at most two aggregate queries and builds totals, previous and spark per entity', async () => {
     const now = Date.now();
     const toMs = now - (now % HOUR);
@@ -264,6 +285,23 @@ describe('getEntitySummaries', () => {
     await getEntitySummaries({ ...scope, entityType: 'agent', fromMs: now - 400 * DAY, toMs: now, withPrevious: false });
     const query = aggregate.calls[0] as EntityMetricsAggregateQuery;
     expect(query.fromMs).toBeGreaterThanOrEqual(now - 45 * DAY - FIVE);
+  });
+});
+
+describe('getEntitySeries previous period retention', () => {
+  it('skips the previous-period query when it is not fully retained', async () => {
+    const now = Date.now();
+    const toMs = now - (now % HOUR);
+    aggregate.handler = async () => [row({ requests: 4 })];
+
+    const thirty = await getEntitySeries({ ...scope, entityType: 'agent', entityKey: 'a', fromMs: toMs - 30 * DAY, toMs });
+    expect(thirty.previous).toBeNull();
+    expect(aggregate.calls).toHaveLength(1);
+
+    aggregate.calls.length = 0;
+    const day = await getEntitySeries({ ...scope, entityType: 'agent', entityKey: 'a', fromMs: toMs - DAY, toMs });
+    expect(aggregate.calls).toHaveLength(2);
+    expect(day.previous?.requests).toBe(4);
   });
 });
 
@@ -377,5 +415,28 @@ describe('listActiveEntityKeys', () => {
     expect(out).toEqual([{ key: 'a', requests: 50, lastBucketMs: toMs - HOUR }]);
     const bucketed = aggregate.calls.find((c) => (c as EntityMetricsAggregateQuery).bucketMs !== undefined) as EntityMetricsAggregateQuery;
     expect(bucketed.entityKeys).toEqual(['a']);
+  });
+
+  it('serves repeat picker lookups from a short cache and filters q in memory', async () => {
+    const now = Date.now();
+    const toMs = now - (now % HOUR);
+    const fromMs = toMs - 24 * HOUR;
+    aggregate.handler = async (q) => {
+      const query = q as EntityMetricsAggregateQuery;
+      if (query.bucketMs === undefined) {
+        return [row({ entityKey: 'alpha', requests: 5 }), row({ entityKey: 'beta', requests: 9 })];
+      }
+      return [row({ entityKey: 'beta', bucketMs: toMs - HOUR, requests: 9 })];
+    };
+    const first = await listActiveEntityKeys({ ...scope, entityType: 'agent', fromMs, toMs, q: 'b' });
+    const second = await listActiveEntityKeys({ ...scope, entityType: 'agent', fromMs, toMs, q: 'be' });
+    expect(first.map((k) => k.key)).toEqual(['beta']);
+    expect(second.map((k) => k.key)).toEqual(['beta']);
+    const totalReads = aggregate.calls.filter((c) => (c as EntityMetricsAggregateQuery).bucketMs === undefined);
+    expect(totalReads).toHaveLength(1);
+
+    // a different type is a different cache entry
+    await listActiveEntityKeys({ ...scope, entityType: 'model', fromMs, toMs });
+    expect(aggregate.calls.filter((c) => (c as EntityMetricsAggregateQuery).bucketMs === undefined)).toHaveLength(2);
   });
 });

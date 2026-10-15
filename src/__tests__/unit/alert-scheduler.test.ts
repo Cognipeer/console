@@ -51,6 +51,15 @@ describe('alert scheduler', () => {
     expect(vi.mocked(evaluateTenantAlerts).mock.calls[0][0]).toMatchObject({ tenantDbName: 'db0', tenantId: 't0', tenantSlug: 's0' });
   });
 
+  it('bounds each tenant: a deadline inside the lock TTL and within five minutes is passed down', async () => {
+    const before = Date.now();
+    await triggerAlertSchedulerRun();
+    const { deadlineMs } = vi.mocked(evaluateTenantAlerts).mock.calls[0][1]!;
+    expect(deadlineMs).toBeGreaterThanOrEqual(before + 5 * 60_000 - 1000);
+    expect(deadlineMs).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+    expect(deadlineMs).toBeLessThan(before + 600_000);
+  });
+
   it('a failing tenant does not stop the sweep', async () => {
     vi.mocked(evaluateTenantAlerts).mockRejectedValueOnce(new Error('tenant db down')).mockResolvedValueOnce(1);
     expect(await triggerAlertSchedulerRun()).toEqual({ firedCount: 1, processedTenants: 2 });

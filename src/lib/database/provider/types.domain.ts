@@ -3450,7 +3450,8 @@ export interface IIncident {
 export interface IIncidentContext {
   mode: AlertConditionMode;
   windowMinutes: number;
-  versionChange?: { from: string | null; to: string | null } | null;
+  /** `firstSeenAt` is when the new version's first session started (ISO). */
+  versionChange?: { from: string | null; to: string | null; firstSeenAt?: string } | null;
   errorSignatures?: Array<{ message: string; count: number }>;
   /** e.g. /dashboard/tracing/sessions?agent=<name>&status=error&from=..&to=.. (no session ids). */
   failingSessions?: { count: number; listPath: string } | null;

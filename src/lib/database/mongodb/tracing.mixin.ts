@@ -776,14 +776,20 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         aiErrors: plus('aiErrors', delta.aiErrors),
       };
 
-      // A late error event flips a session that already finished as healthy:
-      // events are posted fire-and-forget and can land after `/end`.
+      // A late error event flips a session that already finished as healthy with a
+      // DERIVED status: events are posted fire-and-forget and can land after `/end`.
       const flipToError = typeof delta.errorEvents === 'number' && delta.errorEvents > 0;
       const statusStage = flipToError
         ? {
             status: {
               $cond: [
-                { $in: [{ $ifNull: ['$status', 'unknown'] }, ['success', 'partial', 'unknown', 'completed']] },
+                {
+                  $and: [
+                    { $in: [{ $ifNull: ['$status', 'unknown'] }, ['success', 'partial', 'unknown', 'completed']] },
+                    // An explicit client status (a recovered run reported as 'success') is never overridden.
+                    { $ne: ['$statusExplicit', true] },
+                  ],
+                },
                 'error',
                 '$status',
               ],
@@ -831,15 +837,19 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
     async listStaleAgentTracingSessions(input: {
       updatedBefore: Date;
       limit: number;
+      source?: string;
     }): Promise<IAgentTracingSession[]> {
       await this.ensureTracingIndexes();
       const db = this.getTenantDb();
       const n = Number(input.limit);
       const limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 500;
+      // `source` is an equality filter on top of the (status, updatedAt) index range; no extra index (hot write path).
+      const filter: Record<string, unknown> = { status: 'in_progress', updatedAt: { $lt: input.updatedBefore } };
+      if (typeof input.source === 'string') filter.source = input.source;
       const docs = await db
         .collection<IAgentTracingSession>(COLLECTIONS.agentTracingSessions)
         .find(
-          { status: 'in_progress', updatedAt: { $lt: input.updatedBefore } },
+          filter,
           { projection: { config: 0, agent: 0, summary: 0, errors: 0, eventCounts: 0 } },
         )
         .sort({ updatedAt: 1 })

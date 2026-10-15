@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatTimestamp,
   formatValue,
+  formatVersionChange,
   formatWindow,
   operatorSymbol,
   severityLabel,
@@ -56,10 +57,8 @@ export function buildNotificationMessage(n: AlertNotification): ChannelMessage {
     fields.push({ label: 'Duration', value: formatDuration(new Date(n.firedAt).getTime(), new Date(n.resolvedAt).getTime()) });
   }
 
-  const version = n.context?.versionChange;
-  if (version && (version.from || version.to)) {
-    fields.push({ label: 'Version change', value: `${version.from ?? 'n/a'} → ${version.to ?? 'n/a'}` });
-  }
+  const version = formatVersionChange(n.context?.versionChange, n.firedAt);
+  if (version) fields.push({ label: 'Version change', value: version });
   const signatures = (n.context?.errorSignatures ?? []).slice(0, MAX_ERROR_SIGNATURES);
   if (signatures.length > 0 && n.kind !== 'resolved') {
     fields.push({

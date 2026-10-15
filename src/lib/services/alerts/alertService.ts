@@ -34,9 +34,10 @@ import { AlertApiError } from './alertApiError';
 import { ALERT_METRIC_CATALOG, ALERT_MODULE_METRICS, getMetricDef } from './metricCatalog';
 import { createModeGate, getModeAvailability } from './modeAvailability';
 import { IncidentService } from './incidentService';
+import { evaluationShapeOf } from './ruleShape';
 import { evaluateRuleTargets } from './alertEvaluator';
 import { maskChannels, sealChannels } from './channels/channelSecrets';
-import { assertPublicChannelUrl, ChannelUrlError, isValidPagerDutyRoutingKey } from './channels/channelUrl';
+import { assertPublicChannelUrl, ChannelUrlError, isValidPagerDutyRoutingKey, MAX_CHANNEL_URL_LENGTH } from './channels/channelUrl';
 import { dispatchNotification } from './channels';
 import type { AlertNotification, DispatchResult } from './channels';
 
@@ -312,10 +313,10 @@ function storedChannelOfId(existing: IAlertRule | null | undefined, id: string |
   return (existing.channels ?? []).find((channel) => channel.id === id && channel.type === type);
 }
 
-function optionalSecret(value: unknown, field: string): string | undefined {
+function optionalSecret(value: unknown, field: string, maxLength = MAX_SECRET_LENGTH): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string') throw bad('invalid_channel', `${field} must be a string`);
-  if (value.length > MAX_SECRET_LENGTH) throw bad('invalid_channel', `${field} must be at most ${MAX_SECRET_LENGTH} characters`);
+  if (value.length > maxLength) throw bad('invalid_channel', `${field} must be at most ${maxLength} characters`);
   return value;
 }
 
@@ -343,14 +344,14 @@ function normalizeChannelInput(raw: unknown, index: number, existing: IAlertRule
       return { ...(id ? { id } : {}), type, recipients };
     }
     case 'webhook': {
-      const url = optionalSecret(raw.url, `channels[${index}].url`)?.trim();
+      const url = optionalSecret(raw.url, `channels[${index}].url`, MAX_CHANNEL_URL_LENGTH)?.trim();
       if (!url && !stored) throw bad('invalid_channel', `channels[${index}] (webhook) needs a url`);
       const secret = optionalSecret(raw.secret, `channels[${index}].secret`);
       return { ...(id ? { id } : {}), type, ...(url ? { url } : {}), ...(secret !== undefined ? { secret } : {}) };
     }
     case 'slack':
     case 'teams': {
-      const url = optionalSecret(raw.url, `channels[${index}].url`)?.trim();
+      const url = optionalSecret(raw.url, `channels[${index}].url`, MAX_CHANNEL_URL_LENGTH)?.trim();
       if (!url && !stored) throw bad('invalid_channel', `channels[${index}] (${type}) needs a url`);
       return { ...(id ? { id } : {}), type, ...(url ? { url } : {}) };
     }
@@ -549,38 +550,13 @@ async function assertModeAvailable(tenantId: string, condition: IAlertCondition)
   );
 }
 
-/** JSON with sorted keys and no undefined members, so equal shapes compare equal. */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .filter((key) => value[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-}
-
-/**
- * Rule fields whose change makes the stored per-entity states meaningless.
- * Defaults are filled in first, so a stored legacy condition equals its
- * normalised form.
- */
-function evaluationShapeOf(rule: Pick<IAlertRule, 'metric' | 'module' | 'entity' | 'condition' | 'windowMinutes'>): string {
-  return stableStringify([
-    rule.metric,
-    rule.module,
-    rule.entity ?? null,
-    { ...rule.condition, mode: rule.condition?.mode ?? 'threshold', forMinutes: rule.condition?.forMinutes ?? 0 },
-    rule.windowMinutes,
-  ]);
-}
-
 function maskRule<T extends IAlertRule | null>(rule: T): T {
   if (!rule) return rule;
   return { ...rule, channels: maskChannels(rule.channels) };
 }
+
+/** Most addresses one unsaved email channel is tested against. */
+const MAX_TEST_EMAIL_RECIPIENTS = 5;
 
 export interface RuleScopeOptions {
   /** When set, a rule of another project reads as missing. */
@@ -692,7 +668,7 @@ export class AlertService {
     const deleted = options.projectId === undefined
       ? await db.deleteAlertRule(ruleId)
       : await db.deleteAlertRule(ruleId, options.projectId);
-    if (deleted) await AlertService.retireStates(tenantDbName, ruleId, 'Rule deleted');
+    if (deleted) await AlertService.retireStates(tenantDbName, ruleId, 'Rule deleted', { keepCooldown: true });
     return deleted;
   }
 
@@ -734,7 +710,12 @@ export class AlertService {
   }
 
   /** Forget a rule's states; incidents that were open stay open and get a note saying why nothing will resolve them. */
-  private static async retireStates(tenantDbName: string, ruleId: string, note: string): Promise<void> {
+  private static async retireStates(
+    tenantDbName: string,
+    ruleId: string,
+    note: string,
+    options: { keepCooldown?: boolean } = {},
+  ): Promise<void> {
     const db = await getTenantDatabase(tenantDbName);
     const states = await db.listAlertStates({ ruleId, phases: ['firing'], limit: 5000 });
     for (const state of states) {
@@ -744,6 +725,13 @@ export class AlertService {
       } catch { /* the note is informational */ }
     }
     await db.deleteAlertStates({ ruleId });
+    if (options.keepCooldown !== true) {
+      // The states carried the cooldown; a retired rule starts afresh, so the pre-v2
+      // `lastTriggeredAt` (which seeds the cooldown of a rule without states) goes too.
+      try {
+        await db.updateAlertRule(ruleId, { lastTriggeredAt: null as unknown as Date });
+      } catch { /* a deleted rule has nothing to clear */ }
+    }
   }
 
   /** Per-rule counts of persisted states (healthy entities leave no row, so `ok` counts only those that have been non-ok). */
@@ -888,6 +876,10 @@ export class AlertService {
 
     if (body.channel !== undefined) {
       const input = normalizeChannelInput(body.channel, 0, null);
+      if (input.type === 'email' && (input.recipients?.length ?? 0) > MAX_TEST_EMAIL_RECIPIENTS) {
+        // An unsaved channel is mailed as typed; a long list would make the test a mass mailer.
+        throw bad('too_many_recipients', `Send the test to at most ${MAX_TEST_EMAIL_RECIPIENTS} addresses (save the channel to test a longer list)`);
+      }
       await verifyChannelDestinations([input]);
       [stored] = await sealChannels([input], []);
     } else if (typeof body.ruleId === 'string' && typeof body.channelId === 'string') {

@@ -30,9 +30,12 @@ describe('index manifest: entity health collections', () => {
     expect(nameOf('alert_states', 'idx_alert_states_project_phase_notenant')?.key).toEqual({ projectId: 1, phase: 1 });
   });
 
-  it('incidents are indexed for the project/status list and the (rule, entity) lookup', () => {
+  it('incidents are indexed for the project/status list, the (rule, entity) lookup, the entity list and the alert event lookup', () => {
     expect(nameOf('incidents', 'idx_incidents_project_status_firedAt')?.key).toEqual({ projectId: 1, status: 1, firedAt: -1 });
     expect(nameOf('incidents', 'idx_incidents_rule_entity')?.key).toEqual({ ruleId: 1, entityKey: 1 });
+    // listIncidents filtered by entity (newest first) and findIncidentByAlertEventId.
+    expect(nameOf('incidents', 'idx_incidents_project_entity_firedAt')?.key).toEqual({ projectId: 1, entityKey: 1, firedAt: -1 });
+    expect(nameOf('incidents', 'idx_incidents_alertEventId')?.key).toEqual({ alertEventId: 1 });
   });
 
   it('the mixins that ensure these indexes on first write use the same names as the manifest', () => {

@@ -329,7 +329,7 @@ export default function AlertsPage() {
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             {view.firing > 0 ? (
               <Link
-                href={`/dashboard/alerts/incidents?ruleId=${encodeURIComponent(rule._id)}&status=open`}
+                href={`/dashboard/alerts/incidents?ruleId=${encodeURIComponent(rule._id)}&status=all`}
                 className="ds-badge ds-badge-err"
                 style={{ textDecoration: 'none' }}
               >

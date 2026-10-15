@@ -114,8 +114,11 @@ describe('AlertsPage', () => {
     expect(text()).toContain('guardrail: pii');
     expect(text()).toContain('> 5% · 15 min');
     expect(text()).toContain('2 firing');
+    // each tile says what it counts: entity states that are firing, rules that fired
+    expect(text()).toContain('Entities Firing Now');
+    expect(text()).toContain('Rules Fired (24h)');
     expect(text()).toContain('Disabled');
-    expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts/incidents?ruleId=r1&status=open"]')).not.toBeNull();
+    expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts/incidents?ruleId=r1&status=all"]')).not.toBeNull();
   });
 
   it('shows the empty state and the error state', async () => {
@@ -268,6 +271,51 @@ describe('IncidentDetailPage', () => {
     expect(q<HTMLAnchorElement>('a[href="/dashboard/tracing/sessions?agent=support&status=error"]')).not.toBeNull();
     // the rule opens in the rules page through the edit deep link
     expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts?edit=r1"]')).not.toBeNull();
+  });
+
+  it('states when the new version was first seen and spells out the page labels', async () => {
+    detailApi({
+      ...INCIDENT,
+      context: { ...INCIDENT.context!, versionChange: { from: 'v3', to: 'v4', firstSeenAt: '2026-10-15T09:42:00.000Z' } },
+    });
+    mounted = await mount(createElement(IncidentDetailPage));
+    await settle(150);
+    expect(text()).toContain('First seen 18 min before this fired');
+    // the Detection row names the entity type with a capital, the links card drops the article
+    const rowLabels = qa('table.ds-tbl td:first-child').map((cell) => cell.textContent?.trim());
+    expect(rowLabels).toContain('Agent');
+    expect(rowLabels).not.toContain('agent');
+    expect(text()).toContain('Open entity health');
+    expect(text()).not.toContain('Open the entity health');
+  });
+
+  it('lays the context labels above their content, and keeps the actions out of the title header', async () => {
+    detailApi();
+    mounted = await mount(createElement(IncidentDetailPage));
+    await settle(150);
+    const failingLabel = qa<HTMLElement>('.ds-eyebrow').find((node) => node.textContent === 'Failing sessions');
+    expect(failingLabel?.style.display).toBe('flex');
+    expect(q('.detail-header')?.textContent).not.toContain('Acknowledge');
+    expect(q<HTMLElement>('.detail-title-row h1')?.style.whiteSpace).not.toBe('nowrap');
+  });
+
+  it('puts the meta separators only between the items that are there', async () => {
+    const withoutEntity = { ...INCIDENT, entityType: undefined, entityKey: undefined, baselineValue: undefined, metadata: { operator: 'gt', windowMinutes: 15 } };
+    for (const incident of [INCIDENT, withoutEntity]) {
+      detailApi(incident);
+      mounted = await mount(createElement(IncidentDetailPage));
+      await settle(150);
+      const kids = Array.from(q('.detail-meta-row')!.children);
+      const isSeparator = (node: Element) => node.textContent === '·';
+      expect(kids.length).toBeGreaterThan(1);
+      expect(isSeparator(kids[0]!)).toBe(false);
+      expect(isSeparator(kids[kids.length - 1]!)).toBe(false);
+      kids.forEach((node, index) => {
+        if (index > 0) expect(isSeparator(node) && isSeparator(kids[index - 1]!)).toBe(false);
+      });
+      expect(kids.filter(isSeparator).length).toBe(kids.filter((node) => !isSeparator(node)).length - 1);
+      await mounted.unmount();
+    }
   });
 
   it('offers exactly the transitions the lifecycle allows and sends the chosen one', async () => {

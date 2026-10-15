@@ -485,6 +485,7 @@ export const TENANT_SCHEMA_SQL = `
     toolErrors INTEGER DEFAULT 0,
     aiErrors INTEGER DEFAULT 0,
     metricsOutcome TEXT,
+    statusExplicit INTEGER DEFAULT 0,
     totalBytesIn INTEGER DEFAULT 0,
     totalBytesOut INTEGER DEFAULT 0,
     totalRequestBytes INTEGER DEFAULT 0,
@@ -734,6 +735,11 @@ export const TENANT_SCHEMA_SQL = `
     UNIQUE (tenantId, ruleId, entityKey)
   );
   CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase ON alert_states(tenantId, projectId, phase);
+  -- listAlertStates() filters by ruleId and by (projectId, phase) without a tenantId predicate (the tenant DB
+  -- is already per tenant), which neither the UNIQUE (tenantId, ruleId, entityKey) nor the index above can serve.
+  -- Same names and key order as the MongoDB indexes.
+  CREATE INDEX IF NOT EXISTS idx_alert_states_rule ON alert_states(ruleId);
+  CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase_notenant ON alert_states(projectId, phase);
 
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).

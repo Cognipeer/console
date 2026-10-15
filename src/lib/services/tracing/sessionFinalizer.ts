@@ -27,6 +27,7 @@ import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
+import { createTraceModelPricerLoader, type TraceModelPricerLoader } from '@/lib/services/agentTracing';
 import { recordAgentSessionOutcome } from './traceEntityMetrics';
 
 const logger = createLogger('tracing-session-finalizer');
@@ -45,6 +46,14 @@ const SWEEP_BUDGET_MS = 4 * 60_000;
 const OTLP_QUIET_MINUTES = 10;
 /** One fetch (no paging: finalized sessions stay behind as candidates only while they are skipped). */
 const OTLP_PASS_LIMIT = 2000;
+/**
+ * A session whose last activity is older than this (and than the stale window plus a margin) is history, not
+ * current health: it is closed so it stops being a candidate, but no outcome is booked for it. Without the cap
+ * the first sweep on an existing tenant would book every session ever stranded 'in_progress' as a fresh
+ * request + abandon in the current rollup bucket.
+ */
+const HISTORY_AGE_MS = 24 * 60 * 60_000;
+const HISTORY_MARGIN_MS = 60 * 60_000;
 
 export interface TracingFinalizerResult {
   tenantsScanned: number;
@@ -74,6 +83,24 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
   const updatedBefore = new Date(now - staleMinutes * 60_000);
   const otlpQuietBefore = new Date(now - Math.min(OTLP_QUIET_MINUTES, staleMinutes) * 60_000);
   const deadline = Date.now() + SWEEP_BUDGET_MS;
+  const historyBeforeMs = now - Math.max(HISTORY_AGE_MS, staleMinutes * 60_000 + HISTORY_MARGIN_MS);
+  // One lazy, memoized model-price loader per (tenant, project) and sweep: the Model Hub is read once, not once per session.
+  const pricerLoaders = new Map<string, TraceModelPricerLoader>();
+  const pricerLoaderFor = (tenantDbName: string, projectId: string): TraceModelPricerLoader => {
+    const key = `${tenantDbName}\u0001${projectId}`;
+    let loader = pricerLoaders.get(key);
+    if (!loader) {
+      loader = createTraceModelPricerLoader(tenantDbName, projectId || undefined);
+      pricerLoaders.set(key, loader);
+    }
+    return loader;
+  };
+  /** Last activity older than the history cap (unknown time: not history). */
+  const isHistory = (lastActivity: unknown): boolean => {
+    if (lastActivity === undefined || lastActivity === null) return false;
+    const at = new Date(lastActivity as Date | string).getTime();
+    return Number.isFinite(at) && at < historyBeforeMs;
+  };
 
   const mainDb = await getDatabase();
   const tenants = await mainDb.listTenants();
@@ -89,9 +116,10 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
     try {
       await runWithTenantScope(tenantDbName, async (db) => {
         // OTLP first: a quiet OTLP run that is also past the stale window is finalized, not abandoned.
-        const quiet = await db.listStaleAgentTracingSessions({ updatedBefore: otlpQuietBefore, limit: OTLP_PASS_LIMIT });
+        // The source filter is applied by the database: idle runs of other sources (waiting for the stale window)
+        // must not use up the page limit and starve the OTLP sessions behind them.
+        const quiet = await db.listStaleAgentTracingSessions({ updatedBefore: otlpQuietBefore, limit: OTLP_PASS_LIMIT, source: 'otlp' });
         for (const candidate of quiet) {
-          if (candidate.source !== 'otlp') continue;
           if (Date.now() > deadline) break;
           const projectId = candidate.projectId ?? '';
           // The abandon CAS is the atomic claim (a late span or an overlapping sweep wins or loses here);
@@ -105,6 +133,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
           const status = deriveOtlpFinalStatus(claimed);
           await db.updateAgentTracingSession(claimed.sessionId, { status }, projectId || undefined);
           result.finalized += 1;
+          if (isHistory(candidate.updatedAt)) continue;
           await recordAgentSessionOutcome({
             tenantDbName,
             tenantId: claimed.tenantId || tenantId,
@@ -113,6 +142,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
             previousOutcome: claimed.metricsOutcome,
             source: 'tracing',
             atMs: Date.now(),
+            pricerLoader: pricerLoaderFor(tenantDbName, claimed.projectId ?? projectId),
           });
         }
 
@@ -127,6 +157,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
             // null: a late event or /end won the race.
             if (!abandoned) continue;
             result.abandoned += 1;
+            if (isHistory(candidate.updatedAt)) continue;
             await recordAgentSessionOutcome({
               tenantDbName,
               tenantId: abandoned.tenantId || tenantId,
@@ -137,6 +168,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
               source: abandoned.metadata?.agentKey ? 'hosted' : 'tracing',
               // The abandon happens now, whenever the run last made progress.
               atMs: Date.now(),
+              pricerLoader: pricerLoaderFor(tenantDbName, abandoned.projectId ?? candidate.projectId ?? ''),
             });
           }
           if (stale.length < PAGE_SIZE || Date.now() > deadline) break;

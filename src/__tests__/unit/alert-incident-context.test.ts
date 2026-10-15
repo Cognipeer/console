@@ -5,6 +5,7 @@ import { createMockDb } from '../helpers/db.mock';
 type LooseDb = Record<string, import('vitest').Mock>;
 import {
   ENRICHER_TIMEOUT_MS,
+  VERSION_CHANGE_LOOKBACK_MS,
   buildIncidentContext,
   normalizeErrorSignature,
   summarizeErrorSignatures,
@@ -96,38 +97,100 @@ describe('buildIncidentContext', () => {
     expect((await buildIncidentContext(input({ rule: baselineRule, entityType: null, entityKey: '' }))).mode).toBe('baseline');
   });
 
-  it('queries the project, the exact agent name and the current and previous windows', async () => {
+  it('queries the project and the exact agent name: one bounded scan for versions, one for failures', async () => {
     await buildIncidentContext(input());
-    expect(db.listAgentTracingSessions).toHaveBeenCalledTimes(3);
+    expect(db.listAgentTracingSessions).toHaveBeenCalledTimes(2);
     const calls = db.listAgentTracingSessions.mock.calls.map((c) => c[0] as Record<string, unknown>);
     const windowMs = 15 * 60_000;
-    const current = calls.find((c) => c.from === new Date(NOW - windowMs).toISOString() && !c.status)!;
-    const previous = calls.find((c) => c.to === new Date(NOW - windowMs).toISOString())!;
+    const scan = calls.find((c) => !c.status)!;
     const failed = calls.find((c) => c.status === 'error')!;
-    expect(current.to).toBe(new Date(NOW).toISOString());
-    expect(previous.from).toBe(new Date(NOW - 2 * windowMs).toISOString());
+    expect(scan.from).toBe(new Date(NOW - VERSION_CHANGE_LOOKBACK_MS).toISOString());
+    expect(scan.to).toBe(new Date(NOW).toISOString());
+    expect(scan.limit).toBe(2000);
+    expect(scan.projection).toEqual({ agentVersion: 1, startedAt: 1 });
+    expect(failed.from).toBe(new Date(NOW - windowMs).toISOString());
     for (const c of calls) expect(c.agentNameExact).toBe('Pulse Main');
     expect(failed.includeTotal).toBe(true);
     for (const call of db.listAgentTracingSessions.mock.calls) expect(call[1]).toBe('p1');
   });
 
-  it('detects a version that appeared in this window', async () => {
-    db.listAgentTracingSessions.mockImplementation(async (q: { status?: string; to: string }) => {
-      if (q.status === 'error') return { sessions: [], total: 0 };
-      if (q.to === new Date(NOW).toISOString()) return { sessions: [session('v3'), session('v2')], total: 2 };
-      return { sessions: [session('v2')], total: 1 };
-    });
-    expect((await buildIncidentContext(input())).versionChange).toEqual({ from: 'v2', to: 'v3' });
+  it('scans at least two windows back when the rule window is longer than the lookback', async () => {
+    await buildIncidentContext(input({ windowMinutes: 12 * 60 }));
+    const scan = db.listAgentTracingSessions.mock.calls.map((c) => c[0] as Record<string, unknown>).find((c) => !c.status)!;
+    expect(scan.from).toBe(new Date(NOW - 24 * 60 * 60_000).toISOString());
   });
 
-  it('versionChange is null when the versions did not change or the previous window is empty', async () => {
-    db.listAgentTracingSessions.mockResolvedValue({ sessions: [session('v1')], total: 1 });
-    expect((await buildIncidentContext(input())).versionChange).toBeNull();
+  describe('version change', () => {
+    const MIN = 60_000;
+    /** A session that started `minutesAgo` before the alert fired. */
+    const at = (version: string | undefined, minutesAgo: number) => ({
+      agentVersion: version,
+      startedAt: new Date(NOW - minutesAgo * MIN),
+    });
+    /** The scan returns these (newest first, like the store); the failed-sessions query returns none. */
+    const scanReturns = (rows: ReturnType<typeof at>[], total = rows.length) => {
+      db.listAgentTracingSessions.mockImplementation(async (q: { status?: string }) =>
+        q.status === 'error' ? { sessions: [], total: 0 } : { sessions: rows, total });
+    };
 
-    // Nothing to compare with in an empty previous window: no change is claimed.
-    db.listAgentTracingSessions.mockImplementation(async (q: { status?: string; to: string }) =>
-      q.to === new Date(NOW).toISOString() && !q.status ? { sessions: [session('v1')], total: 1 } : { sessions: [], total: 0 });
-    expect((await buildIncidentContext(input())).versionChange).toBeNull();
+    it('detects a version introduced well before the current window, with when it was first seen', async () => {
+      scanReturns([at('v3', 1), at('v3', 4), at('v3', 20), at('v2', 25), at('v2', 40)]);
+      const { versionChange } = await buildIncidentContext(input({ windowMinutes: 5 }));
+      expect(versionChange).toEqual({ from: 'v2', to: 'v3', firstSeenAt: new Date(NOW - 20 * MIN).toISOString() });
+    });
+
+    it('is null for a version that has run longer than the horizon and for a brand-new agent', async () => {
+      scanReturns([at('v3', 1), at('v3', 120), at('v3', 340)]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+      scanReturns([]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+      scanReturns([at(undefined, 1), at('  ', 30)]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+    });
+
+    it('reports the new version when old and new run side by side in the current window', async () => {
+      scanReturns([at('v2', 1), at('v3', 2), at('v2', 3), at('v3', 4), at('v2', 12), at('v2', 30)]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange)
+        .toEqual({ from: 'v2', to: 'v3', firstSeenAt: new Date(NOW - 4 * MIN).toISOString() });
+    });
+
+    it('names the version running just before the new one as "from", not the oldest one seen', async () => {
+      scanReturns([at('v3', 1), at('v3', 20), at('v2', 40), at('v2', 90), at('v1', 200)]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange)
+        .toEqual({ from: 'v2', to: 'v3', firstSeenAt: new Date(NOW - 20 * MIN).toISOString() });
+    });
+
+    it('is null when the same version kept running (a rollback is not a new version)', async () => {
+      scanReturns([at('v2', 1), at('v2', 10), at('v3', 40), at('v2', 90)]);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+    });
+
+    it('is null for two versions served side by side since before the scan started', async () => {
+      // v2 and v3 alternate every 2 min across the whole 6 h horizon: neither is new, the scan just starts mid-run.
+      const rows = Array.from({ length: 180 }, (_, i) => at(i % 2 ? 'v2' : 'v3', 1 + i * 2));
+      scanReturns(rows);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+    });
+
+    it('does not report a version first seen at the edge of a truncated scan', async () => {
+      // 2000 rows hit the cap: the oldest scanned session is v2 at ~201 min, and v3 first shows up 3 min later.
+      // Sessions older than the cap are missing, so v3 may have been running for hours.
+      const rows = [
+        ...Array.from({ length: 1999 }, (_, i) => at('v3', 1 + (i * 197) / 1998)),
+        at('v2', 201),
+      ];
+      scanReturns(rows);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange).toBeNull();
+    });
+
+    it('still reports a version introduced clear of the edge of a truncated scan', async () => {
+      const rows = [
+        ...Array.from({ length: 1000 }, (_, i) => at('v3', 1 + i * 0.01)),
+        ...Array.from({ length: 1000 }, (_, i) => at('v2', 30 + i * 0.1)),
+      ];
+      scanReturns(rows);
+      expect((await buildIncidentContext(input({ windowMinutes: 5 }))).versionChange?.to).toBe('v3');
+    });
   });
 
   it('summarises error signatures and links the failing sessions by list path, never by id', async () => {

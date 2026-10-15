@@ -14,6 +14,7 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/server/api/fastify-utils')>();
   return {
     ...actual,
+    authorizeServiceForRequest: vi.fn(),
     requireProjectContextForRequest: vi.fn(),
     sendProjectContextError: vi.fn().mockReturnValue(null),
   };
@@ -38,7 +39,7 @@ vi.mock('@/lib/services/agents/traceSession', () => ({ resolveTraceSession: vi.f
 
 import { registerEntityBaselineProvider } from '@/enterprise/alert-extensions';
 import { AgentTracingService } from '@/lib/services/agentTracing';
-import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
+import { authorizeServiceForRequest, requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { tracingApiPlugin } from '@/server/api/plugins/tracing';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -63,8 +64,9 @@ type ListBody = {
     totals: Derived;
     previous: Derived | null;
     spark: { requests: number[]; errorRate: (number | null)[]; p95Ms: (number | null)[] };
-    alert: { phase: 'firing' | 'pending' | null; severity?: string; incidentId?: string };
+    alert: { phase: 'firing' | 'pending' | null; severity?: string; incidentId?: string; covered: boolean };
   }>;
+  alertsAvailable: boolean;
 };
 type DetailBody = {
   range: Range;
@@ -74,7 +76,8 @@ type DetailBody = {
   baseline: { errorRate: unknown[]; p95Ms: unknown[] } | null;
   markers: Array<{ t: number; type: string; label: string; href?: string }>;
   markersPartial: boolean;
-  alerts: { firing: number; pending: number };
+  alerts: { firing: number; pending: number; covered: boolean };
+  alertsAvailable: boolean;
 };
 
 /** Aggregate rows as the db returns them: `bucketMs` only when the query was bucketed. */
@@ -101,6 +104,7 @@ beforeEach(async () => {
   vi.setSystemTime(NOW);
   vi.clearAllMocks();
   mockFn(requireProjectContextForRequest).mockResolvedValue(CTX);
+  mockFn(authorizeServiceForRequest).mockResolvedValue({ allowed: true });
   fakeDb.aggregateEntityMetrics.mockResolvedValue([]);
   fakeDb.listAlertRules.mockResolvedValue([]);
   fakeDb.listAlertStates.mockResolvedValue([]);
@@ -221,7 +225,7 @@ describe('GET /tracing/agents/health', () => {
       current: ['hot', 'warming', 'calm', 'other'].map((k, i) => ({ entityKey: k, bucketMs: t0, requests: 10 - i })),
     });
     fakeDb.listAlertRules.mockResolvedValue([
-      { _id: 'rule-agent', module: 'agents', enabled: true, severity: 'auto' },
+      { _id: 'rule-agent', module: 'agents', enabled: true, severity: 'auto', entity: { entityType: 'agent', mode: 'all' } },
       { _id: 'rule-model', module: 'models', enabled: true },
     ]);
     fakeDb.listAlertStates.mockResolvedValue([
@@ -234,10 +238,10 @@ describe('GET /tracing/agents/health', () => {
     const data = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
     const alert = (name: string) => data.agents.find((a) => a.name === name)!.alert;
 
-    expect(alert('hot')).toEqual({ phase: 'firing', severity: 'critical', incidentId: 'inc-1' });
-    expect(alert('warming')).toEqual({ phase: 'pending' });
-    expect(alert('calm')).toEqual({ phase: null });
-    expect(alert('other')).toEqual({ phase: null });
+    expect(alert('hot')).toEqual({ phase: 'firing', severity: 'critical', incidentId: 'inc-1', covered: true });
+    expect(alert('warming')).toEqual({ phase: 'pending', covered: true });
+    expect(alert('calm')).toEqual({ phase: null, covered: true });
+    expect(alert('other')).toEqual({ phase: null, covered: true });
 
     expect(fakeDb.listAlertRules).toHaveBeenCalledWith('tenant-1', { projectId: 'proj-1', enabled: true });
     expect(fakeDb.listAlertStates).toHaveBeenCalledWith({
@@ -281,10 +285,10 @@ describe('GET /tracing/agents/health', () => {
     const data = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
     const alert = (name: string) => data.agents.find((a) => a.name === name)!.alert;
 
-    expect(alert('fallback')).toEqual({ phase: 'firing', severity: 'warning' });
-    expect(alert('mixed')).toEqual({ phase: 'firing', severity: 'warning', incidentId: 'inc-w' });
-    expect(alert('sev')).toEqual({ phase: 'firing', severity: 'critical', incidentId: 'inc-c' });
-    expect(alert('off')).toEqual({ phase: null });
+    expect(alert('fallback')).toMatchObject({ phase: 'firing', severity: 'warning' });
+    expect(alert('mixed')).toMatchObject({ phase: 'firing', severity: 'warning', incidentId: 'inc-w' });
+    expect(alert('sev')).toMatchObject({ phase: 'firing', severity: 'critical', incidentId: 'inc-c' });
+    expect(alert('off')).toMatchObject({ phase: null });
   });
 
   it('reads incidents only for the firing agents of the returned page', async () => {
@@ -314,7 +318,7 @@ describe('GET /tracing/agents/health', () => {
     expect(data.agents.map((a) => a.name)).toEqual(['busy', 'gone-quiet']);
     expect(data.total).toBe(2);
     expect(data.agents[1]!.totals.requests).toBe(0);
-    expect(data.agents[1]!.alert).toEqual({ phase: 'firing', severity: 'critical' });
+    expect(data.agents[1]!.alert).toMatchObject({ phase: 'firing', severity: 'critical' });
     const keyed = fakeDb.aggregateEntityMetrics.mock.calls.map((c) => c[0]).filter((q) => q.entityKeys);
     expect(keyed.length).toBeGreaterThan(0);
     expect(keyed[0]).toMatchObject({ entityKeys: ['gone-quiet'] });
@@ -335,7 +339,55 @@ describe('GET /tracing/agents/health', () => {
     fakeDb.listAlertRules.mockRejectedValue(new Error('alerts down'));
     const res = await get('/api/tracing/agents/health');
     expect(res.status).toBe(200);
-    expect((res.body as unknown as ListBody).agents[0]!.alert).toEqual({ phase: null });
+    const body = res.body as unknown as ListBody;
+    expect(body.agents[0]!.alert).toEqual({ phase: null, covered: false });
+    expect(body.alertsAvailable).toBe(false);
+  });
+
+  it('says which agents an enabled rule watches: all, selected keys, never disabled or legacy-scoped rules', async () => {
+    aggregateRows({ current: ['a', 'b', 'c'].map((k) => ({ entityKey: k, bucketMs: NOW - 24 * HOUR, requests: 1 })) });
+
+    // No enabled agent rule: nobody is covered, and the read itself worked.
+    let body = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
+    expect(body.alertsAvailable).toBe(true);
+    expect(body.agents.map((a) => a.alert.covered)).toEqual([false, false, false]);
+
+    // Selected rule covers only its keys; a legacy-scoped (no entity) and a models rule cover nothing.
+    fakeDb.listAlertRules.mockResolvedValue([
+      { _id: 'r1', module: 'agents', enabled: true, entity: { entityType: 'agent', mode: 'selected', keys: ['b'] } },
+      { _id: 'r2', module: 'agents', enabled: true },
+      { _id: 'r3', module: 'models', enabled: true, entity: { entityType: 'model', mode: 'all' } },
+    ]);
+    body = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
+    expect(Object.fromEntries(body.agents.map((a) => [a.name, a.alert.covered]))).toEqual({ a: false, b: true, c: false });
+
+    // A disabled rule never covers.
+    fakeDb.listAlertRules.mockResolvedValue([
+      { _id: 'r4', module: 'agents', enabled: false, entity: { entityType: 'agent', mode: 'all' } },
+    ]);
+    body = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
+    expect(body.agents.every((a) => a.alert.covered === false)).toBe(true);
+
+    // An 'all' rule covers everyone.
+    fakeDb.listAlertRules.mockResolvedValue([
+      { _id: 'r5', module: 'agents', enabled: true, entity: { entityType: 'agent', mode: 'all' } },
+    ]);
+    body = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
+    expect(body.agents.every((a) => a.alert.covered === true)).toBe(true);
+  });
+
+  it('hides incident ids from callers without alerts read and keeps phase and severity', async () => {
+    aggregateRows({ current: [{ entityKey: 'hot', bucketMs: NOW - 24 * HOUR, requests: 1 }] });
+    fakeDb.listAlertRules.mockResolvedValue([
+      { _id: 'rule-agent', module: 'agents', enabled: true, entity: { entityType: 'agent', mode: 'all' } },
+    ]);
+    fakeDb.listAlertStates.mockResolvedValue([{ ruleId: 'rule-agent', entityKey: 'hot', phase: 'firing', incidentId: 'inc-1' }]);
+    fakeDb.findIncidentById.mockResolvedValue({ _id: 'inc-1', severity: 'critical' });
+    mockFn(authorizeServiceForRequest).mockResolvedValue({ allowed: false });
+
+    const body = (await get('/api/tracing/agents/health')).body as unknown as ListBody;
+    expect(body.agents[0]!.alert).toEqual({ phase: 'firing', severity: 'critical', covered: true });
+    expect(mockFn(authorizeServiceForRequest).mock.calls[0]!.slice(1)).toEqual(['alerts', { level: 'read' }]);
   });
 
   it('answers 500 when the rollup read fails', async () => {
@@ -363,7 +415,28 @@ describe('GET /tracing/agents/:agentName/health', () => {
     expect(data.previous).toBeNull();
     expect(data.baseline).toBeNull();
     expect(data.markers).toEqual([]);
-    expect(data.alerts).toEqual({ firing: 0, pending: 0 });
+    expect(data.alerts).toEqual({ firing: 0, pending: 0, covered: false });
+    expect(data.alertsAvailable).toBe(true);
+  });
+
+  it('reports coverage of this agent by an enabled rule', async () => {
+    fakeDb.listAlertRules.mockResolvedValue([
+      { _id: 'r1', module: 'agents', enabled: true, entity: { entityType: 'agent', mode: 'selected', keys: ['pulse'] } },
+      { _id: 'r2', module: 'agents', enabled: false, entity: { entityType: 'agent', mode: 'all' } },
+    ]);
+    const covered = (await get('/api/tracing/agents/pulse/health')).body as unknown as DetailBody;
+    expect(covered.alerts.covered).toBe(true);
+    const other = (await get('/api/tracing/agents/other/health')).body as unknown as DetailBody;
+    expect(other.alerts.covered).toBe(false);
+    expect(other.alertsAvailable).toBe(true);
+  });
+
+  it('drops incident markers for callers without alerts read', async () => {
+    fakeDb.listIncidents.mockResolvedValue([{ _id: 'inc-in', ruleName: 'Secret rule', firedAt: new Date(NOW - 2 * HOUR) }]);
+    mockFn(authorizeServiceForRequest).mockResolvedValue({ allowed: false });
+    const data = (await get('/api/tracing/agents/pulse/health')).body as unknown as DetailBody;
+    expect(data.markers.some((m) => m.type === 'incident')).toBe(false);
+    expect(fakeDb.listIncidents).not.toHaveBeenCalled();
   });
 
   it('returns the bucketed series, totals and previous period of the agent', async () => {
@@ -494,7 +567,8 @@ describe('GET /tracing/agents/:agentName/health', () => {
       { ruleId: 'rule-agent', entityKey: 'someone-else', phase: 'firing' },
     ]);
     const data = (await get('/api/tracing/agents/pulse/health')).body as unknown as DetailBody;
-    expect(data.alerts).toEqual({ firing: 1, pending: 2 });
+    expect(data.alerts).toEqual({ firing: 1, pending: 2, covered: false });
+    expect(data.alertsAvailable).toBe(true);
   });
 
   it('adds the baseline band of the seam for error rate and p95, and falls back to null on failure', async () => {
@@ -540,7 +614,8 @@ describe('GET /tracing/agents/:agentName/health', () => {
     const data = res.body as unknown as DetailBody;
     expect(data.buckets).toHaveLength(24);
     expect(data.markers).toEqual([]);
-    expect(data.alerts).toEqual({ firing: 0, pending: 0 });
+    expect(data.alerts).toEqual({ firing: 0, pending: 0, covered: false });
+    expect(data.alertsAvailable).toBe(false);
   });
 
   it('parses the period like the list endpoint and rejects an unusable range', async () => {

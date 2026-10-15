@@ -168,6 +168,39 @@ describe('AgentHealthPanel', () => {
     expect(hrefs).toContain('/dashboard/alerts/incidents/inc1');
   });
 
+  it('says no alert rule covers the agent instead of implying all is well', async () => {
+    api = installApiMock([['GET', /\/health$/, () => series({ alerts: { firing: 0, pending: 0, covered: false }, alertsAvailable: true })]]);
+    mounted = await mount(h(AgentHealthPanel, { agentName: 'Pulse Main', dateFilter: noFilter }));
+    await settle(50);
+    const badge = q('[data-testid="agent-no-alert-rule"]')!;
+    expect(badge.textContent).toContain('No alert rule');
+    expect(new URL(badge.getAttribute('href')!, 'http://x').searchParams.get('entityKey')).toBe('Pulse Main');
+    expect(q('[data-testid="agent-alerts-unavailable"]')).toBeNull();
+  });
+
+  it('shows nothing extra for a covered agent with no alert, and for an older server without the flags', async () => {
+    api = installApiMock([['GET', /\/health$/, () => series({ alerts: { firing: 0, pending: 0, covered: true }, alertsAvailable: true })]]);
+    mounted = await mount(h(AgentHealthPanel, { agentName: 'a', dateFilter: noFilter }));
+    await settle(50);
+    expect(q('[data-testid="agent-no-alert-rule"]')).toBeNull();
+    expect(q('[data-testid="agent-alerts-unknown"]')).toBeNull();
+    await mounted.unmount();
+    api = installApiMock([['GET', /\/health$/, () => series()]]);
+    mounted = await mount(h(AgentHealthPanel, { agentName: 'a', dateFilter: noFilter }));
+    await settle(50);
+    expect(q('[data-testid="agent-no-alert-rule"]')).toBeNull();
+    expect(q('[data-testid="agent-alerts-unavailable"]')).toBeNull();
+  });
+
+  it('warns and shows Unknown when the alert read failed, never an all-clear', async () => {
+    api = installApiMock([['GET', /\/health$/, () => series({ alerts: { firing: 0, pending: 0, covered: true }, alertsAvailable: false })]]);
+    mounted = await mount(h(AgentHealthPanel, { agentName: 'a', dateFilter: noFilter }));
+    await settle(50);
+    expect(q('[data-testid="agent-alerts-unavailable"]')).not.toBeNull();
+    expect(q('[data-testid="agent-alerts-unknown"]')!.textContent).toContain('Unknown');
+    expect(q('[data-testid="agent-no-alert-rule"]')).toBeNull();
+  });
+
   it('shows a skeleton while loading and an empty state when the period has no sessions', async () => {
     let release: (value: unknown) => void = () => undefined;
     api = installApiMock([['GET', /\/health$/, () => new Promise((resolve) => { release = resolve; })]]);
@@ -259,7 +292,7 @@ describe('AgentHealthPanel', () => {
     const badge = qa('a').find((a) => (a.textContent ?? '').includes('alert firing'))!;
     const url = new URL(badge.getAttribute('href')!, 'http://x');
     expect(url.pathname).toBe('/dashboard/alerts/incidents');
-    expect(Object.fromEntries(url.searchParams)).toEqual({ status: 'open', module: 'agents', entityKey: 'Pulse Main' });
+    expect(Object.fromEntries(url.searchParams)).toEqual({ status: 'all', module: 'agents', entityKey: 'Pulse Main' });
   });
 
   it('notes that "total" means the last 30 days', async () => {
@@ -290,6 +323,33 @@ describe('EntityHealthCharts (reused for entities that are not agents)', () => {
       'requests', 'errorRate', 'p95Ms', 'toolErrorRate', 'costUsd', 'abandoned',
     ]);
     expect(text()).toContain('$3.20');
+  });
+
+  it('always signs the change against the previous period and gives it an arrow, however small', async () => {
+    mounted = await mount(h(EntityHealthCharts, {
+      series: series({
+        totals: { requests: 35, errorRate: 17.1, p95Ms: 1035, toolCalls: 8, toolErrorRate: 5.3 },
+        previous: { requests: 35, errorRate: 17.1, p95Ms: 1000, toolErrorRate: 5.6 },
+      }),
+    }));
+    await settle(20);
+    const delta = (id: string) => q(`[data-kpi="${id}"] .ds-stat-delta`)!;
+    // p95 up 3.5% is under the noise band, but still reads as a rise, in red.
+    expect(delta('p95Ms').textContent).toContain('+3.5%');
+    expect(delta('p95Ms').getAttribute('data-tone')).toBe('bad');
+    expect(delta('p95Ms').className).toContain('down');
+    expect(q('svg', delta('p95Ms'))).not.toBeNull();
+    // Tool errors down 0.3 pp: a real minus sign, an arrow, green.
+    expect(delta('toolErrorRate').textContent).toContain('\u22120.3 pp');
+    expect(delta('toolErrorRate').getAttribute('data-tone')).toBe('good');
+    expect(delta('toolErrorRate').className).toContain('up');
+    expect(q('svg', delta('toolErrorRate'))).not.toBeNull();
+    // No change at all: neutral, no sign and no arrow.
+    expect(delta('errorRate').getAttribute('data-tone')).toBe('neutral');
+    expect(delta('errorRate').textContent).toContain('0 pp');
+    expect(delta('errorRate').textContent).not.toMatch(/[+\u2212]/);
+    expect(q('svg', delta('errorRate'))).toBeNull();
+    expect(q('svg', delta('requests'))).toBeNull();
   });
 
   it('says there is not enough data when there are fewer than two buckets', async () => {
@@ -369,6 +429,81 @@ describe('the agents list', () => {
     // A directory-only agent has no health data for the period.
     const old = qa('tbody tr').find((row) => row.textContent?.includes('old-agent'))!;
     expect(old.textContent).toContain('—');
+  });
+
+  it('writes the Trend header in the same case as the sortable ones', async () => {
+    mockAgents();
+    mounted = await mount(h(TracingAgentsPage));
+    await settle(50);
+    const headers = qa('thead th');
+    const sortable = headers.find((th) => th.textContent?.includes('Sessions'))!;
+    const trend = headers.find((th) => th.textContent?.trim() === 'Trend')!;
+    expect(sortable.querySelector('button')).not.toBeNull();
+    // The grid uppercases plain header text, buttons are exempt: the plain one opts out the same way.
+    const label = trend.querySelector('span')!;
+    expect(label.style.textTransform).toBe('none');
+    expect(label.style.letterSpacing).toBe('normal');
+  });
+
+  it('tells an agent no rule covers from a healthy one, and an unreadable alert state from both', async () => {
+    const body = {
+      ...healthBody,
+      alertsAvailable: true,
+      agents: healthBody.agents.map((agent) => ({
+        ...agent,
+        alert: agent.name === 'support' ? { phase: null, covered: false } : { ...agent.alert, covered: true },
+      })),
+    };
+    api = installApiMock([
+      ['GET', '/api/tracing/agents/health', () => body],
+      ['GET', '/api/tracing/agents', () => directoryBody],
+    ]);
+    mounted = await mount(h(TracingAgentsPage));
+    await settle(50);
+    const row = (name: string) => qa('tbody tr').find((r) => r.textContent?.includes(name))!;
+    expect(row('support').textContent).toContain('No alert rule');
+    expect(row('support').textContent).not.toContain('OK');
+    const link = row('support').querySelector('a.ds-badge')!;
+    expect(new URL(link.getAttribute('href')!, 'http://x').searchParams.get('entityKey')).toBe('support');
+    expect(q('[data-testid="agents-alerts-unavailable"]')).toBeNull();
+  });
+
+  it('shows OK for a covered agent without an alert, and keeps showing it for a server without the flags', async () => {
+    api = installApiMock([
+      ['GET', '/api/tracing/agents/health', () => ({ ...healthBody, agents: [{ ...healthBody.agents[1]!, alert: { phase: null, covered: true } }] })],
+      ['GET', '/api/tracing/agents', () => directoryBody],
+    ]);
+    mounted = await mount(h(TracingAgentsPage));
+    await settle(50);
+    const body = () => qa('tbody').map((el) => el.textContent ?? '').join(' ');
+    expect(body()).toContain('OK');
+    expect(body()).not.toContain('No alert rule');
+    await mounted.unmount();
+    mockAgents();
+    mounted = await mount(h(TracingAgentsPage));
+    await settle(50);
+    expect(qa('tbody tr').find((r) => r.textContent?.includes('support'))!.textContent).toContain('OK');
+  });
+
+  it('warns and shows Unknown instead of OK when the alerts could not be read', async () => {
+    api = installApiMock([
+      ['GET', '/api/tracing/agents/health', () => ({
+        ...healthBody,
+        alertsAvailable: false,
+        agents: healthBody.agents.map((agent) => ({ ...agent, alert: { phase: null, covered: true } })),
+      })],
+      ['GET', '/api/tracing/agents', () => directoryBody],
+    ]);
+    mounted = await mount(h(TracingAgentsPage));
+    await settle(50);
+    expect(q('[data-testid="agents-alerts-unavailable"]')).not.toBeNull();
+    const rows = qa('tbody tr');
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      expect(r.textContent).not.toContain('Firing');
+    }
+    for (const r of rows) expect(r.textContent).not.toMatch(/\bOK\b/);
+    expect(rows.find((r) => r.textContent?.includes('support'))!.textContent).toContain('Unknown');
   });
 
   it('opens the agent with the period, the name encoded once', async () => {
@@ -479,6 +614,42 @@ describe('the sessions list', () => {
     expect(call.query.status).toBeUndefined();
     expect(call.query.from).toBeUndefined();
     expect(q('[data-testid="sessions-range-chip"]')).toBeNull();
+  });
+
+  it('keeps a typed metadata filter when the status changes and the URL follows', async () => {
+    api = installApiMock([['GET', '/api/tracing/sessions', () => sessionsBody]]);
+    // The router rewrites the URL: the next render sees the new search params.
+    nav.replace.mockImplementation((url: string) => {
+      nav.search = new URLSearchParams(url.split('?')[1] ?? '');
+    });
+    mounted = await mount(h(TracingSessionsPage));
+    await settle(50);
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    const type = async (placeholder: string, value: string) => {
+      const input = q<HTMLInputElement>(`input[placeholder="${placeholder}"]`)!;
+      await act(async () => {
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    await type('metadata key', 'tenant');
+    await type('value', 'acme');
+    await settle(50);
+    expect(api.to('GET', '/api/tracing/sessions').at(-1)!.query).toMatchObject({ metadataKey: 'tenant', metadataValue: 'acme' });
+
+    const statusSelect = q<HTMLSelectElement>('select[aria-label="Filter by status"]')!;
+    const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+    await act(async () => {
+      selectSetter.call(statusSelect, 'error');
+      statusSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await settle(50);
+
+    expect(nav.replace).toHaveBeenCalled();
+    expect(q<HTMLInputElement>('input[placeholder="metadata key"]')!.value).toBe('tenant');
+    expect(q<HTMLInputElement>('input[placeholder="value"]')!.value).toBe('acme');
+    const last = api.to('GET', '/api/tracing/sessions').at(-1)!;
+    expect(last.query).toMatchObject({ status: 'error', metadataKey: 'tenant', metadataValue: 'acme' });
   });
 
   it('accepts abandoned and clears the range from the chip, in the URL too', async () => {

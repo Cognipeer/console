@@ -195,6 +195,8 @@ export interface AppConfig {
     entityMetricsRetentionDays: number;
     /** Cap on distinct buffered rows per process; new rows beyond it are dropped and counted. */
     entityMetricsMaxBufferedRows: number;
+    /** Share of the buffer one tenant may hold, so one tenant cannot starve the others; excess new rows are dropped and counted per tenant. */
+    entityMetricsMaxBufferedRowsPerTenant: number;
     /** A tracing session still 'in_progress' this long after its last activity is marked 'abandoned'. */
     tracingStaleSessionMinutes: number;
     /** How often the stale tracing-session finalizer runs. */
@@ -646,6 +648,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       entityMetricsFlushMs: Math.max(int(source, 'ENTITY_METRICS_FLUSH_MS', 30_000), 1_000),
       entityMetricsRetentionDays: Math.max(int(source, 'ENTITY_METRICS_RETENTION_DAYS', 45), 1),
       entityMetricsMaxBufferedRows: Math.max(int(source, 'ENTITY_METRICS_MAX_BUFFERED_ROWS', 50_000), 100),
+      entityMetricsMaxBufferedRowsPerTenant: Math.max(int(source, 'ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT', 10_000), 100),
       tracingStaleSessionMinutes: Math.max(int(source, 'TRACING_STALE_SESSION_MINUTES', 360), 5),
       tracingFinalizerIntervalMs: Math.max(int(source, 'TRACING_FINALIZER_INTERVAL_MS', 300_000), 10_000),
       alertChannelTimeoutMs: Math.max(int(source, 'ALERT_CHANNEL_TIMEOUT_MS', 10_000), 1_000),

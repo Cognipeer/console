@@ -528,5 +528,8 @@ describe('incidentUi', () => {
     expect(entries[2]).toMatchObject({ by: 'Ada', content: 'looking' });
     expect(entries[3]).toMatchObject({ system: true });
     expect(timelineEntries(incident({ resolvedAt: '2026-10-15T11:00:00.000Z', resolvedBy: 'u2' }))[1]).toMatchObject({ system: false, by: 'u2' });
+    expect(
+      timelineEntries(incident({ resolvedAt: '2026-10-15T11:00:00.000Z', resolvedBy: 'u2', resolvedByName: 'Grace', acknowledgedAt: '2026-10-15T10:30:00.000Z', acknowledgedBy: 'u3', acknowledgedByName: 'Linus' })).slice(1),
+    ).toMatchObject([{ kind: 'acknowledged', by: 'u3', byName: 'Linus' }, { kind: 'resolved', by: 'u2', byName: 'Grace' }]);
   });
 });

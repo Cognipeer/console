@@ -172,6 +172,13 @@ describe('AlertRuleForm: create', () => {
     expect(body(posts[0])).not.toHaveProperty('scope');
   });
 
+  it('words the "all" hint with the singular entity type', async () => {
+    const prefill = prefillFromParams({ module: 'agents', metric: 'agent_error_rate' }, DEFAULT_ALERT_CATALOG);
+    await render({ initialData: prefill as unknown as Record<string, unknown> });
+    expect(text()).toContain('every agent that reports data');
+    expect(text()).not.toContain('every agents');
+  });
+
   it('sends the baseline condition with the selected preset', async () => {
     await render({ initialData: { ...duplicateRuleSeed(RULE, 'Baseline copy').seed } as unknown as Record<string, unknown> });
     await click(qa('button').find((button) => button.textContent?.startsWith('Baseline')));
@@ -258,5 +265,11 @@ describe('AlertRuleForm: Turkish', () => {
     expect(text()).toContain('Uyarı Kuralını Düzenle');
     expect(text()).not.toMatch(/alerts\.[a-zA-Z]/);
     expect(q('[data-testid="rule-sentence"]')?.textContent).toContain('Ajan Hata Oranı');
+  });
+
+  it('words the "all" hint with the singular entity type', async () => {
+    const prefill = prefillFromParams({ module: 'agents', metric: 'agent_error_rate' }, DEFAULT_ALERT_CATALOG);
+    await render({ initialData: prefill as unknown as Record<string, unknown> }, 'tr');
+    expect(text()).toContain('veri gönderen her ajan için');
   });
 });

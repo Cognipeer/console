@@ -1629,6 +1629,7 @@ export const tr: typeof en = {
     analysisDescription: 'Konuşma alan çıkarımı, kalite değerlendirme ve doğruluk',
     pii: 'PII Servisi',
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
+    alertsDescription: 'Ajanlar, modeller ve araçlar için eşik, taban çizgisi, yokluk ve SLO alarmları ile olaylar',
     crawler: 'Crawler',
     crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
     websearch: 'Web Arama',

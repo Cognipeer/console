@@ -17,6 +17,7 @@ import { resolveHealthRange as resolveHealthRangeFor, sparkBucketMs, type Health
 import { resolveTraceSession } from '@/lib/services/agents/traceSession';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
+  authorizeServiceForRequest,
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
@@ -48,6 +49,7 @@ const BASELINE_LOOKBACK_DAYS = 14;
 /** Upper bound of sessions read to find the first time each agent version was seen. */
 const VERSION_MARKER_SESSION_LIMIT = 5000;
 const INCIDENT_MARKER_LIMIT = 200;
+const INCIDENT_READ_CONCURRENCY = 8;
 /** Silent agents with an active alert that are added to the scoreboard. */
 const HEALTH_MISSING_KEYS_LIMIT = 50;
 const SEVERITY_RANK: Record<IncidentSeverity, number> = { critical: 3, warning: 2, info: 1 };
@@ -65,17 +67,42 @@ function parseHealthLimit(raw: string | undefined): number {
 
 type AlertMaps = { rules: Map<string, IAlertRule>; incidents: Map<string, IIncident> };
 
+/** Which agents the enabled agent-module rules target: every agent, or a set of selected keys. */
+type AgentRuleCoverage = { all: boolean; keys: Set<string> };
+
+/**
+ * Coverage of the enabled agent-module rules (one in-memory pass over the rules read once per request).
+ * Legacy-scoped rules (no entity scope) target no agent here.
+ */
+function agentRuleCoverage(rules: Iterable<IAlertRule>): AgentRuleCoverage {
+  const coverage: AgentRuleCoverage = { all: false, keys: new Set() };
+  for (const rule of rules) {
+    if (!rule.enabled || rule.module !== 'agents') continue;
+    const entity = rule.entity;
+    if (!entity || entity.entityType !== 'agent') continue;
+    if (entity.mode === 'all') coverage.all = true;
+    else if (entity.mode === 'selected') for (const key of entity.keys ?? []) coverage.keys.add(key);
+  }
+  return coverage;
+}
+
+function isCovered(coverage: AgentRuleCoverage, agentKey: string): boolean {
+  return coverage.all || coverage.keys.has(agentKey);
+}
+
 /** Pending/firing alert states of enabled agent-module rules, by agent name. Two cheap reads, no incident reads. */
 async function loadAgentAlertStates(
   scope: { tenantDbName: string; tenantId: string; projectId: string },
-): Promise<{ states: Map<string, IAlertState[]> } & AlertMaps> {
+): Promise<{ states: Map<string, IAlertState[]>; coverage: AgentRuleCoverage } & AlertMaps> {
   const states = new Map<string, IAlertState[]>();
   const rules = new Map<string, IAlertRule>();
   const incidents = new Map<string, IIncident>();
+  let coverage: AgentRuleCoverage = { all: false, keys: new Set() };
   await runWithTenantScope(scope.tenantDbName, async (db) => {
     const agentRules = (await db.listAlertRules(scope.tenantId, { projectId: scope.projectId, enabled: true }))
       .filter((rule) => rule.module === 'agents' && rule._id !== undefined);
     if (agentRules.length === 0) return;
+    coverage = agentRuleCoverage(agentRules);
     for (const rule of agentRules) rules.set(String(rule._id), rule);
     const active = await db.listAlertStates({
       projectId: scope.projectId,
@@ -89,7 +116,7 @@ async function loadAgentAlertStates(
       states.set(state.entityKey, list);
     }
   });
-  return { states, rules, incidents };
+  return { states, rules, incidents, coverage };
 }
 
 /**
@@ -109,16 +136,23 @@ async function loadFiringIncidents(
     }
   }
   if (incidentIds.size === 0) return;
-  await runWithTenantScope(scope.tenantDbName, (db) =>
-    Promise.all([...incidentIds].map(async (id) => {
-      try {
-        const incident = await db.findIncidentById(id, scope.projectId);
-        if (incident) maps.incidents.set(id, incident);
-      } catch (error) {
-        logger.warn('Incident of a firing agent alert unavailable', { error });
+  const ids = [...incidentIds];
+  await runWithTenantScope(scope.tenantDbName, async (db) => {
+    // Point reads by id with a small fixed fan-out: a wide scoreboard never opens hundreds of reads at once.
+    let next = 0;
+    const worker = async () => {
+      while (next < ids.length) {
+        const id = ids[next++];
+        try {
+          const incident = await db.findIncidentById(id, scope.projectId);
+          if (incident) maps.incidents.set(id, incident);
+        } catch (error) {
+          logger.warn('Incident of a firing agent alert unavailable', { error });
+        }
       }
-    })),
-  );
+    };
+    await Promise.all(Array.from({ length: Math.min(INCIDENT_READ_CONCURRENCY, ids.length) }, worker));
+  });
 }
 
 function severityOf(
@@ -137,6 +171,7 @@ type AgentAlertSummary = { phase: AlertStatePhase | null; severity?: IncidentSev
 function summarizeAgentAlert(
   agentStates: IAlertState[] | undefined,
   maps: AlertMaps,
+  includeDetails: boolean,
 ): AgentAlertSummary {
   if (!agentStates || agentStates.length === 0) return { phase: null };
   let best: { state: IAlertState; severity?: IncidentSeverity } | null = null;
@@ -150,7 +185,7 @@ function summarizeAgentAlert(
   return {
     phase: best.state.phase === 'firing' ? 'firing' : 'pending',
     ...(best.severity ? { severity: best.severity } : {}),
-    ...(best.state.incidentId ? { incidentId: best.state.incidentId } : {}),
+    ...(includeDetails && best.state.incidentId ? { incidentId: best.state.incidentId } : {}),
   };
 }
 
@@ -554,6 +589,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in range) return reply.code(400).send({ error: range.error });
       const limit = parseHealthLimit(query.limit);
       const scope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // Rule names, incident ids and incident links are for callers who may read alerts; the others keep phase and severity.
+      const alertDetails = (await authorizeServiceForRequest(request, 'alerts', { level: 'read' })).allowed;
 
       const summaryInput = {
         ...scope,
@@ -595,15 +632,21 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         totals: summary.totals,
         previous: summary.previous,
         spark: summary.spark,
-        alert: alertInfo
-          ? summarizeAgentAlert(alertInfo.states.get(summary.entityKey), alertInfo)
-          : { phase: null },
+        alert: {
+          ...(alertInfo
+            ? summarizeAgentAlert(alertInfo.states.get(summary.entityKey), alertInfo, alertDetails)
+            : { phase: null }),
+          // Whether any enabled rule watches this agent: `phase: null` alone cannot tell "healthy" from "unmonitored".
+          covered: alertInfo ? isCovered(alertInfo.coverage, summary.entityKey) : false,
+        },
       }));
 
       const bucketMs = sparkBucketMs(range, HEALTH_SPARK_POINTS);
       return reply.code(200).send({
         // Spark point i starts at `sparkFromMs + i * bucketMs` (the first bucket is floored to a bucket boundary, so it can start before `fromMs`).
         range: { ...range, bucketMs, sparkFromMs: Math.floor(range.fromMs / bucketMs) * bucketMs },
+        // False when the alert rules or states could not be read: every `alert` below is then unknown, not OK.
+        alertsAvailable: alertInfo !== null,
         agents,
         total: summaries.length,
       });
@@ -625,6 +668,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       const range = resolveHealthRange(query);
       if ('error' in range) return reply.code(400).send({ error: range.error });
       const scope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const alertDetails = (await authorizeServiceForRequest(request, 'alerts', { level: 'read' })).allowed;
 
       const series = await getEntitySeries({
         ...scope,
@@ -642,10 +686,12 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
           logger.warn('Agent version markers unavailable', { error });
           return { markers: [] as HealthMarker[], partial: false };
         }),
-        loadIncidentMarkers(scope, agentName, seriesRange).catch((error) => {
-          logger.warn('Agent incident markers unavailable', { error });
-          return [] as HealthMarker[];
-        }),
+        alertDetails
+          ? loadIncidentMarkers(scope, agentName, seriesRange).catch((error) => {
+            logger.warn('Agent incident markers unavailable', { error });
+            return [] as HealthMarker[];
+          })
+          : Promise.resolve([] as HealthMarker[]),
         loadAgentAlertStates(scope).catch((error) => {
           logger.warn('Agent alert states unavailable for health view', { error });
           return null;
@@ -664,9 +710,13 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         markers,
         // True when the session read behind the version markers hit its bound: earlier versions may be missing.
         markersPartial: versionMarkers.partial,
+        // False when the alert rules or states could not be read: the counts below are then unknown, not zero.
+        alertsAvailable: alertInfo !== null,
         alerts: {
           firing: agentStates.filter((state) => state.phase === 'firing').length,
           pending: agentStates.filter((state) => state.phase === 'pending').length,
+          // Whether any enabled rule watches this agent.
+          covered: alertInfo ? isCovered(alertInfo.coverage, agentName) : false,
         },
       });
     } catch (error) {

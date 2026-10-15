@@ -104,7 +104,7 @@ import {
     recordAgentSessionOutcome,
     recordTraceEventMetrics,
 } from '@/lib/services/tracing/traceEntityMetrics';
-import { countTraceErrors, deriveSessionStatus } from '@/lib/shared/traceHealth';
+import { countTraceErrors, deriveSessionStatus, isExplicitClientStatus } from '@/lib/shared/traceHealth';
 import {
     buildToolDefinitionsSection,
     TOOL_DEFINITIONS_SECTION_KIND,
@@ -2354,6 +2354,8 @@ export async function createInternalTracingSink(
                     metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
                     summary: session.summary ?? {},
                     status: sessionStatus,
+                    // An SDK-supplied status is never overridden by a late error event (only a derived one is).
+                    statusExplicit: isExplicitClientStatus(session.status),
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
                     durationMs: session.durationMs ?? undefined,

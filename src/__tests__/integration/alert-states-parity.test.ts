@@ -4,7 +4,7 @@
 
 import { it, expect, beforeEach } from 'vitest';
 
-import { describeForEachProvider } from './db-parity.helper';
+import { describeForEachProvider, listTenantIndexNames, sqliteQueryPlan } from './db-parity.helper';
 import type { IAlertState } from '@/lib/database';
 
 type Seed = { tenantId: string; projectId: string };
@@ -169,6 +169,28 @@ describeForEachProvider('Alert states', (getDb) => {
     expect(await db.listAlertStates({ ruleIds: [] })).toEqual([]);
     expect(await db.listAlertStates({ phases: [] })).toEqual([]);
     expect(await db.listAlertStates({ limit: 2 })).toHaveLength(2);
+  });
+
+  it('indexes the by-rule and the (project, phase) lookups, which the unique (tenant, rule, entity) index cannot serve', async () => {
+    const db = getDb();
+    // MongoDB ensures its indexes on the first write; SQLite has them from the tenant schema.
+    await db.upsertAlertState(state(seed));
+    const names = await listTenantIndexNames(db, 'alert_states');
+    expect(names).toEqual(expect.arrayContaining([
+      'idx_alert_states_rule',
+      'idx_alert_states_project_phase',
+      'idx_alert_states_project_phase_notenant',
+    ]));
+
+    // listAlertStates() runs these two shapes without a tenantId predicate. SQLite only: the planner picks the plain indexes.
+    const byRule = sqliteQueryPlan(db, 'SELECT * FROM alert_states WHERE ruleId = @ruleId', { ruleId: 'rule-1' });
+    if (byRule !== null) expect(byRule).toContain('USING INDEX idx_alert_states_rule');
+    const byProjectPhase = sqliteQueryPlan(
+      db,
+      'SELECT * FROM alert_states WHERE projectId = @projectId AND phase IN (@p0, @p1)',
+      { projectId: seed.projectId, p0: 'firing', p1: 'pending' },
+    );
+    if (byProjectPhase !== null) expect(byProjectPhase).toContain('USING INDEX idx_alert_states_project_phase_notenant');
   });
 
   it('deletes by rule, or only the named entities of a rule', async () => {

@@ -92,6 +92,8 @@ interface BufferedRow {
 const buffer = new Map<string, Map<string, BufferedRow>>();
 let pendingRows = 0;
 let droppedRows = 0;
+/** tenantDbName -> rows dropped (global cap or per-tenant share). */
+const droppedByTenant = new Map<string, number>();
 let lastDropWarnAt = 0;
 let lastFlushAt: Date | null = null;
 let lastError: string | null = null;
@@ -123,13 +125,15 @@ function accumulate(target: EntityMetricCounters, source: EntityMetricCounters):
   if (source.latencyMsMax > target.latencyMsMax) target.latencyMsMax = source.latencyMsMax;
 }
 
-function warnDropped(): void {
+function warnDropped(tenantDbName: string): void {
   const now = Date.now();
   if (now - lastDropWarnAt < WARN_INTERVAL_MS) return;
   lastDropWarnAt = now;
   log.warn('Entity metrics buffer is full; dropping new rows', {
     dropped: droppedRows,
     pending: pendingRows,
+    tenant: tenantDbName,
+    tenantDropped: droppedByTenant.get(tenantDbName) ?? 0,
     cap: getConfig().health.entityMetricsMaxBufferedRows,
   });
 }
@@ -146,9 +150,15 @@ function bufferRow(tenantDbName: string, row: BufferedRow): void {
     accumulate(existing.counters, row.counters);
     return;
   }
-  if (pendingRows >= getConfig().health.entityMetricsMaxBufferedRows) {
+  const health = getConfig().health;
+  // A tenant may hold only a share of the process-wide cap: row cardinality is
+  // client-influenced (event timestamps, model/tool names), so one tenant must
+  // not be able to fill the buffer and starve every other tenant's rows.
+  const tenantCap = Math.min(health.entityMetricsMaxBufferedRowsPerTenant, health.entityMetricsMaxBufferedRows);
+  if (pendingRows >= health.entityMetricsMaxBufferedRows || (tenantRows?.size ?? 0) >= tenantCap) {
     droppedRows += 1;
-    warnDropped();
+    droppedByTenant.set(tenantDbName, (droppedByTenant.get(tenantDbName) ?? 0) + 1);
+    warnDropped(tenantDbName);
     return;
   }
   if (!tenantRows) {
@@ -396,10 +406,12 @@ export async function stopEntityMetricsRollup(): Promise<void> {
 export function getEntityMetricsRollupHealth(): {
   pending: number;
   dropped: number;
+  /** Rows dropped per tenant database (cap or per-tenant share). */
+  droppedByTenant: Record<string, number>;
   lastFlushAt: Date | null;
   lastError: string | null;
 } {
-  return { pending: pendingRows, dropped: droppedRows, lastFlushAt, lastError };
+  return { pending: pendingRows, dropped: droppedRows, droppedByTenant: Object.fromEntries(droppedByTenant), lastFlushAt, lastError };
 }
 
 /** Test helper: drop all state and timers. */
@@ -408,6 +420,7 @@ export function __resetEntityMetricsRollupForTests(): void {
   buffer.clear();
   pendingRows = 0;
   droppedRows = 0;
+  droppedByTenant.clear();
   lastDropWarnAt = 0;
   lastFlushAt = null;
   lastError = null;

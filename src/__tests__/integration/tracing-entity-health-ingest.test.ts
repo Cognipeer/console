@@ -263,16 +263,17 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 0, errorEvents: 1, toolErrors: 1 });
   });
 
-  it('stream: an error landing after /end flips the finished session and books one correction', async () => {
+  it('stream: an error landing after a /end without a status flips the derived status and books one correction', async () => {
     const sessionId = `late-${sequence}`;
     await streamStart(sessionId);
     await drainPendingTasks();
     await streamEvent(sessionId, aiCall());
     await drainPendingTasks();
-    await streamEnd(sessionId, { status: 'success', durationMs: 1000 });
+    // The client sends no status: the counters derive 'success' (nothing failed yet), and the status stays flippable.
+    await streamEnd(sessionId, { durationMs: 1000 });
     await settle();
 
-    expect(await session(sessionId)).toMatchObject({ status: 'success' });
+    expect(await session(sessionId)).toMatchObject({ status: 'success', statusExplicit: false });
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 0 });
 
     // The SDK does not wait for /events before /end: this one arrives late.
@@ -290,6 +291,68 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await streamEvent(sessionId, toolCall('late-tool-2', { status: 'error', error: { message: 'later' } }));
     await settle();
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 1, toolErrors: 2, errorEvents: 2 });
+  });
+
+  it('stream: an error landing after a client "success" keeps it a success while the counters keep the error', async () => {
+    const sessionId = `late-explicit-${sequence}`;
+    await streamStart(sessionId);
+    await drainPendingTasks();
+    await streamEvent(sessionId, aiCall());
+    await drainPendingTasks();
+    await streamEnd(sessionId, { status: 'success', durationMs: 1000 });
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success', statusExplicit: true });
+
+    // Same late event as above, but the client itself called the run a success: that outcome never depends on
+    // whether /events or /end arrives first.
+    const late = await streamEvent(sessionId, toolCall('late-tool', { status: 'error', error: { message: 'late' } }));
+    expect(late.statusCode).toBe(200);
+    await settle();
+
+    const kept = await session(sessionId);
+    expect(kept).toMatchObject({ status: 'success', statusExplicit: true, errorEvents: 1, toolErrors: 1 });
+    expect(kept?.metricsOutcome?.status).toBe('success');
+    // No correction: the run is still one successful request; only the event-level error counters moved.
+    expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 0, errorEvents: 1, toolErrors: 1 });
+  });
+
+  it('stream: re-starting an ended session re-arms it, and the next /end decides whether its status is explicit', async () => {
+    const sessionId = `reopen-${sequence}`;
+    await streamStart(sessionId);
+    await drainPendingTasks();
+    await streamEnd(sessionId, { status: 'success', durationMs: 500 });
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success', statusExplicit: true });
+
+    // A second leg of the same logical run: open again, the first leg's client status no longer describes it.
+    await streamStart(sessionId);
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'in_progress', statusExplicit: false });
+
+    await streamEnd(sessionId, { durationMs: 700 });
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success', statusExplicit: false });
+  });
+
+  it('stream: an error landing while /end has stored the status but not yet its outcome marker is still booked', async () => {
+    const sessionId = `race-${sequence}`;
+    await streamStart(sessionId);
+    await drainPendingTasks();
+    await streamEvent(sessionId, aiCall());
+    await drainPendingTasks();
+
+    // /end wrote status=success and is still pricing the session: no marker is stored yet.
+    await db.switchToTenant(dbName);
+    await db.updateAgentTracingSession(sessionId, { status: 'success', endedAt: new Date(), durationMs: 1000 }, projectId);
+    expect((await session(sessionId))?.metricsOutcome).toBeFalsy();
+
+    await streamEvent(sessionId, toolCall('late-tool', { status: 'error', error: { message: 'late' } }));
+    await settle();
+
+    const flipped = await session(sessionId);
+    expect(flipped).toMatchObject({ status: 'error', errorEvents: 1 });
+    expect(flipped?.metricsOutcome?.status).toBe('error');
+    expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 1 });
   });
 
   // ── abandoned sessions and the finalizer ──────────────────────────────────
@@ -314,6 +377,41 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     expect(abandoned?.status).toBe('abandoned');
     expect(abandoned?.metricsOutcome).toMatchObject({ status: 'abandoned', latencyRecorded: false });
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 0, abandoned: 1, latencyCount: 0 });
+  });
+
+  it('finalizer: the OTLP pass lists OTLP sessions only (filtered by the database), the abandon pass every source', async () => {
+    const listed = vi.spyOn(db, 'listStaleAgentTracingSessions');
+    try {
+      await sweepStaleTracingSessions(later());
+      const inputs = listed.mock.calls.map(([input]) => input);
+      const withSource = inputs.filter((input) => input.source !== undefined);
+      const withoutSource = inputs.filter((input) => input.source === undefined);
+      // Every tenant is swept: one OTLP listing and at least one abandon listing each.
+      expect(withSource.length).toBeGreaterThan(0);
+      expect(withSource.every((input) => input.source === 'otlp')).toBe(true);
+      expect(withoutSource.length).toBeGreaterThan(0);
+      // The OTLP pass looks at a shorter idle window than the abandon pass.
+      const oldestOtlpCutoff = Math.min(...withSource.map((input) => input.updatedBefore.getTime()));
+      const newestAbandonCutoff = Math.max(...withoutSource.map((input) => input.updatedBefore.getTime()));
+      expect(oldestOtlpCutoff).toBeGreaterThan(newestAbandonCutoff);
+    } finally {
+      listed.mockRestore();
+    }
+  });
+
+  it('finalizer: a session stranded for more than a day is closed as history and books nothing', async () => {
+    const stranded = `stranded-${sequence}`;
+    await streamStart(stranded);
+    await settle();
+
+    // Three days later: the run is history, not current health.
+    await sweepStaleTracingSessions(Date.now() + 3 * DAY_MS);
+    await settle();
+
+    const closed = await session(stranded);
+    expect(closed?.status).toBe('abandoned');
+    expect(closed?.metricsOutcome).toBeFalsy();
+    expect(await row('agent', agent)).toBeUndefined();
   });
 
   it('finalizer: a late /end revives an abandoned session and only the difference is booked', async () => {
@@ -377,7 +475,7 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await settle();
 
     const stored = await session(sessionId);
-    expect(stored).toMatchObject({ status: 'error', errorEvents: 1, toolErrors: 1, aiErrors: 0 });
+    expect(stored).toMatchObject({ status: 'error', errorEvents: 1, toolErrors: 1, aiErrors: 0, statusExplicit: false });
     // Duration comes from the client's own start and end when it sends none.
     expect(stored?.durationMs).toBeGreaterThanOrEqual(3900);
     expect(stored?.durationMs).toBeLessThanOrEqual(4100);
@@ -398,13 +496,13 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     const recoveredId = `batch-recovered-${sequence}`;
     expect((await batch({ ...payload, sessionId: recoveredId, status: 'success' })).statusCode).toBe(200);
     await settle();
-    expect(await session(recoveredId)).toMatchObject({ status: 'success', errorEvents: 1 });
+    expect(await session(recoveredId)).toMatchObject({ status: 'success', errorEvents: 1, statusExplicit: true });
 
     // No errors and no status: an ended session is a success, never 'unknown'.
     const cleanId = `batch-clean-${sequence}`;
     expect((await batch({ sessionId: cleanId, agent: { name: agent }, startedAt, endedAt, events: [aiCall()] })).statusCode).toBe(200);
     await settle();
-    expect(await session(cleanId)).toMatchObject({ status: 'success', errorEvents: 0 });
+    expect(await session(cleanId)).toMatchObject({ status: 'success', errorEvents: 0, statusExplicit: false });
   });
 
   it('batch: a re-post that adds a failed call books only the new call and the status change', async () => {
@@ -482,6 +580,8 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await settle();
     const done = await session(sessionId);
     expect(done).toMatchObject({ status: 'success' });
+    // OTLP carries no client status, so a late error span may always flip it.
+    expect(done?.statusExplicit ?? false).toBe(false);
     expect(done?.metricsOutcome).toMatchObject({ status: 'success', latencyRecorded: true });
     expect(await row('agent', agent)).toMatchObject({
       requests: 1, errors: 0, aiCalls: 1, toolCalls: 1, latencyCount: 1, latencyMsSum: 2000,
@@ -633,6 +733,25 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await onSession(sink, hostedSession as never);
     await settle();
     expect(await metrics('agent', ['entityKey', 'source'])).toEqual(rows);
+  });
+
+  it('hosted sink: records whether the status came from the SDK, so only a derived status can be flipped later', async () => {
+    const sink = await createInternalTracingSink(dbName, tenantId, projectId, undefined, 'agent-key-3');
+    const finished = {
+      agent: { name: agent }, startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+      durationMs: 500, summary: {}, errors: [],
+    };
+    const failing = [toolCall('flaky-hosted', { status: 'error', error: { message: 'retried' } })];
+
+    await onSession(sink, { ...finished, sessionId: `h-sdk-${sequence}`, status: 'success', events: failing } as never);
+    await onSession(sink, { ...finished, sessionId: `h-derived-${sequence}`, events: failing } as never);
+    await onSession(sink, { ...finished, sessionId: `h-paused-flag-${sequence}`, status: 'in_progress', events: [aiCall()] } as never);
+    await settle();
+
+    // The SDK called the run a success: that wins over the error event, and it is remembered as explicit.
+    expect(await session(`h-sdk-${sequence}`)).toMatchObject({ status: 'success', errorEvents: 1, statusExplicit: true });
+    expect(await session(`h-derived-${sequence}`)).toMatchObject({ status: 'error', errorEvents: 1, statusExplicit: false });
+    expect(await session(`h-paused-flag-${sequence}`)).toMatchObject({ status: 'in_progress', statusExplicit: false });
   });
 
   it('hosted sink: an SDK status wins, sink failures are not run failures, an in-progress post is not booked', async () => {

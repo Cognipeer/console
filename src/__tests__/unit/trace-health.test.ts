@@ -3,6 +3,7 @@ import {
   countTraceErrors,
   deriveSessionStatus,
   isErrorTraceEvent,
+  isExplicitClientStatus,
   traceErrorKind,
 } from '@/lib/shared/traceHealth';
 
@@ -102,5 +103,17 @@ describe('deriveSessionStatus', () => {
   it('re-derives a stale in_progress or unknown status once the session ended', () => {
     expect(deriveSessionStatus({ clientStatus: 'in_progress', errorEvents: 0, nonSinkErrors: 0, ended: true })).toBe('success');
     expect(deriveSessionStatus({ clientStatus: 'unknown', errorEvents: 2, nonSinkErrors: 0, ended: true })).toBe('error');
+  });
+});
+
+describe('isExplicitClientStatus', () => {
+  it('is true only for a status deriveSessionStatus returns as-is', () => {
+    for (const status of ['success', 'error', ' Partial ', 'cancelled']) {
+      expect(isExplicitClientStatus(status)).toBe(true);
+      expect(deriveSessionStatus({ clientStatus: status, errorEvents: 0, nonSinkErrors: 0, ended: true })).toBe(status.trim() === status ? status : status.trim());
+    }
+    for (const status of [undefined, null, '', '  ', 'unknown', 'UNKNOWN', 'in_progress']) {
+      expect(isExplicitClientStatus(status)).toBe(false);
+    }
   });
 });

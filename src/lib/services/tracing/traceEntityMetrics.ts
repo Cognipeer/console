@@ -14,6 +14,12 @@
  *    `/end` on an abandoned session or a late error on a finished one only emits
  *    a correction row.
  *
+ * Booking time of events: event timestamps are client-controlled, and an ingest of old events would otherwise
+ * touch up to 288 five-minute buckets per key. For externally traced runs (`source: 'tracing'`) the time an event is
+ * booked at is clamped to [now - 3 h, now + 5 min]: an event between 3 h and 24 h old is booked at the now-3h bucket
+ * (its counts are kept, only its time moves), a later one at now + 5 min. Events older than 24 h are still skipped
+ * (history, re-imports) and hosted runs, whose times are the console's own, keep theirs.
+ *
  * Known limitation: tokens and cost are booked with the FIRST terminal outcome
  * only (`metricsOutcome` stores no booked totals, so growth cannot be booked as
  * a delta). Legs of a multi-leg run that end after the first `/end`, and events
@@ -49,6 +55,8 @@ const MAX_DISTINCT_KEYS_PER_INGEST = 50;
 const CAP_WARN_INTERVAL_MS = 60_000;
 let lastCapWarnAt = 0;
 const FUTURE_SLACK_MS = 5 * 60_000;
+/** How far back an externally traced event may be booked (see the header): older events are booked at `now - this`. */
+const MAX_BOOKING_PAST_MS = 3 * 60 * 60_000;
 
 export type TraceMetricsSource = 'tracing' | 'hosted';
 export type SessionMetricsOutcome = NonNullable<IAgentTracingSession['metricsOutcome']>;
@@ -126,6 +134,16 @@ function eventTimeMs(event: TraceEntityEventLike): number | undefined {
 function isRecentEvent(event: TraceEntityEventLike, now: number): boolean {
   const at = eventTimeMs(event);
   return at === undefined || at >= now - DAY_MS;
+}
+
+/**
+ * The time an event is booked at. External traces carry client-controlled times, so they are clamped to
+ * [now - 3 h, now + 5 min]; hosted runs keep their own time. No usable time: undefined (the rollup books it at now).
+ */
+function bookingTimeMs(event: TraceEntityEventLike, source: TraceMetricsSource, now: number): number | undefined {
+  const at = eventTimeMs(event);
+  if (at === undefined || source !== 'tracing') return at;
+  return Math.min(Math.max(at, now - MAX_BOOKING_PAST_MS), now + FUTURE_SLACK_MS);
 }
 
 function eventToolName(event: TraceEntityEventLike): string | undefined {
@@ -214,6 +232,7 @@ function emitAgentCounters(
   agentKey: string,
   events: TraceEntityEventLike[],
   sign: 1 | -1,
+  now: number,
 ): void {
   for (const event of events) {
     const counts = countTraceErrors([event]);
@@ -234,7 +253,7 @@ function emitAgentCounters(
       toolErrors: sign * counts.toolErrors,
       aiCalls: sign * counts.aiCalls,
       aiErrors: sign * counts.aiErrors,
-      at: eventTimeMs(event),
+      at: bookingTimeMs(event, params.source, now),
     });
   }
 }
@@ -287,8 +306,8 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
 
     const agentKey = params.agentName?.trim();
     if (agentKey) {
-      emitAgentCounters(params, agentKey, fresh, 1);
-      emitAgentCounters(params, agentKey, removed, -1);
+      emitAgentCounters(params, agentKey, fresh, 1, now);
+      emitAgentCounters(params, agentKey, removed, -1, now);
     }
 
     // Hosted runs count their model and tool calls where they execute.
@@ -347,7 +366,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
         inputTokens: tokens.inputTokens,
         outputTokens: tokens.outputTokens,
         costUsd: priced?.costUsd ?? 0,
-        at: eventTimeMs(event),
+        at: bookingTimeMs(event, 'tracing', now),
       });
     }
 
@@ -361,7 +380,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
         source: 'tracing',
         outcome: isErrorTraceEvent(event) ? 'error' : 'ok',
         latencyMs: typeof event.durationMs === 'number' ? event.durationMs : null,
-        at: eventTimeMs(event),
+        at: bookingTimeMs(event, 'tracing', now),
       });
     }
   } catch (error) {

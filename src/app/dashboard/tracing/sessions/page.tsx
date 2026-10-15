@@ -161,19 +161,28 @@ export default function TracingSessionsPage() {
     [buildQueryParams, page],
   );
 
+  // The URL only carries agent, status and range (typed metadata filters are page state), and the page rewrites
+  // it itself on a status or range change. So a param is applied only when the URL moved on it since the last
+  // run (a link, back/forward): re-applying them all would reset the typed metadata filter to the URL's empty value.
+  const seenUrl = useRef<Record<string, string> | null>(null);
   useEffect(() => {
-    const agentParam = searchParams.get('agent')?.trim() || '';
-    setAgentFilter((current) => (current === agentParam ? current : agentParam));
-    const statusFromUrl = statusParam(searchParams.get('status'));
-    setStatusFilter((current) => (current === statusFromUrl ? current : statusFromUrl));
-    const fromFromUrl = isoParam(searchParams.get('from'));
-    setFromFilter((current) => (current === fromFromUrl ? current : fromFromUrl));
-    const toFromUrl = isoParam(searchParams.get('to'));
-    setToFilter((current) => (current === toFromUrl ? current : toFromUrl));
-    const metadataKeyParam = searchParams.get('metadataKey')?.trim() || '';
-    setMetadataKey((current) => (current === metadataKeyParam ? current : metadataKeyParam));
-    const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
-    setMetadataValue((current) => (current === metadataValueParam ? current : metadataValueParam));
+    const current = {
+      agent: searchParams.get('agent')?.trim() || '',
+      status: statusParam(searchParams.get('status')),
+      from: isoParam(searchParams.get('from')),
+      to: isoParam(searchParams.get('to')),
+      metadataKey: searchParams.get('metadataKey')?.trim() || '',
+      metadataValue: searchParams.get('metadataValue')?.trim() || '',
+    };
+    const before = seenUrl.current;
+    seenUrl.current = current;
+    const moved = (key: keyof typeof current) => before === null || before[key] !== current[key];
+    if (moved('agent')) setAgentFilter((value) => (value === current.agent ? value : current.agent));
+    if (moved('status')) setStatusFilter((value) => (value === current.status ? value : current.status));
+    if (moved('from')) setFromFilter((value) => (value === current.from ? value : current.from));
+    if (moved('to')) setToFilter((value) => (value === current.to ? value : current.to));
+    if (moved('metadataKey')) setMetadataKey((value) => (value === current.metadataKey ? value : current.metadataKey));
+    if (moved('metadataValue')) setMetadataValue((value) => (value === current.metadataValue ? value : current.metadataValue));
   }, [searchParams]);
 
   // Another search is another list: the pages of the last one no longer say where this one's start.

@@ -116,9 +116,50 @@ function p95Latency(c: EntityMetricCounters): EntityMetricValue {
   return { value: quantileFromCounters(c, 0.95), sampleCount: n(c.latencyCount) };
 }
 
-function errorRateOf(c: EntityMetricCounters, cancelledAware: boolean): EntityMetricValue {
-  const denominator = cancelledAware ? Math.max(n(c.requests) - n(c.cancelled), 0) : n(c.requests);
-  return { value: pct(n(c.errors), denominator), sampleCount: denominator };
+/**
+ * Exact numerator and denominator of every metric that is a percentage of two
+ * counters, or null for any other metric. `computeEntityMetric` derives its
+ * value and sample count from this, so the two cannot drift; baselines use the
+ * counts to weigh a rate by how many events stand behind it. The numerator is
+ * clamped to 0..den like the percentage (late corrections can land in another
+ * bucket than the request they correct); den may be 0.
+ */
+export function proportionOf(metric: AlertMetric, c: EntityMetricCounters): { num: number; den: number } | null {
+  let num: number;
+  let den: number;
+  switch (metric) {
+    case 'agent_error_rate':
+    case 'kb_error_rate':
+    case 'mcp_server_error_rate':
+    case 'tool_error_rate':
+      num = n(c.errors);
+      den = n(c.requests);
+      break;
+    // only models exclude cancelled requests
+    case 'model_error_rate':
+      num = n(c.errors);
+      den = Math.max(n(c.requests) - n(c.cancelled), 0);
+      break;
+    case 'agent_tool_error_rate':
+      num = n(c.toolErrors);
+      den = n(c.toolCalls);
+      break;
+    case 'agent_ai_error_rate':
+      num = n(c.aiErrors);
+      den = n(c.aiCalls);
+      break;
+    case 'agent_abandoned_rate':
+      num = n(c.abandoned);
+      den = n(c.requests);
+      break;
+    case 'kb_empty_result_rate':
+      num = n(c.emptyResults);
+      den = Math.max(n(c.requests) - n(c.errors), 0);
+      break;
+    default:
+      return null;
+  }
+  return { num: Math.min(Math.max(num, 0), den), den };
 }
 
 /**
@@ -128,24 +169,18 @@ function errorRateOf(c: EntityMetricCounters, cancelledAware: boolean): EntityMe
  * Non-entity metrics yield `{ value: null, sampleCount: 0 }`.
  */
 export function computeEntityMetric(metric: AlertMetric, c: EntityMetricCounters): EntityMetricValue {
+  const proportion = proportionOf(metric, c);
+  if (proportion) return { value: pct(proportion.num, proportion.den), sampleCount: proportion.den };
   switch (metric) {
     // agents
     case 'agent_sessions':
       return { value: n(c.requests), sampleCount: n(c.requests) };
-    case 'agent_error_rate':
-      return errorRateOf(c, false);
     case 'agent_error_events':
       return { value: n(c.errorEvents), sampleCount: n(c.requests) + n(c.aiCalls) + n(c.toolCalls) };
-    case 'agent_tool_error_rate':
-      return { value: pct(n(c.toolErrors), n(c.toolCalls)), sampleCount: n(c.toolCalls) };
-    case 'agent_ai_error_rate':
-      return { value: pct(n(c.aiErrors), n(c.aiCalls)), sampleCount: n(c.aiCalls) };
     case 'agent_p95_duration_ms':
       return p95Latency(c);
     case 'agent_avg_duration_ms':
       return avgLatency(c);
-    case 'agent_abandoned_rate':
-      return { value: pct(n(c.abandoned), n(c.requests)), sampleCount: n(c.requests) };
     case 'agent_cost':
       return { value: n(c.costUsd), sampleCount: n(c.requests) + n(c.aiCalls) };
     case 'agent_tokens_per_session':
@@ -154,8 +189,6 @@ export function computeEntityMetric(metric: AlertMetric, c: EntityMetricCounters
     // models
     case 'model_requests':
       return { value: n(c.requests), sampleCount: n(c.requests) };
-    case 'model_error_rate':
-      return errorRateOf(c, true);
     case 'model_p95_latency_ms':
       return p95Latency(c);
     case 'model_avg_latency_ms':
@@ -166,30 +199,20 @@ export function computeEntityMetric(metric: AlertMetric, c: EntityMetricCounters
     // knowledge bases
     case 'kb_queries':
       return { value: n(c.requests), sampleCount: n(c.requests) };
-    case 'kb_error_rate':
-      return errorRateOf(c, false);
     case 'kb_p95_latency_ms':
       return p95Latency(c);
     case 'kb_avg_latency_ms':
       return avgLatency(c);
-    case 'kb_empty_result_rate': {
-      const answered = Math.max(n(c.requests) - n(c.errors), 0);
-      return { value: pct(n(c.emptyResults), answered), sampleCount: answered };
-    }
 
     // MCP servers
     case 'mcp_server_requests':
       return { value: n(c.requests), sampleCount: n(c.requests) };
-    case 'mcp_server_error_rate':
-      return errorRateOf(c, false);
     case 'mcp_server_p95_latency_ms':
       return p95Latency(c);
 
     // tools
     case 'tool_calls':
       return { value: n(c.requests), sampleCount: n(c.requests) };
-    case 'tool_error_rate':
-      return errorRateOf(c, false);
     case 'tool_p95_latency_ms':
       return p95Latency(c);
 

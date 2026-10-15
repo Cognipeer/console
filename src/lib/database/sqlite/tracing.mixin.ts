@@ -103,13 +103,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel, metadata,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens, totalReasoningTokens, truncatedEvents,
-         errorEvents, toolErrors, aiErrors, metricsOutcome,
+         errorEvents, toolErrors, aiErrors, metricsOutcome, statusExplicit,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
          userId, apiTokenId, actorType, createdAt, updatedAt)
         VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel, @metadata,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens, @totalReasoningTokens, @truncatedEvents,
-         @errorEvents, @toolErrors, @aiErrors, @metricsOutcome,
+         @errorEvents, @toolErrors, @aiErrors, @metricsOutcome, @statusExplicit,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
          @userId, @apiTokenId, @actorType, @createdAt, @updatedAt)
       `).run({
@@ -146,6 +146,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         toolErrors: session.toolErrors ?? 0,
         aiErrors: session.aiErrors ?? 0,
         metricsOutcome: this.serializeMetricsOutcome(session.metricsOutcome),
+        statusExplicit: session.statusExplicit ? 1 : 0,
         totalBytesIn: session.totalBytesIn ?? 0,
         totalBytesOut: session.totalBytesOut ?? 0,
         totalRequestBytes: session.totalRequestBytes ?? 0,
@@ -265,7 +266,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
              toolErrors = COALESCE(toolErrors, 0) + @toolErrors,
              aiErrors = COALESCE(aiErrors, 0) + @aiErrors,
              status = CASE
-               WHEN @errorEvents > 0 AND COALESCE(status, 'unknown') IN ('success', 'partial', 'unknown', 'completed')
+               WHEN @errorEvents > 0 AND COALESCE(statusExplicit, 0) = 0
+                AND COALESCE(status, 'unknown') IN ('success', 'partial', 'unknown', 'completed')
                THEN 'error' ELSE status END
            WHERE ${where}`,
         ).run(params);
@@ -324,15 +326,22 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
     async listStaleAgentTracingSessions(input: {
       updatedBefore: Date;
       limit: number;
+      source?: string;
     }): Promise<IAgentTracingSession[]> {
       const db = this.getTenantDb();
       const n = Number(input.limit);
       const limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 500;
+      const params: Record<string, unknown> = { updatedBefore: input.updatedBefore.toISOString(), limit };
+      let sourceClause = '';
+      if (typeof input.source === 'string') {
+        sourceClause = ' AND source = @source';
+        params.source = input.source;
+      }
       const rows = db.prepare(
         `SELECT * FROM ${TABLES.agentTracingSessions}
-         WHERE status = 'in_progress' AND updatedAt < @updatedBefore
+         WHERE status = 'in_progress' AND updatedAt < @updatedBefore${sourceClause}
          ORDER BY updatedAt ASC LIMIT @limit`,
-      ).all({ updatedBefore: input.updatedBefore.toISOString(), limit }) as SqliteRow[];
+      ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapAgentTracingSessionRow(r));
     }
 
@@ -418,6 +427,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.aiErrors !== undefined) { sets.push('aiErrors = @aiErrors'); params.aiErrors = data.aiErrors; }
       // Keyed on presence so `null` clears the recorded outcome.
       if ('metricsOutcome' in data) { sets.push('metricsOutcome = @metricsOutcome'); params.metricsOutcome = this.serializeMetricsOutcome(data.metricsOutcome); }
+      if (data.statusExplicit !== undefined) { sets.push('statusExplicit = @statusExplicit'); params.statusExplicit = data.statusExplicit ? 1 : 0; }
       if (data.totalBytesIn !== undefined) { sets.push('totalBytesIn = @totalBytesIn'); params.totalBytesIn = data.totalBytesIn; }
       if (data.totalBytesOut !== undefined) { sets.push('totalBytesOut = @totalBytesOut'); params.totalBytesOut = data.totalBytesOut; }
       if (data.totalRequestBytes !== undefined) { sets.push('totalRequestBytes = @totalRequestBytes'); params.totalRequestBytes = data.totalRequestBytes; }
@@ -980,6 +990,7 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         toolErrors: (r.toolErrors as number) ?? 0,
         aiErrors: (r.aiErrors as number) ?? 0,
         metricsOutcome: this.parseMetricsOutcome(r.metricsOutcome),
+        statusExplicit: Boolean(r.statusExplicit),
         totalBytesIn: (r.totalBytesIn as number) ?? 0,
         totalBytesOut: (r.totalBytesOut as number) ?? 0,
         totalRequestBytes: (r.totalRequestBytes as number) ?? 0,

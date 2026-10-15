@@ -90,3 +90,21 @@ describe('the tracing health views only ask for keys that exist', () => {
     expect(missing).toEqual([]);
   });
 });
+
+describe('the Alerts entry of the main navigation', () => {
+  const nav = (locale: 'en' | 'tr') =>
+    (messages[locale] as unknown as { navigation: Record<string, string> }).navigation.alertsDescription;
+
+  it('describes all four rule kinds and no longer calls itself threshold-only, in both languages', () => {
+    expect(nav('en')).toMatch(/baseline/i);
+    expect(nav('en')).toMatch(/absence/i);
+    expect(nav('en')).toMatch(/SLO/);
+    expect(nav('en')).not.toMatch(/quality, cost/i);
+    // Turkish has its own text (not the English fallback) and the same kinds.
+    expect(nav('tr')).toBeTruthy();
+    expect(nav('tr')).not.toBe(nav('en'));
+    expect(nav('tr')).toMatch(/taban çizgisi/);
+    expect(nav('tr')).toMatch(/yokluk/);
+    expect(nav('tr')).toMatch(/SLO/);
+  });
+});

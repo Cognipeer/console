@@ -13,8 +13,15 @@ export interface AgentHealthApiRow {
   totals: HealthMetricValues;
   previous: HealthMetricValues | null;
   spark: { requests: number[]; errorRate: (number | null)[]; p95Ms: (number | null)[] };
-  alert: { phase: AgentAlertPhase; severity?: AgentAlertSeverity; incidentId?: string };
+  /** `covered`: an enabled alert rule watches this agent. Absent on an older server (treated as covered). */
+  alert: { phase: AgentAlertPhase; severity?: AgentAlertSeverity; incidentId?: string; covered?: boolean };
 }
+
+/**
+ * What the Health column shows. `uncovered`: no alert rule watches the agent, so "OK" would claim more than is
+ * known. `unknown`: the alert state could not be read. A server that sends neither flag yields `ok`/`firing`/`pending`.
+ */
+export type AgentAlertState = 'firing' | 'pending' | 'ok' | 'uncovered' | 'unknown';
 
 export interface AgentDirectoryApiRow {
   name: string;
@@ -30,6 +37,7 @@ export interface AgentListRow {
   previous: HealthMetricValues | null;
   spark: AgentHealthApiRow['spark'] | null;
   alert: AgentHealthApiRow['alert'];
+  alertState: AgentAlertState;
   latestStatus: string | null;
   latestSessionAt: string | null;
 }
@@ -48,10 +56,22 @@ export type SortDirection = 'asc' | 'desc';
 
 const NO_ALERT: AgentHealthApiRow['alert'] = { phase: null };
 
+/** Alert state of a row. `alertsAvailable` is the response's top-level flag; only an explicit `false` counts as unreadable. */
+export function deriveAlertState(
+  alert: AgentHealthApiRow['alert'] | undefined,
+  alertsAvailable?: boolean,
+): AgentAlertState {
+  if (alertsAvailable === false) return 'unknown';
+  if (alert?.phase === 'firing') return 'firing';
+  if (alert?.phase === 'pending') return 'pending';
+  return alert?.covered === false ? 'uncovered' : 'ok';
+}
+
 /** Health rows first (in the order the API gave them), then agents only the directory knows. */
 export function mergeAgentRows(
   health: AgentHealthApiRow[],
   directory: AgentDirectoryApiRow[] | null,
+  alertsAvailable?: boolean,
 ): AgentListRow[] {
   const known = new Map((directory ?? []).map((agent) => [agent.name, agent]));
   const rows: AgentListRow[] = health.map((agent) => {
@@ -62,6 +82,7 @@ export function mergeAgentRows(
       previous: agent.previous,
       spark: agent.spark,
       alert: agent.alert ?? NO_ALERT,
+      alertState: deriveAlertState(agent.alert, alertsAvailable),
       latestStatus: entry?.latestStatus ?? null,
       latestSessionAt: entry?.latestSessionAt ?? null,
     };
@@ -75,6 +96,7 @@ export function mergeAgentRows(
       previous: null,
       spark: null,
       alert: NO_ALERT,
+      alertState: deriveAlertState(NO_ALERT, alertsAvailable),
       latestStatus: agent.latestStatus,
       latestSessionAt: agent.latestSessionAt,
     });
@@ -142,7 +164,7 @@ export function sortAgentRows(rows: AgentListRow[], key: AgentSortKey, direction
   });
 }
 
-export type AgentHealthFilter = 'all' | 'firing' | 'pending' | 'ok';
+export type AgentHealthFilter = 'all' | 'firing' | 'pending' | 'ok' | 'uncovered';
 
 export interface AgentRowFilters {
   query: string;
@@ -160,9 +182,10 @@ export function filterAgentRows(
   return rows.filter((row) => {
     if (q && !row.name.toLowerCase().includes(q)) return false;
     if (filters.status !== 'all' && normalizeStatus(row.latestStatus) !== filters.status) return false;
-    if (filters.health === 'firing' && row.alert.phase !== 'firing') return false;
-    if (filters.health === 'pending' && row.alert.phase !== 'pending') return false;
-    if (filters.health === 'ok' && row.alert.phase !== null) return false;
+    if (filters.health === 'firing' && row.alertState !== 'firing') return false;
+    if (filters.health === 'pending' && row.alertState !== 'pending') return false;
+    if (filters.health === 'ok' && row.alertState !== 'ok') return false;
+    if (filters.health === 'uncovered' && row.alertState !== 'uncovered') return false;
     return true;
   });
 }

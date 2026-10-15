@@ -379,6 +379,13 @@ describe('validateRuleInput', () => {
       expectInvalid({ channels: [channel] }, 'invalid_channel');
     });
 
+    it('allows channel urls up to the url limit, which is longer than the secret limit', () => {
+      const url = `https://example.webhook.office.com/${'a'.repeat(1_000)}`;
+      expect(validate({ channels: [{ type: 'teams', url }] }).channels?.[0]).toEqual({ type: 'teams', url });
+      expectInvalid({ channels: [{ type: 'teams', url: `${url}${'a'.repeat(1_100)}` }] }, 'invalid_channel');
+      expectInvalid({ channels: [{ type: 'webhook', url: 'https://hooks.example.com/x', secret: 's'.repeat(513) }] }, 'invalid_channel');
+    });
+
     it('rejects an unknown channel type', () => {
       expect(() => validate({ channels: [{ type: 'sms', recipients: [] }] })).toThrow(AlertApiError);
     });
@@ -663,6 +670,26 @@ describe('AlertService', () => {
         db.findAlertRuleById.mockResolvedValue(agentRule);
         await AlertService.updateRule(DB_NAME, 'rule-1', { entity: { entityType: 'agent', mode: 'selected', keys: ['a'] } });
         expect(db.deleteAlertStates).toHaveBeenCalledWith({ ruleId: 'rule-1' });
+      });
+
+      it('a change of the legacy scope deletes the rule states (the firing state described another model)', async () => {
+        db.findAlertRuleById.mockResolvedValue({ ...storedRule, scope: { modelKey: 'model-a' } });
+        await AlertService.updateRule(DB_NAME, 'rule-1', { scope: { modelKey: 'model-b' } });
+        expect(db.deleteAlertStates).toHaveBeenCalledWith({ ruleId: 'rule-1' });
+      });
+
+      it('an equal scope, or a stored empty scope against none, keeps the states', async () => {
+        db.findAlertRuleById.mockResolvedValue({ ...storedRule, scope: { modelKey: 'model-a' } });
+        await AlertService.updateRule(DB_NAME, 'rule-1', { scope: { modelKey: ' model-a ' } });
+        expect(db.deleteAlertStates).not.toHaveBeenCalled();
+        db.findAlertRuleById.mockResolvedValue({ ...storedRule, scope: undefined });
+        await AlertService.updateRule(DB_NAME, 'rule-1', { scope: {} });
+        expect(db.deleteAlertStates).not.toHaveBeenCalled();
+      });
+
+      it('retiring clears lastTriggeredAt so the pre-state cooldown does not outlive the old conditions', async () => {
+        await AlertService.updateRule(DB_NAME, 'rule-1', { condition: { operator: 'gt', threshold: 9 } });
+        expect(db.updateAlertRule).toHaveBeenCalledWith('rule-1', { lastTriggeredAt: null });
       });
 
       it('a rename, a channel change or an unchanged legacy condition keeps them', async () => {

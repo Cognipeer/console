@@ -77,6 +77,7 @@ import { disconnectDatabase, getDatabase, getTenantDatabase } from '@/lib/databa
 import { alertsApiPlugin } from '@/server/api/plugins/alerts';
 import { IncidentService } from '@/lib/services/alerts';
 import { dispatchNotification } from '@/lib/services/alerts/channels';
+import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const TENANT_DB_NAME = 'alerts_plugin_tenant';
@@ -224,6 +225,7 @@ afterAll(async () => {
 beforeEach(() => {
   currentUserRole = 'owner';
   currentProjectId = PROJECT_A;
+  resetRateLimitStore();
   vi.mocked(dispatchNotification).mockClear();
 });
 
@@ -393,6 +395,30 @@ describe('POST /alerts/channels/test', () => {
     currentUserRole = 'owner';
     const rule = await createRule(ruleBody({ name: 'Missing channel' }));
     expect((await call('POST', '/alerts/channels/test', { ruleId: rule._id, channelId: 'ch_ffffffffffff' })).status).toBe(404);
+  });
+
+  it('throttles tests per person: a sixth test within a minute is a 429 with Retry-After', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      expect((await call('POST', '/alerts/channels/test', { channel: { type: 'email', recipients: ['ops@acme.com'] } })).status).toBe(200);
+    }
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/channels/test',
+      headers: JSON_HEADERS,
+      payload: JSON.stringify({ channel: { type: 'email', recipients: ['ops@acme.com'] } }),
+    });
+    expect(res.statusCode).toBe(429);
+    expect(Number(res.headers['retry-after'])).toBeGreaterThanOrEqual(1);
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ code: 'rate_limited' });
+    expect(dispatchNotification).toHaveBeenCalledTimes(5);
+  });
+
+  it('refuses to test an unsaved email channel against a long recipient list', async () => {
+    const recipients = Array.from({ length: 6 }, (_, i) => `person${i}@acme.com`);
+    const res = await call('POST', '/alerts/channels/test', { channel: { type: 'email', recipients } });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('too_many_recipients');
+    expect(dispatchNotification).not.toHaveBeenCalled();
   });
 
   it('rejects a malformed or private destination without sending', async () => {
@@ -580,6 +606,44 @@ describe('GET /alerts/incidents', () => {
     expect(res.body.counts).toMatchObject({ open: expect.any(Number), acknowledged: expect.any(Number), resolved: expect.any(Number), closed: expect.any(Number) });
     expect(res.body.total).toBeGreaterThanOrEqual(2);
     expect(res.body.hasMore).toBe(false);
+  });
+
+  it('names the acknowledger, assignee and resolver (ids only for unknown users, no emails)', async () => {
+    const db = await getTenantDatabase(TENANT_DB_NAME);
+    const other = await db.createUser({
+      tenantId: TENANT_ID, email: 'ada@example.com', name: 'Ada Lovelace', password: '$2b$10$x',
+      role: 'user', licenseId: 'FREE', features: [],
+    });
+    const id = await seedIncident(PROJECT_A, { ruleId: 'rule-names' });
+    await call('PATCH', `/alerts/incidents/${id}`, { status: 'acknowledged' });
+    await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: String(other._id) });
+    await call('PATCH', `/alerts/incidents/${id}`, { status: 'resolved' });
+
+    const list = await call('GET', '/alerts/incidents?ruleId=rule-names');
+    const row = list.body.incidents.find((i: Json) => i._id === id);
+    expect(row).toMatchObject({ acknowledgedByName: 'Tester', assignedToName: 'Ada Lovelace', resolvedByName: 'Tester' });
+    expect(JSON.stringify(list.body)).not.toContain('ada@example.com');
+
+    const detail = await call('GET', `/alerts/incidents/${id}`);
+    expect(detail.body.incident).toMatchObject({ acknowledgedByName: 'Tester', assignedToName: 'Ada Lovelace', resolvedByName: 'Tester' });
+
+    // 'system' (automatic resolution) and unknown ids have no name.
+    await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: 'user-gone' });
+    const unknown = await call('GET', `/alerts/incidents/${id}`);
+    expect(unknown.body.incident).toMatchObject({ assignedTo: 'user-gone', assignedToName: null });
+    const fresh = await seedIncident(PROJECT_A, { ruleId: 'rule-names-2' });
+    const untouched = (await call('GET', `/alerts/incidents/${fresh}`)).body.incident;
+    expect(untouched).toMatchObject({ acknowledgedByName: null, assignedToName: null, resolvedByName: null });
+  });
+
+  it('reads the users once per list, and not at all when nobody is named', async () => {
+    const db = await getTenantDatabase(TENANT_DB_NAME);
+    const spy = vi.spyOn(Object.getPrototypeOf(db), 'listUsers');
+    await seedIncident(PROJECT_A, { ruleId: 'rule-nonames' });
+    spy.mockClear();
+    await call('GET', '/alerts/incidents?ruleId=rule-nonames');
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it('pages with hasMore', async () => {

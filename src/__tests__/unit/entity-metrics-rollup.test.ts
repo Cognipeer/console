@@ -70,6 +70,7 @@ beforeEach(async () => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.ENTITY_METRICS_MAX_BUFFERED_ROWS;
+  delete process.env.ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT;
   reloadConfig();
 });
 
@@ -195,6 +196,24 @@ describe('recordEntityMetric buffer', () => {
     // an existing key still merges at the cap
     recordEntityMetric({ ...base, entityKey: 'k5', at });
     expect(getEntityMetricsRollupHealth()).toMatchObject({ pending: 100, dropped: 2 });
+  });
+
+  it('limits one tenant to its share so it cannot starve another tenant', () => {
+    process.env.ENTITY_METRICS_MAX_BUFFERED_ROWS = '1000';
+    process.env.ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT = '100';
+    reloadConfig();
+    const at = Date.now();
+    for (let i = 0; i < 500; i += 1) recordEntityMetric({ ...base, entityKey: `flood${i}`, at });
+    expect(getEntityMetricsRollupHealth()).toMatchObject({ pending: 100, dropped: 400 });
+    expect(getEntityMetricsRollupHealth().droppedByTenant).toEqual({ [TENANT_DB]: 400 });
+
+    // a different tenant still gets its rows in
+    recordEntityMetric({ ...base, tenantDbName: 'tenant_other', tenantId: 't-2', entityKey: 'victim', at });
+    expect(getEntityMetricsRollupHealth()).toMatchObject({ pending: 101, dropped: 400 });
+
+    // the flooding tenant's existing rows still merge
+    recordEntityMetric({ ...base, entityKey: 'flood3', at });
+    expect(getEntityMetricsRollupHealth()).toMatchObject({ pending: 101, dropped: 400 });
   });
 
   it('keeps merged counts for keys that were buffered before the cap was hit', async () => {
@@ -342,7 +361,7 @@ describe('lifecycle', () => {
       }),
     );
     expect(rows.map((r) => r.entityKey)).toEqual(['recent']);
-  });
+  }, 20_000); // walks every tenant DB this file created; slow when the whole suite shares the CPU
 });
 
 describe('read side over a real provider', () => {

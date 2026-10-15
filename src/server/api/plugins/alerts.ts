@@ -6,6 +6,7 @@ import type {
   IncidentStatus,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
 import {
   ALERT_CHANNEL_TYPES,
   AlertService,
@@ -34,6 +35,9 @@ const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const MAX_NOTE_LENGTH = 4000;
 const MAX_ENTITY_SEARCH_LENGTH = 200;
+/** A test notification mails / posts to the outside, so it is throttled per person and per project. */
+const CHANNEL_TEST_USER_LIMIT: RateLimitConfig = { maxAttempts: 5, windowSeconds: 60 };
+const CHANNEL_TEST_PROJECT_LIMIT: RateLimitConfig = { maxAttempts: 20, windowSeconds: 60 };
 
 type ProjectScoped = Awaited<ReturnType<typeof requireProjectContextForRequest>>;
 
@@ -109,6 +113,12 @@ function stringParam(value: unknown, field: string, maxLength = 200): string | u
   return value;
 }
 
+/** One incident with the display names of its acknowledger, assignee and resolver. */
+async function withNames<T extends Parameters<typeof IncidentService.withUserNames>[0]>(tenantDbName: string, incident: T) {
+  const names = await IncidentService.resolveUserNames(tenantDbName, [incident]);
+  return IncidentService.withUserNames(incident, names);
+}
+
 export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/alerts/rules', guarded('List alert rules', async (request, reply) => {
     const context = await requireProjectContextForRequest(request);
@@ -172,6 +182,16 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
     const context = await requireProjectContextForRequest(request);
     const { projectId, session } = context;
     const body = readObjectBody(request);
+
+    const userLimit = checkRateLimit(`alerts:channel-test:user:${session.tenantDbName}:${session.userId}`, CHANNEL_TEST_USER_LIMIT);
+    const projectLimit = userLimit.allowed
+      ? checkRateLimit(`alerts:channel-test:project:${session.tenantDbName}:${projectId}`, CHANNEL_TEST_PROJECT_LIMIT)
+      : userLimit;
+    if (!projectLimit.allowed) {
+      reply.header('Retry-After', String(Math.max(1, projectLimit.retryAfterSeconds)));
+      throw new AlertApiError(429, 'rate_limited', 'Too many test notifications. Wait a moment and try again.');
+    }
+
     const result = await AlertService.testChannel(
       session.tenantDbName,
       session,
@@ -339,7 +359,14 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
     // The stores count by project and status only; with other filters the total is the rows seen so far (+1 when more exist).
     const total = filtered ? skip + incidents.length + (hasMore ? 1 : 0) : statusTotal;
 
-    return reply.code(200).send({ incidents, total, hasMore, openCount: counts.open ?? 0, counts });
+    const names = await IncidentService.resolveUserNames(session.tenantDbName, incidents);
+    return reply.code(200).send({
+      incidents: incidents.map((incident) => IncidentService.withUserNames(incident, names)),
+      total,
+      hasMore,
+      openCount: counts.open ?? 0,
+      counts,
+    });
   }));
 
   app.post('/alerts/incidents/bulk', guarded('Bulk update incidents', async (request, reply) => {
@@ -374,7 +401,7 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ error: 'Incident not found' });
     }
 
-    return reply.code(200).send({ incident });
+    return reply.code(200).send({ incident: await withNames(session.tenantDbName, incident) });
   }));
 
   app.patch('/alerts/incidents/:incidentId', guarded('Update incident', async (request, reply) => {
@@ -427,7 +454,7 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       incident = updated;
     }
 
-    return reply.code(200).send({ incident });
+    return reply.code(200).send({ incident: await withNames(session.tenantDbName, incident) });
   }));
 
   app.post('/alerts/incidents/:incidentId/notes', guarded('Add incident note', async (request, reply) => {
@@ -456,6 +483,6 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ error: 'Incident not found' });
     }
 
-    return reply.code(200).send({ incident });
+    return reply.code(200).send({ incident: await withNames(session.tenantDbName, incident) });
   }));
 };

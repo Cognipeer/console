@@ -49,6 +49,8 @@ export function IncidentMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       await Promise.all([
         coll.createIndex({ projectId: 1, status: 1, firedAt: -1 }, { name: 'idx_incidents_project_status_firedAt' }),
         coll.createIndex({ ruleId: 1, entityKey: 1 }, { name: 'idx_incidents_rule_entity' }),
+        coll.createIndex({ projectId: 1, entityKey: 1, firedAt: -1 }, { name: 'idx_incidents_project_entity_firedAt' }),
+        coll.createIndex({ alertEventId: 1 }, { name: 'idx_incidents_alertEventId' }),
       ]);
       this.incidentIndexesReady.add(dbName);
     }

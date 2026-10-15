@@ -127,7 +127,7 @@ export interface IncidentNoteDto {
 export interface IncidentContextDto {
   mode: AlertConditionMode;
   windowMinutes: number;
-  versionChange?: { from: string | null; to: string | null } | null;
+  versionChange?: { from: string | null; to: string | null; firstSeenAt?: string } | null;
   errorSignatures?: Array<{ message: string; count: number }>;
   failingSessions?: { count: number; listPath: string } | null;
   correlations?: Array<{
@@ -152,6 +152,10 @@ export interface IncidentDto {
   severity: IncidentSeverity;
   status: IncidentStatus;
   assignedTo?: string | null;
+  /** Names the server resolved for the ids (null when unknown); absent on an older server. */
+  assignedToName?: string | null;
+  acknowledgedByName?: string | null;
+  resolvedByName?: string | null;
   notes: IncidentNoteDto[];
   firedAt: string;
   acknowledgedAt?: string | null;

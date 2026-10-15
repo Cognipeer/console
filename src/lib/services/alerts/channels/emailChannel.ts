@@ -18,6 +18,7 @@ import {
   formatDuration,
   formatTimestamp,
   formatValue,
+  formatVersionChange,
   formatWindow,
   operatorSymbol,
   severityLabel,
@@ -36,17 +37,33 @@ const MAX_ERROR_SIGNATURES = 3;
 
 type TenantUser = Awaited<ReturnType<Awaited<ReturnType<typeof getTenantDatabase>>['listUsers']>>[number];
 
+/** A fan-out storm sends hundreds of mails in one sweep; the user list they all consult is read once per this long. */
+const USER_CACHE_TTL_MS = 30_000;
+const userCache = new Map<string, { at: number; users: Promise<TenantUser[]> }>();
+
+/** Forget the cached user lists (tests; a disabled account is otherwise honoured within the TTL). */
+export function resetAlertEmailUserCache(): void {
+  userCache.clear();
+}
+
 /**
- * The tenant's users, read once per resolution. Best effort: `null` when the
- * list can't be read (logged, error name only), so callers keep their
- * recipients: failing to notify is worse than one stray mail to an account
- * disabled moments ago.
+ * The tenant's users, shared across the resolutions of one burst. Best effort:
+ * `null` when the list can't be read (logged, error name only, never cached), so
+ * callers keep their recipients: failing to notify is worse than one stray mail
+ * to an account disabled moments ago.
  */
 async function readUsers(tenantDbName: string): Promise<TenantUser[] | null> {
+  const now = Date.now();
+  let entry = userCache.get(tenantDbName);
+  if (!entry || now - entry.at > USER_CACHE_TTL_MS) {
+    const users = (async () => (await getTenantDatabase(tenantDbName)).listUsers())();
+    entry = { at: now, users };
+    userCache.set(tenantDbName, entry);
+  }
   try {
-    const db = await getTenantDatabase(tenantDbName);
-    return await db.listUsers();
+    return await entry.users;
   } catch (err) {
+    userCache.delete(tenantDbName);
     log.warn('Alert email recipient lookup failed', { error: err instanceof Error ? err.name : typeof err });
     return null;
   }
@@ -94,7 +111,6 @@ export function buildAlertEmailData(n: AlertNotification, ctx: AlertContext): Re
   const hasThreshold = typeof rule.threshold === 'number' && Number.isFinite(rule.threshold);
   const incidentUrl = n.incidentUrl || ctx.incidentUrl || n.dashboardUrl || ctx.dashboardUrl;
   const hasBaseline = n.baseline !== null && n.baseline !== undefined;
-  const version = n.context?.versionChange;
 
   return {
     kind: n.kind,
@@ -126,7 +142,7 @@ export function buildAlertEmailData(n: AlertNotification, ctx: AlertContext): Re
     firedAt: formatTimestamp(n.firedAt),
     resolvedAt: resolvedAt ? formatTimestamp(resolvedAt) : '',
     duration: resolvedAt ? formatDuration(new Date(n.firedAt).getTime(), resolvedAt.getTime()) : '',
-    versionChange: version && (version.from || version.to) ? `${version.from ?? 'n/a'} → ${version.to ?? 'n/a'}` : '',
+    versionChange: formatVersionChange(n.context?.versionChange, n.firedAt),
     errorSignatures: (n.context?.errorSignatures ?? []).slice(0, MAX_ERROR_SIGNATURES).map((s) => ({
       message: s.message,
       count: s.count,

@@ -2,8 +2,8 @@
  * Incident context: what an on-call person wants to know the moment an alert
  * fires, gathered once at FIRE time.
  *
- * Core part (every edition): the mode and window, and for an agent whether its
- * version changed versus the previous window and which error signatures dominate
+ * Core part (every edition): the mode and window, and for an agent whether a new
+ * version was introduced recently and which error signatures dominate
  * its failed sessions. The enterprise enricher (correlated dependency
  * regressions) is merged in with a short timeout; a failure never blocks the alert.
  *
@@ -16,12 +16,15 @@ import type {
   IAlertRule,
   IIncidentContext,
 } from '@/lib/database';
+import { ENTITY_METRIC_BUCKET_MS } from '@/lib/database/provider/types.base';
 import { createLogger } from '@/lib/core/logger';
 import { getIncidentEnricher } from '@/enterprise/alert-extensions';
 
 const logger = createLogger('alert-incident-context');
 
 const SESSION_SAMPLE_LIMIT = 2000;
+/** How far back a version change is looked for (at least two windows when the rule window is longer). */
+export const VERSION_CHANGE_LOOKBACK_MS = 6 * 60 * 60_000;
 const FAILED_SESSION_SAMPLE_LIMIT = 200;
 const MAX_SIGNATURES = 5;
 const MAX_SIGNATURE_LENGTH = 160;
@@ -74,36 +77,69 @@ export function summarizeErrorSignatures(
     .map(([message, count]) => ({ message, count }));
 }
 
-function versionsOf(sessions: Array<{ agentVersion?: string | null }>): string[] {
-  // Sessions arrive newest first, so the first entry is the latest version.
-  const seen: string[] = [];
+/**
+ * Which version replaced which, from one bounded scan of the agent's sessions.
+ * "to" is the version most recently introduced among those running in the
+ * current window; "from" is the version seen last before that. A version first
+ * seen at the edge of the scan is skipped: older sessions were not scanned (the
+ * scan start, or the oldest session when the cap was hit), so it may have been
+ * running for much longer, e.g. two versions served side by side all day.
+ */
+function detectVersionChange(
+  sessions: Array<{ agentVersion?: string | null; startedAt?: Date | string | null }>,
+  currentFromMs: number,
+  scanFromMs: number,
+  capped: boolean,
+): { from: string; to: string; firstSeenAt: string } | null {
+  const rows: Array<{ version: string; at: number }> = [];
+  const firstSeen = new Map<string, number>();
+  const inWindow = new Set<string>();
+  let oldest = Number.POSITIVE_INFINITY;
   for (const session of sessions) {
+    const at = session.startedAt ? new Date(session.startedAt).getTime() : Number.NaN;
+    if (!Number.isFinite(at)) continue;
+    if (at < oldest) oldest = at;
     const version = typeof session.agentVersion === 'string' ? session.agentVersion.trim() : '';
-    if (version && !seen.includes(version)) seen.push(version);
+    if (!version) continue;
+    rows.push({ version, at });
+    const known = firstSeen.get(version);
+    if (known === undefined || at < known) firstSeen.set(version, at);
+    if (at >= currentFromMs) inWindow.add(version);
   }
-  return seen;
+
+  const edge = capped ? oldest : scanFromMs;
+  let to: string | null = null;
+  for (const version of inWindow) {
+    const at = firstSeen.get(version) as number;
+    if (at - edge < ENTITY_METRIC_BUCKET_MS) continue;
+    if (to === null || at > (firstSeen.get(to) as number)) to = version;
+  }
+  if (to === null) return null;
+
+  const introducedAt = firstSeen.get(to) as number;
+  let from: { version: string; at: number } | null = null;
+  for (const row of rows) {
+    if (row.version === to || row.at >= introducedAt) continue;
+    if (from === null || row.at > from.at) from = row;
+  }
+  // No earlier version (a new agent, or one running for longer than the scan) is not a "change".
+  return from ? { from: from.version, to, firstSeenAt: new Date(introducedAt).toISOString() } : null;
 }
 
 async function agentContext(input: IncidentContextInput, context: IIncidentContext): Promise<void> {
   const { db, projectId, entityKey, nowMs, windowMinutes } = input;
   const windowMs = windowMinutes * 60_000;
   const from = new Date(nowMs - windowMs).toISOString();
-  const previousFrom = new Date(nowMs - 2 * windowMs).toISOString();
   const to = new Date(nowMs).toISOString();
+  // A release can precede the alert by more than one window (a pending period, a regression that needs traffic to show).
+  const scanFromMs = nowMs - Math.max(VERSION_CHANGE_LOOKBACK_MS, 2 * windowMs);
+  const scanFrom = new Date(scanFromMs).toISOString();
 
-  const [current, previous, failed] = await Promise.all([
+  const [scan, failed] = await Promise.all([
     db.listAgentTracingSessions({
       agentNameExact: entityKey,
-      from,
+      from: scanFrom,
       to,
-      limit: SESSION_SAMPLE_LIMIT,
-      includeTotal: false,
-      projection: { agentVersion: 1, startedAt: 1 },
-    }, projectId),
-    db.listAgentTracingSessions({
-      agentNameExact: entityKey,
-      from: previousFrom,
-      to: from,
       limit: SESSION_SAMPLE_LIMIT,
       includeTotal: false,
       projection: { agentVersion: 1, startedAt: 1 },
@@ -119,13 +155,7 @@ async function agentContext(input: IncidentContextInput, context: IIncidentConte
     }, projectId),
   ]);
 
-  const currentVersions = versionsOf(current.sessions);
-  const previousVersions = versionsOf(previous.sessions);
-  const introduced = currentVersions.find((version) => !previousVersions.includes(version));
-  // With no sessions before the window there is nothing to compare with: a quiet agent or a new one did not "change version".
-  context.versionChange = previousVersions.length > 0 && introduced !== undefined
-    ? { from: previousVersions[0] ?? null, to: introduced }
-    : null;
+  context.versionChange = detectVersionChange(scan.sessions, nowMs - windowMs, scanFromMs, scan.sessions.length >= SESSION_SAMPLE_LIMIT);
 
   const signatures = summarizeErrorSignatures(failed.sessions);
   if (signatures.length > 0) context.errorSignatures = signatures;

@@ -110,8 +110,8 @@ export const entityHealthEn = {
     baselineUnavailable: 'Comparison with normal is not available, so only alerts decide the status.',
     sloFailed: 'Service levels could not be read for some entities.',
     truncated: 'Showing the {shown} entities with the most traffic out of {total}.',
-    overviewUnavailable: 'Some entity types could not be read and are left out of these counts.',
-    overviewTruncated: 'Counts cover the busiest entities of each type.',
+    overviewUnavailable: 'Some entity types could not be read and are left out of these counts: {types}.',
+    overviewTruncated: 'Counts cover the busiest entities of each type ({types}).',
     totalLimited: 'Health data is kept for a limited time, so Total shows only the most recent 30 days at most.',
   },
   actions: {

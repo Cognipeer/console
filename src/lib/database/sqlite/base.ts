@@ -967,6 +967,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'toolErrors', 'toolErrors INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'aiErrors', 'aiErrors INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'metricsOutcome', 'metricsOutcome TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'statusExplicit', 'statusExplicit INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.alertRules, 'entity', 'entity TEXT');
     this.ensureTableColumn(db, TABLES.alertRules, 'severity', 'severity TEXT');
     this.ensureTableColumn(db, TABLES.alertRules, 'notifyOnResolve', 'notifyOnResolve INTEGER');
@@ -1183,6 +1184,10 @@ export class SQLiteProviderBase {
         ON ${TABLES.incidents}(projectId, status, firedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_incidents_rule_entity
         ON ${TABLES.incidents}(ruleId, entityKey);
+      CREATE INDEX IF NOT EXISTS idx_incidents_project_entity_firedAt
+        ON ${TABLES.incidents}(projectId, entityKey, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_incidents_alertEventId
+        ON ${TABLES.incidents}(alertEventId);
     `);
 
     // Attribution index — must be created here (after applyTenantMigrations)

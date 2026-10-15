@@ -319,6 +319,13 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   aiErrors?: number;
   /** What was already counted in entity_metrics for this session (idempotency). */
   metricsOutcome?: { status: string; latencyRecorded: boolean; recordedAt: Date } | null;
+  /**
+   * The client supplied this session's end status (see `isExplicitClientStatus`).
+   * A late error event only flips a session whose status was DERIVED to 'error';
+   * an explicit status (e.g. a recovered run the client calls 'success') stays,
+   * so the outcome does not depend on whether /events or /end arrives first.
+   */
+  statusExplicit?: boolean;
   totalBytesIn?: number;
   totalBytesOut?: number;
   totalRequestBytes?: number;
@@ -347,7 +354,7 @@ export interface AgentTracingSessionEventDelta {
   eventType?: string;
   modelsUsed?: string[];
   toolsUsed?: string[];
-  /** Error-event counters for this event; a late error flips a finished session to 'error'. */
+  /** Error-event counters for this event; a late error flips a finished session with a derived (not client-supplied) status to 'error'. */
   errorEvents?: number;
   toolErrors?: number;
   aiErrors?: number;

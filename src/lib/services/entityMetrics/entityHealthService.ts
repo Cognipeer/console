@@ -27,6 +27,19 @@ const DEFAULT_SPARK_POINTS = 24;
 const MAX_SPARK_POINTS = 96;
 const DEFAULT_ACTIVE_LIMIT = 50;
 const MAX_ACTIVE_LIMIT = 500;
+/** Picker keystrokes re-read the same 30-day totals; keep them briefly and filter `q` in memory. */
+const ACTIVE_TOTALS_TTL_MS = 60_000;
+const ACTIVE_TOTALS_MAX_ENTRIES = 200;
+
+type ActiveTotals = Array<{ key: string; requests: number }>;
+const activeTotalsCache = new Map<string, { expiresAt: number; rows: ActiveTotals }>();
+const activeTotalsInflight = new Map<string, Promise<ActiveTotals>>();
+
+/** Test hook: the active-totals cache is module-level state. */
+export function __resetEntityHealthCachesForTests(): void {
+  activeTotalsCache.clear();
+  activeTotalsInflight.clear();
+}
 
 /** Aggregate rows come back oldest-bucket-first, so hitting the cap silently drops the newest data: say so. */
 function warnIfTruncated(rows: unknown[], operation: string, context: Record<string, unknown>): void {
@@ -112,6 +125,16 @@ function clampRange(fromMs: number, toMs: number): { fromMs: number; toMs: numbe
   return { fromMs: from, toMs: to };
 }
 
+/**
+ * The previous period [from - span, from] is only comparable when retention still
+ * covers all of it; a partially retained window would understate the previous
+ * totals and fake growth, so it counts as "no previous data".
+ */
+function previousWindowRetained(previousFromMs: number): boolean {
+  const retentionFloor = floorBucket(Date.now() - getConfig().health.entityMetricsRetentionDays * DAY_MS);
+  return previousFromMs >= retentionFloor;
+}
+
 function sparkBucketSize(fromMs: number, toMs: number, points: number): number {
   const raw = (toMs - fromMs) / Math.max(points, 1);
   return Math.max(ENTITY_METRIC_BUCKET_MS, Math.ceil(raw / ENTITY_METRIC_BUCKET_MS) * ENTITY_METRIC_BUCKET_MS);
@@ -124,14 +147,13 @@ export async function getEntitySummaries(input: EntitySummariesInput): Promise<E
   if (input.keys && input.keys.length === 0) return [];
   const keys = input.keys?.slice(0, MAX_KEYS);
   const points = Math.min(Math.max(Math.floor(input.sparkPoints ?? DEFAULT_SPARK_POINTS), 1), MAX_SPARK_POINTS);
-  const withPrevious = input.withPrevious ?? true;
+  const span = range.toMs - range.fromMs;
+  const previousRange = { fromMs: range.fromMs - span, toMs: range.fromMs };
+  const withPrevious = (input.withPrevious ?? true) && previousWindowRetained(previousRange.fromMs);
 
   const size = sparkBucketSize(range.fromMs, range.toMs, points);
   const firstBucket = Math.floor(range.fromMs / size) * size;
   const bucketCount = Math.floor((range.toMs - 1 - firstBucket) / size) + 1;
-
-  const span = range.toMs - range.fromMs;
-  const previousRange = { fromMs: range.fromMs - span, toMs: range.fromMs };
 
   const base = {
     tenantId: input.tenantId,
@@ -215,6 +237,7 @@ export async function getEntitySeries(input: EntitySeriesInput): Promise<EntityS
   const bucketMs = Math.max(requested, Math.ceil((range.toMs - range.fromMs) / 2000 / ENTITY_METRIC_BUCKET_MS) * ENTITY_METRIC_BUCKET_MS);
 
   const span = range.toMs - range.fromMs;
+  const withPrevious = previousWindowRetained(range.fromMs - span);
   const base = {
     tenantId: input.tenantId,
     projectId: input.projectId,
@@ -226,7 +249,9 @@ export async function getEntitySeries(input: EntitySeriesInput): Promise<EntityS
   const [rows, previousRows] = await runWithTenantScope(input.tenantDbName, (db) =>
     Promise.all([
       db.aggregateEntityMetrics({ ...base, fromMs: range.fromMs, toMs: range.toMs, groupBy: [], bucketMs }),
-      db.aggregateEntityMetrics({ ...base, fromMs: range.fromMs - span, toMs: range.fromMs, groupBy: [] }),
+      withPrevious
+        ? db.aggregateEntityMetrics({ ...base, fromMs: range.fromMs - span, toMs: range.fromMs, groupBy: [] })
+        : Promise.resolve([] as IEntityMetricAggregate[]),
     ]),
   );
 
@@ -280,19 +305,47 @@ export async function listActiveEntityKeys(input: ActiveEntityKeysInput): Promis
     limit: AGGREGATE_LIMIT,
   };
 
-  // Unbucketed totals: one row per key, so the cap cannot truncate by time.
-  const totalRows = await runWithTenantScope(input.tenantDbName, (db) =>
-    db.aggregateEntityMetrics({ ...scope, groupBy: ['entityKey'] }),
-  );
-  warnIfTruncated(totalRows, 'listActiveEntityKeys', { entityType: input.entityType });
+  // Unbucketed totals: one row per key, so the cap cannot truncate by time. Cached per
+  // (tenant, project, type, range) so typing in a picker does not rescan the rollup.
+  const cacheKey = JSON.stringify([
+    input.tenantDbName, input.tenantId, input.projectId, input.entityType, range.fromMs, floorBucket(range.toMs),
+  ]);
+  const cached = activeTotalsCache.get(cacheKey);
+  let totals: ActiveTotals;
+  if (cached && cached.expiresAt > Date.now()) {
+    totals = cached.rows;
+  } else {
+    let pending = activeTotalsInflight.get(cacheKey);
+    if (!pending) {
+      pending = runWithTenantScope(input.tenantDbName, (db) =>
+        db.aggregateEntityMetrics({ ...scope, groupBy: ['entityKey'] }),
+      )
+        .then((totalRows) => {
+          warnIfTruncated(totalRows, 'listActiveEntityKeys', { entityType: input.entityType });
+          const rows: ActiveTotals = [];
+          for (const row of totalRows) {
+            if (row.entityKey) rows.push({ key: row.entityKey, requests: Number(row.requests) || 0 });
+          }
+          if (activeTotalsCache.size >= ACTIVE_TOTALS_MAX_ENTRIES) {
+            const oldest = activeTotalsCache.keys().next().value;
+            if (oldest !== undefined) activeTotalsCache.delete(oldest);
+          }
+          activeTotalsCache.set(cacheKey, { expiresAt: Date.now() + ACTIVE_TOTALS_TTL_MS, rows });
+          return rows;
+        })
+        .finally(() => {
+          activeTotalsInflight.delete(cacheKey);
+        });
+      activeTotalsInflight.set(cacheKey, pending);
+    }
+    totals = await pending;
+  }
 
   const needle = input.q?.trim().toLowerCase();
   const ranked: Array<{ key: string; requests: number }> = [];
-  for (const row of totalRows) {
-    const key = row.entityKey;
-    if (!key) continue;
-    if (needle && !key.toLowerCase().includes(needle)) continue;
-    ranked.push({ key, requests: Number(row.requests) || 0 });
+  for (const row of totals) {
+    if (needle && !row.key.toLowerCase().includes(needle)) continue;
+    ranked.push(row);
   }
   ranked.sort((a, b) => b.requests - a.requests || a.key.localeCompare(b.key));
   const top = ranked.slice(0, limit);

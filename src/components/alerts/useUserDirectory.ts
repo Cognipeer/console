@@ -79,10 +79,19 @@ export interface UserLabels {
   system: string;
 }
 
-/** `You`, `System`, a known name, or a short id. */
-export function userLabel(id: string | null | undefined, directory: UserDirectory, labels: UserLabels): string {
+/**
+ * `You`, `System`, a name, or a short id. `serverName` is the name the server resolved for the id (incident
+ * `acknowledgedByName` and friends): it works for viewers who cannot list users, so it wins over the directory.
+ */
+export function userLabel(
+  id: string | null | undefined,
+  directory: UserDirectory,
+  labels: UserLabels,
+  serverName?: string | null,
+): string {
   if (!id) return '—';
   if (id === 'system') return labels.system;
   if (directory.meId && id === directory.meId) return labels.you;
+  if (serverName) return serverName;
   return directory.names[id] ?? (id.length > 10 ? `${id.slice(0, 8)}…` : id);
 }

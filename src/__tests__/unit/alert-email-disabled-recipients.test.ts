@@ -5,7 +5,7 @@ const h = vi.hoisted(() => ({ db: { listUsers: vi.fn() }, sendEmail: vi.fn() }))
 vi.mock('@/lib/email/mailer', () => ({ sendEmail: h.sendEmail }));
 vi.mock('@/lib/database', () => ({ getTenantDatabase: vi.fn(async () => h.db) }));
 
-import { EmailAlertChannel } from '@/lib/services/alerts/channels/emailChannel';
+import { EmailAlertChannel, resetAlertEmailUserCache } from '@/lib/services/alerts/channels/emailChannel';
 
 const event = {
   kind: 'fired',
@@ -29,6 +29,7 @@ const USERS = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetAlertEmailUserCache();
   h.sendEmail.mockResolvedValue(true);
   h.db.listUsers.mockResolvedValue(USERS);
 });
@@ -67,5 +68,21 @@ describe('EmailAlertChannel and disabled users', () => {
   it('reads the user list once per dispatch', async () => {
     await new EmailAlertChannel().dispatch(event, { type: 'email', recipients: [] } as never, ctx);
     expect(h.db.listUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one user-list read across a burst of dispatches', async () => {
+    const channel = new EmailAlertChannel();
+    await channel.dispatch(event, { type: 'email', recipients: ['dev2@acme.test'] } as never, ctx);
+    await channel.dispatch(event, { type: 'email', recipients: ['dev2@acme.test'] } as never, ctx);
+    await channel.dispatch(event, { type: 'email', recipients: [] } as never, ctx);
+    expect(h.db.listUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed read', async () => {
+    h.db.listUsers.mockRejectedValueOnce(new Error('db down'));
+    await new EmailAlertChannel().dispatch(event, { type: 'email', recipients: ['dev2@acme.test'] } as never, ctx);
+    await new EmailAlertChannel().dispatch(event, { type: 'email', recipients: ['dev@acme.test'] } as never, ctx);
+    expect(h.db.listUsers).toHaveBeenCalledTimes(2);
+    expect(h.sendEmail.mock.calls.map((c) => c[0])).toEqual(['dev2@acme.test']);
   });
 });

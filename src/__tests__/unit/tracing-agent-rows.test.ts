@@ -1,6 +1,7 @@
 /** The agents list rows: health overview joined with the directory, sorting, filters, the red flag. */
 import { describe, expect, it } from 'vitest';
 import {
+  deriveAlertState,
   errorSpark,
   filterAgentRows,
   healthRank,
@@ -139,5 +140,42 @@ describe('errorSpark', () => {
     expect(errorSpark([null, 2, null, 4])).toEqual([0, 2, 0, 4]);
     expect(errorSpark([null, 2, null])).toBeNull();
     expect(errorSpark(undefined)).toBeNull();
+  });
+});
+
+describe('alert state: unmonitored and unreadable are not OK', () => {
+  it('derives the state from the phase, the coverage flag and the response availability', () => {
+    expect(deriveAlertState({ phase: 'firing', covered: true })).toBe('firing');
+    expect(deriveAlertState({ phase: 'pending', covered: true })).toBe('pending');
+    expect(deriveAlertState({ phase: null, covered: true })).toBe('ok');
+    expect(deriveAlertState({ phase: null, covered: false })).toBe('uncovered');
+    // An older server sends neither flag: shown as before.
+    expect(deriveAlertState({ phase: null })).toBe('ok');
+    expect(deriveAlertState(undefined)).toBe('ok');
+    expect(deriveAlertState({ phase: null }, true)).toBe('ok');
+    // A failed alert read beats everything, a stale phase included.
+    expect(deriveAlertState({ phase: null, covered: true }, false)).toBe('unknown');
+    expect(deriveAlertState({ phase: 'firing' }, false)).toBe('unknown');
+  });
+
+  it('puts the state on every merged row and filters OK apart from no-rule and unknown', () => {
+    const rows = mergeAgentRows(
+      [
+        health('watched', { alert: { phase: null, covered: true } }),
+        health('bare', { alert: { phase: null, covered: false } }),
+        health('hot', { alert: { phase: 'firing', covered: true } }),
+      ],
+      null,
+    );
+    expect(rows.map((r) => r.alertState)).toEqual(['ok', 'uncovered', 'firing']);
+    const base = { query: '', status: 'all', health: 'all' as const };
+    expect(filterAgentRows(rows, { ...base, health: 'ok' }, normalizeTracingStatus).map((r) => r.name)).toEqual(['watched']);
+    expect(filterAgentRows(rows, { ...base, health: 'uncovered' }, normalizeTracingStatus).map((r) => r.name)).toEqual(['bare']);
+
+    const unreadable = mergeAgentRows([health('watched', { alert: { phase: null, covered: true } })], [
+      { name: 'dir-only', sessionsCount: 1, latestSessionAt: null, latestStatus: 'success' },
+    ], false);
+    expect(unreadable.map((r) => r.alertState)).toEqual(['unknown', 'unknown']);
+    expect(filterAgentRows(unreadable, { ...base, health: 'ok' }, normalizeTracingStatus)).toEqual([]);
   });
 });

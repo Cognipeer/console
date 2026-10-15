@@ -17,13 +17,15 @@
  * `license_required` / `not_enterprise_build`, incidents carry only the core
  * context, and only the built-in collectors resolve.
  *
- * Leaf module on purpose: only types and the logger are imported, so the
- * overlay registry can import it at load time without creating a cycle, and it
- * is a separate community file (NOT replaced by the overlay), so the
- * `registry.ts` seam shape and SEAM_CONTRACT_VERSION do not change because of it.
+ * Leaf module on purpose: only types are imported, so the overlay registry can
+ * import it at load time without creating a cycle, and it is a separate
+ * community file (NOT replaced by the overlay), so the `registry.ts` seam shape
+ * and SEAM_CONTRACT_VERSION do not change because of it.
  * Never read a registered value at module scope: resolve it at call time.
+ * Registration runs while the server is still importing, before the .env files
+ * are loaded: do not log or read config here (the first log builds and caches
+ * the config without the .env values).
  */
-import { createLogger } from '@/lib/core/logger';
 import type {
   AlertMetric,
   EntityMetricType,
@@ -32,8 +34,6 @@ import type {
   IAlertSloConfig,
   IIncidentContext,
 } from '@/lib/database';
-
-const logger = createLogger('alerts:extension-seam');
 
 // ── Baseline provider ───────────────────────────────────────────────────
 
@@ -175,7 +175,6 @@ export function getIncidentEnricher(): IncidentEnricher | null {
 export function registerAlertMetricCollector(collector: IMetricCollectorLike): void {
   if (metricCollectors.includes(collector)) return;
   metricCollectors.push(collector);
-  logger.debug('Registered extra alert metric collector', { metrics: collector.supportedMetrics.length });
 }
 
 export function getRegisteredAlertMetricCollectors(): IMetricCollectorLike[] {

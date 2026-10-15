@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Badge, Button, Center, Stack, Text, Textarea, Timeline } from '@mantine/core';
@@ -214,7 +214,12 @@ export default function IncidentDetailPage() {
   // An absence incident stores a request count, not a metric value: its peak and latest value are counts too.
   const formatStored = (value: number | null | undefined) => formatMetricValue(value, mode === 'absence' ? '' : unit, locale);
 
-  const userLabel = (id: string | null | undefined): string => resolveUserLabel(id, directory, { you: t('you'), system: t('system') });
+  const userLabel = (id: string | null | undefined, serverName?: string | null): string =>
+    resolveUserLabel(id, directory, { you: t('you'), system: t('system') }, serverName);
+
+  // The translated type reads lowercase inside sentences ("agent"); as a row label it starts a capital.
+  const typeLabel = entity ? entityTypeLabel(entity.type, ta) : '—';
+  const entityRowLabel = typeLabel === '—' ? t('entity') : `${typeLabel.charAt(0).toLocaleUpperCase(locale)}${typeLabel.slice(1)}`;
 
   const entityChip = entity ? (
     entityLink ? (
@@ -229,6 +234,22 @@ export default function IncidentDetailPage() {
       </span>
     )
   ) : null;
+
+  // Separators go only between the items that are present.
+  const metaItems: Array<{ key: string; node: ReactNode }> = [
+    { key: 'metric', node: <span className="ds-mono">{label}</span> },
+    ...(entityChip ? [{ key: 'entity', node: entityChip }] : []),
+    {
+      key: 'value',
+      node: (
+        <span>
+          <span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>{valueText}</span>
+          {compareText ? <span className="ds-faint"> {compareText}</span> : null}
+        </span>
+      ),
+    },
+    { key: 'fired', node: <span>{t('firedOn', { time: formatDateTime(incident.firedAt, locale) })}</span> },
+  ];
 
   const actions = (
     <>
@@ -270,6 +291,11 @@ export default function IncidentDetailPage() {
   const failing = incident.context?.failingSessions ?? null;
   const failingPath = internalPath(failing?.listPath);
   const versionChange = incident.context?.versionChange ?? null;
+  const firstSeenMs = versionChange?.firstSeenAt ? Date.parse(versionChange.firstSeenAt) : Number.NaN;
+  const firedMs = Date.parse(incident.firedAt);
+  const versionFirstSeen = Number.isFinite(firstSeenMs) && Number.isFinite(firedMs) && firstSeenMs <= firedMs
+    ? t('versionFirstSeen', { duration: formatMinutes(Math.max(1, Math.round((firedMs - firstSeenMs) / 60_000)), ta) })
+    : null;
   const contextNotes = translateServerNotes(incident.context?.notes, ta, locale === 'en');
   const hasContext = Boolean(versionChange || signatures.length || failing || correlations.length || contextNotes.length);
 
@@ -288,7 +314,7 @@ export default function IncidentDetailPage() {
       }
       title={
         <>
-          <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: 540, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <h1 className="ds-h2" style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>
             {incident.ruleName}
           </h1>
           <span className={statusBadgeClass(incident.status)}>{t(`status.${incident.status}`)}</span>
@@ -301,22 +327,19 @@ export default function IncidentDetailPage() {
       }
       meta={
         <>
-          <span className="ds-mono">{label}</span>
-          {entityChip ? (
-            <>
-              <span className="ds-faint">·</span>
-              {entityChip}
-            </>
-          ) : null}
-          <span className="ds-faint">·</span>
-          <span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>{valueText}</span>
-          {compareText ? <span className="ds-faint">{compareText}</span> : null}
-          <span className="ds-faint">·</span>
-          <span>{t('firedOn', { time: formatDateTime(incident.firedAt, locale) })}</span>
+          {metaItems.map((item, index) => (
+            <Fragment key={item.key}>
+              {index > 0 ? <span className="ds-faint">·</span> : null}
+              {item.node}
+            </Fragment>
+          ))}
         </>
       }
-      actions={actions}
     >
+      {/* Six actions would squeeze the title column in the header, so they sit in a toolbar of their own. */}
+      <div className="ds-row ds-gap-sm" style={{ marginBottom: 14 }}>
+        {actions}
+      </div>
       {error ? (
         <div style={{ marginBottom: 12 }}>
           <LoadError message={error} onRetry={() => void load(true)} />
@@ -331,7 +354,7 @@ export default function IncidentDetailPage() {
                   <DetailRow label={t('metric')} value={label} />
                   <DetailRow label={t('detectionMode')} value={ta(`mode.${mode}`)} />
                   {entity ? (
-                    <DetailRow label={entityTypeLabel(entity.type, ta) === '—' ? t('entity') : entityTypeLabel(entity.type, ta)} value={entityChip} />
+                    <DetailRow label={entityRowLabel} value={entityChip} />
                   ) : null}
                   <DetailRow label={t('actualValue')} value={<span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>{valueText}</span>} />
                   {incident.peakValue != null ? <DetailRow label={t('peakValue')} value={formatStored(incident.peakValue)} /> : null}
@@ -370,6 +393,11 @@ export default function IncidentDetailPage() {
                     <Text size="sm">
                       <span className="ds-mono">{versionChange.from ?? t('versionNone')}</span> → <span className="ds-mono">{versionChange.to ?? t('versionNone')}</span>
                     </Text>
+                    {versionFirstSeen ? (
+                      <Text size="xs" c="dimmed" mt={2}>
+                        {versionFirstSeen}
+                      </Text>
+                    ) : null}
                   </ContextBlock>
                 ) : null}
                 {signatures.length > 0 ? (
@@ -496,7 +524,7 @@ export default function IncidentDetailPage() {
             <KeyValue label={t('incidentId')} value={<span className="ds-mono">{incident._id.slice(0, 12)}…</span>} />
             <KeyValue label={t('ruleId')} value={<span className="ds-mono">{incident.ruleId.slice(0, 12)}…</span>} />
             <KeyValue label={t('eventId')} value={<span className="ds-mono">{incident.alertEventId.slice(0, 12)}…</span>} />
-            <KeyValue label={t('assignedTo')} value={incident.assignedTo ? userLabel(incident.assignedTo) : t('unassignedLabel')} />
+            <KeyValue label={t('assignedTo')} value={incident.assignedTo ? userLabel(incident.assignedTo, incident.assignedToName) : t('unassignedLabel')} />
           </DetailCard>
         </Stack>
       </DetailTwoCol>
@@ -504,14 +532,14 @@ export default function IncidentDetailPage() {
   );
 }
 
-function timelineTitle(entry: TimelineEntry, t: (key: string, values?: Record<string, string | number>) => string, userLabel: (id: string | null | undefined) => string): string {
+function timelineTitle(entry: TimelineEntry, t: (key: string, values?: Record<string, string | number>) => string, userLabel: (id: string | null | undefined, serverName?: string | null) => string): string {
   switch (entry.kind) {
     case 'fired':
       return t('timelineFired');
     case 'acknowledged':
-      return entry.by ? t('timelineAcknowledgedBy', { user: userLabel(entry.by) }) : t('timelineAcknowledged');
+      return entry.by ? t('timelineAcknowledgedBy', { user: userLabel(entry.by, entry.byName) }) : t('timelineAcknowledged');
     case 'resolved':
-      return entry.system ? t('timelineResolvedBySystem') : entry.by ? t('timelineResolvedBy', { user: userLabel(entry.by) }) : t('timelineResolved');
+      return entry.system ? t('timelineResolvedBySystem') : entry.by ? t('timelineResolvedBy', { user: userLabel(entry.by, entry.byName) }) : t('timelineResolved');
     case 'closed':
       return t('timelineClosed');
     default:
@@ -537,7 +565,7 @@ function TimelineBullet({ entry }: { entry: TimelineEntry }) {
 function ContextBlock({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div>
-      <div className="ds-eyebrow" style={{ fontSize: 10.5, marginBottom: 6 }}>
+      <div className="ds-eyebrow" style={{ display: 'flex', fontSize: 10.5, marginBottom: 6 }}>
         {title}
       </div>
       {children}

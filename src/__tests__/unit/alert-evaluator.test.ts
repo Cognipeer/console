@@ -26,6 +26,7 @@ vi.mock('@/lib/services/alerts/metricCatalog', async (importOriginal) => {
 });
 
 import {
+  __resetEvaluatorCachesForTests,
   advanceAlertState,
   evaluateTenantAlerts,
   type StateStepInput,
@@ -112,6 +113,7 @@ function createHarness(): Harness {
   (getTenantDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
 
   db.listAlertRules.mockImplementation(async () => h.rules);
+  db.findAlertRuleById.mockImplementation(async (id: string) => h.rules.find((rule) => String(rule._id) === id) ?? null);
   db.findProjectById.mockResolvedValue({ _id: 'proj-1', name: 'Main Project', key: 'main', tenantId: 'tenant-1', createdBy: 'user-1' });
   db.listAlertStates.mockImplementation(async (filter: { ruleId?: string }) =>
     [...h.states.values()].filter((s) => !filter.ruleId || s.ruleId === filter.ruleId));
@@ -181,6 +183,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(T0);
   vi.clearAllMocks();
+  __resetEvaluatorCachesForTests();
   (dispatchNotification as ReturnType<typeof vi.fn>).mockResolvedValue([{ type: 'email', target: 'ops@acme.com', success: true }]);
   (collectMetric as ReturnType<typeof vi.fn>).mockResolvedValue({ value: 10, sampleCount: 5 });
   (isTenantEnterpriseLicensed as ReturnType<typeof vi.fn>).mockResolvedValue(false);
@@ -260,6 +263,25 @@ describe('advanceAlertState', () => {
     expect(two).toMatchObject({ phase: 'ok', action: 'resolve', okStreak: 2 });
     const relapse = advanceAlertState({ ...base, prev: state({ ...firing, okStreak: 1 }), breached: true });
     expect(relapse).toMatchObject({ phase: 'firing', action: 'none', okStreak: 0 });
+  });
+
+  it('same-window evaluations count once towards resolving', () => {
+    const firing = state({ phase: 'firing', okStreak: 1, detail: { windowKey: 1000 } });
+    const same = advanceAlertState({ ...base, windowKey: 1000, prev: firing, breached: false });
+    expect(same).toMatchObject({ phase: 'firing', action: 'none', okStreak: 1 });
+    const next = advanceAlertState({ ...base, windowKey: 2000, prev: firing, breached: false });
+    expect(next).toMatchObject({ phase: 'ok', action: 'resolve', okStreak: 2 });
+    // No window recorded (legacy rules, older rows): every tick counts.
+    const legacy = advanceAlertState({ ...base, prev: state({ phase: 'firing', okStreak: 1 }), breached: false });
+    expect(legacy).toMatchObject({ action: 'resolve' });
+  });
+
+  it('peaks at the largest deviation from the baseline for two-sided rules', () => {
+    const prev = state({ phase: 'firing', peakValue: 20 });
+    const step = (value: number) => advanceAlertState({ ...base, worse: 'farthest', baseline: 10, value, prev, breached: true }).peakValue;
+    expect(step(26)).toBe(26); // deviation 16 > 10
+    expect(step(2)).toBe(20); // deviation 8 < 10: the earlier peak stays
+    expect(step(-1)).toBe(-1); // deviation 11 > 10
   });
 
   it('tracks the worst value as the peak (max, or min for "less than" rules)', () => {
@@ -532,12 +554,14 @@ describe('evaluateTenantAlerts: entity fan-out', () => {
     expect(await tick(1)).toBe(1);
     expect(h.states.get(stateKey('rule-agents', 'support'))).toMatchObject({ phase: 'firing' });
 
-    // `pulse` stops reporting: its firing state still counts as a target, sees no data, resolves after 2 ticks.
+    // `pulse` stops reporting: its firing state still counts as a target, sees no data, resolves
+    // after 2 evaluated windows (ticks 1-2 still judge the window of 12:00, tick 3 is the next one).
     h.current = { support: failing };
     await tick(2);
     expect(h.states.get(stateKey('rule-agents', 'pulse'))).toMatchObject({ phase: 'firing', okStreak: 1 });
     await tick(3);
-    expect(h.states.get(stateKey('rule-agents', 'pulse'))).toMatchObject({ phase: 'ok' });
+    // Resolved: a settled healthy entity leaves no row behind.
+    expect(h.states.has(stateKey('rule-agents', 'pulse'))).toBe(false);
     expect(kinds().filter((k) => k === 'resolved')).toHaveLength(1);
   });
 
@@ -600,15 +624,20 @@ describe('evaluateTenantAlerts: entity fan-out', () => {
           total: 2,
         };
       }
-      const isCurrent = new Date(filters.from).getTime() === T0 - 15 * MIN;
-      return { sessions: [{ agentVersion: isCurrent ? '2.0.0' : '1.9.0' }], total: 1 };
+      return {
+        sessions: [
+          { agentVersion: '2.0.0', startedAt: new Date(T0 - 2 * MIN) },
+          { agentVersion: '1.9.0', startedAt: new Date(T0 - 25 * MIN) },
+        ],
+        total: 2,
+      };
     });
     await tick();
     const incident = [...h.incidents.values()][0] as { context: Record<string, unknown> };
     expect(incident.context).toMatchObject({
       mode: 'threshold',
       windowMinutes: 15,
-      versionChange: { from: '1.9.0', to: '2.0.0' },
+      versionChange: { from: '1.9.0', to: '2.0.0', firstSeenAt: new Date(T0 - 2 * MIN).toISOString() },
       errorSignatures: [{ message: 'Timeout after <n> ms', count: 2 }],
       failingSessions: { count: 2, listPath: expect.stringContaining('/dashboard/tracing/sessions?agent=pulse&status=error') },
     });
@@ -669,9 +698,35 @@ describe('evaluateTenantAlerts: absence', () => {
     await tick();
     h.current = { busy: { requests: 7 } };
     await tick(1);
-    await tick(2);
-    expect(h.states.get(stateKey('rule-absent', 'busy'))).toMatchObject({ phase: 'ok' });
+    await tick(6);
+    expect(h.states.has(stateKey('rule-absent', 'busy'))).toBe(false);
     expect(kinds()).toEqual(['fired', 'resolved']);
+  });
+
+  it('stays firing while the entity is silent even after its traffic aged out of the lookback', async () => {
+    h.history = { busy: { requests: 60 } };
+    expect(await tick()).toBe(1);
+    // The lookback no longer holds enough traffic: busy stops being a candidate, but it is still silent.
+    h.history = { busy: { requests: 1 } };
+    h.current = {};
+    await tick(6);
+    await tick(11);
+    await tick(16);
+    expect(h.states.get(stateKey('rule-absent', 'busy'))).toMatchObject({ phase: 'firing' });
+    expect(kinds()).toEqual(['fired']);
+    // Only returning traffic resolves it.
+    h.current = { busy: { requests: 4 } };
+    await tick(21);
+    await tick(26);
+    expect(kinds()).toEqual(['fired', 'resolved']);
+  });
+
+  it('rules with the same window share their aggregates within a sweep', async () => {
+    h.rules = [absenceRule, { ...absenceRule, _id: 'rule-absent-2', name: 'Second' }];
+    h.history = { busy: { requests: 60 } };
+    await tick();
+    // One current-window read and one lookback read, not one pair per rule.
+    expect(h.aggregateCalls).toHaveLength(2);
   });
 
   it('an entity that has traffic is not breached', async () => {
@@ -750,6 +805,55 @@ describe('evaluateTenantAlerts: baseline and SLO modes', () => {
     expect(await tick()).toBe(0);
   });
 
+  describe('count metrics', () => {
+    const dropRule: IAlertRule = {
+      ...agentRule,
+      _id: 'rule-drop',
+      metric: 'agent_sessions',
+      condition: {
+        operator: 'lt', threshold: 0, mode: 'baseline',
+        baseline: { direction: 'down', minRatio: 2, minZ: 3, minDelta: 0, lookbackDays: 14, seasonality: 'daily' },
+      },
+    };
+
+    beforeEach(() => {
+      (isTenantEnterpriseLicensed as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      h.rules = [dropRule];
+    });
+
+    it('judges a drop to 5 requests: the minSamples floor does not apply to the count itself', async () => {
+      const evaluate = vi.fn(async () => new Map([['pulse', result({ ratio: 0.17, z: -6, baseline: 30 })]]));
+      registerEntityBaselineProvider({ evaluate, band: vi.fn() });
+      h.current = { pulse: { requests: 5 } };
+      expect(await tick()).toBe(1);
+      const request = (evaluate.mock.calls[0] as unknown[])[0] as { current: Array<{ entityKey: string; value: number }> };
+      expect(request.current).toEqual([expect.objectContaining({ entityKey: 'pulse', value: 5 })]);
+      // A drop to 17% of normal is critical, not just a warning.
+      expect([...h.incidents.values()][0]).toMatchObject({ severity: 'critical', peakValue: 5 });
+    });
+
+    it('an entity that went completely silent joins as a zero-valued target', async () => {
+      const evaluate = vi.fn(async () => new Map([['gone', result({ ratio: 0, z: -9, baseline: 40 })]]));
+      registerEntityBaselineProvider({ evaluate, band: vi.fn() });
+      h.history = { gone: { requests: 120 } };
+      h.current = {};
+      expect(await tick()).toBe(1);
+      const request = (evaluate.mock.calls[0] as unknown[])[0] as { current: Array<{ entityKey: string; value: number }> };
+      expect(request.current).toEqual([expect.objectContaining({ entityKey: 'gone', value: 0 })]);
+      expect(h.events.map((e) => e.entityKey)).toEqual(['gone']);
+    });
+
+    it('an "up" rule does not look for silent entities', async () => {
+      const evaluate = vi.fn(async () => new Map());
+      registerEntityBaselineProvider({ evaluate, band: vi.fn() });
+      h.rules = [{ ...dropRule, condition: { ...dropRule.condition, baseline: { ...dropRule.condition.baseline!, direction: 'up' } } }];
+      h.history = { gone: { requests: 120 } };
+      h.current = {};
+      await tick();
+      expect(evaluate).not.toHaveBeenCalled();
+    });
+  });
+
   it('baseline mode needs 20 samples by default', async () => {
     (isTenantEnterpriseLicensed as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     const evaluate = vi.fn(async () => new Map());
@@ -791,5 +895,159 @@ describe('evaluateTenantAlerts: baseline and SLO modes', () => {
       condition: { operator: 'gt', threshold: 0, mode: 'slo_burn', slo: { objectivePct: 99, windowDays: 30, burnRate: 14.4, longWindowMinutes: 60, shortWindowMinutes: 5 } },
     }];
     expect(await tick()).toBe(0);
+  });
+});
+
+// ── Hardening: hysteresis, upgrade, races, storms ───────────────────────────
+
+describe('evaluateTenantAlerts: hardening', () => {
+  const failing = { requests: 100, errors: 40 };
+  const healthy = { requests: 100, errors: 1 };
+
+  it('counts ok evaluations per distinct data window: minute ticks of one 5-minute bucket resolve nothing', async () => {
+    h.rules = [agentRule];
+    h.current = { pulse: failing };
+    expect(await tick()).toBe(1);
+    h.current = { pulse: healthy };
+    // 12:03:30 and 12:04:30 still judge the 12:00 window the alert fired on.
+    await tick(1);
+    await tick(2);
+    expect(kinds()).toEqual(['fired']);
+    expect(h.states.get(stateKey('rule-agents', 'pulse'))).toMatchObject({ phase: 'firing', okStreak: 1 });
+    // 12:05:30 is the next window: the second ok evaluation.
+    await tick(3);
+    expect(kinds()).toEqual(['fired', 'resolved']);
+  });
+
+  it('a blip (bad, good, bad) does not resolve the alert', async () => {
+    h.rules = [agentRule];
+    h.current = { pulse: failing };
+    await tick();
+    h.current = { pulse: healthy };
+    await tick(1);
+    await tick(2);
+    h.current = { pulse: failing };
+    await tick(3);
+    h.current = { pulse: healthy };
+    await tick(4);
+    expect(kinds()).toEqual(['fired']);
+    expect(h.states.get(stateKey('rule-agents', 'pulse'))).toMatchObject({ phase: 'firing' });
+  });
+
+  it('an upgraded legacy rule keeps its cooldown from rule.lastTriggeredAt (no immediate re-fire)', async () => {
+    h.rules = [{ ...legacyRule, lastTriggeredAt: new Date(T0 - 10 * MIN) }];
+    expect(await tick()).toBe(0);
+    expect(h.states.get(stateKey('rule-1', ''))).toMatchObject({ phase: 'pending' });
+    expect(await tick(30)).toBe(0);
+    // 10 + 51 minutes after the last firing the 60 minute cooldown is over.
+    expect(await tick(51)).toBe(1);
+    expect(kinds()).toEqual(['fired']);
+  });
+
+  it('a legacy rule that never fired starts without a cooldown', async () => {
+    h.rules = [legacyRule];
+    expect(await tick()).toBe(1);
+  });
+
+  it('a rule deleted while its notification is in flight leaves no state behind', async () => {
+    h.rules = [agentRule];
+    h.current = { a: failing, b: failing, c: failing };
+    (dispatchNotification as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      h.rules = [];
+      return [{ type: 'email', target: 'ops@acme.com', success: true }];
+    });
+    await tick();
+    expect(h.states.size).toBe(0);
+    expect(h.db.deleteAlertStates).toHaveBeenCalledWith({ ruleId: 'rule-agents' });
+  });
+
+  it('a rule disabled before its turn writes no state', async () => {
+    h.rules = [agentRule];
+    h.current = { a: failing };
+    h.db.findAlertRuleById.mockResolvedValue({ ...agentRule, enabled: false });
+    expect(await tick()).toBe(0);
+    expect(h.states.size).toBe(0);
+  });
+
+  it('a rule whose scope was edited mid-sweep counts as reshaped', async () => {
+    h.rules = [legacyRule];
+    h.db.findAlertRuleById.mockResolvedValue({ ...legacyRule, scope: { modelKey: 'other' } });
+    await tick();
+    expect(h.states.size).toBe(0);
+  });
+
+  it('a notification storm is paced: at most 50 per rule and sweep, the rest waits with its state', async () => {
+    h.rules = [agentRule];
+    const current: Record<string, typeof failing> = {};
+    for (let i = 0; i < 120; i += 1) current[`agent-${i}`] = failing;
+    h.current = current;
+    expect(await tick()).toBe(50);
+    expect(dispatched()).toHaveLength(50);
+    expect([...h.states.values()].filter((st) => st.phase === 'firing')).toHaveLength(50);
+    expect([...h.states.values()].filter((st) => st.phase === 'pending')).toHaveLength(70);
+    expect(await tick(1)).toBe(50);
+    expect(await tick(2)).toBe(20);
+    expect(h.events).toHaveLength(120);
+    expect(new Set(h.events.map((e) => e.entityKey)).size).toBe(120);
+    expect(await tick(3)).toBe(0);
+  });
+
+  it('only the first fires of a storm build an incident context', async () => {
+    h.rules = [agentRule];
+    const current: Record<string, typeof failing> = {};
+    for (let i = 0; i < 30; i += 1) current[`agent-${i}`] = failing;
+    h.current = current;
+    await tick();
+    expect(h.db.listAgentTracingSessions.mock.calls.length).toBeLessThan(30 * 3);
+    expect(h.incidents.size).toBe(30);
+  });
+
+  it('past the tenant deadline no further notification is sent and nothing is lost', async () => {
+    h.rules = [agentRule];
+    const current: Record<string, typeof failing> = {};
+    for (let i = 0; i < 20; i += 1) current[`agent-${i}`] = failing;
+    h.current = current;
+    (dispatchNotification as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 10_000); // a slow channel
+      return [{ type: 'email', target: 'ops@acme.com', success: true }];
+    });
+    expect(await evaluateTenantAlerts(ctx, { deadlineMs: T0 + 5_000 })).toBe(8);
+    expect([...h.states.values()].filter((st) => st.phase === 'pending')).toHaveLength(12);
+    // The next sweep (fresh deadline) finishes the job.
+    (dispatchNotification as ReturnType<typeof vi.fn>).mockResolvedValue([{ type: 'email', target: 'ops@acme.com', success: true }]);
+    vi.setSystemTime(T0 + MIN);
+    expect(await evaluateTenantAlerts(ctx)).toBe(12);
+  });
+
+  it('stops starting rules once the deadline passed', async () => {
+    h.rules = [legacyRule, agentRule];
+    expect(await evaluateTenantAlerts(ctx, { deadlineMs: T0 - 1 })).toBe(0);
+    expect(h.db.listAlertStates).not.toHaveBeenCalled();
+  });
+
+  it('drops the rows of healthy entities once their cooldown is over', async () => {
+    h.rules = [{ ...agentRule, cooldownMinutes: 30 }];
+    h.current = { pulse: failing };
+    await tick();
+    h.current = { pulse: healthy };
+    await tick(3);
+    await tick(8);
+    // Resolved, but the cooldown (30 min) still needs the row.
+    expect(kinds()).toEqual(['fired', 'resolved']);
+    expect(h.states.get(stateKey('rule-agents', 'pulse'))).toMatchObject({ phase: 'ok' });
+    await tick(60);
+    expect(h.states.has(stateKey('rule-agents', 'pulse'))).toBe(false);
+  });
+
+  it('drops healthy rows of entities that stopped reporting altogether', async () => {
+    h.rules = [{ ...agentRule, cooldownMinutes: 0 }];
+    h.states.set(stateKey('rule-agents', 'old'), {
+      tenantId: 'tenant-1', projectId: 'proj-1', ruleId: 'rule-agents', entityKey: 'old', phase: 'ok',
+      phaseSince: new Date(T0 - 600 * MIN), breachStreak: 0, okStreak: 3, lastValue: null, lastBaseline: null,
+      lastSampleCount: 0, lastEvaluatedAt: new Date(T0 - 600 * MIN),
+    } as IAlertState);
+    h.current = { pulse: healthy };
+    await tick();
+    expect(h.states.has(stateKey('rule-agents', 'old'))).toBe(false);
   });
 });

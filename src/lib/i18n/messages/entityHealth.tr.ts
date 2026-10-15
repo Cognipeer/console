@@ -106,8 +106,8 @@ export const entityHealthTr: typeof entityHealthEn = {
     baselineUnavailable: 'Olağan seviyeyle karşılaştırma kullanılamıyor; durumu yalnızca uyarılar belirliyor.',
     sloFailed: 'Bazı varlıkların hizmet seviyeleri okunamadı.',
     truncated: '{total} varlık içinden en çok trafiği olan {shown} tanesi gösteriliyor.',
-    overviewUnavailable: 'Bazı varlık türleri okunamadığı için bu sayımların dışında kaldı.',
-    overviewTruncated: 'Sayımlar, her türün en yoğun varlıklarını kapsar.',
+    overviewUnavailable: 'Bazı varlık türleri okunamadığı için bu sayımların dışında kaldı: {types}.',
+    overviewTruncated: 'Sayımlar, her türün en yoğun varlıklarını kapsar ({types}).',
     totalLimited: 'Sağlık verileri sınırlı süre saklanır; bu yüzden Toplam en fazla son 30 günü gösterir.',
   },
   actions: {

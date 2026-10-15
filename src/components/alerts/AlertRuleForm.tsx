@@ -334,6 +334,7 @@ export default function AlertRuleForm({
   );
 
   const entityPlural = def?.entityType ? entityTypeLabel(def.entityType, t, true) : '';
+  const entitySingular = def?.entityType ? entityTypeLabel(def.entityType, t) : '';
   const scopeField = SCOPE_FIELD_BY_MODULE[values.module];
 
   return (
@@ -417,7 +418,7 @@ export default function AlertRuleForm({
               />
             ) : (
               <Text size="xs" c="dimmed">
-                {t('target.allHint', { type: entityPlural })}
+                {t('target.allHint', { type: entitySingular })}
               </Text>
             )}
           </>

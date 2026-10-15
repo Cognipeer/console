@@ -303,7 +303,7 @@ export const en = {
     pii: 'PII Service',
     piiDescription: 'Detect, redact and mask personal data',
     alerts: 'Alerts & Incidents',
-    alertsDescription: 'Threshold alerts for quality, cost & latency',
+    alertsDescription: 'Threshold, baseline, absence & SLO alerts and incidents across agents, models and tools',
     cost: 'Cost & Optimization',
     costDescription: 'Spend across models and agents, pricing, model-switch recommendations and parity testing',
     automations: 'Automations',

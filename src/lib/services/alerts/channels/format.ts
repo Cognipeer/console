@@ -81,6 +81,19 @@ export function formatDuration(fromMs: number, toMs: number): string {
   return rest ? `${days} d ${rest} h` : `${days} d`;
 }
 
+/** `1.4.0 → 1.5.0 (first seen 18 min before this fired)`; empty when no version is known. */
+export function formatVersionChange(
+  version: { from: string | null; to: string | null; firstSeenAt?: string } | null | undefined,
+  firedAt: Date | string | number,
+): string {
+  if (!version || (!version.from && !version.to)) return '';
+  const text = `${version.from ?? 'n/a'} → ${version.to ?? 'n/a'}`;
+  const firstSeenMs = version.firstSeenAt ? new Date(version.firstSeenAt).getTime() : Number.NaN;
+  const firedMs = new Date(firedAt).getTime();
+  if (!Number.isFinite(firstSeenMs) || !Number.isFinite(firedMs) || firstSeenMs > firedMs) return text;
+  return `${text} (first seen ${formatDuration(firstSeenMs, firedMs)} before this fired)`;
+}
+
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
