@@ -663,7 +663,7 @@ export default function AgentDetailPage() {
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
     nextConfig.skills = skills.length > 0 ? skills : undefined;
     nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
-    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
+    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey || memoryConfig?.mounts?.length ? memoryConfig : undefined;
     // Kept even when disabled, so turning the sandbox off does not throw away
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.

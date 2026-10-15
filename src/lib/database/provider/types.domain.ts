@@ -2199,6 +2199,13 @@ export interface IAgentMemoryConfig {
   enabled?: boolean;
   /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
   memoryStoreKey?: string;
+  /**
+   * One or more stores ("mounts") the agent reads from / writes into. Several
+   * agents mounting the same store (+ a shared scope) share memory. When set
+   * this wins over the legacy `memoryStoreKey`; the FIRST mount is the primary
+   * store for the SDK's pre-injected recall and summary writes.
+   */
+  mounts?: IAgentMemoryMount[];
   scope?: AgentMemoryScope;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
@@ -2214,6 +2221,17 @@ export interface IAgentMemoryConfig {
    * something and silently not doing so is the worse surprise.
    */
   tools?: AgentMemoryToolMode;
+}
+
+export interface IAgentMemoryMount {
+  /** Key of an existing `IMemoryStore`. */
+  storeKey: string;
+  /** Default 'read_write'. A read_only mount is never written to or forgotten from. */
+  access?: 'read_write' | 'read_only';
+  /** What this store is for — shown to the model ("Use for: ..."). */
+  description?: string;
+  /** Overrides `memory.scope` for this mount. */
+  scope?: AgentMemoryScope;
 }
 
 /** 'read' drops the write/forget tools, for a curated store the agent must not pollute. */
