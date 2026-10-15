@@ -844,7 +844,13 @@ export async function sweepExpiredPendingActions(
             }
 
             if (hitl.onTimeout === 'cancel' && !resolvedAny) {
-                await dropPausedSnapshot(db, conversationId);
+                await dropPausedSnapshot(db, conversationId, {
+                    outcome: 'expired',
+                    resolvedBy: 'system:timeout',
+                    actions: actions.filter((action) => snapshots.get(String(action._id))?.status === 'expired'),
+                    projectId: first.projectId,
+                    tenantId: first.tenantId,
+                });
                 await db.updateAgentConversationRuntime(conversationId, {
                     runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [],
                 });
