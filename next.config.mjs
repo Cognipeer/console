@@ -1,5 +1,8 @@
-import type { NextConfig } from 'next';
 import path from 'node:path';
+
+// Plain JavaScript on purpose. For a next.config.ts the production server
+// first verifies the TypeScript setup: it loads the compiler and, in an image
+// without dev dependencies, runs `npm install typescript` on every start.
 
 // The E2E/load-test Docker image is built with E2E_BUILD=1. It only needs a
 // *runnable* server, not a type-clean one — so we skip the strict build-time
@@ -8,7 +11,8 @@ import path from 'node:path';
 // stays fully strict.
 const e2eBuild = process.env.E2E_BUILD === '1';
 
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   typescript: { ignoreBuildErrors: e2eBuild },
   eslint: { ignoreDuringBuilds: e2eBuild },
   serverExternalPackages: [
@@ -108,8 +112,13 @@ const nextConfig: NextConfig = {
     ];
   },
   experimental: {
+    // Next 15 defaults this to true: on start the production server evaluates
+    // every module of every page (123 routes here) before the first request,
+    // which is most of the boot-time heap. Pages load on their first request
+    // instead.
+    preloadEntriesOnStart: false,
     serverActions: {
-      bodySizeLimit: (process.env.NEXT_BODY_SIZE_LIMIT || '10mb') as `${number}mb`,
+      bodySizeLimit: process.env.NEXT_BODY_SIZE_LIMIT || '10mb',
     },
   },
 };

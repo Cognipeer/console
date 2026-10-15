@@ -12,7 +12,7 @@ const ROOT = path.resolve(__dirname, '../../..');
 
 /** Files allowed to name the old routes: the redirects, this guard, the tests that assert their absence and the change logs. */
 const ALLOWED = new Set([
-  'next.config.ts',
+  'next.config.mjs',
   'src/__tests__/unit/removed-routes-guard.test.ts',
   'src/__tests__/unit/next-config-redirects.test.ts',
   'src/__tests__/unit/nav-registry.test.ts',

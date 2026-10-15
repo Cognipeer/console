@@ -103,6 +103,9 @@ describe('a server whose authorization engine passes its self-test', () => {
     // (cut off at the first step after the self-test)
     await expect(bootstrapApplication()).rejects.toThrow(BOOT_CONTINUED);
     expect(spies.initLifecycle).toHaveBeenCalledTimes(1);
+    // marked on the process, so Next's instrumentation hook does not boot it a second time
+    const { isBootstrapStarted } = await import('@/server/bootstrapMarker');
+    expect(isBootstrapStarted()).toBe(true);
     expect(exit).not.toHaveBeenCalled();
     vi.advanceTimersByTime(5000);
     expect(exit).not.toHaveBeenCalled();

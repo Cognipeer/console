@@ -46,13 +46,15 @@ import { startAnalysisScheduler } from '@/lib/services/analysis/analysisSchedule
 import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
 import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/registry';
 import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrganization';
+import { markBootstrapStarted } from './bootstrapMarker';
 import { ensureServerEnvLoaded } from './env';
 
 const logger = createLogger('startup');
 
-// Promise-based singleton: `nextApp.prepare()` runs concurrently with this
-// bootstrap and Next's instrumentation hook also calls it — concurrent
-// callers must await the SAME in-flight run, not return early.
+// Promise-based singleton: concurrent callers must await the SAME in-flight
+// run, not return early. It is per module instance, so the run is also marked
+// on the process (bootstrapMarker.ts) for Next's instrumentation hook, which
+// sees its own bundled copy of this module.
 let bootstrapPromise: Promise<void> | null = null;
 
 // The HTTP server now starts listening before this resolves (see app.ts) so
@@ -129,6 +131,7 @@ export function bootstrapApplication(): Promise<void> {
   ensureServerEnvLoaded();
 
   if (!bootstrapPromise) {
+    markBootstrapStarted();
     bootstrapPromise = runBootstrap();
   }
   return bootstrapPromise;
