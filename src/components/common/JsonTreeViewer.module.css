@@ -49,3 +49,34 @@
 .collapsedContent {
     color: var(--mantine-color-dimmed);
 }
+
+/*
+ * Replacing the library's class names also drops the pseudo-elements its own
+ * classes carried: the ▸/▾ toggles and the "..." of a collapsed node. Without
+ * them a collapsed array of objects reads as `[{}, {}]` — empty, and with
+ * nothing that looks clickable.
+ */
+.expandIcon::after {
+    content: '\25B8';
+}
+
+.collapseIcon::after {
+    content: '\25BE';
+}
+
+.expandIcon,
+.collapseIcon {
+    display: inline-block;
+    width: 1em;
+    margin-right: 2px;
+}
+
+.collapsedContent {
+    cursor: pointer;
+    margin: 0 2px;
+}
+
+.collapsedContent::after {
+    content: '...';
+    font-size: 0.85em;
+}

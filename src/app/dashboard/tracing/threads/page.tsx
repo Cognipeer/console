@@ -284,6 +284,8 @@ export default function TracingThreadsPage() {
               { value: 'success', label: 'Success' },
               { value: 'error', label: 'Error' },
               { value: 'in_progress', label: 'In progress' },
+              { value: 'paused', label: 'Waiting on a person' },
+              { value: 'cancelled', label: 'Cancelled' },
             ],
           },
         ]}

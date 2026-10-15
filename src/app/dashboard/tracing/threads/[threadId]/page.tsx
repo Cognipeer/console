@@ -25,6 +25,7 @@ import {
   Alert,
   Code,
   SimpleGrid,
+  SegmentedControl,
 } from '@mantine/core';
 import {
   IconClock,
@@ -57,6 +58,8 @@ import {
   statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
+import { createToolTurnKeys, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
+import ToolDefinitionsCard, { readToolDefinitions } from '@/components/tracing/ToolDefinitionsCard';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
@@ -67,6 +70,8 @@ import LlmRequestDetailModal, {
   type LlmRequestDetailData,
   type LlmRequestItem,
 } from '@/components/common/llm/LlmRequestDetail';
+import { buildSessionModel, outcomeText, stepCategory } from '@/components/tracing/sessionModel';
+import EventListGrouped from '@/components/tracing/EventListGrouped';
 
 dayjs.extend(relativeTime);
 dayjs.extend(duration);
@@ -138,7 +143,11 @@ interface SessionDetailResponse {
     toolName?: string;
     inputTokens?: number;
     outputTokens?: number;
+    totalTokens?: number;
     cachedInputTokens?: number;
+    finishReason?: string;
+    spanId?: string;
+    parentSpanId?: string;
   }>;
 }
 
@@ -199,6 +208,11 @@ function MetaItem({
   );
 }
 
+/** An object result renders as a JSON tree; text and content parts as text. */
+function toolResultContent(value: unknown): unknown {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : messageContentToText(value);
+}
+
 /**
  * Maps thread event sections onto the shared item stream. `message`/
  * `tool_call`/`tool_result` become typed items (a call and the result
@@ -214,23 +228,20 @@ function sectionsToItems(
   const items: LlmRequestItem[] = [];
   let functionNames: string[] = [];
 
+  const turnKeys = createToolTurnKeys();
   sections.forEach((section, index) => {
     const kind = typeof section.kind === 'string' ? section.kind : undefined;
     const role = typeof section.role === 'string' ? section.role : undefined;
     const tool = typeof section.tool === 'string' ? section.tool : undefined;
 
     if (kind === 'message' && role) {
+      turnKeys.reset();
       // A recorded message is handed over as parts (structured when the SDK kept them, else read back from the flattened text), so pictures and files are drawn by the inspector instead of printed as JSON.
       items.push({ itemType: 'message', role, content: tracedMessageContent(section) });
     } else if (kind === 'tool_call') {
-      const raw = section.content;
-      let args: unknown = raw;
-      if (typeof raw === 'string') {
-        try { args = JSON.parse(raw); } catch { /* leave as string */ }
-      }
-      items.push({ itemType: 'call', turnId: tool ?? `call-${index}`, name: tool, args });
+      items.push({ itemType: 'call', turnId: turnKeys.call(tool, index), name: tool, args: sectionToolArgs(section) });
     } else if (kind === 'tool_result') {
-      items.push({ itemType: 'result', turnId: tool ?? `result-${index}`, name: tool, content: messageContentToText(section.content) });
+      items.push({ itemType: 'result', turnId: turnKeys.result(tool, index), name: tool, content: toolResultContent(sectionToolResult(section)) });
     } else if (kind === 'tool_definitions' && Array.isArray(section.tools)) {
       functionNames = (section.tools as Array<Record<string, unknown>>)
         .filter((entry) => entry && typeof entry === 'object' && typeof entry.name === 'string')
@@ -375,6 +386,9 @@ export default function ThreadDetailPage({
   const [error, setError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSessionEvents, setSelectedSessionEvents] = useState<TracingEvent[]>([]);
+  const [eventsView, setEventsView] = useState<'grouped' | 'list'>('grouped');
+  // Same integration-agnostic grouping as the session page.
+  const sessionModel = useMemo(() => buildSessionModel(selectedSessionEvents), [selectedSessionEvents]);
   const [sessionEventsLoading, setSessionEventsLoading] = useState(false);
   const [sessionEventsError, setSessionEventsError] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -829,7 +843,17 @@ export default function ThreadDetailPage({
         <Grid.Col span={{ base: 12, xl: 4 }}>
           <Card withBorder p="md" h="100%">
             <Stack gap="md" h="100%">
-              <Text fw={600}>Events</Text>
+              <Group justify="space-between" wrap="nowrap">
+                <Text fw={600}>Events</Text>
+                {!sessionModel.legacyHandler && selectedSessionEvents.length > 0 ? (
+                  <SegmentedControl
+                    size="xs"
+                    value={eventsView}
+                    onChange={(value) => setEventsView(value as 'grouped' | 'list')}
+                    data={[{ value: 'grouped', label: 'Grouped' }, { value: 'list', label: 'List' }]}
+                  />
+                ) : null}
+              </Group>
               {sessionEventsLoading ? (
                 <Box p="xl" style={{ textAlign: 'center' }}>
                   <Text c="dimmed">Loading events...</Text>
@@ -844,6 +868,13 @@ export default function ThreadDetailPage({
                 </Box>
               ) : (
                 <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
+                  {eventsView === 'grouped' && !sessionModel.legacyHandler ? (
+                    <EventListGrouped
+                      nodes={sessionModel.tree}
+                      selectedEventId={selectedEventId}
+                      onSelect={setSelectedEventId}
+                    />
+                  ) : (
                   <Stack gap="sm">
                     {selectedSessionEvents.map((event) => {
                       const isSelected = event.id === selectedEventId;
@@ -879,7 +910,11 @@ export default function ThreadDetailPage({
                             </Group>
 
                             <Group gap="xs">
-                              {event.toolName && (
+                              {stepCategory(event.type) === 'model' ? (
+                                outcomeText(event) ? (
+                                  <Badge size="xs" variant="light" color="violet">{outcomeText(event)}</Badge>
+                                ) : null
+                              ) : event.toolName && (
                                 <Badge size="xs" variant="light" color="violet">
                                   {formatToolName(event.toolName)}
                                 </Badge>
@@ -901,6 +936,7 @@ export default function ThreadDetailPage({
                       );
                     })}
                   </Stack>
+                  )}
                 </ScrollArea>
               )}
             </Stack>
@@ -1051,7 +1087,12 @@ export default function ThreadDetailPage({
                         Sections
                       </Text>
                       {selectedEvent.sections && selectedEvent.sections.length > 0 ? (
-                        <LlmRequestItemsView items={sectionsToItems(selectedEvent.sections, true).items} sessionFiles={sessionFiles} />
+                        <Stack gap="sm">
+                          <ToolDefinitionsCard
+                            tools={selectedEvent.sections.filter((section) => section.kind === 'tool_definitions').flatMap(readToolDefinitions)}
+                          />
+                          <LlmRequestItemsView items={sectionsToItems(selectedEvent.sections, true).items} sessionFiles={sessionFiles} />
+                        </Stack>
                       ) : (
                         <Text size="sm" c="dimmed">
                           No structured sections for this event.
