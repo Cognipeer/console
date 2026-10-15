@@ -82,7 +82,7 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     // works. A non-enterprise tenant cannot configure SSO (402); a stored but
     // now-unlicensed connection is skipped in-handler (defense in depth).
     module: 'sso',
-    prefixes: ['/api/sso/config', '/api/sso/test'],
+    prefixes: ['/api/sso/config', '/api/sso/test', '/api/sso/provisioning'],
   },
   {
     // Realtime voice/chat: admin model CRUD under /api/realtime, client session

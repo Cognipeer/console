@@ -67,6 +67,26 @@ export function principalHref(type: IamPrincipalType, id: string, params: { edit
   return params.edit ? `${base}?edit=${encodeURIComponent(params.edit)}` : base;
 }
 
+/** The principal kinds a list (and a `/principals/<type>` address) exists for. */
+const LIST_TYPES = ['user', 'group', 'token'] as const;
+
+export function isListType(value: unknown): value is (typeof LIST_TYPES)[number] {
+  return typeof value === 'string' && (LIST_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * Where the pageless addresses `/dashboard/iam/principals` and `/dashboard/iam/principals/<type>`
+ * lead: the principals tab, narrowed to that kind when it is one (an unknown kind gets the plain tab).
+ */
+export function principalsListHref(type?: string | null): string {
+  return isListType(type) ? iamHref('principals', { principalType: type }) : iamHref('principals');
+}
+
+/** Where `/dashboard/iam/policies` leads: the policies tab. */
+export function policiesListHref(): string {
+  return iamHref('policies');
+}
+
 /** A person's page in the IAM center. */
 export function memberHref(userId: string): string {
   return principalHref('user', userId);

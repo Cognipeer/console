@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Anchor, Group, Stack } from '@mantine/core';
@@ -11,6 +11,7 @@ import { iamHref, principalHref } from '../links';
 import type { PrincipalTarget } from './client';
 import { isPrincipalType } from './client';
 import { EDIT_KINDS, type EditKind } from './listState';
+import { lastListUrlFor, readLastListUrl } from './lastList';
 import NewTokenShell from './NewTokenShell';
 import { PrincipalDetailContent, type DetailContext } from './PrincipalDetail';
 import { usePeopleActions } from './usePeopleActions';
@@ -57,7 +58,11 @@ export default function PrincipalDetailPage({ type, id, canManage }: PrincipalDe
   const [tokenOwner, setTokenOwner] = useState<{ id: string; label: string } | null>(null);
 
   const typed = isPrincipalType(type) ? type : null;
-  const leave = useCallback(() => router.push(listHref(typed ?? 'user')), [router, typed]);
+  // The list view this page was opened from (search, filters, kind) when the session remembers it.
+  const [lastList, setLastList] = useState<string | null>(null);
+  useEffect(() => setLastList(readLastListUrl()), []);
+  const backHref = lastListUrlFor(typed ?? 'user', lastList) ?? listHref(typed ?? 'user');
+  const leave = useCallback(() => router.push(backHref), [router, backHref]);
 
   const context = useMemo<DetailContext>(
     () => ({
@@ -90,7 +95,7 @@ export default function PrincipalDetailPage({ type, id, canManage }: PrincipalDe
     <PageContainer>
       <Stack gap="md" maw={1100} data-testid="principal-detail-page">
         <Group>
-          <Anchor component={Link} href={listHref(typed)} size="sm" data-testid="principal-back-to-list">
+          <Anchor component={Link} href={backHref} size="sm" data-testid="principal-back-to-list">
             <Group gap={4} wrap="nowrap">
               <IconArrowLeft size={14} />
               {t(`page.backTo.${typed}`)}

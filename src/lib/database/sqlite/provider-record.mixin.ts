@@ -2,7 +2,7 @@
  * SQLite Provider – Unified provider record operations mixin
  */
 
-import type { IProviderRecord, ProviderDomain } from '../provider.interface';
+import type { IProviderLastTest, IProviderRecord, ProviderDomain } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -65,6 +65,7 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
       if (data.type !== undefined) { sets.push('type = @type'); params.type = data.type; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.projectIds !== undefined) { sets.push('projectIds = @projectIds'); params.projectIds = this.toJson(data.projectIds); }
+      if (data.lastTest !== undefined) { sets.push('lastTest = @lastTest'); params.lastTest = this.toJson(data.lastTest); }
 
       db.prepare(`UPDATE ${TABLES.providers} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findProviderById(id);
@@ -175,6 +176,7 @@ export function ProviderRecordMixin<TBase extends Constructor<SQLiteProviderBase
         settings: this.parseJson(r.settings, {}),
         capabilitiesOverride: this.parseJson<string[]>(r.capabilitiesOverride, []),
         metadata: this.parseJson(r.metadata, {}),
+        lastTest: this.parseJson<IProviderLastTest | undefined>(r.lastTest, undefined),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

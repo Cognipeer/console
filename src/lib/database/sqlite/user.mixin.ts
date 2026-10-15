@@ -23,6 +23,14 @@ import {
 /** More than this many accounts holding one identity is not a race, it is a data problem; the resolver only needs the oldest. */
 const MAX_IDENTITY_MATCHES = 5;
 
+/** The stored `{at, message?}` of an access request as the account field (null/absent/garbled = none). */
+function mapAccessRequest(raw: { at?: string; message?: string } | null): IUser['accessRequest'] {
+  if (!raw || typeof raw.at !== 'string') return undefined;
+  const at = new Date(raw.at);
+  if (Number.isNaN(at.getTime())) return undefined;
+  return { at, ...(typeof raw.message === 'string' && raw.message ? { message: raw.message } : {}) };
+}
+
 interface WithTenantOps {
   findTenantById(id: string): Promise<import('../provider.interface').ITenant | null>;
   registerUserInDirectory(entry: import('../provider.interface').ITenantUserDirectoryEntry): Promise<void>;
@@ -267,6 +275,13 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       if (data.disabledAt !== undefined) { sets.push('disabledAt = @disabledAt'); params.disabledAt = data.disabledAt?.toISOString() ?? null; }
       if (data.disabledBy !== undefined) { sets.push('disabledBy = @disabledBy'); params.disabledBy = data.disabledBy ?? null; }
       if (data.disabledReason !== undefined) { sets.push('disabledReason = @disabledReason'); params.disabledReason = data.disabledReason ?? null; }
+      // The last access request is one JSON value: `{at, message?}`; null clears it.
+      if (data.accessRequest !== undefined) {
+        sets.push('accessRequest = @accessRequest');
+        params.accessRequest = data.accessRequest
+          ? this.toJson({ at: new Date(data.accessRequest.at).toISOString(), ...(data.accessRequest.message ? { message: data.accessRequest.message } : {}) })
+          : null;
+      }
 
       // The kind and the external identities are not columns of the users table: they are in the account's identity document
       // (userIdentity.ts), changed in the same transaction as the account. A null kind clears it; `externalIds` is a whole new
@@ -394,6 +409,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         disabledAt: this.toDate(r.disabledAt),
         disabledBy: (r.disabledBy as string | null) ?? undefined,
         disabledReason: (r.disabledReason as string | null) ?? undefined,
+        accessRequest: mapAccessRequest(this.parseJson<{ at?: string; message?: string } | null>(r.accessRequest, null)),
         // No identity document (every account that is not external and holds no external identity) = a member.
         kind: identity.kind,
         externalIds: identity.externalIds,

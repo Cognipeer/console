@@ -247,6 +247,11 @@ const iso = (value: unknown): string | null => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 };
 const userLabel = (user: Pick<IUser, 'name' | 'email'>): string => user.name || user.email || '';
+/** The person's last "I need access" request (null = never asked); a screen shows it only while they still have no project. */
+const accessRequestOf = (user: Pick<IUser, 'accessRequest'>): { at: string; message: string | null } | null => {
+  const at = iso(user.accessRequest?.at);
+  return at ? { at, message: user.accessRequest?.message ?? null } : null;
+};
 
 export interface DirectoryUserItem extends PrincipalListItem {
   type: 'user';
@@ -258,6 +263,7 @@ export interface DirectoryUserItem extends PrincipalListItem {
   roleManaged: boolean;
   createdAt: string | null;
   invitedAt: string | null;
+  accessRequest: { at: string; message: string | null } | null;
   allowedActions: AllowedActions;
 }
 
@@ -365,6 +371,7 @@ export async function listDirectory(
           roleManaged: roleManaged(user),
           createdAt: iso(user.createdAt),
           invitedAt: iso(user.invitedAt),
+          accessRequest: accessRequestOf(user),
           allowedActions: computeAllowedActions(viewer, targetOf(user, { roleManaged: roleManaged(user) })),
         })),
       };
@@ -616,6 +623,7 @@ export async function augmentPrincipalDetail(
         createdAt: iso(user.createdAt),
         invitedAt: iso(user.invitedAt),
         inviteAcceptedAt: iso(user.inviteAcceptedAt),
+        accessRequest: accessRequestOf(user),
         pendingInvite: isPendingInvite(user),
         disabledAt: iso(user.disabledAt),
         disabledBy: user.disabledBy ?? null,

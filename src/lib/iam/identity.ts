@@ -136,6 +136,11 @@ export const PEOPLE_ERROR_CODES = [
   'invalid_current_password',
   'no_pending_invite',
   'external_user',
+  'project_not_found',
+  'invalid_issuer',
+  'identity_taken',
+  'already_has_access',
+  'implicit_access',
 ] as const;
 export type PeopleErrorCode = (typeof PEOPLE_ERROR_CODES)[number];
 

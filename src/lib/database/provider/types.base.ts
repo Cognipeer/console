@@ -190,6 +190,12 @@ export interface IUser {
   disabledBy?: string | null;
   disabledReason?: string | null;
   /**
+   * The person's last "I need access to a project" request (`POST /api/users/me/access-request`). Never cleared by the
+   * server: a screen shows it only while the person still has no accessible project, and a new request (allowed once
+   * per 24 h) overwrites it.
+   */
+  accessRequest?: { at: Date; message?: string } | null;
+  /**
    * Timestamp of the last password change.
    * Used to invalidate password reset tokens issued before this moment,
    * making reset tokens effectively single-use.
@@ -785,6 +791,17 @@ export interface IProviderRecordStatus {
   status: 'active' | 'disabled' | 'errored';
 }
 
+/** Outcome of the last "Test connection" run against a stored provider (never carries secrets). */
+export interface IProviderLastTest {
+  /** `null`: the driver has no test. */
+  ok: boolean | null;
+  at: Date | string;
+  latencyMs: number;
+  message: string;
+  /** Deployments / models the probe found, when it lists them. */
+  deployments?: number;
+}
+
 export interface IProviderRecord
   extends Partial<IProviderRecordStatus> {
   _id?: ObjectId | string;
@@ -801,6 +818,7 @@ export interface IProviderRecord
   settings: Record<string, unknown>;
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
+  lastTest?: IProviderLastTest;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

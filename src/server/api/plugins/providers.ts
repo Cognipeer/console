@@ -12,9 +12,14 @@ import {
   deleteProviderConfig,
   getProviderConfigById,
   listProviderConfigs,
+  loadProviderRuntimeData,
   ProviderCredentialDecryptError,
+  recordProviderTest,
+  resolveTenantProjectIds,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
+import { foundCount, testProviderConnection } from '@/lib/services/providers/providerConnectionTest';
+import { getProviderUsage } from '@/lib/services/providers/providerUsage';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
 import {
   readJsonBody,
@@ -117,6 +122,58 @@ function sanitizeUpdatePayload(body: unknown): UpdateProviderConfigInput {
   return payload;
 }
 
+class ProviderProjectIdsError extends Error {}
+
+/**
+ * `projectIds` of a create body: absent is fine, otherwise an array of ids that are each a project
+ * of the caller's tenant (deduped). Anything else is a 400 that says what is wrong.
+ */
+async function readCreateProjectIds(
+  body: Record<string, unknown>,
+  tenantDbName: string,
+  tenantId: string,
+): Promise<string[] | undefined> {
+  if (body.projectIds === undefined || body.projectIds === null) return undefined;
+  if (
+    !Array.isArray(body.projectIds)
+    || !body.projectIds.every((item) => typeof item === 'string' && item.trim() !== '')
+  ) {
+    throw new ProviderProjectIdsError('projectIds must be an array of project ids');
+  }
+  const { projectIds, unknown } = await resolveTenantProjectIds(
+    tenantDbName,
+    tenantId,
+    body.projectIds as string[],
+  );
+  if (unknown.length > 0) {
+    throw new ProviderProjectIdsError(`Unknown project(s): ${unknown.join(', ')}`);
+  }
+  return projectIds;
+}
+
+/** What `POST /providers/test` needs of a body: the same fields a create does, minus the identity ones. */
+function readTestPayload(body: unknown): {
+  type: ProviderDomain;
+  driver: string;
+  credentials: Record<string, unknown>;
+  settings: Record<string, unknown>;
+} {
+  if (!isRecord(body)) throw new Error('Invalid payload');
+  if (typeof body.type !== 'string' || body.type === '') throw new Error('type is required');
+  if (typeof body.driver !== 'string' || body.driver === '') throw new Error('driver is required');
+  if (body.credentials !== undefined && !isRecord(body.credentials)) throw new Error('credentials must be an object');
+  if (body.settings !== undefined && !isRecord(body.settings)) throw new Error('settings must be an object');
+  if (!providerRegistry.listDescriptors().some((descriptor) => descriptor.id === body.driver)) {
+    throw new Error(`Unknown driver "${body.driver}"`);
+  }
+  return {
+    type: body.type as ProviderDomain,
+    driver: body.driver,
+    credentials: (body.credentials ?? {}) as Record<string, unknown>,
+    settings: (body.settings ?? {}) as Record<string, unknown>,
+  };
+}
+
 export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
@@ -198,6 +255,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       validateCreatePayload(body);
 
       if (query.scope === 'tenant') {
+        const projectIds = await readCreateProjectIds(body, session.tenantDbName, session.tenantId);
         const provider = await createProviderConfig(session.tenantDbName, session.tenantId, {
           capabilitiesOverride: body.capabilitiesOverride as string[] | undefined,
           createdBy: session.userId,
@@ -207,6 +265,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           key: body.key as string,
           label: body.label as string,
           metadata: body.metadata as Record<string, unknown> | undefined,
+          projectIds,
           settings: body.settings as Record<string, unknown> | undefined,
           status: body.status as ProviderStatus | undefined,
           type: body.type as ProviderDomain,
@@ -236,6 +295,9 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof ProviderEndpointError) {
         return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
       }
+      if (error instanceof ProviderProjectIdsError) {
+        return reply.code(400).send({ error: error.message });
+      }
       if (error instanceof Error) {
         if (error.message.includes('already exists')) {
           return reply.code(409).send({ error: error.message });
@@ -244,6 +306,94 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
       logger.error('Create provider error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  // "Test connection" of a provider that is not saved yet (the create form). Nothing is persisted.
+  app.post('/providers/test', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!isProviderAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      let payload: ReturnType<typeof readTestPayload>;
+      try {
+        payload = readTestPayload(readJsonBody<unknown>(request));
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'Invalid payload' });
+      }
+
+      const result = await testProviderConnection({
+        ...payload,
+        tenantId: session.tenantId,
+      });
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendProviderError(reply, error);
+    }
+  }));
+
+  // "Test connection" of a stored provider: its credentials are decrypted here and never leave. The outcome is kept on the record.
+  app.post('/providers/:id/test', withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const session = requireSessionContext(request);
+      if (!isProviderAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      const existing = await getProviderConfigById(session.tenantDbName, id);
+      if (!existing || existing.tenantId !== session.tenantId) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+
+      const { record, credentials } = await loadProviderRuntimeData(session.tenantDbName, {
+        id,
+        tenantId: session.tenantId,
+      });
+
+      const result = await testProviderConnection({
+        type: record.type,
+        driver: record.driver,
+        credentials,
+        settings: record.settings ?? {},
+        tenantId: session.tenantId,
+        providerKey: record.key,
+      });
+
+      const deployments = foundCount(result);
+      await recordProviderTest(session.tenantDbName, id, {
+        ok: result.ok,
+        at: new Date(),
+        latencyMs: result.latencyMs,
+        message: result.message,
+        ...(deployments !== undefined ? { deployments } : {}),
+      });
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendProviderError(reply, error);
+    }
+  }));
+
+  // Where a provider is used: per project, the models on it and the agents that use them. Read before unassigning.
+  app.get('/providers/:id/usage', withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const session = requireSessionContext(request);
+      if (!isProviderAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      const existing = await getProviderConfigById(session.tenantDbName, id);
+      if (!existing || existing.tenantId !== session.tenantId) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+
+      const usage = await getProviderUsage(session.tenantDbName, session.tenantId, existing);
+      return reply.code(200).send(usage);
+    } catch (error) {
+      return sendProviderError(reply, error);
     }
   }));
 

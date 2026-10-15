@@ -1,5 +1,6 @@
 import {
   getDatabase,
+  IProviderLastTest,
   IProviderRecord,
   ProviderDomain,
 } from '@/lib/database';
@@ -38,6 +39,8 @@ export class ProviderCredentialDecryptError extends Error {
 
 export interface CreateProviderConfigInput {
   projectId?: string;
+  /** Projects the provider is assigned to on creation (deduped; `projectId` is added when given). */
+  projectIds?: string[];
   key: string;
   type: ProviderDomain;
   driver: string;
@@ -113,6 +116,32 @@ function isDuplicateKeyError(error: unknown): boolean {
   return typeof message === 'string' && /unique constraint/i.test(message);
 }
 
+function initialProjectIds(payload: CreateProviderConfigInput): string[] | undefined {
+  const ids = [...(payload.projectId ? [payload.projectId] : []), ...(payload.projectIds ?? [])]
+    .map(String);
+  return ids.length > 0 ? [...new Set(ids)] : undefined;
+}
+
+/**
+ * Checks a list of project ids from a request body against the caller's tenant:
+ * the ids are deduped and each must be a project of the tenant. `unknown` lists the ones that are not.
+ */
+export async function resolveTenantProjectIds(
+  tenantDbName: string,
+  tenantId: string,
+  projectIds: readonly string[],
+): Promise<{ projectIds: string[]; unknown: string[] }> {
+  const wanted = [...new Set(projectIds.map(String))];
+  if (wanted.length === 0) return { projectIds: [], unknown: [] };
+  const db = await withTenantDb(tenantDbName);
+  // A tenant has fewer than a hundred projects: one list read beats a lookup per id.
+  const known = new Set((await db.listProjects(tenantId)).map((project) => String(project._id)));
+  return {
+    projectIds: wanted.filter((id) => known.has(id)),
+    unknown: wanted.filter((id) => !known.has(id)),
+  };
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
@@ -135,7 +164,7 @@ export async function createProviderConfig(
   try {
     record = await db.createProvider({
       tenantId,
-      projectIds: payload.projectId ? [payload.projectId] : undefined,
+      projectIds: initialProjectIds(payload),
       key: payload.key,
       type: payload.type,
       driver: payload.driver,
@@ -254,6 +283,16 @@ export async function updateProviderConfig(
 
   const updated = await db.updateProvider(providerId, updates);
   return updated ? sanitize(updated) : null;
+}
+
+/** Stores the outcome of a "Test connection" on the provider record. */
+export async function recordProviderTest(
+  tenantDbName: string,
+  providerId: string,
+  lastTest: IProviderLastTest,
+): Promise<void> {
+  const db = await withTenantDb(tenantDbName);
+  await db.updateProvider(providerId, { lastTest });
 }
 
 export async function listProviderConfigs(

@@ -5,7 +5,9 @@ import { Anchor, Breadcrumbs, Text } from '@mantine/core';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { readLastListUrl } from '@/components/iam/principals/lastList';
 import { BREADCRUMB_RESOLVERS } from './breadcrumbResolvers';
+import { hasNoPage, iamCrumbPlan, type IamCrumbLabel } from './iamBreadcrumbs';
 
 /**
  * Translation keys for static path segments. A segment listed here is
@@ -132,11 +134,29 @@ function shortenId(value: string): string {
 
 type ResolvedSegmentLabels = Record<number, string>;
 
+interface Crumb {
+  key: string;
+  label: string;
+  /** `null`: not a link (the current page, or a folder without a page). */
+  href: string | null;
+  current: boolean;
+}
+
+/** `breadcrumbs.*` keys of the IAM trail's own labels. */
+const IAM_CRUMB_KEYS: Record<IamCrumbLabel, string> = {
+  people: 'iamPeople',
+  groups: 'iamGroups',
+  tokens: 'iamTokens',
+  policies: 'iamPolicies',
+};
+
 export default function DashboardBreadcrumbs() {
   const pathname = usePathname();
   const t = useTranslations('breadcrumbs');
 
   const cacheRef = useRef<Map<string, string>>(new Map());
+  // The principals list view a person's page was opened from (session storage: unknown until mounted).
+  const [lastListUrl, setLastListUrl] = useState<string | null>(null);
   const [resolvedLabels, setResolvedLabels] = useState<ResolvedSegmentLabels>(
     {},
   );
@@ -144,6 +164,10 @@ export default function DashboardBreadcrumbs() {
   const segments = useMemo(() => {
     if (!pathname) return [] as string[];
     return pathname.split('/').filter(Boolean);
+  }, [pathname]);
+
+  useEffect(() => {
+    setLastListUrl(readLastListUrl());
   }, [pathname]);
 
   useEffect(() => {
@@ -194,6 +218,29 @@ export default function DashboardBreadcrumbs() {
     [segments, resolvedLabels, t],
   );
 
+  // IAM pages have their own trail (IAM / People / <name>): the folders between are not pages.
+  const crumbs = useMemo<Crumb[]>(() => {
+    const iamPlan = iamCrumbPlan(segments, lastListUrl);
+    if (iamPlan) {
+      return iamPlan.map((item, i) => ({
+        key: `${item.segmentIndex}:${item.href ?? ''}`,
+        label: item.label ? t(IAM_CRUMB_KEYS[item.label]) : labels[item.segmentIndex],
+        href: item.href,
+        current: i === iamPlan.length - 1,
+      }));
+    }
+    return segments.map((_segment, index) => {
+      const current = index === segments.length - 1;
+      const path = `/${segments.slice(0, index + 1).join('/')}`;
+      return {
+        key: path,
+        label: labels[index],
+        href: current || hasNoPage(segments, index) ? null : path,
+        current,
+      };
+    });
+  }, [segments, labels, lastListUrl, t]);
+
   // Browser tab title: breadcrumb labels minus "Dashboard". A layout effect
   // + MutationObserver is used (instead of a plain useEffect) because Next's
   // App Router can reset document.title on navigation without changing our
@@ -202,12 +249,12 @@ export default function DashboardBreadcrumbs() {
 
   useLayoutEffect(() => {
     if (!segments.length || segments[0] !== 'dashboard') return;
-    const pageLabels = labels.slice(1);
+    const pageLabels = crumbs.slice(1).map((crumb) => crumb.label);
     titleRef.current = pageLabels.length
       ? `${[...pageLabels].reverse().join(' · ')} - Cognipeer Console`
       : 'Cognipeer Console';
     document.title = titleRef.current;
-  }, [segments, labels]);
+  }, [segments, crumbs]);
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
@@ -227,14 +274,14 @@ export default function DashboardBreadcrumbs() {
     return null;
   }
 
-  const items = segments.map((segment, index) => {
-    const href = `/${segments.slice(0, index + 1).join('/')}`;
-    const label = labels[index];
-    const isLast = index === segments.length - 1;
-
-    if (isLast) {
+  const items = crumbs.map(({ key, label, href, current }) => {
+    if (href === null) {
       return (
-        <Text key={href} fw={500} size="xs" style={{ color: 'var(--ds-text)' }}>
+        <Text
+          key={key}
+          fw={current ? 500 : undefined}
+          size="xs"
+          style={{ color: current ? 'var(--ds-text)' : 'var(--ds-text-faint)' }}>
           {label}
         </Text>
       );
@@ -242,7 +289,7 @@ export default function DashboardBreadcrumbs() {
 
     return (
       <Anchor
-        key={href}
+        key={key}
         component={Link}
         href={href}
         size="xs"

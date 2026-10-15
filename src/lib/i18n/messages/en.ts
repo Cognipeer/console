@@ -459,6 +459,10 @@ export const en = {
     edit: 'Edit',
     new: 'New',
     portals: 'Portals',
+    iamPeople: 'People',
+    iamGroups: 'Groups',
+    iamTokens: 'Tokens',
+    iamPolicies: 'Policies',
   },
   validation: {
     invalidEmail: 'Invalid email',

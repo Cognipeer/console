@@ -36,6 +36,14 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       return rows.map((r) => this.mapUserProjectRow(r));
     }
 
+    async listUserProjectsByTenant(tenantId: string): Promise<IUserProject[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.userProjects} WHERE tenantId = @tenantId ORDER BY createdAt DESC`,
+      ).all({ tenantId }) as SqliteRow[];
+      return rows.map((r) => this.mapUserProjectRow(r));
+    }
+
     async upsertUserProject(
       data: Omit<IUserProject, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IUserProject> {
@@ -51,9 +59,16 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       if (existing) {
         db.prepare(`
           UPDATE ${TABLES.userProjects}
-          SET role = @role, servicePermissions = @servicePermissions, updatedAt = @updatedAt
+          SET role = @role, servicePermissions = @servicePermissions,
+              source = COALESCE(@source, source), updatedAt = @updatedAt
           WHERE id = @id
-        `).run({ id: existing.id, role: data.role, servicePermissions: servicePermsJson, updatedAt: now });
+        `).run({
+          id: existing.id,
+          role: data.role,
+          servicePermissions: servicePermsJson,
+          source: data.source ?? null,
+          updatedAt: now,
+        });
 
         const updated = db.prepare(`SELECT * FROM ${TABLES.userProjects} WHERE id = @id`)
           .get({ id: existing.id }) as SqliteRow;
@@ -63,8 +78,8 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       const id = this.newId();
       db.prepare(`
         INSERT INTO ${TABLES.userProjects}
-        (id, tenantId, userId, projectId, role, servicePermissions, invitedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @userId, @projectId, @role, @servicePermissions, @invitedBy, @createdAt, @updatedAt)
+        (id, tenantId, userId, projectId, role, servicePermissions, invitedBy, source, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @userId, @projectId, @role, @servicePermissions, @invitedBy, @source, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: data.tenantId,
@@ -73,6 +88,7 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
         role: data.role,
         servicePermissions: servicePermsJson,
         invitedBy: data.invitedBy ?? null,
+        source: data.source ?? null,
         createdAt: now,
         updatedAt: now,
       });
@@ -80,6 +96,7 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       return {
         ...data,
         _id: id,
+        source: data.source ?? 'manual',
         servicePermissions: normalizeServicePermissions(data.servicePermissions),
         createdAt: new Date(now),
         updatedAt: new Date(now),
@@ -112,7 +129,8 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
         projectId: r.projectId as string,
         role: r.role as ProjectRole,
         servicePermissions: normalizeServicePermissions(this.parseJson(r.servicePermissions, {})),
-        invitedBy: r.invitedBy as string | undefined,
+        invitedBy: (r.invitedBy as string | null) ?? undefined,
+        source: r.source === 'directory' ? 'directory' : 'manual',
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };
@@ -245,6 +263,13 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       return rows.map((r) => this.mapGroupMemberRow(r));
     }
 
+    async listGroupMembersByTenant(tenantId: string): Promise<IGroupMember[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`SELECT * FROM ${TABLES.groupMembers} WHERE tenantId = @tenantId`)
+        .all({ tenantId }) as SqliteRow[];
+      return rows.map((r) => this.mapGroupMemberRow(r));
+    }
+
     async listGroupMembersByUser(userId: string): Promise<IGroupMember[]> {
       const db = this.getTenantDb();
       const rows = db.prepare(`SELECT * FROM ${TABLES.groupMembers} WHERE userId = @userId`)
@@ -307,6 +332,13 @@ export function UserProjectMixin<TBase extends Constructor<SQLiteProviderBase>>(
       const db = this.getTenantDb();
       const rows = db.prepare(`SELECT * FROM ${TABLES.groupProjects} WHERE projectId = @projectId`)
         .all({ projectId }) as SqliteRow[];
+      return rows.map((r) => this.mapGroupProjectRow(r));
+    }
+
+    async listGroupProjectsByTenant(tenantId: string): Promise<IGroupProject[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`SELECT * FROM ${TABLES.groupProjects} WHERE tenantId = @tenantId`)
+        .all({ tenantId }) as SqliteRow[];
       return rows.map((r) => this.mapGroupProjectRow(r));
     }
 

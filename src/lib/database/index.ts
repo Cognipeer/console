@@ -210,6 +210,7 @@ export type {
   ITenantUserDirectoryEntry,
   ProviderDomain,
   IProviderRecord,
+  IProviderLastTest,
   IVectorIndexRecord,
   IVectorQueryLog,
   IVectorQueryStats,

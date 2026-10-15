@@ -2528,6 +2528,10 @@ export const tr: typeof en = {
     cost: 'Maliyet ve Optimizasyon',
     resources: 'Kaynaklar',
     portals: 'Portallar',
+    iamPeople: 'Kişiler',
+    iamGroups: 'Gruplar',
+    iamTokens: 'Token’lar',
+    iamPolicies: 'Politikalar',
   },
   webhooks: {
     title: 'Webhook’lar',

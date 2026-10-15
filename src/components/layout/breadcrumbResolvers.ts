@@ -376,11 +376,49 @@ const tracingThreadResolver: BreadcrumbResolver = {
   },
 };
 
+/**
+ * IAM center pages: `/dashboard/iam/principals/:type/:id` (a person, group or token) and
+ * `/dashboard/iam/policies/:id`. The IAM trail (iamBreadcrumbs.ts) puts the name at the
+ * last segment: index 4 for a principal, 3 for a policy.
+ */
+const iamResolver: BreadcrumbResolver = {
+  id: 'custom:iam',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (segments[0] !== 'dashboard' || segments[1] !== 'iam') return [];
+
+    if (segments[2] === 'principals' && segments[3] && segments[4]) {
+      const [type, id] = [segments[3], segments[4]];
+      if (type !== 'user' && type !== 'group' && type !== 'token') return [];
+      const label = await cached(ctx, `iam:principal:${type}:${id}`, async () => {
+        // Without the effective-permission table: it is the expensive part and a label does not need it.
+        const body = await fetchJson<ApiResponseBody>(
+          `/api/iam/principals/${encodeURIComponent(type)}/${encodeURIComponent(id)}?effective=0`,
+        );
+        return body ? wrappedName(body, 'principal', 'label', 'name') : undefined;
+      });
+      return label ? [{ index: 4, label }] : [];
+    }
+
+    if (segments[2] === 'policies' && segments[3]) {
+      const id = segments[3];
+      const label = await cached(ctx, `iam:policy:${id}`, async () => {
+        const body = await fetchJson<ApiResponseBody>(`/api/iam/policies/${encodeURIComponent(id)}`);
+        return body ? pickString(body, 'name') : undefined;
+      });
+      return label ? [{ index: 3, label }] : [];
+    }
+
+    return [];
+  },
+};
+
 const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   projectsResolver,
   vectorIndexResolver,
   tracingSessionResolver,
   tracingThreadResolver,
+  iamResolver,
 ];
 
 export const BREADCRUMB_RESOLVERS: BreadcrumbResolver[] = [

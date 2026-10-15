@@ -72,6 +72,7 @@ import MembershipShell from './MembershipShell';
 import NewTokenShell from './NewTokenShell';
 import { PagerControls, useCursorPager } from './pager';
 import { principalHref } from '../links';
+import { writeLastListUrl } from './lastList';
 import { replaceUrlParams } from './urlState';
 import { useBulkFlow } from './useBulkFlow';
 import { usePeopleActions } from './usePeopleActions';
@@ -131,6 +132,11 @@ export default function PrincipalsTab(_props: { canManage: boolean }) {
     // Read once per address.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlType, urlId]);
+
+  // The list view (kind, search, filters) is remembered for the session: a person's page leads back to it.
+  useEffect(() => {
+    writeLastListUrl(`${window.location.pathname}${window.location.search}`);
+  }, [paramsKey, type, filters]);
 
   // Query strings this tab wrote itself: the router reports them back, and they must not be re-read as navigation.
   const written = useRef(new Set<string>([paramsKey]));

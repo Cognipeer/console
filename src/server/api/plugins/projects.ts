@@ -28,6 +28,19 @@ import type { UserServicePermissions } from '@/lib/security/rbac';
 import { mergeServicePermissions } from '@/lib/security/rbac';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { foldSearchText } from '@/lib/shared/searchFold';
+import { listDirectoryProjectRules } from '@/enterprise/external-auth';
+import {
+  applyBulkMembers,
+  applyProjectExtras,
+  parseIdList,
+  parseRoleEntries,
+} from '@/lib/services/projects/projectMembership';
+import {
+  buildProjectOverview,
+  describeProjectGroups,
+  listTenantAdmins,
+} from '@/lib/services/projects/projectOverview';
+import { directoryDefaultsFor, loadProjectStats } from '@/lib/services/projects/projectStats';
 import {
   readJsonBody,
   requireSessionContext,
@@ -198,6 +211,23 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
+      const include = String((request.query as { include?: unknown } | undefined)?.include ?? '');
+      if (include.split(',').map((part) => part.trim()).includes('stats')) {
+        const [stats, rules] = await Promise.all([
+          loadProjectStats(db, session.tenantId, projects),
+          listDirectoryProjectRules(session.tenantId),
+        ]);
+        const enriched = projects.map((project) => {
+          const id = String(project._id);
+          return {
+            ...project,
+            stats: stats.get(id),
+            directoryDefault: directoryDefaultsFor(rules, id),
+          };
+        });
+        return reply.code(200).send({ activeProjectId, projects: enriched });
+      }
+
       return reply.code(200).send({ activeProjectId, projects });
     } catch (error) {
       logger.error('List projects error', { error });
@@ -248,6 +278,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const warnings: string[] = [];
+      const members = parseRoleEntries(body.members, 'userId', 'Members', warnings);
+      const groups = parseRoleEntries(body.groups, 'groupId', 'Groups', warnings);
+      const providerIds = parseIdList(body.providerIds, 'Providers', warnings);
+
       const project = await db.createProject({
         createdBy: session.userId,
         description: body.description as string | undefined,
@@ -257,7 +292,22 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: session.userId,
       });
 
-      return reply.code(201).send({ project });
+      // Best effort: the project exists whatever happens to the optional extras.
+      try {
+        warnings.push(...await applyProjectExtras(db, {
+          actorUserId: session.userId,
+          groups,
+          members,
+          projectId: String(project._id),
+          providerIds,
+          tenantId: session.tenantId,
+        }));
+      } catch (extrasError) {
+        logger.error('Apply project extras error', { error: extrasError });
+        warnings.push('Some people, groups or providers could not be applied; check the project and add them again.');
+      }
+
+      return reply.code(201).send({ project, warnings });
     } catch (error) {
       logger.error('Create project error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -417,6 +467,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           servicePermissions: null,
           ignoredServices: [] as string[],
           implicit: true,
+          source: 'manual' as 'manual' | 'directory',
         }));
 
       // Explicit members via UserProject records. The engine reads a stored "no access" of a row that
@@ -438,6 +489,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
             servicePermissions: m.servicePermissions ?? null,
             ignoredServices: ignoredProjectLevels(m, since),
             implicit: false,
+            source: (m.source === 'directory' ? 'directory' : 'manual') as 'manual' | 'directory',
           };
         })
         .filter((member): member is {
@@ -449,6 +501,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           projectRole: ProjectRole;
           role: string;
           servicePermissions: Record<string, string> | null;
+          source: 'manual' | 'directory';
         } => member !== null);
 
       const explicitIds = new Set(explicit.map((member) => member.userId));
@@ -465,6 +518,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           role: user.role as string,
           servicePermissions: null,
           ignoredServices: [] as string[],
+          source: 'manual' as 'manual' | 'directory',
         }));
 
       // Deduplicate: privileged users already covered above
@@ -478,6 +532,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       const isProjectAdmin = access.userProject?.role === 'project_admin';
       const canManageProjectAccess = canManageProjects(session.userRole) || isProjectAdmin;
 
+      const [grants, tenantGroups, groupMembers] = await Promise.all([
+        access.db.listGroupProjectsByProject(projectId),
+        access.db.listGroups(session.tenantId),
+        access.db.listGroupMembersByTenant(session.tenantId),
+      ]);
+
       return reply.code(200).send({
         capabilities: {
           canAssignMembers: canManageProjectAccess,
@@ -489,6 +549,15 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           isTenantAdmin: canManageProjects(session.userRole),
         },
         members,
+        groups: describeProjectGroups({ grants, groupMembers, groups: tenantGroups })
+          .map((group) => ({
+            directorySynced: group.directorySynced,
+            groupId: group.groupId,
+            memberCount: group.memberCount,
+            name: group.name,
+            role: group.role,
+          })),
+        tenantAdmins: listTenantAdmins(allUsers),
       });
     } catch (error) {
       logger.error('List project members error', { error });
@@ -539,6 +608,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         role,
         servicePermissions: undefined,
         invitedBy: session.userId,
+        source: 'manual',
       });
 
       return reply.code(200).send({ userProject });
@@ -640,6 +710,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           projectId,
           role: body.role as ProjectRole,
           servicePermissions: undefined,
+          source: 'manual',
           tenantId: session.tenantId,
           userId: body.userId,
         });
@@ -654,11 +725,67 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         role: body.role as ProjectRole,
         servicePermissions: existing.servicePermissions,
         invitedBy: existing.invitedBy,
+        // A hand-edited role makes a directory-applied row a manual one.
+        source: 'manual',
       });
 
       return reply.code(200).send({ userProject: updated });
     } catch (error) {
       logger.error('Update project member role error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/projects/:projectId/members/bulk', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { projectId } = request.params as { projectId: string };
+      const access = await assertProjectAccess({ projectId, requireAdmin: true, session });
+
+      if (!access.ok) {
+        return reply.code(access.status).send({ error: access.error });
+      }
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const warnings: string[] = [];
+      const add = parseRoleEntries(body.add, 'userId', 'Add', warnings);
+      const setRole = parseRoleEntries(body.setRole, 'userId', 'Set role', warnings);
+      const remove = parseIdList(body.remove, 'Remove', warnings);
+
+      if (add.length + setRole.length + remove.length === 0) {
+        return reply.code(400).send({ error: 'add, remove or setRole must contain at least one entry' });
+      }
+
+      const result = await applyBulkMembers(access.db, {
+        actorUserId: session.userId,
+        add,
+        projectId,
+        remove,
+        setRole,
+        tenantId: session.tenantId,
+      });
+
+      return reply.code(200).send({ ...result, warnings: [...warnings, ...result.warnings] });
+    } catch (error) {
+      logger.error('Bulk project members error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.get('/projects/:projectId/overview', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { projectId } = request.params as { projectId: string };
+      const access = await assertProjectAccess({ projectId, session });
+
+      if (!access.ok) {
+        return reply.code(access.status).send({ error: access.error });
+      }
+
+      const overview = await buildProjectOverview(access.db, session.tenantId, access.project);
+      return reply.code(200).send(overview);
+    } catch (error) {
+      logger.error('Project overview error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
