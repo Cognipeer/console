@@ -2817,6 +2817,8 @@ export interface IAgentMessageAttachment {
   name: string;
   mimeType: string;
   size: number;
+  /** `agent_output`: written by the agent to its sandbox `/outputs/` (see agentSandboxOutputs.ts). Absent = a user upload. */
+  origin?: 'agent_output';
 }
 
 /** An earlier answer to the same question, kept when an answer is regenerated (newest last, at most 5). */

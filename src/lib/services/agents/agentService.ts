@@ -106,7 +106,7 @@ import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
-import { toClientPendingAction, type ClientPendingAction } from './clientWire';
+import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
 import {
     agentTakesAttachments,
     assembleTurnAttachments,
@@ -151,6 +151,7 @@ import { addSessionTurnSpend, recordSessionTurnSpend } from './sessionBudgetServ
 import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
+import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
     buildCostEstimator,
@@ -3031,6 +3032,8 @@ export type AgentPlaygroundChatResult = Omit<IAgentConversationMessage, 'role' |
 export interface ResponseOutputText {
     type: 'output_text';
     text: string;
+    /** Files the agent produced this turn (`file_path`, as OpenAI's code interpreter cites its files). Additive. */
+    annotations?: ClientFileAnnotation[];
 }
 
 /** OpenAI Responses API–compatible output message */
@@ -3089,6 +3092,8 @@ export interface AgentChatResponse {
     output_parsed?: unknown;
     /** Why the structured contract failed (parse/validation); mutually exclusive with `output_parsed`. */
     output_error?: string;
+    /** Files the agent wrote to its sandbox's `/outputs/` this turn, saved as session files. Additive; absent when none. */
+    output_files?: ClientOutputFile[];
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
@@ -3571,7 +3576,12 @@ async function buildLocalAgentRun(input: {
         zod: z,
         protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
         onWarning: (message) => warnings.add(message),
+        outputs: { agentConfig: config, actorId },
     });
+    // Files the agent writes to /outputs/ are delivered after the turn; that needs a session to attach them to and a bucket.
+    if (sandboxTools.tools.length > 0 && input.conversation && resolveAttachmentsConfig(config.attachments).bucketKey) {
+        systemPrompt = withSandboxOutputsPrompt(systemPrompt);
+    }
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
@@ -3734,6 +3744,7 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        collectOutputs: sandboxTools.collectOutputs,
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
     };
@@ -4003,6 +4014,11 @@ function sessionStopReason(
  * The OpenAI Responses–shaped reply to one exchange. `outcome` is absent for a
  * connected agent, which reports no stop reason at all.
  */
+/** `agent.output_file` event payloads of a turn's output attachments. */
+function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAgentMessageAttachment>): Array<Record<string, unknown>> {
+    return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
+}
+
 function toAgentChatResponse(input: {
     conversationId: string;
     priorMessageCount: number;
@@ -4028,6 +4044,7 @@ function toAgentChatResponse(input: {
         : `msg_${Date.now().toString(36)}`;
     const reasoningId = `rs_${Date.now().toString(36)}`;
     const stopped = outcome && outcome.stopReason !== 'completed' ? outcome : undefined;
+    const outputFiles = answerIndex >= 0 ? toClientOutputFiles(input.conversationId, input.messages[answerIndex]?.attachments) : [];
 
     return {
         id: responseId,
@@ -4038,7 +4055,7 @@ function toAgentChatResponse(input: {
             ...(reasoning
                 ? [{ id: reasoningId, type: 'reasoning' as const, summary: [{ type: 'summary_text' as const, text: reasoning }] }]
                 : []),
-            { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content }] },
+            { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content, ...(outputFiles.length > 0 ? { annotations: toFileAnnotations(outputFiles) } : {}) }] },
         ],
         status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
         ...(requiresAction
@@ -4063,6 +4080,7 @@ function toAgentChatResponse(input: {
         version: input.version,
         ...(input.outputParsed !== undefined ? { output_parsed: input.outputParsed } : {}),
         ...(input.outputError ? { output_error: input.outputError } : {}),
+        ...(outputFiles.length > 0 ? { output_files: outputFiles } : {}),
         _conversation_messages: input.messages,
     };
 }
@@ -4291,7 +4309,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4457,6 +4475,10 @@ async function runAgentChatTurn(
         // anyway, however complete the answer looks.
         const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
 
+        // Files the agent left in the sandbox's /outputs/ ride on the answer (never fails the turn).
+        const outputFiles = supersededByDeadlineOrCancel ? { attachments: [], warnings: [] } : await collectOutputs();
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         // The run stopped for a person: keep what it needs to continue.
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !supersededByDeadlineOrCancel) {
@@ -4491,6 +4513,7 @@ async function runAgentChatTurn(
                 content: outcome.content,
                 ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
                 ...(steps.length > 0 ? { steps } : {}),
+                ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                     : {}),
@@ -4532,6 +4555,7 @@ async function runAgentChatTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        for (const event of outputFileEvents(conversationId, outputFiles.attachments)) turnEvents.emitInTurn('agent.output_file', event);
         for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
         await turnEvents.finish({
             // A turn the deadline or an async cancel already decided was not
@@ -4995,7 +5019,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5151,6 +5175,10 @@ async function runPlaygroundChatTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        // Files the agent left in the sandbox's /outputs/ ride on the answer (never fails the turn).
+        const outputFiles = sessionConversation ? await collectOutputs() : { attachments: [], warnings: [] };
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         const playgroundResult: AgentPlaygroundChatResult = {
             content: outcome.content,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
@@ -5161,6 +5189,7 @@ async function runPlaygroundChatTurn(
             ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
             latencyMs: Date.now() - invokeStartedAt,
             steps: extractPlaygroundSteps(result, priorExecutionIds),
+            ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
             version: ranVersion,
             ...answeredWithMetadata(model.key, Boolean(modelChoice), routedModel()),
             ...(outcome.stopReason !== 'completed'
@@ -5230,6 +5259,7 @@ async function runPlaygroundChatTurn(
                     ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
                 });
             }
+            for (const event of outputFileEvents(String(sessionConversation._id), outputFiles.attachments)) turnEvents?.emitInTurn('agent.output_file', event);
             for (const action of pause?.actions ?? []) turnEvents?.emitInTurn('action.required', actionRequiredEventData(action));
             await turnEvents?.finish({
                 stopReason: sessionStopReason(outcome.stopReason, pause, budget),
@@ -5285,6 +5315,7 @@ async function persistSessionTurn(
                 timestamp: now,
                 ...(result.reasoning ? { reasoning: result.reasoning } : {}),
                 ...(result.steps && result.steps.length > 0 ? { steps: result.steps } : {}),
+                ...(result.attachments && result.attachments.length > 0 ? { attachments: result.attachments } : {}),
                 ...(result.output !== undefined ? { output: result.output } : {}),
                 ...(result.outputError ? { outputError: result.outputError } : {}),
                 ...(result.usage ? { usage: result.usage } : {}),
@@ -5627,7 +5658,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5846,6 +5877,10 @@ async function runAgentResumeTurn(
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
         }
 
+        // Files the agent left in /outputs/ while the run continued (never fails the turn).
+        const outputFiles = superseded ? { attachments: [], warnings: [] } : await collectOutputs();
+        for (const warning of outputFiles.warnings) warnings.add(warning);
+
         const assistantMessage: IAgentConversation['messages'][number] = {
             role: 'assistant',
             content: outcome.content,
@@ -5853,6 +5888,7 @@ async function runAgentResumeTurn(
             ...answeredWithMetadata(model.key, additionalModelKeys(config).length > 0, routedModel()),
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
             ...(steps.length > 0 ? { steps } : {}),
+            ...(outputFiles.attachments.length > 0 ? { attachments: outputFiles.attachments } : {}),
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
@@ -5887,6 +5923,7 @@ async function runAgentResumeTurn(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        for (const event of outputFileEvents(conversationId, outputFiles.attachments)) turnEvents.emitInTurn('agent.output_file', event);
         for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
         const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget);
         await turnEvents.finish({

@@ -33,10 +33,19 @@ import {
     type AgentSandboxRef,
     type AgentSandboxRunner,
 } from '@/enterprise/registry';
-import { getDatabase, type IAgentConversation, type IAgentSandboxConfig } from '@/lib/database';
+import { getDatabase, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentSandboxConfig } from '@/lib/database';
 import { isTenantEnterpriseLicensed } from '@/lib/license/tenantLicense';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { resolveSandboxMode } from './agentSandboxMode';
+import {
+    SANDBOX_OUTPUTS_DIR,
+    collectSandboxOutputs,
+    parseStatListing,
+    readBytesViaExec,
+    shQuote,
+} from './agentSandboxOutputs';
+import { resolveAttachmentsConfig } from './sessionFilesConfig';
+import { resolveUploadMimeType, saveAgentOutputFile } from './sessionFiles';
 import { openAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
 
 const logger = createLogger('agent-sandbox');
@@ -114,16 +123,25 @@ export interface BuildAgentSandboxToolsInput {
     /** Wraps a built tool with the agent's tool guardrails. */
     protect: (policyName: string, tool: AnyTool) => AnyTool;
     onWarning: (message: string) => void;
+    /** Where `/outputs/` files are saved as session files; without it nothing is collected. */
+    outputs?: { agentConfig: IAgentConfig | undefined; actorId: string };
 }
 
 export interface AgentSandboxTools {
+    /**
+     * End of turn: saves the files the agent wrote to `/outputs/` (new or changed since the last turn) as session
+     * files and returns them as attachments. Never throws: a failure is logged and the turn goes on.
+     */
+    collectOutputs: () => Promise<{ attachments: IAgentMessageAttachment[]; warnings: string[] }>;
     tools: AnyTool[];
     definitions: TraceToolDefinition[];
     /** Deletes the sandbox this run used (ephemeral); a session sandbox is left up and only recorded. */
     cleanup: () => Promise<void>;
 }
 
-const NO_TOOLS: AgentSandboxTools = { tools: [], definitions: [], cleanup: async () => undefined };
+const NO_TOOLS: AgentSandboxTools = {
+    tools: [], definitions: [], cleanup: async () => undefined, collectOutputs: async () => ({ attachments: [], warnings: [] }),
+};
 
 export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput): Promise<AgentSandboxTools> {
     const config = input.sandbox;
@@ -417,7 +435,58 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }
     };
 
-    return { tools, definitions, cleanup };
+    const collectOutputs: AgentSandboxTools['collectOutputs'] = async () => {
+        const empty = { attachments: [] as IAgentMessageAttachment[], warnings: [] as string[] };
+        const outputs = input.outputs;
+        if (!outputs || !instance || !conversationId || !input.conversation) return empty;
+        try {
+            const instanceId = await instance;
+            const conversation = { _id: conversationId, agentKey: input.agentKey };
+            const maxFileBytes = Math.floor(resolveAttachmentsConfig(outputs.agentConfig?.attachments).maxFileSizeMb * 1024 * 1024);
+            const sh = (command: string) => runner.exec(ref, instanceId, { command, timeoutSec: 60 });
+            const stored = (input.conversation.metadata?.sandboxOutputs ?? {}) as Record<string, string>;
+            const result = await collectSandboxOutputs({
+                seen: session ? stored : {},
+                maxFileBytes,
+                list: async () => {
+                    const res = await sh(`find ${shQuote(SANDBOX_OUTPUTS_DIR)} -type f -exec stat -c '%Y|%s|%n' {} +`);
+                    if (res.exitCode === 0) return parseStatListing(res.stdout);
+                    const listed = await runner.listFiles(ref, instanceId, SANDBOX_OUTPUTS_DIR).catch(() => []);
+                    return listed.filter((e) => e.type === 'file').map((e) => ({ path: e.path, size: e.size ?? 0 }));
+                },
+                readBytes: async (entry) => runner.readFileBytes
+                    ? runner.readFileBytes(ref, instanceId, entry.path)
+                    : readBytesViaExec(sh, entry.path, entry.size),
+                store: (file) => saveAgentOutputFile({
+                    scope: { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
+                    conversation,
+                    agentConfig: outputs.agentConfig,
+                    fileName: file.name,
+                    contentType: resolveUploadMimeType(undefined, file.name),
+                    data: file.data,
+                    actorId: outputs.actorId,
+                }),
+            });
+            if (session && result.attachments.length > 0) {
+                // `metadata` is replaced wholesale: start from a fresh read (see `saveRecord`).
+                const db = await getDatabase();
+                await db.switchToTenant(input.tenantDbName);
+                const latest = await readOwnConversation(db);
+                if (latest) {
+                    await db.updateAgentConversation(conversationId, {
+                        metadata: { ...(latest.metadata ?? {}), sandboxOutputs: result.seen },
+                    });
+                }
+            }
+            if (result.warnings.length > 0) logger.warn('Sandbox outputs collected with warnings', { agentKey: input.agentKey, warnings: result.warnings });
+            return { attachments: result.attachments, warnings: result.warnings };
+        } catch (error) {
+            logger.warn('Could not collect sandbox outputs', { agentKey: input.agentKey, error: error instanceof Error ? error.message : String(error) });
+            return empty;
+        }
+    };
+
+    return { tools, definitions, cleanup, collectOutputs };
 }
 
 /** The running turn's abort signal as an optional field: a Stop ends a command that is in flight. */
