@@ -103,11 +103,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         (id, sessionId, traceId, rootSpanId, threadId, tenantId, projectId, source, agent, agentName, agentVersion, agentModel, metadata,
          config, summary, status, startedAt, endedAt, durationMs, errors, modelsUsed, toolsUsed,
          eventCounts, totalEvents, totalInputTokens, totalOutputTokens, totalCachedInputTokens, totalReasoningTokens, truncatedEvents,
+         errorEvents, toolErrors, aiErrors, metricsOutcome,
          totalBytesIn, totalBytesOut, totalRequestBytes, totalResponseBytes,
          userId, apiTokenId, actorType, createdAt, updatedAt)
         VALUES (@id, @sessionId, @traceId, @rootSpanId, @threadId, @tenantId, @projectId, @source, @agent, @agentName, @agentVersion, @agentModel, @metadata,
          @config, @summary, @status, @startedAt, @endedAt, @durationMs, @errors, @modelsUsed, @toolsUsed,
          @eventCounts, @totalEvents, @totalInputTokens, @totalOutputTokens, @totalCachedInputTokens, @totalReasoningTokens, @truncatedEvents,
+         @errorEvents, @toolErrors, @aiErrors, @metricsOutcome,
          @totalBytesIn, @totalBytesOut, @totalRequestBytes, @totalResponseBytes,
          @userId, @apiTokenId, @actorType, @createdAt, @updatedAt)
       `).run({
@@ -140,6 +142,10 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalCachedInputTokens: session.totalCachedInputTokens ?? 0,
         totalReasoningTokens: session.totalReasoningTokens ?? 0,
         truncatedEvents: session.truncatedEvents ?? 0,
+        errorEvents: session.errorEvents ?? 0,
+        toolErrors: session.toolErrors ?? 0,
+        aiErrors: session.aiErrors ?? 0,
+        metricsOutcome: this.serializeMetricsOutcome(session.metricsOutcome),
         totalBytesIn: session.totalBytesIn ?? 0,
         totalBytesOut: session.totalBytesOut ?? 0,
         totalRequestBytes: session.totalRequestBytes ?? 0,
@@ -238,6 +244,9 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         cachedInputTokens: toNumber(delta.cachedInputTokens),
         reasoningTokens: toNumber(delta.reasoningTokens),
         truncated,
+        errorEvents: toNumber(delta.errorEvents),
+        toolErrors: toNumber(delta.toolErrors),
+        aiErrors: toNumber(delta.aiErrors),
       };
       let where = 'sessionId = @sessionId';
       if (projectId) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
@@ -251,7 +260,13 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
              totalOutputTokens = COALESCE(totalOutputTokens, 0) + @outputTokens,
              totalCachedInputTokens = COALESCE(totalCachedInputTokens, 0) + @cachedInputTokens,
              totalReasoningTokens = COALESCE(totalReasoningTokens, 0) + @reasoningTokens,
-             truncatedEvents = COALESCE(truncatedEvents, 0) + @truncated
+             truncatedEvents = COALESCE(truncatedEvents, 0) + @truncated,
+             errorEvents = COALESCE(errorEvents, 0) + @errorEvents,
+             toolErrors = COALESCE(toolErrors, 0) + @toolErrors,
+             aiErrors = COALESCE(aiErrors, 0) + @aiErrors,
+             status = CASE
+               WHEN @errorEvents > 0 AND COALESCE(status, 'unknown') IN ('success', 'partial', 'unknown', 'completed')
+               THEN 'error' ELSE status END
            WHERE ${where}`,
         ).run(params);
 
@@ -306,6 +321,57 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       tx();
     }
 
+    async listStaleAgentTracingSessions(input: {
+      updatedBefore: Date;
+      limit: number;
+    }): Promise<IAgentTracingSession[]> {
+      const db = this.getTenantDb();
+      const n = Number(input.limit);
+      const limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 500;
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.agentTracingSessions}
+         WHERE status = 'in_progress' AND updatedAt < @updatedBefore
+         ORDER BY updatedAt ASC LIMIT @limit`,
+      ).all({ updatedBefore: input.updatedBefore.toISOString(), limit }) as SqliteRow[];
+      return rows.map((r) => this.mapAgentTracingSessionRow(r));
+    }
+
+    async abandonAgentTracingSession(input: {
+      projectId: string;
+      sessionId: string;
+      updatedBefore: Date;
+    }): Promise<IAgentTracingSession | null> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = {
+        sessionId: input.sessionId,
+        updatedBefore: input.updatedBefore.toISOString(),
+      };
+      let where = "sessionId = @sessionId AND status = 'in_progress' AND updatedAt < @updatedBefore";
+      if (input.projectId) { where += ' AND projectId = @projectId'; params.projectId = input.projectId; }
+
+      // Compare-and-set: read and write run in one synchronous transaction, and
+      // the UPDATE re-checks the status, so a concurrent late event or /end that
+      // moved the session on makes nothing get abandoned.
+      const abandoned = db.transaction((): SqliteRow | undefined => {
+        const row = db.prepare(`SELECT * FROM ${TABLES.agentTracingSessions} WHERE ${where}`).get(params) as SqliteRow | undefined;
+        if (!row) return undefined;
+        const lastActivity = String(row.updatedAt);
+        const startedMs = row.startedAt ? Date.parse(String(row.startedAt)) : NaN;
+        const durationMs = Number.isFinite(startedMs)
+          ? Math.max(0, Date.parse(lastActivity) - startedMs)
+          : ((row.durationMs as number | null) ?? 0);
+        const result = db.prepare(
+          `UPDATE ${TABLES.agentTracingSessions}
+           SET status = 'abandoned', endedAt = @endedAt, durationMs = @durationMs, updatedAt = @now
+           WHERE id = @id AND status = 'in_progress'`,
+        ).run({ id: row.id, endedAt: lastActivity, durationMs, now: this.now() });
+        if (result.changes === 0) return undefined;
+        return db.prepare(`SELECT * FROM ${TABLES.agentTracingSessions} WHERE id = @id`).get({ id: row.id }) as SqliteRow | undefined;
+      })();
+
+      return abandoned ? this.mapAgentTracingSessionRow(abandoned) : null;
+    }
+
     async updateAgentTracingSession(
       sessionId: string,
       data: Partial<IAgentTracingSession>,
@@ -347,6 +413,11 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (data.totalCachedInputTokens !== undefined) { sets.push('totalCachedInputTokens = @totalCachedInputTokens'); params.totalCachedInputTokens = data.totalCachedInputTokens; }
       if (data.totalReasoningTokens !== undefined) { sets.push('totalReasoningTokens = @totalReasoningTokens'); params.totalReasoningTokens = data.totalReasoningTokens; }
       if (data.truncatedEvents !== undefined) { sets.push('truncatedEvents = @truncatedEvents'); params.truncatedEvents = data.truncatedEvents; }
+      if (data.errorEvents !== undefined) { sets.push('errorEvents = @errorEvents'); params.errorEvents = data.errorEvents; }
+      if (data.toolErrors !== undefined) { sets.push('toolErrors = @toolErrors'); params.toolErrors = data.toolErrors; }
+      if (data.aiErrors !== undefined) { sets.push('aiErrors = @aiErrors'); params.aiErrors = data.aiErrors; }
+      // Keyed on presence so `null` clears the recorded outcome.
+      if ('metricsOutcome' in data) { sets.push('metricsOutcome = @metricsOutcome'); params.metricsOutcome = this.serializeMetricsOutcome(data.metricsOutcome); }
       if (data.totalBytesIn !== undefined) { sets.push('totalBytesIn = @totalBytesIn'); params.totalBytesIn = data.totalBytesIn; }
       if (data.totalBytesOut !== undefined) { sets.push('totalBytesOut = @totalBytesOut'); params.totalBytesOut = data.totalBytesOut; }
       if (data.totalRequestBytes !== undefined) { sets.push('totalRequestBytes = @totalRequestBytes'); params.totalRequestBytes = data.totalRequestBytes; }
@@ -857,6 +928,23 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
 
     // ── Row mappers ────────────────────────────────────────────────
 
+    protected serializeMetricsOutcome(value: IAgentTracingSession['metricsOutcome']): string | null {
+      if (!value) return null;
+      const recordedAt = value.recordedAt instanceof Date ? value.recordedAt.toISOString() : value.recordedAt;
+      return this.toJson({ status: value.status, latencyRecorded: !!value.latencyRecorded, recordedAt });
+    }
+
+    protected parseMetricsOutcome(raw: unknown): IAgentTracingSession['metricsOutcome'] {
+      if (!raw) return null;
+      const parsed = this.parseJson<{ status?: string; latencyRecorded?: boolean; recordedAt?: string } | null>(raw, null);
+      if (!parsed || typeof parsed.status !== 'string') return null;
+      return {
+        status: parsed.status,
+        latencyRecorded: !!parsed.latencyRecorded,
+        recordedAt: this.toDate(parsed.recordedAt) ?? new Date(0),
+      };
+    }
+
     protected mapAgentTracingSessionRow(r: SqliteRow): IAgentTracingSession {
       return {
         _id: r.id as string,
@@ -888,6 +976,10 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         totalCachedInputTokens: (r.totalCachedInputTokens as number) ?? 0,
         totalReasoningTokens: (r.totalReasoningTokens as number) ?? 0,
         truncatedEvents: (r.truncatedEvents as number) ?? 0,
+        errorEvents: (r.errorEvents as number) ?? 0,
+        toolErrors: (r.toolErrors as number) ?? 0,
+        aiErrors: (r.aiErrors as number) ?? 0,
+        metricsOutcome: this.parseMetricsOutcome(r.metricsOutcome),
         totalBytesIn: (r.totalBytesIn as number) ?? 0,
         totalBytesOut: (r.totalBytesOut as number) ?? 0,
         totalRequestBytes: (r.totalRequestBytes as number) ?? 0,

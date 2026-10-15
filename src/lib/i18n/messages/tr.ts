@@ -8,9 +8,12 @@
 
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
+import { alertsTr, incidentsTr } from './alerts.tr';
 import { directorySyncTr } from './directorySync.tr';
+import { entityHealthTr } from './entityHealth.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { portalsNowTr } from './portalsNow.tr';
+import { tracingHealthTr } from './tracingHealth.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -1214,6 +1217,10 @@ export const tr: typeof en = {
   },
   iamDirectory: iamDirectoryTr,
   directorySync: directorySyncTr,
+  alerts: alertsTr,
+  incidents: incidentsTr,
+  tracingHealth: tracingHealthTr,
+  entityHealth: entityHealthTr,
   accountPage: accountPageTr,
   iamPrincipals: {
     segments: {

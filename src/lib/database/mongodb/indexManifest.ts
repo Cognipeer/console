@@ -80,6 +80,21 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, day: -1 }, options: { name: 'idx_usage_daily_day' } },
     { key: { tenantId: 1, userId: 1, day: -1 }, options: { name: 'idx_usage_daily_user_day' } },
   ],
+  // Entity health rollup. Created lazily by the entity-metrics mixin on its
+  // first write (names/keys identical); the TTL pairs with the retention sweep.
+  entity_metrics: [
+    { key: { tenantId: 1, projectId: 1, entityType: 1, entityKey: 1, source: 1, bucketMs: 1 }, options: { name: 'uniq_entity_metrics_dims', unique: true } },
+    { key: { tenantId: 1, projectId: 1, entityType: 1, bucketMs: 1 }, options: { name: 'idx_entity_metrics_type_bucket' } },
+    { key: { bucketMs: 1 }, options: { name: 'idx_entity_metrics_bucket' } },
+    { key: { expiresAt: 1 }, options: { name: 'ttl_entity_metrics_expiresAt', expireAfterSeconds: 0 } },
+  ],
+  // Alert evaluation state, one document per (rule, entity).
+  alert_states: [
+    { key: { tenantId: 1, ruleId: 1, entityKey: 1 }, options: { name: 'uniq_alert_states_rule_entity', unique: true } },
+    { key: { tenantId: 1, projectId: 1, phase: 1 }, options: { name: 'idx_alert_states_project_phase' } },
+    { key: { ruleId: 1 }, options: { name: 'idx_alert_states_rule' } },
+    { key: { projectId: 1, phase: 1 }, options: { name: 'idx_alert_states_project_phase_notenant' } },
+  ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },
   ],
@@ -247,7 +262,14 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, status: 1 }, options: { name: 'idx_project_status' } },
   ],
   memory_items: [{ key: { storeKey: 1, createdAt: -1 }, options: { name: 'idx_store_createdAt' } }],
-  alert_events: [{ key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } }],
+  alert_events: [
+    { key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } },
+    { key: { tenantId: 1, projectId: 1, firedAt: -1 }, options: { name: 'idx_alert_events_project_firedAt' } },
+  ],
+  incidents: [
+    { key: { projectId: 1, status: 1, firedAt: -1 }, options: { name: 'idx_incidents_project_status_firedAt' } },
+    { key: { ruleId: 1, entityKey: 1 }, options: { name: 'idx_incidents_rule_entity' } },
+  ],
   files: [
     { key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } },
     // Session files: the retention sweep, and a session's own files.

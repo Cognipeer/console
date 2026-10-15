@@ -8,9 +8,16 @@
 
 import { sendEmail } from '@/lib/email/mailer';
 import { getTenantDatabase } from '@/lib/database';
-import type { IAlertEvent, IAlertChannel } from '@/lib/database';
+import type { IAlertChannel } from '@/lib/database';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
-import type { AlertContext, DispatchResult, IAlertDispatcher } from './types';
+import {
+  isAlertNotification,
+  type AlertContext,
+  type AlertNotification,
+  type DispatchResult,
+  type IAlertDispatcher,
+  type LegacyAlertDispatchPayload,
+} from './types';
 
 /** Human-readable labels for metric names */
 const METRIC_LABELS: Record<string, string> = {
@@ -59,7 +66,7 @@ export class EmailAlertChannel implements IAlertDispatcher {
   readonly type = 'email';
 
   async dispatch(
-    event: Omit<IAlertEvent, '_id'>,
+    payload: AlertNotification | LegacyAlertDispatchPayload,
     channel: IAlertChannel,
     ctx: AlertContext,
   ): Promise<DispatchResult[]> {
@@ -82,21 +89,37 @@ export class EmailAlertChannel implements IAlertDispatcher {
       ];
     }
 
-    const templateData = {
-      alertName: event.ruleName,
-      projectName: ctx.projectName,
-      companyName: ctx.companyName,
-      metricLabel: METRIC_LABELS[event.metric] ?? event.metric,
-      operator: OPERATOR_LABELS[(event as Record<string, unknown>).operator as string] ?? '≥',
-      threshold: event.threshold,
-      actualValue: Number(event.actualValue.toFixed(2)),
-      unit: METRIC_UNITS[event.metric] ?? '',
-      firedAt: event.firedAt.toISOString(),
-      dashboardUrl: ctx.dashboardUrl,
-      incidentUrl: ctx.incidentUrl || ctx.dashboardUrl,
-      incidentId: ctx.incidentId || '',
-      metadata: event.metadata,
-    };
+    const templateData = isAlertNotification(payload)
+      ? {
+          alertName: payload.rule.name,
+          projectName: ctx.projectName,
+          companyName: ctx.companyName,
+          metricLabel: payload.rule.metricLabel,
+          operator: OPERATOR_LABELS[payload.rule.operator ?? 'gte'] ?? '≥',
+          threshold: payload.rule.threshold,
+          actualValue: Number((payload.value ?? 0).toFixed(2)),
+          unit: payload.rule.unit,
+          firedAt: payload.firedAt.toISOString(),
+          dashboardUrl: ctx.dashboardUrl,
+          incidentUrl: ctx.incidentUrl || ctx.dashboardUrl,
+          incidentId: ctx.incidentId || '',
+          metadata: undefined,
+        }
+      : {
+          alertName: payload.ruleName,
+          projectName: ctx.projectName,
+          companyName: ctx.companyName,
+          metricLabel: METRIC_LABELS[payload.metric] ?? payload.metric,
+          operator: OPERATOR_LABELS[(payload as Record<string, unknown>).operator as string] ?? '≥',
+          threshold: payload.threshold,
+          actualValue: Number(payload.actualValue.toFixed(2)),
+          unit: METRIC_UNITS[payload.metric] ?? '',
+          firedAt: payload.firedAt.toISOString(),
+          dashboardUrl: ctx.dashboardUrl,
+          incidentUrl: ctx.incidentUrl || ctx.dashboardUrl,
+          incidentId: ctx.incidentId || '',
+          metadata: payload.metadata,
+        };
 
     const results: DispatchResult[] = [];
 

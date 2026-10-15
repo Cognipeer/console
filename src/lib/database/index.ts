@@ -163,6 +163,12 @@ export async function disconnectDatabase(): Promise<void> {
 // Export the provider interface for type safety
 export type { DatabaseProvider } from './provider.interface';
 export { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from './provider.interface';
+export {
+  ENTITY_METRIC_BUCKET_MS,
+  ENTITY_LATENCY_BUCKET_UPPER_MS,
+  ENTITY_LATENCY_BUCKET_FIELDS,
+  ENTITY_METRIC_COUNTER_FIELDS,
+} from './provider.interface';
 export type {
   IUser,
   IUserProject,
@@ -186,6 +192,15 @@ export type {
   UsageSource,
   IUsageDaily,
   IUsageDailyIncrement,
+  EntityMetricType,
+  EntityMetricSource,
+  EntityMetricCounterField,
+  EntityMetricCounters,
+  EntityMetricsGroupField,
+  EntityMetricsAggregateQuery,
+  IEntityMetricIncrement,
+  IEntityMetricRow,
+  IEntityMetricAggregate,
   ModelCategory,
   ModelProviderType,
   IModelPricing,
@@ -341,6 +356,17 @@ export type {
   AlertConditionOperator,
   IAlertCondition,
   IAlertChannel,
+  AlertChannelInput,
+  AlertConditionMode,
+  IAlertBaselineConfig,
+  IAlertAbsenceConfig,
+  IAlertSloConfig,
+  IAlertRuleEntityScope,
+  AlertRuleSeverity,
+  AlertStatePhase,
+  IAlertState,
+  IAlertStateFilter,
+  IIncidentContext,
   AlertEventStatus,
   IIncident,
   IIncidentNote,

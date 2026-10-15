@@ -128,6 +128,19 @@ vLLM server on a private IP) should list those hosts in
 
 See [Cluster](/guide/cluster) for the full topology / assignment model.
 
+### Entity Health & Alerting
+
+Health views, alert rules and reports for agents, models, knowledge bases, MCP servers and tools read 5-minute rollups that every node buffers in memory and flushes to the database.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENTITY_METRICS_FLUSH_MS` | How often buffered rollup increments are written to the database (minimum `1000`) | `30000` |
+| `ENTITY_METRICS_RETENTION_DAYS` | Rollup buckets older than this many days are expired (database TTL plus an hourly purge) | `45` |
+| `ENTITY_METRICS_MAX_BUFFERED_ROWS` | Cap on distinct rollup rows buffered per process; new rows beyond the cap are dropped and counted, existing rows keep accumulating | `50000` |
+| `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` | `360` |
+| `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept | `300000` |
+| `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification | `10000` |
+
 ### Logging
 
 | Variable | Description | Default |

@@ -137,6 +137,11 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         db
           .collection(COLLECTIONS.agentTracingSessions)
           .createIndex({ projectId: 1, agentName: 1, startedAt: -1 }, { name: 'idx_project_agent_startedAt' }),
+        // Stale-session finalizer: status 'in_progress' and updatedAt older than a
+        // cutoff, tenant-wide (the project-first indexes above cannot serve it).
+        db
+          .collection(COLLECTIONS.agentTracingSessions)
+          .createIndex({ status: 1, updatedAt: 1 }, { name: 'idx_status_updatedAt' }),
         db
           .collection(COLLECTIONS.agentTracingEvents)
           .createIndex({ sessionId: 1, sequence: 1, timestamp: 1 }, { name: 'idx_session_sequence_timestamp' }),
@@ -766,12 +771,31 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
         totalCachedInputTokens: plus('totalCachedInputTokens', delta.cachedInputTokens),
         totalReasoningTokens: plus('totalReasoningTokens', delta.reasoningTokens),
         truncatedEvents: plus('truncatedEvents', isTruncated ? 1 : 0),
+        errorEvents: plus('errorEvents', delta.errorEvents),
+        toolErrors: plus('toolErrors', delta.toolErrors),
+        aiErrors: plus('aiErrors', delta.aiErrors),
       };
+
+      // A late error event flips a session that already finished as healthy:
+      // events are posted fire-and-forget and can land after `/end`.
+      const flipToError = typeof delta.errorEvents === 'number' && delta.errorEvents > 0;
+      const statusStage = flipToError
+        ? {
+            status: {
+              $cond: [
+                { $in: [{ $ifNull: ['$status', 'unknown'] }, ['success', 'partial', 'unknown', 'completed']] },
+                'error',
+                '$status',
+              ],
+            },
+          }
+        : {};
 
       await collection.updateOne(filter, [
         { $set: { ...totals, eventCounts } },
         {
           $set: {
+            ...statusStage,
             updatedAt: new Date(),
             modelsUsed: { $setUnion: [asArray('modelsUsed'), delta.modelsUsed ?? []] },
             toolsUsed: { $setUnion: [asArray('toolsUsed'), delta.toolsUsed ?? []] },
@@ -802,6 +826,75 @@ export function TracingMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       if (threadId) {
         await this.syncAgentTracingThread(threadId, session?.projectId ?? projectId);
       }
+    }
+
+    async listStaleAgentTracingSessions(input: {
+      updatedBefore: Date;
+      limit: number;
+    }): Promise<IAgentTracingSession[]> {
+      await this.ensureTracingIndexes();
+      const db = this.getTenantDb();
+      const n = Number(input.limit);
+      const limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 500;
+      const docs = await db
+        .collection<IAgentTracingSession>(COLLECTIONS.agentTracingSessions)
+        .find(
+          { status: 'in_progress', updatedAt: { $lt: input.updatedBefore } },
+          { projection: { config: 0, agent: 0, summary: 0, errors: 0, eventCounts: 0 } },
+        )
+        .sort({ updatedAt: 1 })
+        .limit(limit)
+        .toArray();
+      return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() }) as IAgentTracingSession);
+    }
+
+    async abandonAgentTracingSession(input: {
+      projectId: string;
+      sessionId: string;
+      updatedBefore: Date;
+    }): Promise<IAgentTracingSession | null> {
+      await this.ensureTracingIndexes();
+      const db = this.getTenantDb();
+      const collection = db.collection<IAgentTracingSession>(COLLECTIONS.agentTracingSessions);
+      // A literal date, not $$NOW: $$NOW is not confirmed on Cosmos (Mongo vCore).
+      const abandonedAt = new Date();
+      // Compare-and-set: only a session that is STILL in progress and idle past
+      // the cutoff is abandoned, so a concurrent late event or /end wins.
+      const filter: Record<string, unknown> = {
+        sessionId: input.sessionId,
+        status: 'in_progress',
+        updatedAt: { $lt: input.updatedBefore },
+      };
+      if (input.projectId) filter.projectId = input.projectId;
+
+      const result = await collection.findOneAndUpdate(
+        filter,
+        [
+          {
+            $set: {
+              status: 'abandoned',
+              endedAt: '$updatedAt',
+              durationMs: {
+                $cond: [
+                  { $eq: [{ $type: '$startedAt' }, 'date'] },
+                  { $max: [0, { $subtract: ['$updatedAt', '$startedAt'] }] },
+                  { $ifNull: ['$durationMs', 0] },
+                ],
+              },
+              updatedAt: abandonedAt,
+            },
+          },
+        ],
+        { returnDocument: 'after' },
+      );
+      if (!result) return null;
+
+      const abandoned = { ...result, _id: result._id?.toString() } as IAgentTracingSession;
+      const threadId = this.normalizeThreadId(abandoned.threadId);
+      if (threadId) {
+        await this.syncAgentTracingThread(threadId, abandoned.projectId ?? (input.projectId || undefined));
+      }
+      return abandoned;
     }
 
     async updateAgentTracingSession(

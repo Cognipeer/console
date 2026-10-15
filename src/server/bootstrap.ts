@@ -42,6 +42,11 @@ import { startRagIngestQueueConsumer } from '@/lib/services/rag/ragIngestConsume
 import { resumePendingRagIngests } from '@/lib/services/rag/ragIngestJob';
 import { startPollScheduler } from '@/lib/services/inferenceMonitoring/pollScheduler';
 import { startAlertScheduler } from '@/lib/services/alerts/alertScheduler';
+import {
+  getEntityMetricsRollupHealth,
+  startEntityMetricsRollup,
+  stopEntityMetricsRollup,
+} from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
 import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
 import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/registry';
@@ -319,6 +324,30 @@ async function runBootstrap(): Promise<void> {
 
   startPollScheduler();
   startAlertScheduler();
+
+  // Entity health rollup (5-minute buckets). Started here, never lazily from a
+  // request: its timers must not inherit a request's tenant scope. Registered
+  // after the database and async-task handlers, so on shutdown (LIFO) it runs
+  // first: it drains in-flight fire-and-forget emitters itself, then flushes,
+  // while the database is still open.
+  startEntityMetricsRollup();
+  registerShutdownHandler('entity-metrics-rollup', async () => {
+    await drainPendingTasks();
+    await stopEntityMetricsRollup();
+  });
+  registerHealthCheck('entity-metrics-rollup', async () => {
+    const health = getEntityMetricsRollupHealth();
+    return {
+      status: health.lastError ? 'degraded' : 'ok',
+      ...(health.lastError ? { message: health.lastError } : {}),
+      details: {
+        pending: health.pending,
+        dropped: health.dropped,
+        lastFlushAt: health.lastFlushAt?.toISOString() ?? null,
+      },
+    };
+  });
+
   startCrawlerScheduler();
   startAgentScheduler();
   startAgentRunReconciler();

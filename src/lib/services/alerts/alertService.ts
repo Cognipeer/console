@@ -63,6 +63,8 @@ const MODULE_METRICS: Record<AlertModule, AlertMetric[]> = {
   // metric still resolve to a label instead of an empty option list.
   aegis: GUARDRAIL_METRICS,
   'ai-app-gateway': ['appgw_requests', 'appgw_block_rate', 'appgw_error_rate', 'appgw_requests_per_user'],
+  agents: [],
+  tools: [],
 };
 
 /**

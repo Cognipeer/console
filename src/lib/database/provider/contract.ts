@@ -29,6 +29,9 @@ import type {
   WebhookEndpointStatus,
   IAlertEvent,
   IAlertRule,
+  IAlertState,
+  IAlertStateFilter,
+  AlertModule,
   IApiToken,
   IBrowser,
   IBrowserFlow,
@@ -76,6 +79,9 @@ import type {
   IModelUsageLog,
   IUsageDaily,
   IUsageDailyIncrement,
+  EntityMetricsAggregateQuery,
+  IEntityMetricAggregate,
+  IEntityMetricIncrement,
   IMemoryItem,
   IMemoryStore,
   IPrompt,
@@ -381,6 +387,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     delta: AgentTracingSessionEventDelta,
     projectId?: string,
   ): Promise<void>;
+  /** Sessions still 'in_progress' whose last activity is older than `updatedBefore` (tenant-wide, oldest first). */
+  listStaleAgentTracingSessions(input: {
+    updatedBefore: Date;
+    limit: number;
+  }): Promise<IAgentTracingSession[]>;
+  /**
+   * Compare-and-set: marks a session 'abandoned' (endedAt = last activity,
+   * durationMs = last activity - startedAt) only while it is still
+   * 'in_progress' and idle since `updatedBefore`. Returns null when the CAS
+   * missed (a late event or /end won).
+   */
+  abandonAgentTracingSession(input: {
+    projectId: string;
+    sessionId: string;
+    updatedBefore: Date;
+  }): Promise<IAgentTracingSession | null>;
   findAgentTracingSessionById(
     sessionId: string,
     projectId?: string,
@@ -541,6 +563,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     toDay?: string;
     limit?: number;
   }): Promise<IUsageDaily[]>;
+
+  // Entity health rollup (tenant-specific): 5-minute buckets per
+  // (project, entity type, entity key, source) with a latency histogram.
+  /** Additive bulk upsert (chunks of 500) - safe under concurrency. */
+  incrementEntityMetrics(rows: IEntityMetricIncrement[]): Promise<void>;
+  /** Sums every counter (max for latencyMsMax) over the half-open [fromMs, toMs) range, grouped by `groupBy` (+ optional time bucket). */
+  aggregateEntityMetrics(q: EntityMetricsAggregateQuery): Promise<IEntityMetricAggregate[]>;
+  /** Batched delete of buckets with `bucketMs < olderThanMs`; returns the number of rows deleted. */
+  purgeEntityMetrics(input: { olderThanMs: number; batchSize?: number }): Promise<number>;
 
   // External model pricing (tenant-specific) — reference prices for models
   // observed via tracing that are not in the Model Hub.
@@ -1026,15 +1057,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   }): Promise<IPiiPolicy[]>;
 
   // ── Alert rule operations (tenant-specific) ──
+  // `projectId`, when given, filters by project inside the query (a rule of
+  // another project reads as missing).
   createAlertRule(
     rule: Omit<IAlertRule, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<IAlertRule>;
   updateAlertRule(
     id: string,
     data: Partial<Omit<IAlertRule, 'tenantId' | 'createdBy'>>,
+    projectId?: string,
   ): Promise<IAlertRule | null>;
-  deleteAlertRule(id: string): Promise<boolean>;
-  findAlertRuleById(id: string): Promise<IAlertRule | null>;
+  deleteAlertRule(id: string, projectId?: string): Promise<boolean>;
+  findAlertRuleById(id: string, projectId?: string): Promise<IAlertRule | null>;
   listAlertRules(
     tenantId: string,
     filters?: { projectId?: string; enabled?: boolean },
@@ -1044,12 +1078,14 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createAlertEvent(
     event: Omit<IAlertEvent, '_id'>,
   ): Promise<IAlertEvent>;
+  findAlertEventById(id: string, projectId?: string): Promise<IAlertEvent | null>;
   listAlertEvents(
     tenantId: string,
     options?: {
       projectId?: string;
       ruleId?: string;
       status?: AlertEventStatus;
+      /** Clamped to 1..200. */
       limit?: number;
       skip?: number;
     },
@@ -1060,6 +1096,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAlertEvent | null>;
   countActiveAlerts(tenantId: string, projectId?: string): Promise<number>;
 
+  // ── Alert evaluation state (tenant-specific) ──
+  listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
+  /** Keyed by the unique (tenantId, ruleId, entityKey). */
+  upsertAlertState(state: Omit<IAlertState, '_id' | 'updatedAt'>): Promise<IAlertState>;
+  deleteAlertStates(filter: { ruleId: string; entityKeys?: string[] }): Promise<number>;
+
   // ── Incident operations (tenant-specific) ──
   createIncident(
     incident: Omit<IIncident, '_id' | 'createdAt' | 'updatedAt'>,
@@ -1067,8 +1109,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   updateIncident(
     id: string,
     data: Partial<Omit<IIncident, 'tenantId' | 'alertEventId' | 'ruleId'>>,
+    projectId?: string,
   ): Promise<IIncident | null>;
-  findIncidentById(id: string): Promise<IIncident | null>;
+  findIncidentById(id: string, projectId?: string): Promise<IIncident | null>;
   findIncidentByAlertEventId(alertEventId: string): Promise<IIncident | null>;
   listIncidents(
     tenantId: string,
@@ -1077,6 +1120,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       ruleId?: string;
       status?: IncidentStatus;
       severity?: IncidentSeverity;
+      entityKey?: string;
+      module?: AlertModule;
+      /** Clamped to 1..200. */
       limit?: number;
       skip?: number;
     },
@@ -1085,6 +1131,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     tenantId: string,
     options?: { projectId?: string; status?: IncidentStatus },
   ): Promise<number>;
+  /** Incident counts per status for one project (every status present, 0 when none). */
+  countIncidentsByStatus(projectId: string): Promise<Record<IncidentStatus, number>>;
 
   // ── RAG Module operations (tenant-specific) ──
   createRagModule(
