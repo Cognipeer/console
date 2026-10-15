@@ -67,7 +67,7 @@ interface DashboardLayoutProps {
     licenseType: string;
     tenantName?: string;
     tenantSlug?: string;
-    role?: 'owner' | 'admin' | 'project_admin' | 'user';
+    role?: 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
     servicePermissions?: UserServicePermissions;
   };
 }

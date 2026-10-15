@@ -31,7 +31,7 @@ const logger = createLogger('api:groups');
 
 /** Roles a group may grant tenant-wide. `owner` is intentionally excluded —
  *  ownership is unique to the tenant owner and never group-derived. */
-const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user'];
+const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user', 'portal_user'];
 
 /** Users per read when a group's members are named (the whole table is never loaded for it). */
 const MEMBER_LOOKUP_CHUNK = 200;

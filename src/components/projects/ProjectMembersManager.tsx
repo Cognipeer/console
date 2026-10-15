@@ -22,7 +22,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import ProjectPermissionsEditor from './ProjectPermissionsEditor';
 import { summarizeStored } from './projectPermissionsModel';
 
-type TenantRole = 'owner' | 'admin' | 'project_admin' | 'user';
+type TenantRole = 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
 type ProjectRole = 'member' | 'project_admin';
 
 type ProjectMember = {

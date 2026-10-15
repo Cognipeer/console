@@ -56,7 +56,7 @@ export async function findUserByIdSafe(
 export interface PersonPatch {
   name?: string;
   email?: string;
-  role?: 'admin' | 'project_admin' | 'user';
+  role?: 'admin' | 'project_admin' | 'user' | 'portal_user';
 }
 
 export interface PersonUpdateContext {

@@ -18,11 +18,13 @@ export const iamDirectoryEn = {
     admin: 'Admin',
     project_admin: 'Project admin',
     user: 'User',
+    portal_user: 'Portal user',
     hints: {
       owner: 'The one account that owns the workspace. It cannot be changed.',
       admin: 'Full access except ownership. Manages people, groups, tokens and every project.',
       project_admin: 'Works like a user across the workspace and manages the projects they belong to.',
       user: 'Uses the services their role allows. Cannot manage people or settings.',
+      portal_user: 'Signs in only to open the portals shared with them. No access to the console itself.',
     },
   },
   badges: {

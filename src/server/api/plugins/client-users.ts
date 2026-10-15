@@ -49,7 +49,7 @@ import { clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:client-users');
 
-const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user'];
+const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user', 'portal_user'];
 
 /** Same gate as client-members.ts: user/token provisioning is owner/admin-owned-token only. */
 function isTenantAdmin(auth: ApiTokenContext): auth is ApiTokenContext & { user: IUser } {

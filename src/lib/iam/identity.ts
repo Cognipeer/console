@@ -9,11 +9,11 @@
 
 // ── roles ────────────────────────────────────────────────────────────────
 
-export const TENANT_ROLES = ['owner', 'admin', 'project_admin', 'user'] as const;
+export const TENANT_ROLES = ['owner', 'admin', 'project_admin', 'user', 'portal_user'] as const;
 export type TenantRole = (typeof TENANT_ROLES)[number];
 
 /** The roles an administrator may give to a person. The owner role is never assignable. */
-export const ASSIGNABLE_ROLES = ['admin', 'project_admin', 'user'] as const;
+export const ASSIGNABLE_ROLES = ['admin', 'project_admin', 'user', 'portal_user'] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
 /** Higher outranks lower: nobody acts on someone above them. `project_admin` and `user` are not ordered by privilege here. */
@@ -22,6 +22,7 @@ export const ROLE_RANK: Readonly<Record<TenantRole, number>> = {
   admin: 2,
   project_admin: 1,
   user: 0,
+  portal_user: 0,
 };
 
 export function isTenantRole(value: unknown): value is TenantRole {

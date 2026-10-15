@@ -11,7 +11,7 @@ export interface JWTPayload {
   tenantId: string;
   tenantSlug: string;
   tenantDbName: string;
-  role: 'owner' | 'admin' | 'project_admin' | 'user';
+  role: 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
   licenseId: string;
   licenseType: LicenseType;
   licenseExpiresAt?: string;

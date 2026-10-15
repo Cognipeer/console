@@ -16,6 +16,7 @@ export const accountPageTr: typeof accountPageEn = {
     admin: 'Yönetici',
     project_admin: 'Proje yöneticisi',
     user: 'Kullanıcı',
+    portal_user: 'Yalnız portal',
   },
   providers: {
     local: 'Yerel hesap',

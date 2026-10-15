@@ -7,7 +7,7 @@ export interface DashboardUser {
   name: string;
   email: string;
   licenseType: string;
-  role?: 'owner' | 'admin' | 'project_admin' | 'user';
+  role?: 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
 }
 
 const DashboardUserContext = createContext<DashboardUser | null>(null);

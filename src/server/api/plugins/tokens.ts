@@ -66,7 +66,7 @@ import {
 
 const logger = createLogger('api:tokens');
 
-const ALLOWED_ROLES = new Set(['owner', 'admin', 'project_admin', 'user']);
+const ALLOWED_ROLES = new Set(['owner', 'admin', 'project_admin', 'user', 'portal_user']);
 
 /** Most tokens one revoke request names (a page of the directory). */
 export const MAX_REVOKE_IDS = 100;

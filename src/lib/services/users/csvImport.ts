@@ -234,7 +234,7 @@ export function rowAlreadyExists(
 export async function importProgrammaticUsers(args: {
   tenantId: string;
   rows: CsvUserRow[];
-  role?: 'user' | 'admin' | 'project_admin';
+  role?: 'user' | 'admin' | 'project_admin' | 'portal_user';
   projectIds?: string[];
   /** Tenant licence type, stored on the record exactly as the invite route does. */
   licenseId: string;

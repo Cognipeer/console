@@ -17,11 +17,13 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     admin: 'Yönetici',
     project_admin: 'Proje yöneticisi',
     user: 'Kullanıcı',
+    portal_user: 'Yalnız portal',
     hints: {
       owner: 'Çalışma alanının sahibi olan tek hesap. Değiştirilemez.',
       admin: 'Sahiplik dışında tam erişim. Kişileri, grupları, token\'ları ve tüm projeleri yönetir.',
       project_admin: 'Çalışma alanında kullanıcı gibi çalışır ve üyesi olduğu projeleri yönetir.',
       user: 'Rolünün izin verdiği hizmetleri kullanır. Kişileri veya ayarları yönetemez.',
+      portal_user: 'Yalnızca kendisiyle paylaşılan portalları açmak için giriş yapar. Console\'un kendisine erişimi yoktur.',
     },
   },
   badges: {
