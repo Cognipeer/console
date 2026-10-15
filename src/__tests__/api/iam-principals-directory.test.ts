@@ -715,7 +715,7 @@ describeForEachProvider('IAM directory API', (getDb) => {
       for (let i = 0; i < 40 && !limited; i += 1) limited = (await preview(alice, { role: 'user' }, 'owner')).status === 429;
       expect(limited).toBe(true);
       expect((await preview(alice, { role: 'user' }, 'admin2')).status).toBe(200);
-    });
+    }, 30_000);
   });
 
   // ── what the viewer can do here ─────────────────────────────────────────

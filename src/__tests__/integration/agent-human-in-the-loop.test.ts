@@ -35,7 +35,7 @@ vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: 
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
 vi.mock('@/lib/services/agents/gatewayChatModel', () => ({ buildGatewayChatModel: hoisted.buildGatewayChatModel, isDynamicModel: () => false, }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
-  buildAgentSandboxTools: vi.fn(async () => ({ tools: hoisted.sandboxTools, definitions: [], cleanup: async () => undefined })),
+  buildAgentSandboxTools: vi.fn(async () => ({ tools: hoisted.sandboxTools, definitions: [], cleanup: async () => undefined, collectOutputs: async () => ({ attachments: [], warnings: [] }) })),
   destroyConversationSandbox: vi.fn(),
   resolveSandboxAvailability: vi.fn(),
 }));
