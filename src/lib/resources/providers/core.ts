@@ -80,6 +80,7 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   // agentService only looks the prompt up when there is no inline system prompt.
   if (!config.systemPrompt) edges.add('agent.prompt', config.promptKey, 'config.promptKey');
   edges.add('agent.knowledge', config.knowledgeEngineKey, 'config.knowledgeEngineKey');
+  asArray(config.knowledgeBindings).forEach((b, i) => edges.add('agent.knowledge', b.key, `config.knowledgeBindings[${i}].key`));
   addGuardrailEdges(edges, 'agent.guardrail', config, 'config.');
   addBindingEdges(edges, config.toolBindings, { tool: 'agent.tool', mcp: 'agent.mcp' }, 'config.');
   asArray(config.toolBindings).forEach((binding, i) => {

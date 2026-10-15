@@ -101,6 +101,9 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
     if (spec.knowledgeEngineKey) {
         out.push({ type: 'knowledge', key: spec.knowledgeEngineKey, usedBy: 'spec.knowledgeEngineKey' });
     }
+    for (const [index, binding] of (spec.knowledgeBindings ?? []).entries()) {
+        if (binding?.key) out.push({ type: 'knowledge', key: binding.key, usedBy: `spec.knowledgeBindings[${index}]` });
+    }
     for (const guardrail of spec.guardrails ?? []) {
         if (guardrail.key) out.push({ type: 'guardrail', key: guardrail.key, usedBy: 'spec.guardrails' });
     }
