@@ -190,3 +190,49 @@ export function toClientOutputFiles(conversationId: string, attachments: Readonl
 export function toFileAnnotations(files: ReadonlyArray<ClientOutputFile>): ClientFileAnnotation[] {
     return files.map((file) => ({ type: 'file_path', file_id: file.id, filename: file.name }));
 }
+
+/** Data of the `agent.output_file` session event (the client wire snake-cases it). */
+export function outputFileEventData(file: ClientOutputFile): Record<string, unknown> {
+    return { fileId: file.id, name: file.name, mimeType: file.mime_type, size: file.size, downloadUrl: file.download_url };
+}
+
+/** A file attached to a transcript message, as a client sees it (uploads and agent outputs alike). */
+export interface ClientMessageAttachment extends ClientOutputFile {
+    /** `agent_output` for a file the agent produced; `user_upload` for one the person attached. */
+    origin: 'agent_output' | 'user_upload';
+}
+
+export function toClientMessageAttachments(
+    conversationId: string,
+    attachments: ReadonlyArray<OutputAttachmentLike> | undefined,
+): ClientMessageAttachment[] {
+    return (attachments ?? []).map((file) => ({
+        id: file.fileId,
+        name: file.name,
+        mime_type: file.mimeType,
+        size: file.size,
+        origin: file.origin === 'agent_output' ? 'agent_output' : 'user_upload',
+        download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+    }));
+}
+
+/** One transcript message for `GET .../sessions/{id}/messages`; files (`attachments`) keep their origin and download URL. */
+export function toClientTranscriptMessage(
+    conversationId: string,
+    index: number,
+    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike> },
+    id: string,
+) {
+    const files = toClientMessageAttachments(conversationId, message.attachments);
+    const at = message.timestamp instanceof Date ? message.timestamp : new Date(message.timestamp);
+    return {
+        id,
+        object: 'agent.session.message' as const,
+        index,
+        role: message.role,
+        content: message.content,
+        created_at: Number.isNaN(at.getTime()) ? null : at.toISOString(),
+        attachments: files,
+        ...(files.some((f) => f.origin === 'agent_output') ? { output_files: files.filter((f) => f.origin === 'agent_output') } : {}),
+    };
+}
