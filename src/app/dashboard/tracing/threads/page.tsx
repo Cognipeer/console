@@ -13,7 +13,12 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
-import StatusBadge from '@/components/common/ui/StatusBadge';
+import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
+import {
+  isTracingStatusFilterValue,
+  TRACING_STATUS_FILTER_VALUES,
+} from '@/components/tracing/sessionStatus';
+import { useTranslations } from '@/lib/i18n';
 import {
   formatDuration,
   formatNumber,
@@ -46,9 +51,16 @@ interface ThreadsResponse extends OffsetPageInfo {
 
 const DEFAULT_PAGE_SIZE = 25;
 
+/** A `status` URL value the filter offers, else 'all'. */
+function statusParam(value: string | null): string {
+  const raw = value?.trim() ?? '';
+  return isTracingStatusFilterValue(raw) ? raw : 'all';
+}
+
 export default function TracingThreadsPage() {
   const router = useRouter();
   const searchParams = useSearchParams()!;
+  const th = useTranslations('tracingHealth');
   const { openDocs } = useDocsDrawer();
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
   const [totalThreads, setTotalThreads] = useState(0);
@@ -60,7 +72,7 @@ export default function TracingThreadsPage() {
   const [page, setPage] = useState(1);
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState(() => statusParam(searchParams.get('status')));
   const [metadataKey, setMetadataKey] = useState(
     () => searchParams.get('metadataKey')?.trim() || '',
   );
@@ -82,6 +94,8 @@ export default function TracingThreadsPage() {
   }, [page, pageSize, query, statusFilter, metadataKey, metadataValue]);
 
   useEffect(() => {
+    const statusFromUrl = statusParam(searchParams.get('status'));
+    setStatusFilter((current) => (current === statusFromUrl ? current : statusFromUrl));
     const metadataKeyParam = searchParams.get('metadataKey')?.trim() || '';
     setMetadataKey((current) => (current === metadataKeyParam ? current : metadataKeyParam));
     const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
@@ -143,7 +157,7 @@ export default function TracingThreadsPage() {
   const columns: DataGridColumn<ThreadRecord>[] = [
     {
       key: 'thread',
-      label: 'Thread',
+      label: th('sessionTable.thread'),
       render: (t) => (
         <Tooltip label={t.threadId} withArrow>
           <span className="ds-mono" style={{ fontSize: 12, color: 'var(--ds-text)' }}>
@@ -154,7 +168,7 @@ export default function TracingThreadsPage() {
     },
     {
       key: 'sessions',
-      label: 'Sessions',
+      label: th('threads.sessions'),
       align: 'right',
       render: (t) => (
         <span
@@ -167,7 +181,7 @@ export default function TracingThreadsPage() {
     },
     {
       key: 'agents',
-      label: 'Agents',
+      label: th('threads.agents'),
       render: (t) => (
         <div className="ds-row ds-gap-xs" style={{ flexWrap: 'wrap' }}>
           {(t.agents ?? []).slice(0, 3).map((a) => (
@@ -185,25 +199,12 @@ export default function TracingThreadsPage() {
     },
     {
       key: 'status',
-      label: 'Latest status',
-      render: (t) => (
-        <StatusBadge
-          status={
-            t.latestStatus === 'success'
-              ? 'ok'
-              : t.latestStatus === 'error'
-                ? 'err'
-                : t.latestStatus === 'running'
-                  ? 'info'
-                  : 'paused'
-          }
-          label={(t.latestStatus || 'unknown').toUpperCase()}
-        />
-      ),
+      label: th('threads.latestStatus'),
+      render: (t) => <SessionStatusBadge status={t.latestStatus} />,
     },
     {
       key: 'started',
-      label: 'Started',
+      label: th('sessionTable.started'),
       render: (t) => (
         <span className="ds-faint" style={{ fontSize: 12.5 }}>
           {formatRelativeTime(t.startedAt)}
@@ -212,7 +213,7 @@ export default function TracingThreadsPage() {
     },
     {
       key: 'duration',
-      label: 'Duration',
+      label: th('sessionTable.duration'),
       render: (t) => (
         <span className="ds-mono" style={{ fontSize: 12 }}>
           {formatDuration(t.totalDurationMs)}
@@ -221,7 +222,7 @@ export default function TracingThreadsPage() {
     },
     {
       key: 'tokens',
-      label: 'Tokens',
+      label: th('sessionTable.tokens'),
       align: 'right',
       render: (t) => (
         <span
@@ -239,9 +240,9 @@ export default function TracingThreadsPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Tracing"
-        title="Thread Explorer"
-        subtitle="Aggregate view of sessions sharing the same thread ID — useful for multi-turn agent conversations."
+        eyebrow={th('eyebrow')}
+        title={th('threads.title')}
+        subtitle={th('threads.subtitle')}
         actions={
           <Button
             variant="default"
@@ -249,7 +250,7 @@ export default function TracingThreadsPage() {
             leftSection={<IconBook size={14} stroke={1.7} />}
             onClick={() => openDocs('api-tracing')}
           >
-            Docs
+            {th('common.docs')}
           </Button>
         }
       />
@@ -268,7 +269,7 @@ export default function TracingThreadsPage() {
             setQuery(v);
             setPage(1);
           },
-          placeholder: 'Search by thread ID…',
+          placeholder: th('threads.search'),
         }}
         filters={[
           {
@@ -277,13 +278,11 @@ export default function TracingThreadsPage() {
               setStatusFilter(v);
               setPage(1);
             },
-            ariaLabel: 'Filter by latest status',
-            width: 160,
+            ariaLabel: th('sessions.latestStatusFilter'),
+            width: 170,
             options: [
-              { value: 'all', label: 'All statuses' },
-              { value: 'success', label: 'Success' },
-              { value: 'error', label: 'Error' },
-              { value: 'in_progress', label: 'In progress' },
+              { value: 'all', label: th('sessions.statusAll') },
+              ...TRACING_STATUS_FILTER_VALUES.map((value) => ({ value, label: th(`status.${value}`) })),
             ],
           },
         ]}
@@ -291,7 +290,8 @@ export default function TracingThreadsPage() {
           <Group gap={4} wrap="nowrap">
             <TextInput
               size="xs"
-              placeholder="metadata key"
+              placeholder={th('sessions.metadataKey')}
+              aria-label={th('sessions.metadataKey')}
               value={metadataKey}
               onChange={(e) => {
                 setMetadataKey(e.currentTarget.value);
@@ -301,7 +301,8 @@ export default function TracingThreadsPage() {
             />
             <TextInput
               size="xs"
-              placeholder="value"
+              placeholder={th('sessions.metadataValue')}
+              aria-label={th('sessions.metadataValue')}
               value={metadataValue}
               onChange={(e) => {
                 setMetadataValue(e.currentTarget.value);
@@ -310,11 +311,12 @@ export default function TracingThreadsPage() {
               style={{ width: 130 }}
             />
             {(metadataKey || metadataValue) && (
-              <Tooltip label="Clear metadata filter" withArrow>
+              <Tooltip label={th('sessions.clearMetadata')} withArrow>
                 <ActionIcon
                   size="sm"
                   variant="subtle"
                   color="gray"
+                  aria-label={th('sessions.clearMetadata')}
                   onClick={() => {
                     setMetadataKey('');
                     setMetadataValue('');
@@ -331,13 +333,14 @@ export default function TracingThreadsPage() {
         refreshing={refreshing}
         empty={{
           icon: <IconTimeline size={26} stroke={1.7} />,
-          title: 'No threads found',
-          description:
-            'Threads will appear once sessions are grouped by their thread ID.',
+          title: th('threads.emptyTitle'),
+          description: th('threads.emptyDescription'),
         }}
         footerLeft={
           <Text size="xs" c="dimmed">
-            {moreAfter === null ? `${formatNumber(totalThreads)} total · Page ${page} of ${totalPages}` : `Page ${page}`}
+            {moreAfter === null
+              ? th('sessions.footerTotal', { total: formatNumber(totalThreads), page, pages: totalPages })
+              : th('sessions.footerPage', { page })}
           </Text>
         }
         pagination={{
@@ -350,7 +353,7 @@ export default function TracingThreadsPage() {
         rowActions={(t) => [
           {
             id: 'view',
-            label: 'View thread',
+            label: th('threads.viewThread'),
             icon: <IconEye size={14} />,
             onClick: () =>
               router.push(`/dashboard/tracing/threads/${t.threadId}`),

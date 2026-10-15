@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
@@ -9,8 +9,8 @@ import {
   Badge,
   Button,
   Center,
+  Collapse,
   Group,
-  Loader,
   ScrollArea,
   Stack,
   Table,
@@ -21,23 +21,25 @@ import {
   IconArrowUpRight,
   IconBook,
   IconChartHistogram,
+  IconChevronDown,
+  IconChevronRight,
   IconRefresh,
   IconRobot,
 } from '@tabler/icons-react';
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
+import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
+import AgentHealthPanel from '@/components/tracing/health/AgentHealthPanel';
+import { formatDayLabel } from '@/components/tracing/health/healthFormat';
+import { formatRelative } from '@/components/iam/timeFormat';
+import { DetailSkeleton } from '@/components/common/ui/Skeletons';
 import DetailShell, {
   DetailCard,
   DetailTwoCol,
 } from '@/components/common/ui/DetailShell';
 import StatTile from '@/components/common/ui/StatTile';
-import StatusBadge from '@/components/common/ui/StatusBadge';
-import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
-import {
-  buildDashboardDateSearchParams,
-  defaultDashboardDateFilter,
-} from '@/lib/utils/dashboardDateFilter';
+import DashboardDateFilter from '@/components/layout/DashboardDateFilter';
+import { useHealthDateFilter } from '@/components/tracing/health/useHealthDateFilter';
+import { buildDashboardDateSearchParams, dashboardDateFilterKey } from '@/lib/utils/dashboardDateFilter';
 import {
   formatNumber,
   formatDuration,
@@ -46,8 +48,7 @@ import {
   calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
-
-dayjs.extend(relativeTime);
+import { useLocale, useTranslations } from '@/lib/i18n';
 
 interface AgentOverviewResponse {
   agent: {
@@ -145,24 +146,21 @@ interface AgentOverviewResponse {
   };
 }
 
-function statusVariant(status: string | null | undefined): 'ok' | 'warn' | 'err' | 'info' {
-  if (!status) return 'info';
-  const s = status.toLowerCase();
-  if (s === 'completed' || s === 'success' || s === 'ok' || s === 'active') return 'ok';
-  if (s === 'failed' || s === 'error' || s === 'err') return 'err';
-  if (s === 'warning' || s === 'warn' || s === 'degraded') return 'warn';
-  return 'info';
-}
-
 export default function AgentTracingAgentPage() {
   const params = useParams<{ agentName: string }>();
   const router = useRouter();
+  const t = useTranslations('tracingHealth');
+  const locale = useLocale();
   const { openDocs } = useDocsDrawer();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AgentOverviewResponse | null>(null);
-  const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [rawDailyOpen, setRawDailyOpen] = useState(false);
+  // Same 24h default as the agents list and the health panel when the link carries no period.
+  const [dateFilter, setDateFilter] = useHealthDateFilter('last_day');
+  const filterKey = dashboardDateFilterKey(dateFilter);
 
   const agentName = useMemo(() => {
     const value = params?.agentName ?? '';
@@ -181,38 +179,45 @@ export default function AgentTracingAgentPage() {
     }
   }, []);
 
-  const fetchOverview = useCallback(async (isRefresh = false) => {
-    if (!agentName) return;
-
-    try {
-      if (isRefresh) setRefreshing(true);
-      setLoading(true);
-      setError(null);
-
-      const params = buildDashboardDateSearchParams(dateFilter);
-      params.append('timezone', timezone);
-
-      const response = await fetch(`/api/tracing/agents/${encodeURIComponent(agentName)}/overview?${params}`);
-      if (!response.ok) {
-        const payload = await response.json();
-        throw new Error(payload.error || 'Failed to fetch agent overview');
-      }
-
-      const payload = await response.json();
-      setData(payload);
-    } catch (err: unknown) {
-      console.error('Agent overview fetch error:', err);
-      const message = err instanceof Error ? err.message : 'Failed to fetch agent overview';
-      setError(message);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [agentName, dateFilter, timezone]);
-
   useEffect(() => {
-    void fetchOverview();
-  }, [fetchOverview]);
+    if (!agentName) return;
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        // The first load of an agent shows skeletons; later ones keep the page and show the refresh state.
+        setRefreshing(true);
+        setError(null);
+
+        const query = buildDashboardDateSearchParams(dateFilter);
+        query.append('timezone', timezone);
+
+        const response = await fetch(
+          `/api/tracing/agents/${encodeURIComponent(agentName)}/overview?${query}`,
+          { signal: controller.signal },
+        );
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
+          throw new Error(typeof payload.error === 'string' ? payload.error : t('detail.loadError'));
+        }
+
+        const payload = (await response.json()) as AgentOverviewResponse;
+        if (!controller.signal.aborted) setData(payload);
+      } catch (err: unknown) {
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        console.error('Agent overview fetch error:', err);
+        setError(err instanceof Error && err.message ? err.message : t('detail.loadError'));
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    };
+    void load();
+    return () => controller.abort();
+    // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentName, filterKey, timezone, refreshKey, t]);
 
   const handleShowAllSessions = () => {
     router.push(`/dashboard/tracing/sessions?agent=${encodeURIComponent(agentName)}`);
@@ -227,11 +232,7 @@ export default function AgentTracingAgentPage() {
   };
 
   if (loading && !data) {
-    return (
-      <Center h={400}>
-        <Loader size="lg" />
-      </Center>
-    );
+    return <DetailSkeleton tabs={0} aside={false} actions={3} />;
   }
 
   const agent = data?.agent;
@@ -270,7 +271,7 @@ export default function AgentTracingAgentPage() {
   return (
     <DetailShell
       backHref="/dashboard/tracing"
-      backLabel="Back to tracing"
+      backLabel={t('detail.backToTracing')}
       icon={
         <div
           style={{
@@ -300,12 +301,7 @@ export default function AgentTracingAgentPage() {
           >
             {displayLabel}
           </h1>
-          {agent?.latestStatus ? (
-            <StatusBadge
-              status={statusVariant(agent.latestStatus)}
-              label={agent.latestStatus.toUpperCase()}
-            />
-          ) : null}
+          {agent?.latestStatus ? <SessionStatusBadge status={agent.latestStatus} /> : null}
           {agent?.latestVersion ? (
             <span className="ds-badge ds-badge-info">v{agent.latestVersion}</span>
           ) : null}
@@ -316,12 +312,12 @@ export default function AgentTracingAgentPage() {
           <span className="ds-mono">{agentName}</span>
           <span className="ds-faint">·</span>
           <span>
-            {formatNumber(agent?.sessionsCount || 0)} sessions tracked
+            {t('detail.sessionsTracked', { count: formatNumber(agent?.sessionsCount || 0) })}
           </span>
           {agent?.latestSessionAt ? (
             <>
               <span className="ds-faint">·</span>
-              <span>Last active {dayjs(agent.latestSessionAt).fromNow()}</span>
+              <span>{t('detail.lastActive', { when: formatRelative(agent.latestSessionAt, locale) })}</span>
             </>
           ) : null}
         </>
@@ -335,16 +331,16 @@ export default function AgentTracingAgentPage() {
             size="xs"
             leftSection={<IconBook size={14} />}
           >
-            Docs
+            {t('common.docs')}
           </Button>
           <Button
             variant="light"
             size="xs"
             leftSection={<IconRefresh size={14} />}
-            onClick={() => fetchOverview(true)}
+            onClick={() => setRefreshKey((key) => key + 1)}
             loading={refreshing}
           >
-            Refresh
+            {t('common.refresh')}
           </Button>
         </>
       }
@@ -358,49 +354,54 @@ export default function AgentTracingAgentPage() {
       {/* Top-level stat tiles */}
       <div className="ds-stat-grid">
         <StatTile
-          label="Total sessions"
+          label={t('detail.totalSessions')}
           value={formatNumber(totals.sessionsCount)}
-          delta={`All-time: ${formatNumber(agent?.sessionsCount || 0)}`}
+          delta={t('detail.allTime', { count: formatNumber(agent?.sessionsCount || 0) })}
         />
         <StatTile
-          label="Total events"
+          label={t('detail.totalEvents')}
           value={formatNumber(totals.totalEvents)}
-          delta={`Avg duration: ${formatDuration(totals.averageDurationMs)}`}
+          delta={t('detail.avgDuration', { duration: formatDuration(totals.averageDurationMs) })}
         />
         <StatTile
-          label="Total tokens"
+          label={t('detail.totalTokens')}
           value={formatNumber(totals.totalTokens)}
-          delta={`Avg per session: ${formatNumber(totals.averageTokensPerSession)}`}
+          delta={t('detail.avgPerSession', { count: formatNumber(totals.averageTokensPerSession) })}
         />
         <StatTile
-          label="Tool error rate"
+          label={t('detail.toolErrorRate')}
           value={formatPercent(toolTotals.errorRate)}
-          delta={`Total calls: ${formatNumber(toolTotals.totalCalls)}`}
+          delta={t('detail.totalCalls', { count: formatNumber(toolTotals.totalCalls) })}
         />
       </div>
 
+      {/* Health: rollup charts, normal range, markers */}
+      <AgentHealthPanel key={agentName} agentName={agentName} dateFilter={dateFilter} refreshKey={refreshKey} />
+
       {/* Token breakdown */}
       <DetailCard
-        title="Token breakdown"
-        description="Input, output, and cached input usage for this agent in the selected range."
+        title={t('detail.tokenBreakdown')}
+        description={t('detail.tokenBreakdownDescription')}
       >
         <div className="ds-stat-grid">
           <StatTile
-            label="Input tokens"
+            label={t('detail.inputTokens')}
             value={formatNumber(totals.totalInputTokens)}
-            delta={`Avg per session: ${formatNumber(totals.averageInputTokensPerSession)}`}
+            delta={t('detail.avgPerSession', { count: formatNumber(totals.averageInputTokensPerSession) })}
           />
           <StatTile
-            label="Output tokens"
+            label={t('detail.outputTokens')}
             value={formatNumber(totals.totalOutputTokens)}
-            delta={`Avg per session: ${formatNumber(totals.averageOutputTokensPerSession)}`}
+            delta={t('detail.avgPerSession', { count: formatNumber(totals.averageOutputTokensPerSession) })}
           />
           <StatTile
-            label="Cached input"
+            label={t('detail.cachedInput')}
             value={formatNumber(totals.totalCachedInputTokens)}
-            delta={`Cache hit rate: ${formatPercent(
-              calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens),
-            )}`}
+            delta={t('detail.cacheHitRate', {
+              rate: formatPercent(
+                calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens),
+              ),
+            })}
           />
         </div>
       </DetailCard>
@@ -410,13 +411,12 @@ export default function AgentTracingAgentPage() {
         color="teal"
         variant="light"
         icon={<IconChartHistogram size={16} />}
-        title="Deterministic analysis moved to Cost → Analysis"
+        title={t('detail.analysisMovedTitle')}
       >
         <Text size="sm">
-          System-prompt checks, per-turn tool-menu stats, repeated-call waste and recurring
-          errors for this agent live on the optimization workbench:{' '}
+          {t('detail.analysisMovedBefore')}{' '}
           <Anchor component={Link} size="sm" href="/dashboard/cost/analysis">
-            open Analysis
+            {t('detail.analysisMovedLink')}
           </Anchor>
           .
         </Text>
@@ -425,14 +425,14 @@ export default function AgentTracingAgentPage() {
       {/* Two-column: Status + Versions */}
       <DetailTwoCol>
         <DetailCard
-          title="Status breakdown"
+          title={t('detail.statusBreakdown')}
           actions={
             <span className="ds-badge">{formatNumber(statusEntriesTotal)}</span>
           }
         >
           {statusEntries.length === 0 ? (
             <Center h={120} c="dimmed">
-              No status data available.
+              {t('detail.noStatusData')}
             </Center>
           ) : (
             <Stack gap={6}>
@@ -449,22 +449,22 @@ export default function AgentTracingAgentPage() {
         </DetailCard>
 
         <DetailCard
-          title="Versions"
+          title={t('detail.versions')}
           actions={
             <span className="ds-badge">
-              {formatNumber(agent?.versions.length || 0)} versions
+              {t('detail.versionsCount', { count: formatNumber(agent?.versions.length || 0) })}
             </span>
           }
         >
           {versionEntries.length === 0 ? (
             <Center h={120} c="dimmed">
-              No version information yet.
+              {t('detail.noVersions')}
             </Center>
           ) : (
             <Stack gap={6}>
               {versionEntries.map((item) => (
                 <Group key={item.version || 'unknown'} justify="space-between">
-                  <Text size="sm">{item.version || 'Unknown'}</Text>
+                  <Text size="sm">{item.version || t('detail.unknownVersion')}</Text>
                   <Badge size="sm" color="grape">
                     {formatNumber(item.sessionsCount)}
                   </Badge>
@@ -478,16 +478,16 @@ export default function AgentTracingAgentPage() {
       {/* Two-column: Top models + Tool summary */}
       <DetailTwoCol>
         <DetailCard
-          title="Top models"
+          title={t('detail.topModels')}
           actions={
             <span className="ds-badge">
-              {formatNumber(modelEntries.length)} entries
+              {t('detail.entries', { count: formatNumber(modelEntries.length) })}
             </span>
           }
         >
           {modelEntries.length === 0 ? (
             <Center h={120} c="dimmed">
-              No model usage recorded.
+              {t('detail.noModels')}
             </Center>
           ) : (
             <Stack gap={6}>
@@ -506,16 +506,16 @@ export default function AgentTracingAgentPage() {
         </DetailCard>
 
         <DetailCard
-          title="Tool summary"
+          title={t('detail.toolSummary')}
           actions={
             <span className="ds-badge">
-              {formatNumber(toolItems.length)} entries
+              {t('detail.entries', { count: formatNumber(toolItems.length) })}
             </span>
           }
         >
           {toolItems.length === 0 ? (
             <Center h={120} c="dimmed">
-              No tool calls recorded.
+              {t('detail.noTools')}
             </Center>
           ) : (
             <Stack gap={6}>
@@ -524,7 +524,10 @@ export default function AgentTracingAgentPage() {
                   <Stack gap={0}>
                     <Text size="sm" fw={500}>{item.toolName}</Text>
                     <Text size="xs" c="dimmed">
-                      {formatNumber(item.totalCalls)} calls · {formatNumber(item.errorCalls)} errors
+                      {t('detail.callsAndErrors', {
+                        calls: formatNumber(item.totalCalls),
+                        errors: formatNumber(item.errorCalls),
+                      })}
                     </Text>
                   </Stack>
                   <Badge size="sm" color={item.errorRate > 0.1 ? 'red' : 'green'}>
@@ -537,53 +540,68 @@ export default function AgentTracingAgentPage() {
         </DetailCard>
       </DetailTwoCol>
 
-      {/* Recent trend table */}
+      {/* Raw daily activity: the charts above replace it as the way to read the trend */}
       <DetailCard
-        title="Recent trend (last 30 days)"
+        title={
+          <Button
+            variant="subtle"
+            color="gray"
+            size="compact-sm"
+            px={0}
+            onClick={() => setRawDailyOpen((open) => !open)}
+            aria-expanded={rawDailyOpen}
+            aria-controls="agent-raw-daily"
+            leftSection={rawDailyOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+          >
+            {t('detail.rawDaily')}
+          </Button>
+        }
         actions={
-          <span className="ds-badge">{formatNumber(dailyRows.length)} days</span>
+          <span className="ds-badge">{t('detail.rawDailyDays', { count: formatNumber(dailyRows.length) })}</span>
         }
       >
-        <ScrollArea>
-          <Table striped highlightOnHover withColumnBorders>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Date</Table.Th>
-                <Table.Th>Sessions</Table.Th>
-                <Table.Th>Events</Table.Th>
-                <Table.Th>Tokens</Table.Th>
-                <Table.Th>Avg duration</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {dailyRows.length === 0 ? (
+        <Collapse in={rawDailyOpen} id="agent-raw-daily">
+          <ScrollArea>
+            <Table striped highlightOnHover withColumnBorders>
+              <Table.Thead>
                 <Table.Tr>
-                  <Table.Td colSpan={5}>
-                    <Center c="dimmed" py="sm">
-                      No activity in the selected range.
-                    </Center>
-                  </Table.Td>
+                  <Table.Th>{t('detail.colDate')}</Table.Th>
+                  <Table.Th>{t('detail.colSessions')}</Table.Th>
+                  <Table.Th>{t('detail.colEvents')}</Table.Th>
+                  <Table.Th>{t('detail.colTokens')}</Table.Th>
+                  <Table.Th>{t('detail.colAvgDuration')}</Table.Th>
                 </Table.Tr>
-              ) : (
-                dailyRows.map((row) => (
-                  <Table.Tr key={row.date}>
-                    <Table.Td>{dayjs(row.date).format('MMM D, YYYY')}</Table.Td>
-                    <Table.Td>{formatNumber(row.sessionsCount)}</Table.Td>
-                    <Table.Td>{formatNumber(row.totalEvents)}</Table.Td>
-                    <Table.Td>{formatNumber(row.totalTokens)}</Table.Td>
-                    <Table.Td>{formatDuration(row.averageDurationMs)}</Table.Td>
+              </Table.Thead>
+              <Table.Tbody>
+                {dailyRows.length === 0 ? (
+                  <Table.Tr>
+                    <Table.Td colSpan={5}>
+                      <Center c="dimmed" py="sm">
+                        {t('detail.noActivity')}
+                      </Center>
+                    </Table.Td>
                   </Table.Tr>
-                ))
-              )}
-            </Table.Tbody>
-          </Table>
-        </ScrollArea>
+                ) : (
+                  dailyRows.map((row) => (
+                    <Table.Tr key={row.date}>
+                      <Table.Td>{formatDayLabel(row.date, locale)}</Table.Td>
+                      <Table.Td>{formatNumber(row.sessionsCount)}</Table.Td>
+                      <Table.Td>{formatNumber(row.totalEvents)}</Table.Td>
+                      <Table.Td>{formatNumber(row.totalTokens)}</Table.Td>
+                      <Table.Td>{formatDuration(row.averageDurationMs)}</Table.Td>
+                    </Table.Tr>
+                  ))
+                )}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
+        </Collapse>
       </DetailCard>
 
       {/* Recent sessions */}
       <DetailCard
-        title="Recent sessions"
-        description="Latest runs reported by this agent."
+        title={t('detail.recentSessions')}
+        description={t('detail.recentSessionsDescription')}
         actions={
           <Button
             variant="light"
@@ -591,7 +609,7 @@ export default function AgentTracingAgentPage() {
             rightSection={<IconArrowUpRight size={14} />}
             onClick={handleShowAllSessions}
           >
-            Show all sessions
+            {t('detail.showAllSessions')}
           </Button>
         }
       >
@@ -614,15 +632,15 @@ export default function AgentTracingAgentPage() {
 
       <DetailCard pad="md">
         <Text size="sm" c="dimmed">
-          Need to instrument another agent? Use the tracing ingestion endpoint at{' '}
+          {t('detail.footerBefore')}{' '}
           <span className="ds-mono">/api/client/tracing/sessions</span>
-          {' '}with your API token from{' '}
-          <Anchor component={Link} href="/dashboard/tokens">API Tokens</Anchor>.
-          {' '}See our{' '}
+          {' '}{t('detail.footerWith')}{' '}
+          <Anchor component={Link} href="/dashboard/tokens">{t('detail.footerTokensLink')}</Anchor>
+          {'. '}{t('detail.footerSee')}{' '}
           <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
-            LangChain/LangGraph integration examples
+            {t('detail.footerExamplesLink')}
           </Anchor>
-          {' '}for quick setup.
+          {' '}{t('detail.footerAfter')}
         </Text>
       </DetailCard>
     </DetailShell>

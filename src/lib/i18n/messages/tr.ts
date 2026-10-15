@@ -9,6 +9,7 @@
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
+import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
 import { healthDigestTr } from './healthDigest.tr';
@@ -1223,6 +1224,7 @@ export const tr: typeof en = {
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
   healthDigest: healthDigestTr,
+  analyticsDashboards: analyticsDashboardsTr,
   accountPage: accountPageTr,
   iamPrincipals: {
     segments: {
@@ -1617,6 +1619,8 @@ export const tr: typeof en = {
     iamDescription: 'Politikalar, kişiler, erişim kontrolü, denetim izi ve limitler',
     webhooks: 'Webhook’lar',
     webhooksDescription: 'Kendi uç noktalarınıza imzalı olaylar gönderin',
+    entityHealth: 'Sağlık',
+    entityHealthDescription: 'Ajanların, modellerin, bilgi tabanlarının, MCP sunucularının ve araçların sağlığı',
     evaluations: 'Değerlendirme',
     evaluationsDescription: 'Veri setleri ve skorlayıcılarla çevrimdışı agent & model testi',
     redteam: 'Red Team',
@@ -2527,6 +2531,11 @@ export const tr: typeof en = {
   breadcrumbs: {
     ...en.breadcrumbs,
     iam: 'IAM merkezi',
+    health: 'Sağlık',
+    healthAgent: 'Ajanlar',
+    healthModel: 'Modeller',
+    healthKb: 'Bilgi tabanları',
+    healthTool: 'Araçlar',
     account: 'Hesabım',
     webhooks: 'Webhook’lar',
     pii: 'PII Servisi',

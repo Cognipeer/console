@@ -13,6 +13,7 @@ import type {
 import { getEntityBaselineProvider, type EntityBandPoint } from '@/enterprise/alert-extensions';
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { getEntitySeries, getEntitySummaries } from '@/lib/services/entityMetrics';
+import { resolveHealthRange as resolveHealthRangeFor, sparkBucketMs, type HealthRange } from '@/lib/services/entityMetrics/healthRange';
 import { resolveTraceSession } from '@/lib/services/agents/traceSession';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -40,7 +41,6 @@ function parseMetadataFilter(query: Record<string, string | undefined>):
   return { metadataKey: key, metadataValue: query.metadataValue };
 }
 
-const DAY_MS = 86_400_000;
 const HEALTH_SPARK_POINTS = 24;
 const HEALTH_DEFAULT_LIMIT = 200;
 const HEALTH_MAX_LIMIT = 500;
@@ -52,58 +52,9 @@ const INCIDENT_MARKER_LIMIT = 200;
 const HEALTH_MISSING_KEYS_LIMIT = 50;
 const SEVERITY_RANK: Record<IncidentSeverity, number> = { critical: 3, warning: 2, info: 1 };
 
-type HealthRange = { fromMs: number; toMs: number };
-
-/**
- * Time range of the health endpoints. An explicit `from`/`to` wins (as in the
- * other tracing handlers), otherwise `period` is resolved by the shared
- * dashboard parser. No (or an unknown) period means the last 24 hours: the
- * parser has no `last_24_hours`, `last_day` is its 24h period, and the SPEC's
- * "last_24_hours" intent is kept (clients should still send `period`
- * explicitly). `total` is bounded to 30 days, since health data is a rolling
- * rollup, not all-time history.
- * Returns an error message for an unusable range.
- */
-function resolveHealthRange(query: Record<string, string | undefined>, nowMs = Date.now()): HealthRange | { error: string } {
-  const searchParams = new URLSearchParams(Object.entries(query).filter((e): e is [string, string] => typeof e[1] === 'string'));
-  const rawFrom = searchParams.get('from');
-  const rawTo = searchParams.get('to');
-  const explicitFrom = rawFrom ? new Date(rawFrom).getTime() : undefined;
-  const explicitTo = rawTo ? new Date(rawTo).getTime() : undefined;
-  if ((rawFrom && !Number.isFinite(explicitFrom)) || (rawTo && !Number.isFinite(explicitTo))) {
-    return { error: '`from` and `to` must be valid dates' };
-  }
-
-  let fromMs: number;
-  let toMs: number;
-  if (explicitFrom !== undefined || explicitTo !== undefined) {
-    toMs = Math.min(explicitTo ?? nowMs, nowMs);
-    fromMs = explicitFrom ?? toMs - DAY_MS;
-  } else {
-    const filter = parseDashboardDateFilterFromSearchParams(searchParams);
-    toMs = nowMs;
-    if (filter.period === 'total') {
-      // `total` is what the parser answers for a missing period too: tell the two apart.
-      fromMs = searchParams.get('period') === 'total' ? nowMs - 30 * DAY_MS : nowMs - DAY_MS;
-    } else {
-      fromMs = filter.from?.getTime() ?? nowMs - DAY_MS;
-      toMs = Math.min(filter.to?.getTime() ?? nowMs, nowMs);
-    }
-  }
-  if (fromMs >= toMs) return { error: '`from` must be earlier than `to`' };
-
-  // Align to the rollup bucket and keep inside retention, so the numbers reported here are the ones queried.
-  const retentionFloor = nowMs - getConfig().health.entityMetricsRetentionDays * DAY_MS;
-  const aligned = Math.max(fromMs, retentionFloor);
-  fromMs = aligned - (aligned % ENTITY_METRIC_BUCKET_MS);
-  if (toMs <= fromMs) return { error: 'The requested range is outside the retained health data' };
-  return { fromMs, toMs };
-}
-
-/** Bucket size the summaries use for a sparkline of `points` buckets (kept in step with entityHealthService). */
-function sparkBucketMs(range: HealthRange, points: number): number {
-  const raw = (range.toMs - range.fromMs) / points;
-  return Math.max(ENTITY_METRIC_BUCKET_MS, Math.ceil(raw / ENTITY_METRIC_BUCKET_MS) * ENTITY_METRIC_BUCKET_MS);
+/** Health range from the request query, inside the configured rollup retention. */
+function resolveHealthRange(query: Record<string, string | undefined>): HealthRange | { error: string } {
+  return resolveHealthRangeFor(query, getConfig().health.entityMetricsRetentionDays);
 }
 
 function parseHealthLimit(raw: string | undefined): number {

@@ -1,16 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import {
-  Button,
-  Center,
-  Loader,
-  Stack,
-  Text,
-  Textarea,
-  Timeline,
-} from '@mantine/core';
+import { Badge, Button, Center, Stack, Text, Textarea, Timeline } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
@@ -21,176 +14,56 @@ import {
   IconLock,
   IconMessage,
   IconRefresh,
+  IconRestore,
   IconSearch,
+  IconUserCheck,
+  IconUserMinus,
 } from '@tabler/icons-react';
-import DetailShell, {
-  DetailCard,
-  DetailTwoCol,
-} from '@/components/common/ui/DetailShell';
-import StatusBadge from '@/components/common/ui/StatusBadge';
-import { useTranslations } from '@/lib/i18n';
+import DetailShell, { DetailCard, DetailTwoCol } from '@/components/common/ui/DetailShell';
+import { DetailSkeleton } from '@/components/common/ui/Skeletons';
+import { formatDateTime } from '@/components/iam/timeFormat';
+import LoadError from '@/components/alerts/LoadError';
+import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import {
+  entityHref,
+  entityOf,
+  entityTypeLabel,
+  formatMetricValue,
+  formatMinutes,
+  inferModule,
+  metricLabel,
+  metricUnit,
+  moduleColor,
+  moduleLabel,
+  operatorSymbol,
+} from '@/components/alerts/alertCatalog';
+import { useAlertMeta } from '@/components/alerts/useAlertMeta';
+import { userLabel as resolveUserLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
+import type { IncidentDto, IncidentStatus } from '@/components/alerts/alertTypes';
+import {
+  INCIDENT_TRANSITIONS,
+  describeRowValue,
+  internalPath,
+  rowMode,
+  severityBadgeClass,
+  statusActionKey,
+  statusBadgeClass,
+  timelineEntries,
+  translateServerNotes,
+  type TimelineEntry,
+} from '@/components/alerts/incidentUi';
+import { useLocale, useTranslations } from '@/lib/i18n';
 
-interface IncidentNote {
-  userId: string;
-  userName: string;
-  content: string;
-  createdAt: string;
-}
-
-interface Incident {
-  _id: string;
-  ruleName: string;
-  ruleId: string;
-  alertEventId: string;
-  metric: string;
-  threshold: number;
-  actualValue: number;
-  severity: 'critical' | 'warning' | 'info';
-  status: 'open' | 'acknowledged' | 'investigating' | 'resolved' | 'closed';
-  assignedTo?: string;
-  notes: IncidentNote[];
-  firedAt: string;
-  acknowledgedAt?: string;
-  resolvedAt?: string;
-  closedAt?: string;
-  resolvedBy?: string;
-  metadata?: Record<string, unknown>;
-}
-
-const METRIC_LABELS: Record<string, string> = {
-  error_rate: 'Error Rate',
-  avg_latency_ms: 'Avg Latency',
-  p95_latency_ms: 'P95 Latency',
-  total_cost: 'Total Cost',
-  total_requests: 'Total Requests',
-  gpu_cache_usage: 'GPU Cache',
-  request_queue_depth: 'Queue Depth',
-  guardrail_fail_rate: 'Fail Rate',
-  guardrail_avg_latency_ms: 'Avg Latency',
-  guardrail_total_evaluations: 'Total Evals',
-  rag_avg_latency_ms: 'Avg Latency',
-  rag_total_queries: 'Total Queries',
-  rag_failed_documents: 'Failed Docs',
-  mcp_error_rate: 'Error Rate',
-  mcp_avg_latency_ms: 'Avg Latency',
-  mcp_total_requests: 'Total Requests',
-  evaluation_pass_rate: 'Pass Rate',
-  evaluation_avg_score: 'Avg Score',
-  analysis_pass_rate: 'Pass Rate',
-  analysis_avg_judge_score: 'Avg Judge Score',
-  analysis_avg_accuracy: 'Avg Accuracy',
-  redteam_attack_success_rate: 'Attack Success Rate',
-  redteam_resilience_score: 'Resilience Score',
-};
-
-const METRIC_UNITS: Record<string, string> = {
-  error_rate: '%',
-  avg_latency_ms: 'ms',
-  p95_latency_ms: 'ms',
-  total_cost: 'USD',
-  total_requests: '',
-  gpu_cache_usage: '%',
-  request_queue_depth: '',
-  guardrail_fail_rate: '%',
-  guardrail_avg_latency_ms: 'ms',
-  guardrail_total_evaluations: '',
-  rag_avg_latency_ms: 'ms',
-  rag_total_queries: '',
-  rag_failed_documents: '',
-  mcp_error_rate: '%',
-  mcp_avg_latency_ms: 'ms',
-  mcp_total_requests: '',
-  evaluation_pass_rate: '%',
-  evaluation_avg_score: '%',
-  analysis_pass_rate: '%',
-  analysis_avg_judge_score: '%',
-  analysis_avg_accuracy: '%',
-  redteam_attack_success_rate: '%',
-  redteam_resilience_score: '%',
-};
-
-const MODULE_LABELS: Record<string, string> = {
-  models: 'Model Hub',
-  inference: 'Model Monitoring',
-  guardrails: 'Guardrail',
-  rag: 'Knowledge Engine',
-  mcp: 'MCP Servers',
-  evaluation: 'Evaluation',
-  analysis: 'Analysis',
-  redteam: 'Red Team',
-};
-
-const SEVERITY_LABELS: Record<string, string> = {
-  critical: 'Critical',
-  warning: 'Warning',
-  info: 'Info',
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  open: 'Open',
-  acknowledged: 'Acknowledged',
-  investigating: 'Investigating',
-  resolved: 'Resolved',
-  closed: 'Closed',
-};
-
-const OPERATOR_SYMBOLS: Record<string, string> = {
-  gt: '>',
-  lt: '<',
-  gte: '≥',
-  lte: '≤',
-  eq: '=',
-};
-
-function inferModule(metric: string): string {
-  if (
-    ['error_rate', 'avg_latency_ms', 'p95_latency_ms', 'total_cost', 'total_requests'].includes(
-      metric,
-    )
-  )
-    return 'models';
-  if (['gpu_cache_usage', 'request_queue_depth'].includes(metric)) return 'inference';
-  if (metric.startsWith('guardrail_')) return 'guardrails';
-  if (metric.startsWith('rag_')) return 'rag';
-  if (metric.startsWith('mcp_')) return 'mcp';
-  if (metric.startsWith('evaluation_')) return 'evaluation';
-  if (metric.startsWith('analysis_')) return 'analysis';
-  if (metric.startsWith('redteam_')) return 'redteam';
-  return 'models';
-}
-
-function statusBadgeVariant(status: Incident['status']) {
-  switch (status) {
-    case 'open':
-      return 'err' as const;
-    case 'acknowledged':
-      return 'info' as const;
-    case 'investigating':
-      return 'paused' as const;
-    case 'resolved':
-      return 'ok' as const;
-    case 'closed':
-      return 'paused' as const;
-    default:
-      return 'info' as const;
-  }
-}
-
-function severityBadgeClass(severity: Incident['severity']): string {
-  switch (severity) {
-    case 'critical':
-      return 'ds-badge ds-badge-err';
-    case 'warning':
-      return 'ds-badge ds-badge-warn';
-    case 'info':
-      return 'ds-badge ds-badge-info';
-    default:
-      return 'ds-badge';
-  }
-}
-
-const STATUS_ICONS: Record<string, typeof IconAlertTriangle> = {
+const STATUS_ICONS: Record<IncidentStatus, typeof IconFlame> = {
   open: IconFlame,
+  acknowledged: IconEye,
+  investigating: IconSearch,
+  resolved: IconCheck,
+  closed: IconLock,
+};
+
+const ACTION_ICONS: Record<IncidentStatus, typeof IconFlame> = {
+  open: IconRestore,
   acknowledged: IconEye,
   investigating: IconSearch,
   resolved: IconCheck,
@@ -201,82 +74,96 @@ export default function IncidentDetailPage() {
   const params = useParams<{ incidentId: string }>();
   const router = useRouter();
   const t = useTranslations('incidents');
+  const ta = useTranslations('alerts');
+  const locale = useLocale();
   const incidentId = params?.incidentId;
+  const { catalog } = useAlertMeta();
+  const directory = useUserDirectory();
 
-  const [incident, setIncident] = useState<Incident | null>(null);
+  const [incident, setIncident] = useState<IncidentDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [noteContent, setNoteContent] = useState('');
   const [noteLoading, setNoteLoading] = useState(false);
-  const [statusActionInflight, setStatusActionInflight] = useState<string | null>(null);
+  const [inflight, setInflight] = useState<string | null>(null);
 
-  const fetchIncident = useCallback(
+  const controllerRef = useRef<AbortController | null>(null);
+  const load = useCallback(
     async (silent = false) => {
       if (!incidentId) return;
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
       if (silent) setRefreshing(true);
       else setLoading(true);
       try {
-        const res = await fetch(`/api/alerts/incidents/${incidentId}`, {
-          cache: 'no-store',
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.error || 'Failed to load incident');
+        const res = await fetch(`/api/alerts/incidents/${encodeURIComponent(incidentId)}`, { cache: 'no-store', signal: controller.signal });
+        if (res.status === 404) {
+          setNotFound(true);
+          setIncident(null);
+          return;
         }
-        const data = await res.json();
+        if (!res.ok) throw new Error(await readApiError(res, t('loadError')));
+        const data = (await res.json()) as { incident: IncidentDto };
         setIncident(data.incident);
+        setNotFound(false);
+        setError(null);
       } catch (err) {
-        notifications.show({
-          color: 'red',
-          title: t('error'),
-          message: err instanceof Error ? err.message : t('error'),
-        });
+        if (isAbortError(err) || controller.signal.aborted) return;
+        setError(err instanceof Error ? err.message : t('loadError'));
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [incidentId, t],
   );
 
   useEffect(() => {
-    void fetchIncident();
-  }, [fetchIncident]);
+    void load();
+    return () => controllerRef.current?.abort();
+  }, [load]);
 
-  const handleStatusChange = async (newStatus: string) => {
+  const patchIncident = async (body: Record<string, unknown>, key: string, failure: string) => {
     if (!incident) return;
-    setStatusActionInflight(newStatus);
+    setInflight(key);
     try {
       const res = await fetch(`/api/alerts/incidents/${incident._id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(data?.error || 'Failed to update status');
-      }
-      const data = await res.json();
+      if (!res.ok) throw new Error(await readApiError(res, failure));
+      const data = (await res.json()) as { incident: IncidentDto };
       setIncident(data.incident);
-      notifications.show({
-        color: 'teal',
-        title: t('statusUpdated'),
-        message: t('statusUpdatedMessage', {
-          status: STATUS_LABELS[newStatus] || newStatus,
-        }),
-      });
+      return data.incident;
     } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: t('error'),
-        message: err instanceof Error ? err.message : t('statusUpdateError'),
-      });
+      notifications.show({ color: 'red', title: t('error'), message: err instanceof Error ? err.message : failure });
     } finally {
-      setStatusActionInflight(null);
+      setInflight(null);
+    }
+    return undefined;
+  };
+
+  const changeStatus = async (status: IncidentStatus) => {
+    const updated = await patchIncident({ status }, status, t('statusUpdateError'));
+    if (updated) {
+      notifications.show({ color: 'teal', title: t('statusUpdated'), message: t('statusUpdatedMessage', { status: t(`status.${status}`) }) });
     }
   };
 
-  const handleAddNote = async () => {
+  const assign = async (assignee: 'me' | null) => {
+    const updated = await patchIncident({ assignedTo: assignee }, 'assign', t('assignError'));
+    if (updated) {
+      notifications.show({ color: 'teal', title: t('assignUpdated'), message: assignee ? t('assignedToYou') : t('unassigned') });
+    }
+  };
+
+  const addNote = async () => {
     if (!incident || !noteContent.trim()) return;
     setNoteLoading(true);
     try {
@@ -285,269 +172,310 @@ export default function IncidentDetailPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: noteContent }),
       });
-      if (!res.ok) throw new Error('Failed to add note');
-      const data = await res.json();
+      if (!res.ok) throw new Error(await readApiError(res, t('noteError')));
+      const data = (await res.json()) as { incident: IncidentDto };
       setIncident(data.incident);
       setNoteContent('');
-      notifications.show({
-        color: 'teal',
-        title: t('noteAdded'),
-        message: t('noteAddedMessage'),
-      });
+      notifications.show({ color: 'teal', title: t('noteAdded'), message: t('noteAddedMessage') });
     } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: t('error'),
-        message: err instanceof Error ? err.message : t('noteError'),
-      });
+      notifications.show({ color: 'red', title: t('error'), message: err instanceof Error ? err.message : t('noteError') });
     } finally {
       setNoteLoading(false);
     }
   };
 
-  if (loading) {
-    return (
-      <Center py="xl">
-        <Loader size="md" />
-      </Center>
-    );
-  }
+  if (loading) return <DetailSkeleton tabs={0} actions={2} />;
 
-  if (!incident) {
+  if (notFound || !incident) {
     return (
       <Center py="xl">
         <Stack gap="sm" align="center">
-          <Text c="dimmed">{t('notFound') || 'Incident not found'}</Text>
-          <Button
-            leftSection={<IconArrowLeft size={16} />}
-            onClick={() => router.push('/dashboard/alerts/incidents')}
-          >
-            {t('backToIncidents') || 'Back to incidents'}
+          {error ? <LoadError message={error} onRetry={() => void load()} /> : <Text c="dimmed">{t('notFound')}</Text>}
+          <Button leftSection={<IconArrowLeft size={16} />} onClick={() => router.push('/dashboard/alerts/incidents')}>
+            {t('backToIncidents')}
           </Button>
         </Stack>
       </Center>
     );
   }
 
-  const mod = inferModule(incident.metric);
-  const scope = incident.metadata?.scope as Record<string, string> | undefined;
+  const moduleId = inferModule(catalog, incident.metric, incident.module);
+  const unit = metricUnit(catalog, incident.metric);
+  const label = metricLabel(catalog, incident.metric, ta);
+  const entity = entityOf(incident);
+  const entityLink = entity ? entityHref(entity.type, entity.key) : null;
   const operator = incident.metadata?.operator as string | undefined;
-  const windowMin = incident.metadata?.windowMinutes as number | undefined;
+  const windowMinutes = (incident.context?.windowMinutes ?? (incident.metadata?.windowMinutes as number | undefined)) || undefined;
   const sampleCount = incident.metadata?.sampleCount as number | undefined;
+  const mode = rowMode(incident);
   const StatusIcon = STATUS_ICONS[incident.status] ?? IconAlertTriangle;
-  const closed = incident.status === 'resolved' || incident.status === 'closed';
-  const metricLabel = METRIC_LABELS[incident.metric] ?? incident.metric;
-  const metricUnit = METRIC_UNITS[incident.metric] ?? '';
+  const lastValue = incident.lastValue ?? incident.actualValue;
+  const { value: valueText, compare: compareText } = describeRowValue(incident, catalog, ta, locale);
+  // An absence incident stores a request count, not a metric value: its peak and latest value are counts too.
+  const formatStored = (value: number | null | undefined) => formatMetricValue(value, mode === 'absence' ? '' : unit, locale);
+
+  const userLabel = (id: string | null | undefined): string => resolveUserLabel(id, directory, { you: t('you'), system: t('system') });
+
+  const entityChip = entity ? (
+    entityLink ? (
+      <Link href={entityLink} style={{ textDecoration: 'none' }}>
+        <span className="ds-badge ds-badge-info">
+          <span className="ds-mono">{entity.key}</span>
+        </span>
+      </Link>
+    ) : (
+      <span className="ds-badge">
+        <span className="ds-mono">{entity.key}</span>
+      </span>
+    )
+  ) : null;
 
   const actions = (
     <>
-      <Button
-        variant="default"
-        size="sm"
-        leftSection={<IconRefresh size={14} stroke={1.7} />}
-        loading={refreshing}
-        onClick={() => void fetchIncident(true)}
-      >
-        Refresh
+      <Button variant="default" size="sm" leftSection={<IconRefresh size={14} stroke={1.7} />} loading={refreshing} onClick={() => void load(true)}>
+        {t('refresh')}
       </Button>
-      {!closed ? (
-        <>
-          {incident.status === 'open' ? (
-            <Button
-              variant="default"
-              size="sm"
-              color="blue"
-              leftSection={<IconEye size={13} stroke={1.7} />}
-              loading={statusActionInflight === 'acknowledged'}
-              onClick={() => void handleStatusChange('acknowledged')}
-            >
-              {t('acknowledge')}
-            </Button>
-          ) : null}
-          {incident.status === 'open' || incident.status === 'acknowledged' ? (
-            <Button
-              variant="default"
-              size="sm"
-              color="violet"
-              leftSection={<IconSearch size={13} stroke={1.7} />}
-              loading={statusActionInflight === 'investigating'}
-              onClick={() => void handleStatusChange('investigating')}
-            >
-              {t('investigate')}
-            </Button>
-          ) : null}
+      {INCIDENT_TRANSITIONS[incident.status].map((status) => {
+        const Icon = ACTION_ICONS[status];
+        const primary = status === 'resolved';
+        return (
           <Button
-            color="teal"
+            key={status}
             size="sm"
-            leftSection={<IconCheck size={13} stroke={1.7} />}
-            loading={statusActionInflight === 'resolved'}
-            onClick={() => void handleStatusChange('resolved')}
+            color={primary ? 'teal' : undefined}
+            variant={primary ? 'filled' : 'default'}
+            leftSection={<Icon size={13} stroke={1.7} />}
+            loading={inflight === status}
+            disabled={inflight !== null && inflight !== status}
+            onClick={() => void changeStatus(status)}
           >
-            {t('resolve')}
+            {t(statusActionKey(status, incident.status))}
           </Button>
-          <Button
-            variant="default"
-            size="sm"
-            leftSection={<IconLock size={13} stroke={1.7} />}
-            loading={statusActionInflight === 'closed'}
-            onClick={() => void handleStatusChange('closed')}
-          >
-            {t('close')}
-          </Button>
-        </>
-      ) : null}
+        );
+      })}
+      {incident.assignedTo ? (
+        <Button variant="default" size="sm" leftSection={<IconUserMinus size={13} stroke={1.7} />} loading={inflight === 'assign'} onClick={() => void assign(null)}>
+          {t('unassign')}
+        </Button>
+      ) : (
+        <Button variant="default" size="sm" leftSection={<IconUserCheck size={13} stroke={1.7} />} loading={inflight === 'assign'} onClick={() => void assign('me')}>
+          {t('assignToMe')}
+        </Button>
+      )}
     </>
   );
+
+  const correlations = incident.context?.correlations ?? [];
+  const signatures = incident.context?.errorSignatures ?? [];
+  const failing = incident.context?.failingSessions ?? null;
+  const failingPath = internalPath(failing?.listPath);
+  const versionChange = incident.context?.versionChange ?? null;
+  const contextNotes = translateServerNotes(incident.context?.notes, ta, locale === 'en');
+  const hasContext = Boolean(versionChange || signatures.length || failing || correlations.length || contextNotes.length);
+
+  const entries = timelineEntries(incident);
+  const rulePath = `/dashboard/alerts?edit=${encodeURIComponent(incident.ruleId)}`;
+  const relatedPath = `/dashboard/alerts/incidents?ruleId=${encodeURIComponent(incident.ruleId)}${entity ? `&entityKey=${encodeURIComponent(entity.key)}` : ''}&status=all`;
 
   return (
     <DetailShell
       backHref="/dashboard/alerts/incidents"
-      backLabel={t('backToIncidents') || 'Back to incidents'}
+      backLabel={t('backToIncidents')}
       icon={
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 10,
-            background: 'var(--ds-accent-soft)',
-            color: 'var(--ds-accent)',
-            display: 'grid',
-            placeItems: 'center',
-          }}
-        >
+        <div style={{ width: 48, height: 48, borderRadius: 10, background: 'var(--ds-accent-soft)', color: 'var(--ds-accent)', display: 'grid', placeItems: 'center' }}>
           <StatusIcon size={22} stroke={1.7} />
         </div>
       }
       title={
         <>
-          <h1
-            className="ds-h2"
-            style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: 540, overflow: 'hidden', textOverflow: 'ellipsis' }}
-          >
+          <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap', maxWidth: 540, overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {incident.ruleName}
           </h1>
-          <StatusBadge
-            status={statusBadgeVariant(incident.status)}
-            label={STATUS_LABELS[incident.status] ?? incident.status}
-          />
-          <span className={severityBadgeClass(incident.severity)}>
-            {SEVERITY_LABELS[incident.severity] ?? incident.severity}
-          </span>
-          <span className="ds-badge ds-badge-info">{MODULE_LABELS[mod] ?? mod}</span>
+          <span className={statusBadgeClass(incident.status)}>{t(`status.${incident.status}`)}</span>
+          <span className={severityBadgeClass(incident.severity)}>{t(`severity.${incident.severity}`)}</span>
+          <Badge size="sm" variant="light" color={moduleColor(moduleId)}>
+            {moduleLabel(moduleId, ta)}
+          </Badge>
+          {incident.autoResolved ? <span className="ds-badge ds-badge-teal">{t('autoResolved')}</span> : null}
         </>
       }
       meta={
         <>
-          <span className="ds-mono">{metricLabel}</span>
+          <span className="ds-mono">{label}</span>
+          {entityChip ? (
+            <>
+              <span className="ds-faint">·</span>
+              {entityChip}
+            </>
+          ) : null}
           <span className="ds-faint">·</span>
-          <span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>
-            {Number(incident.actualValue).toFixed(2)}
-            {metricUnit}
-          </span>
-          <span className="ds-faint">vs</span>
-          <span className="ds-mono">
-            {OPERATOR_SYMBOLS[operator ?? 'gt'] ?? '>'} {incident.threshold}
-            {metricUnit}
-          </span>
+          <span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>{valueText}</span>
+          {compareText ? <span className="ds-faint">{compareText}</span> : null}
           <span className="ds-faint">·</span>
-          <span>Fired {new Date(incident.firedAt).toLocaleString()}</span>
+          <span>{t('firedOn', { time: formatDateTime(incident.firedAt, locale) })}</span>
         </>
       }
       actions={actions}
     >
+      {error ? (
+        <div style={{ marginBottom: 12 }}>
+          <LoadError message={error} onRetry={() => void load(true)} />
+        </div>
+      ) : null}
       <DetailTwoCol narrowAside>
         <Stack gap="md">
-          <DetailCard title="Detection">
+          <DetailCard title={t('detection')}>
             <div className="ds-tbl-wrap">
               <table className="ds-tbl">
                 <tbody>
-                  <DetailRow label={t('metric')} value={metricLabel} />
-                  <DetailRow
-                    label={t('actualValue')}
-                    value={
-                      <span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>
-                        {Number(incident.actualValue).toFixed(2)}
-                        {metricUnit}
-                      </span>
-                    }
-                  />
-                  <DetailRow
-                    label={t('condition')}
-                    value={
-                      <span className="ds-mono">
-                        {OPERATOR_SYMBOLS[operator ?? 'gt'] ?? '>'} {incident.threshold}
-                        {metricUnit}
-                      </span>
-                    }
-                  />
-                  {windowMin ? (
-                    <DetailRow label={t('window')} value={`${windowMin} min`} />
+                  <DetailRow label={t('metric')} value={label} />
+                  <DetailRow label={t('detectionMode')} value={ta(`mode.${mode}`)} />
+                  {entity ? (
+                    <DetailRow label={entityTypeLabel(entity.type, ta) === '—' ? t('entity') : entityTypeLabel(entity.type, ta)} value={entityChip} />
                   ) : null}
-                  {sampleCount != null ? (
-                    <DetailRow label={t('samples')} value={String(sampleCount)} />
+                  <DetailRow label={t('actualValue')} value={<span style={{ color: 'var(--ds-warn)', fontWeight: 600 }}>{valueText}</span>} />
+                  {incident.peakValue != null ? <DetailRow label={t('peakValue')} value={formatStored(incident.peakValue)} /> : null}
+                  {incident.lastValue != null && incident.lastValue !== incident.actualValue ? (
+                    <DetailRow label={t('lastValue')} value={formatStored(lastValue)} />
                   ) : null}
-                  {scope?.modelKey ? (
-                    <DetailRow label={t('model')} value={scope.modelKey} mono />
+                  {incident.baselineValue != null ? (
+                    <DetailRow label={t('baselineValue')} value={formatStored(incident.baselineValue)} />
                   ) : null}
-                  {scope?.serverKey ? (
-                    <DetailRow label={t('server')} value={scope.serverKey} mono />
+                  {mode === 'threshold' ? (
+                    <DetailRow
+                      label={t('condition')}
+                      value={
+                        <span className="ds-mono">
+                          {operatorSymbol(operator)} {formatMetricValue(incident.threshold, unit, locale)}
+                        </span>
+                      }
+                    />
                   ) : null}
-                  {scope?.guardrailKey ? (
-                    <DetailRow label={t('guardrail')} value={scope.guardrailKey} mono />
-                  ) : null}
-                  {scope?.ragModuleKey ? (
-                    <DetailRow label={t('ragModule')} value={scope.ragModuleKey} mono />
-                  ) : null}
+                  {windowMinutes ? <DetailRow label={t('window')} value={formatMinutes(windowMinutes, ta)} /> : null}
+                  {sampleCount != null ? <DetailRow label={t('samples')} value={String(sampleCount)} /> : null}
                 </tbody>
               </table>
             </div>
           </DetailCard>
 
-          <DetailCard title={t('notesTitle')}>
-            {incident.notes.length === 0 ? (
+          <DetailCard title={t('contextTitle')} description={t('contextDescription')}>
+            {!hasContext ? (
               <Text size="sm" c="dimmed">
-                {t('noNotes')}
+                {t('noContext')}
               </Text>
             ) : (
-              <Timeline
-                active={incident.notes.length - 1}
-                bulletSize={24}
-                lineWidth={2}
-              >
-                {incident.notes.map((note, idx) => (
-                  <Timeline.Item
-                    key={idx}
-                    bullet={<IconMessage size={12} />}
-                    title={note.userName}
-                  >
-                    <Text size="xs" c="dimmed">
-                      {new Date(note.createdAt).toLocaleString()}
+              <Stack gap="md">
+                {versionChange ? (
+                  <ContextBlock title={t('versionChange')}>
+                    <Text size="sm">
+                      <span className="ds-mono">{versionChange.from ?? t('versionNone')}</span> → <span className="ds-mono">{versionChange.to ?? t('versionNone')}</span>
                     </Text>
-                    <Text size="sm" mt={4}>
-                      {note.content}
-                    </Text>
-                  </Timeline.Item>
-                ))}
-              </Timeline>
+                  </ContextBlock>
+                ) : null}
+                {signatures.length > 0 ? (
+                  <ContextBlock title={t('errorSignatures')}>
+                    <Stack gap={6}>
+                      {signatures.map((signature) => (
+                        <div key={signature.message} className="ds-row-between" style={{ gap: 12, alignItems: 'flex-start' }}>
+                          <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-word' }}>
+                            {signature.message}
+                          </Text>
+                          <span className="ds-badge">{t('occurrences', { count: signature.count })}</span>
+                        </div>
+                      ))}
+                    </Stack>
+                  </ContextBlock>
+                ) : null}
+                {failing ? (
+                  <ContextBlock title={t('failingSessions')}>
+                    {failingPath ? (
+                      <Link href={failingPath}>{t('failingSessionsLink', { count: failing.count })}</Link>
+                    ) : (
+                      <Text size="sm">{t('failingSessionsCount', { count: failing.count })}</Text>
+                    )}
+                  </ContextBlock>
+                ) : null}
+                {correlations.length > 0 ? (
+                  <ContextBlock title={t('correlations')}>
+                    <div className="ds-tbl-wrap">
+                      <table className="ds-tbl">
+                        <thead>
+                          <tr>
+                            <th>{t('correlationEntity')}</th>
+                            <th>{t('metric')}</th>
+                            <th style={{ textAlign: 'right' }}>{t('actualValue')}</th>
+                            <th style={{ textAlign: 'right' }}>{t('baselineValue')}</th>
+                            <th style={{ textAlign: 'right' }}>{t('ratio')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {correlations.map((entry) => {
+                            const href = entityHref(entry.entityType, entry.entityKey);
+                            const entryUnit = metricUnit(catalog, entry.metric);
+                            return (
+                              <tr key={`${entry.entityType}:${entry.entityKey}:${entry.metric}`}>
+                                <td>
+                                  <span className="ds-mono">{href ? <Link href={href}>{entry.entityKey}</Link> : entry.entityKey}</span>
+                                  <div className="ds-faint" style={{ fontSize: 11 }}>
+                                    {entityTypeLabel(entry.entityType, ta)}
+                                  </div>
+                                </td>
+                                <td>{metricLabel(catalog, entry.metric, ta)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatMetricValue(entry.value, entryUnit, locale)}</td>
+                                <td style={{ textAlign: 'right' }}>{formatMetricValue(entry.baseline, entryUnit, locale)}</td>
+                                <td style={{ textAlign: 'right' }}>{entry.ratio == null ? '—' : `${entry.ratio.toFixed(1)}×`}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </ContextBlock>
+                ) : null}
+                {contextNotes.length > 0 ? (
+                  <ContextBlock title={t('contextNotes')}>
+                    <Stack gap={4}>
+                      {contextNotes.map((note) => (
+                        <Text key={note} size="sm">
+                          {note}
+                        </Text>
+                      ))}
+                    </Stack>
+                  </ContextBlock>
+                ) : null}
+              </Stack>
             )}
+          </DetailCard>
+
+          <DetailCard title={t('activity')}>
+            <Timeline active={entries.length - 1} bulletSize={24} lineWidth={2}>
+              {entries.map((entry, index) => (
+                <Timeline.Item key={`${entry.kind}-${entry.at}-${index}`} bullet={<TimelineBullet entry={entry} />} title={timelineTitle(entry, t, userLabel)}>
+                  <Text size="xs" c="dimmed">
+                    {formatDateTime(entry.at, locale)}
+                  </Text>
+                  {entry.content ? (
+                    <Text size="sm" mt={4} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {entry.content}
+                    </Text>
+                  ) : null}
+                </Timeline.Item>
+              ))}
+            </Timeline>
 
             <Stack gap="xs" mt="md">
               <Textarea
+                aria-label={t('addNote')}
                 placeholder={t('addNotePlaceholder')}
                 value={noteContent}
-                onChange={(e) => setNoteContent(e.currentTarget.value)}
+                maxLength={4000}
+                onChange={(event) => setNoteContent(event.currentTarget.value)}
                 minRows={2}
                 maxRows={6}
+                autosize
               />
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <Button
-                  color="teal"
-                  size="sm"
-                  leftSection={<IconMessage size={13} stroke={1.7} />}
-                  onClick={() => void handleAddNote()}
-                  loading={noteLoading}
-                  disabled={!noteContent.trim()}
-                >
+                <Button color="teal" size="sm" leftSection={<IconMessage size={13} stroke={1.7} />} onClick={() => void addNote()} loading={noteLoading} disabled={!noteContent.trim()}>
                   {t('addNote')}
                 </Button>
               </div>
@@ -556,77 +484,19 @@ export default function IncidentDetailPage() {
         </Stack>
 
         <Stack gap="md">
-          <DetailCard title={t('timeline')}>
-            <Stack gap={6}>
-              <TimelineRow
-                label={t('firedAt')}
-                value={new Date(incident.firedAt).toLocaleString()}
-              />
-              {incident.acknowledgedAt ? (
-                <TimelineRow
-                  label={t('acknowledgedAt')}
-                  value={new Date(incident.acknowledgedAt).toLocaleString()}
-                />
-              ) : null}
-              {incident.resolvedAt ? (
-                <TimelineRow
-                  label={t('resolvedAt')}
-                  value={
-                    <>
-                      {new Date(incident.resolvedAt).toLocaleString()}
-                      {incident.resolvedBy ? (
-                        <span className="ds-faint"> · by {incident.resolvedBy}</span>
-                      ) : null}
-                    </>
-                  }
-                />
-              ) : null}
-              {incident.closedAt ? (
-                <TimelineRow
-                  label={t('closedAt')}
-                  value={new Date(incident.closedAt).toLocaleString()}
-                />
-              ) : null}
+          <DetailCard title={t('linksTitle')}>
+            <Stack gap={8}>
+              <Link href={rulePath}>{t('openRule')}</Link>
+              {entityLink ? <Link href={entityLink}>{t('openEntityHealth')}</Link> : null}
+              <Link href={relatedPath}>{t('relatedIncidents')}</Link>
             </Stack>
           </DetailCard>
 
-          <DetailCard title="Identifiers">
-            <div
-              className="ds-row-between"
-              style={{ padding: '6px 0', fontSize: 12.5 }}
-            >
-              <span className="ds-muted">Incident ID</span>
-              <span className="ds-mono" style={{ fontSize: 11.5 }}>
-                {incident._id.slice(0, 12)}…
-              </span>
-            </div>
-            <div
-              className="ds-row-between"
-              style={{ padding: '6px 0', fontSize: 12.5 }}
-            >
-              <span className="ds-muted">Rule ID</span>
-              <span className="ds-mono" style={{ fontSize: 11.5 }}>
-                {incident.ruleId.slice(0, 12)}…
-              </span>
-            </div>
-            <div
-              className="ds-row-between"
-              style={{ padding: '6px 0', fontSize: 12.5 }}
-            >
-              <span className="ds-muted">Event ID</span>
-              <span className="ds-mono" style={{ fontSize: 11.5 }}>
-                {incident.alertEventId.slice(0, 12)}…
-              </span>
-            </div>
-            {incident.assignedTo ? (
-              <div
-                className="ds-row-between"
-                style={{ padding: '6px 0', fontSize: 12.5 }}
-              >
-                <span className="ds-muted">Assigned to</span>
-                <span>{incident.assignedTo}</span>
-              </div>
-            ) : null}
+          <DetailCard title={t('identifiers')}>
+            <KeyValue label={t('incidentId')} value={<span className="ds-mono">{incident._id.slice(0, 12)}…</span>} />
+            <KeyValue label={t('ruleId')} value={<span className="ds-mono">{incident.ruleId.slice(0, 12)}…</span>} />
+            <KeyValue label={t('eventId')} value={<span className="ds-mono">{incident.alertEventId.slice(0, 12)}…</span>} />
+            <KeyValue label={t('assignedTo')} value={incident.assignedTo ? userLabel(incident.assignedTo) : t('unassignedLabel')} />
           </DetailCard>
         </Stack>
       </DetailTwoCol>
@@ -634,15 +504,57 @@ export default function IncidentDetailPage() {
   );
 }
 
-function DetailRow({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-}) {
+function timelineTitle(entry: TimelineEntry, t: (key: string, values?: Record<string, string | number>) => string, userLabel: (id: string | null | undefined) => string): string {
+  switch (entry.kind) {
+    case 'fired':
+      return t('timelineFired');
+    case 'acknowledged':
+      return entry.by ? t('timelineAcknowledgedBy', { user: userLabel(entry.by) }) : t('timelineAcknowledged');
+    case 'resolved':
+      return entry.system ? t('timelineResolvedBySystem') : entry.by ? t('timelineResolvedBy', { user: userLabel(entry.by) }) : t('timelineResolved');
+    case 'closed':
+      return t('timelineClosed');
+    default:
+      return entry.by ?? t('timelineNote');
+  }
+}
+
+function TimelineBullet({ entry }: { entry: TimelineEntry }) {
+  switch (entry.kind) {
+    case 'fired':
+      return <IconFlame size={12} />;
+    case 'acknowledged':
+      return <IconEye size={12} />;
+    case 'resolved':
+      return <IconCheck size={12} />;
+    case 'closed':
+      return <IconLock size={12} />;
+    default:
+      return <IconMessage size={12} />;
+  }
+}
+
+function ContextBlock({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="ds-eyebrow" style={{ fontSize: 10.5, marginBottom: 6 }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function KeyValue({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="ds-row-between" style={{ padding: '6px 0', fontSize: 12.5 }}>
+      <span className="ds-muted">{label}</span>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <tr>
       <td style={{ width: '40%', verticalAlign: 'top' }}>
@@ -651,30 +563,8 @@ function DetailRow({
         </span>
       </td>
       <td style={{ verticalAlign: 'top' }}>
-        <span
-          className={mono ? 'ds-mono' : undefined}
-          style={{ fontSize: 12.5, wordBreak: 'break-word' }}
-        >
-          {value}
-        </span>
+        <span style={{ fontSize: 12.5, wordBreak: 'break-word' }}>{value}</span>
       </td>
     </tr>
-  );
-}
-
-function TimelineRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <span className="ds-eyebrow" style={{ fontSize: 10.5 }}>
-        {label}
-      </span>
-      <span style={{ fontSize: 12.5 }}>{value}</span>
-    </div>
   );
 }

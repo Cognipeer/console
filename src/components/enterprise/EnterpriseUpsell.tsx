@@ -27,6 +27,7 @@ const MODULE_LABELS: Record<string, string> = {
   sso: 'Single Sign-On (OIDC)',
   ldap: 'LDAP Directory',
   portals: 'Portals',
+  health: 'Entity Health',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {

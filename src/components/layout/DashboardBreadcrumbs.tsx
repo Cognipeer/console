@@ -22,6 +22,12 @@ const SEGMENT_KEYS: Record<string, string> = {
   iam: 'iam',
   overview: 'overview',
   tracing: 'tracing',
+  health: 'health',
+  // Entity health detail pages: /dashboard/tracing/health/<type>/<entity key>
+  agent: 'healthAgent',
+  model: 'healthModel',
+  kb: 'healthKb',
+  tool: 'healthTool',
   models: 'models',
   sessions: 'sessions',
   threads: 'threads',

@@ -32,6 +32,7 @@ import {
   ActivityListSkeleton,
   PinnedServicesSkeleton,
 } from '@/components/dashboard/OverviewSkeletons';
+import ActiveIncidentsCard from '@/components/alerts/ActiveIncidentsCard';
 import { QuickStart } from '@/components/dashboard/QuickStart';
 import { quickStartTiles } from '@/components/dashboard/quickStartModel';
 import {
@@ -411,6 +412,13 @@ export default function DashboardOverviewPage() {
               </Group>
             </UnstyledButton>
           </div>
+        </div>
+      ) : null}
+
+      {/* Open incidents (alerts service) */}
+      {canOpen('alerts') ? (
+        <div style={{ marginBottom: 16 }}>
+          <ActiveIncidentsCard limit={5} />
         </div>
       ) : null}
 

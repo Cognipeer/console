@@ -41,7 +41,7 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import duration from 'dayjs/plugin/duration';
 import DetailShell from '@/components/common/ui/DetailShell';
-import StatusBadge from '@/components/common/ui/StatusBadge';
+import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
 import {
   formatDuration,
   formatNumber,
@@ -54,7 +54,6 @@ import {
   formatActor,
   formatSectionContent,
   shouldDisplaySectionField,
-  statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
@@ -561,7 +560,7 @@ export default function ThreadDetailPage({
           >
             Thread {threadId.substring(0, 16)}{threadId.length > 16 ? '...' : ''}
           </h1>
-          <StatusBadge status={statusVariant(thread.status)} label={thread.status.toUpperCase()} />
+          <SessionStatusBadge status={thread.status} />
           <span className="ds-badge ds-badge-info">
             {thread.sessionsCount} sessions
           </span>

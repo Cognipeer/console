@@ -1,5 +1,6 @@
 import { accountPageEn } from './accountPage.en';
 import { alertsEn, incidentsEn } from './alerts.en';
+import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
 import { healthDigestEn } from './healthDigest.en';
@@ -276,6 +277,8 @@ export const en = {
     promptsDescription: 'Templates and reusable instructions',
     agentTracing: 'Agent Observability',
     agentTracingDescription: 'Monitor sessions and runs',
+    entityHealth: 'Health',
+    entityHealthDescription: 'Health of agents, models, knowledge bases, MCP servers and tools',
     vector: 'Knowledge Index',
     vectorDescription: 'Vector stores and embeddings',
     files: 'Document Store',
@@ -422,6 +425,11 @@ export const en = {
     dashboard: 'Dashboard',
     overview: 'Overview',
     tracing: 'Agent Observability',
+    health: 'Health',
+    healthAgent: 'Agents',
+    healthModel: 'Models',
+    healthKb: 'Knowledge bases',
+    healthTool: 'Tools',
     models: 'Model Hub',
     vector: 'Knowledge Index',
     prompts: 'Prompt Studio',
@@ -3916,6 +3924,7 @@ export const en = {
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,
   healthDigest: healthDigestEn,
+  analyticsDashboards: analyticsDashboardsEn,
   memory: {
     title: 'Agent Memory',
     subtitle: 'Persistent memory with vector-backed semantic search',

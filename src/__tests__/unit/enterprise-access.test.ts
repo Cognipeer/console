@@ -48,6 +48,18 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/portalish/foo')).toBeNull();
   });
 
+  it('gates the entity health API, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/entity-health')).toBe('health');
+    expect(getEnterpriseModuleForPath('/api/entity-health/summary')).toBe('health');
+    expect(getEnterpriseModuleForPath('/api/entity-health/digests/config')).toBe('health');
+    // The community tracing health reads (agents list and detail) stay on the tracing surface.
+    expect(getEnterpriseModuleForPath('/api/tracing/agents/health')).toBeNull();
+    expect(getEnterpriseModuleForPath('/api/tracing/agents/pulse/health')).toBeNull();
+    expect(getEnterpriseModuleForPath('/api/entity-healthx')).toBeNull();
+    expect(checkEnterpriseApiAccess('/api/entity-health/summary', 'FREE')?.body.module).toBe('health');
+    expect(checkEnterpriseApiAccess('/api/entity-health/summary', 'ENTERPRISE')).toBeNull();
+  });
+
   it('does not gate community paths', () => {
     expect(getEnterpriseModuleForPath('/api/models')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/rag/documents')).toBeNull();

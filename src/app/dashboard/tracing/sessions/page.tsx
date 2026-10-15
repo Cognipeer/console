@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
   IconBook,
@@ -13,7 +13,13 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
-import StatusBadge from '@/components/common/ui/StatusBadge';
+import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
+import {
+  isTracingStatusFilterValue,
+  TRACING_STATUS_FILTER_VALUES,
+} from '@/components/tracing/sessionStatus';
+import { formatDateTime } from '@/components/iam/timeFormat';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import {
   formatDuration,
   formatNumber,
@@ -43,9 +49,26 @@ dayjs.extend(relativeTime);
 
 const DEFAULT_PAGE_SIZE = 25;
 
+/** A `from` / `to` URL value (an ISO instant or a date) as an ISO string, or '' when it is not a date. */
+function isoParam(value: string | null): string {
+  const raw = value?.trim();
+  if (!raw) return '';
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
+/** A `status` URL value the filter offers, else 'all'. */
+function statusParam(value: string | null): string {
+  const raw = value?.trim() ?? '';
+  return isTracingStatusFilterValue(raw) ? raw : 'all';
+}
+
 export default function TracingSessionsPage() {
   const router = useRouter();
+  const pathname = usePathname()!;
   const searchParams = useSearchParams()!;
+  const t = useTranslations('tracingHealth');
+  const locale = useLocale();
   const { openDocs } = useDocsDrawer();
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);
@@ -57,7 +80,11 @@ export default function TracingSessionsPage() {
   const [page, setPage] = useState(1);
   const [pageSize] = useState(DEFAULT_PAGE_SIZE);
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  // Status and time range come from the URL too: the health charts and agent list link here for an agent's
+  // failing sessions in a range.
+  const [statusFilter, setStatusFilter] = useState(() => statusParam(searchParams.get('status')));
+  const [fromFilter, setFromFilter] = useState(() => isoParam(searchParams.get('from')));
+  const [toFilter, setToFilter] = useState(() => isoParam(searchParams.get('to')));
   const [agentFilter, setAgentFilter] = useState(
     () => searchParams.get('agent')?.trim() || '',
   );
@@ -75,12 +102,28 @@ export default function TracingSessionsPage() {
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (agentFilter) params.set('agent', agentFilter.trim());
+    if (fromFilter) params.set('from', fromFilter);
+    if (toFilter) params.set('to', toFilter);
     if (metadataKey.trim() && metadataValue.trim()) {
       params.set('metadataKey', metadataKey.trim());
       params.set('metadataValue', metadataValue.trim());
     }
     return params;
-  }, [page, pageSize, query, statusFilter, agentFilter, metadataKey, metadataValue]);
+  }, [page, pageSize, query, statusFilter, agentFilter, fromFilter, toFilter, metadataKey, metadataValue]);
+
+  /** Writes (or removes) URL params without a navigation, so the filters stay shareable. */
+  const replaceUrlParams = useCallback(
+    (changes: Record<string, string | null>) => {
+      const next = new URLSearchParams(searchParams.toString());
+      for (const [key, value] of Object.entries(changes)) {
+        if (value) next.set(key, value);
+        else next.delete(key);
+      }
+      const qs = next.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
 
   const fetchSessions = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
@@ -121,6 +164,12 @@ export default function TracingSessionsPage() {
   useEffect(() => {
     const agentParam = searchParams.get('agent')?.trim() || '';
     setAgentFilter((current) => (current === agentParam ? current : agentParam));
+    const statusFromUrl = statusParam(searchParams.get('status'));
+    setStatusFilter((current) => (current === statusFromUrl ? current : statusFromUrl));
+    const fromFromUrl = isoParam(searchParams.get('from'));
+    setFromFilter((current) => (current === fromFromUrl ? current : fromFromUrl));
+    const toFromUrl = isoParam(searchParams.get('to'));
+    setToFilter((current) => (current === toFromUrl ? current : toFromUrl));
     const metadataKeyParam = searchParams.get('metadataKey')?.trim() || '';
     setMetadataKey((current) => (current === metadataKeyParam ? current : metadataKeyParam));
     const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
@@ -130,7 +179,7 @@ export default function TracingSessionsPage() {
   // Another search is another list: the pages of the last one no longer say where this one's start.
   useEffect(() => {
     skipTrail.current.reset();
-  }, [query, statusFilter, agentFilter, metadataKey, metadataValue]);
+  }, [query, statusFilter, agentFilter, fromFilter, toFilter, metadataKey, metadataValue]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -146,7 +195,7 @@ export default function TracingSessionsPage() {
   const columns: DataGridColumn<SessionRecord>[] = [
     {
       key: 'agent',
-      label: 'Agent',
+      label: t('sessionTable.agent'),
       render: (s) => (
         <Tooltip label={s.agentName || s.sessionId} withArrow>
           <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>
@@ -157,7 +206,7 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'session',
-      label: 'Session',
+      label: t('sessionTable.sessionId'),
       render: (s) => (
         <Tooltip label={s.sessionId} withArrow>
           <span className="ds-mono ds-muted" style={{ fontSize: 12 }}>
@@ -168,7 +217,7 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'thread',
-      label: 'Thread',
+      label: t('sessionTable.thread'),
       render: (s) =>
         s.threadId ? (
           <Tooltip label={s.threadId} withArrow>
@@ -199,25 +248,12 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'status',
-      label: 'Status',
-      render: (s) => (
-        <StatusBadge
-          status={
-            s.status === 'success'
-              ? 'ok'
-              : s.status === 'error'
-                ? 'err'
-                : s.status === 'running'
-                  ? 'info'
-                  : 'paused'
-          }
-          label={(s.status || 'unknown').toUpperCase()}
-        />
-      ),
+      label: t('sessionTable.status'),
+      render: (s) => <SessionStatusBadge status={s.status} />,
     },
     {
       key: 'started',
-      label: 'Started',
+      label: t('sessionTable.started'),
       render: (s) => (
         <span className="ds-faint" style={{ fontSize: 12.5 }}>
           {formatRelativeTime(s.startedAt)}
@@ -226,7 +262,7 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'duration',
-      label: 'Duration',
+      label: t('sessionTable.duration'),
       render: (s) => (
         <span className="ds-mono" style={{ fontSize: 12 }}>
           {formatDuration(s.durationMs)}
@@ -235,7 +271,7 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'events',
-      label: 'Events',
+      label: t('sessionTable.events'),
       align: 'right',
       render: (s) => (
         <span
@@ -248,7 +284,7 @@ export default function TracingSessionsPage() {
     },
     {
       key: 'tokens',
-      label: 'Tokens',
+      label: t('sessionTable.tokens'),
       align: 'right',
       render: (s) => (
         <span
@@ -264,9 +300,9 @@ export default function TracingSessionsPage() {
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Tracing"
-        title="Session Explorer"
-        subtitle="Inspect recent agent sessions, filter by agent or status, and drill into the execution timeline."
+        eyebrow={t('eyebrow')}
+        title={t('sessions.title')}
+        subtitle={t('sessions.subtitle')}
         actions={
           <Group gap="xs">
             <Button
@@ -281,7 +317,7 @@ export default function TracingSessionsPage() {
                 )
               }
             >
-              Create snapshot from traffic
+              {t('sessions.createSnapshot')}
             </Button>
             <Button
               variant="default"
@@ -289,7 +325,7 @@ export default function TracingSessionsPage() {
               leftSection={<IconBook size={14} stroke={1.7} />}
               onClick={() => openDocs('api-tracing')}
             >
-              Docs
+              {t('common.docs')}
             </Button>
           </Group>
         }
@@ -309,7 +345,7 @@ export default function TracingSessionsPage() {
             setQuery(v);
             setPage(1);
           },
-          placeholder: 'Search session ID or agent…',
+          placeholder: t('sessions.search'),
         }}
         filters={[
           {
@@ -317,22 +353,47 @@ export default function TracingSessionsPage() {
             onChange: (v) => {
               setStatusFilter(v);
               setPage(1);
+              replaceUrlParams({ status: v === 'all' ? null : v });
             },
-            ariaLabel: 'Filter by status',
-            width: 140,
+            ariaLabel: t('sessions.statusFilter'),
+            width: 150,
             options: [
-              { value: 'all', label: 'All statuses' },
-              { value: 'success', label: 'Success' },
-              { value: 'error', label: 'Error' },
-              { value: 'in_progress', label: 'In progress' },
+              { value: 'all', label: t('sessions.statusAll') },
+              ...TRACING_STATUS_FILTER_VALUES.map((value) => ({ value, label: t(`status.${value}`) })),
             ],
           },
         ]}
         toolbarRight={
           <Group gap={4} wrap="nowrap">
+            {fromFilter || toFilter ? (
+              <span className="ds-badge ds-row ds-gap-xs" data-testid="sessions-range-chip">
+                {fromFilter && toFilter
+                  ? t('sessions.rangeChip', { from: formatDateTime(fromFilter, locale), to: formatDateTime(toFilter, locale) })
+                  : fromFilter
+                    ? t('sessions.rangeFrom', { from: formatDateTime(fromFilter, locale) })
+                    : t('sessions.rangeTo', { to: formatDateTime(toFilter, locale) })}
+                <Tooltip label={t('sessions.clearRange')} withArrow>
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    aria-label={t('sessions.clearRange')}
+                    onClick={() => {
+                      setFromFilter('');
+                      setToFilter('');
+                      setPage(1);
+                      replaceUrlParams({ from: null, to: null });
+                    }}
+                  >
+                    <IconX size={12} />
+                  </ActionIcon>
+                </Tooltip>
+              </span>
+            ) : null}
             <TextInput
               size="xs"
-              placeholder="metadata key"
+              placeholder={t('sessions.metadataKey')}
+              aria-label={t('sessions.metadataKey')}
               value={metadataKey}
               onChange={(e) => {
                 setMetadataKey(e.currentTarget.value);
@@ -342,7 +403,8 @@ export default function TracingSessionsPage() {
             />
             <TextInput
               size="xs"
-              placeholder="value"
+              placeholder={t('sessions.metadataValue')}
+              aria-label={t('sessions.metadataValue')}
               value={metadataValue}
               onChange={(e) => {
                 setMetadataValue(e.currentTarget.value);
@@ -351,11 +413,12 @@ export default function TracingSessionsPage() {
               style={{ width: 130 }}
             />
             {(metadataKey || metadataValue) && (
-              <Tooltip label="Clear metadata filter" withArrow>
+              <Tooltip label={t('sessions.clearMetadata')} withArrow>
                 <ActionIcon
                   size="sm"
                   variant="subtle"
                   color="gray"
+                  aria-label={t('sessions.clearMetadata')}
                   onClick={() => {
                     setMetadataKey('');
                     setMetadataValue('');
@@ -371,13 +434,14 @@ export default function TracingSessionsPage() {
         onRefresh={() => void fetchSessions(true)}
         refreshing={refreshing}
         empty={{
-          title: 'No sessions found',
-          description:
-            'Tracing sessions will appear here once agents start running.',
+          title: t('sessionTable.emptyTitle'),
+          description: t('sessionTable.emptyDescription'),
         }}
         footerLeft={
           <Text size="xs" c="dimmed">
-            {moreAfter === null ? `${formatNumber(totalSessions)} total · Page ${page} of ${totalPages}` : `Page ${page}`}
+            {moreAfter === null
+              ? t('sessions.footerTotal', { total: formatNumber(totalSessions), page, pages: totalPages })
+              : t('sessions.footerPage', { page })}
           </Text>
         }
         pagination={{
@@ -390,7 +454,7 @@ export default function TracingSessionsPage() {
         rowActions={(s) => [
           {
             id: 'view',
-            label: 'View session',
+            label: t('sessions.viewSession'),
             icon: <IconEye size={14} />,
             onClick: () =>
               router.push(`/dashboard/tracing/sessions/${s.sessionId}`),

@@ -148,6 +148,12 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'portals',
     prefixes: ['/api/portals/', '/api/portal/'],
   },
+  {
+    // Entity Health: the health scoreboard of agents, models, knowledge bases, MCP servers and tools,
+    // its detail series and the health digests. The trailing slash also gates the bare collection path.
+    module: 'health',
+    prefixes: ['/api/entity-health/'],
+  },
 ];
 
 export interface EnterpriseDenial {

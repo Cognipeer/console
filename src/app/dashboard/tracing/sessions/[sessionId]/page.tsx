@@ -43,7 +43,7 @@ import {
     IconMaximize,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
-import StatusBadge from '@/components/common/ui/StatusBadge';
+import SessionStatusBadge from '@/components/tracing/SessionStatusBadge';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import {
@@ -58,7 +58,6 @@ import {
     formatActor,
     formatSectionContent,
     shouldDisplaySectionField,
-    statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
@@ -1317,7 +1316,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                     >
                         Session {session.sessionId.substring(0, 12)}...
                     </h1>
-                    <StatusBadge status={statusVariant(session.status)} label={(session.status || 'unknown').toUpperCase()} />
+                    <SessionStatusBadge status={session.status} />
                     {sourceBadge(session.source)}
                     {session.totalEvents != null ? (
                         <span className="ds-badge ds-badge-info">

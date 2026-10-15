@@ -398,9 +398,36 @@ const tracingAgentResolver: BreadcrumbResolver = {
   },
 };
 
+/**
+ * Entity health detail: `/dashboard/tracing/health/:type/:entityKey`. The entity key is shown exactly as
+ * it is (decoded once, never title-cased): `gpt-4o` stays `gpt-4o`. The type segment is translated by
+ * `SEGMENT_KEYS`.
+ */
+const entityHealthKeyResolver: BreadcrumbResolver = {
+  id: 'custom:entity-health-key',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'health'
+    ) return [];
+    const raw = segments[4];
+    if (!raw) return [];
+    let key = raw;
+    try {
+      key = decodeURIComponent(raw);
+    } catch {
+      // A key with a stray `%` stays as it is.
+    }
+    return [{ index: 4, label: key }];
+  },
+};
+
 const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   projectsResolver,
   tracingAgentResolver,
+  entityHealthKeyResolver,
   vectorIndexResolver,
   tracingSessionResolver,
   tracingThreadResolver,

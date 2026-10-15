@@ -51,7 +51,9 @@ for (const namespace of ['alerts', 'incidents', 'tracingHealth', 'entityHealth']
     });
 
     it('is actually translated (no key is left in English)', () => {
-      const untranslated = [...en].filter(([key, text]) => tr.get(key) === text && !SAME.test(text));
+      // A pure format string ('{label}: {value}') has no words to translate.
+      const hasWords = (text: string) => /\p{L}/u.test(text.replace(/\{\w+\}/g, ''));
+      const untranslated = [...en].filter(([key, text]) => tr.get(key) === text && !SAME.test(text) && hasWords(text));
       expect(untranslated.map(([key]) => key)).toEqual([]);
     });
 

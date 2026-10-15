@@ -4,18 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
+  Alert,
   Stack,
   Group,
   Text,
   Button,
-  Loader,
-  Center,
   Badge,
-  Table,
   Anchor,
   ThemeIcon,
 } from '@mantine/core';
+import { AreaChart } from '@mantine/charts';
 import {
+  IconAlertCircle,
   IconPlug,
   IconRefresh,
   IconActivity,
@@ -28,16 +28,17 @@ import {
   IconArrowUpRight,
   IconDatabase,
 } from '@tabler/icons-react';
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
 import SessionTable from '@/components/tracing/SessionTable';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
+import { CardSkeleton, StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import CollapsibleInfo from '@/components/layout/CollapsibleInfo';
+import { buildDailyTrendRows } from '@/components/tracing/health/dailyTrend';
+import { formatHealthCount } from '@/components/tracing/health/healthFormat';
 import {
   buildDashboardDateSearchParams,
-  defaultDashboardDateFilter,
+  dashboardDateFilterKey,
 } from '@/lib/utils/dashboardDateFilter';
 import {
   formatNumber,
@@ -46,23 +47,26 @@ import {
   resolveStatusColor,
   calcCacheHitRate,
 } from '@/lib/utils/tracingUtils';
-import { useTranslations } from '@/lib/i18n';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import type { AgentTracingAgentSummary, DashboardOverview } from '@/lib/services/agentTracing';
-
-dayjs.extend(relativeTime);
 
 type DashboardData = DashboardOverview;
 
 export default function AgentTracingPage() {
   const router = useRouter();
   const t = useTranslations('tracings');
+  const th = useTranslations('tracingHealth');
   const tNav = useTranslations('navigation');
+  const locale = useLocale();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(
     null,
   );
+  const [refreshKey, setRefreshKey] = useState(0);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
+  const filterKey = dashboardDateFilterKey(dateFilter);
 
   const timezone = useMemo(() => {
     try {
@@ -72,10 +76,11 @@ export default function AgentTracingPage() {
     }
   }, []);
 
-  const fetchDashboard = useCallback(async (isRefresh = false, signal?: AbortSignal) => {
+  const fetchDashboard = useCallback(async (signal: AbortSignal) => {
     try {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
+      // The first load shows skeletons; later ones (filter change, refresh) keep the page in place.
+      setRefreshing(true);
+      setError(null);
 
       const params = buildDashboardDateSearchParams(dateFilter);
       params.append('timezone', timezone);
@@ -83,31 +88,34 @@ export default function AgentTracingPage() {
       const response = await fetch(`/api/tracing/dashboard?${params}`, { signal });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = (await response.json().catch(() => ({}))) as { error?: unknown };
         console.error('Dashboard fetch error:', errorData);
-        throw new Error(errorData.error || 'Failed to fetch dashboard data');
+        throw new Error(typeof errorData.error === 'string' ? errorData.error : th('overview.loadError'));
       }
 
       const data = (await response.json()) as DashboardData;
-      setDashboardData(data);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      if (!signal.aborted) setDashboardData(data);
+    } catch (fetchError) {
+      if (signal.aborted || (fetchError instanceof DOMException && fetchError.name === 'AbortError')) {
         return;
       }
-      console.error('Error fetching dashboard:', error);
+      console.error('Error fetching dashboard:', fetchError);
+      setError(fetchError instanceof Error && fetchError.message ? fetchError.message : th('overview.loadError'));
     } finally {
-      if (!signal?.aborted) {
+      if (!signal.aborted) {
         setLoading(false);
         setRefreshing(false);
       }
     }
-  }, [dateFilter, timezone]);
+    // `filterKey` stands for `dateFilter`: the filter object is replaced on every URL change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, timezone, th]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void fetchDashboard(false, controller.signal);
+    void fetchDashboard(controller.signal);
     return () => controller.abort();
-  }, [fetchDashboard]);
+  }, [fetchDashboard, refreshKey]);
 
   const handleRowClick = (sessionId: string) => {
     if (!sessionId) return;
@@ -124,11 +132,35 @@ export default function AgentTracingPage() {
     }
   };
 
-  if (loading) {
+  const header = (
+    <PageHeader
+      eyebrow={th('eyebrow')}
+      title={tNav('agentTracing')}
+      subtitle={t('list.subtitle')}
+      actions={
+        <>
+          <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setRefreshKey((key) => key + 1)}
+            loading={refreshing}
+            leftSection={<IconRefresh size={14} stroke={1.7} />}>
+            {th('overview.refresh')}
+          </Button>
+        </>
+      }
+    />
+  );
+
+  if (loading && !dashboardData) {
     return (
-      <Center h={400}>
-        <Loader size="lg" color="teal" />
-      </Center>
+      <PageContainer>
+        {header}
+        <StatGridSkeleton count={4} delta />
+        <CardSkeleton blockHeight={220} lines={0} />
+        <CardSkeleton blockHeight={160} lines={0} />
+      </PageContainer>
     );
   }
 
@@ -152,74 +184,68 @@ export default function AgentTracingPage() {
   };
   const toolItems = analytics?.tools?.items || [];
   const agentAnalytics = analytics?.agents || [];
-  const dailyRows = (analytics?.daily || []).slice(-7);
+  const trendRows = buildDailyTrendRows(analytics?.daily, locale);
   const errorRateHigh = toolTotals.errorRate > 0.1;
 
   return (
     <PageContainer>
       {/* Header */}
-      <PageHeader
-        eyebrow="Operate · Tracing"
-        title={tNav('agentTracing')}
-        subtitle={t('list.subtitle')}
-        actions={
-          <>
-            <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-            <Button
-              variant="default"
-              size="sm"
-              onClick={() => fetchDashboard(true)}
-              loading={refreshing}
-              leftSection={<IconRefresh size={14} stroke={1.7} />}>
-              Refresh
+      {header}
+
+      {error && (
+        <Alert icon={<IconAlertCircle size={16} />} color="red" variant="light" title={th('overview.loadError')}>
+          <div className="ds-row-between" style={{ gap: 12 }}>
+            <Text size="sm">{error}</Text>
+            <Button size="xs" variant="default" onClick={() => setRefreshKey((key) => key + 1)}>
+              {th('common.retry')}
             </Button>
-          </>
-        }
-      />
+          </div>
+        </Alert>
+      )}
 
       {/* Stat tiles */}
-      <div className="ds-stat-grid">
+      <div className="ds-stat-grid" aria-busy={refreshing}>
         <StatTile
-          label="Total Sessions"
+          label={th('overview.tiles.totalSessions')}
           icon={<IconActivity size={14} stroke={1.7} />}
           value={formatNumber(totals.sessionsCount)}
-          delta={`Active agents: ${formatNumber(recentAgentsTotal)}`}
+          delta={th('overview.tiles.activeAgents', { count: formatNumber(recentAgentsTotal) })}
         />
         <StatTile
-          label="Total Tokens"
+          label={th('overview.tiles.totalTokens')}
           icon={<IconCpu size={14} stroke={1.7} />}
           value={formatNumber(totals.totalTokens)}
-          delta={`Avg: ${formatNumber(totals.averageTokensPerSession)}/session`}
+          delta={th('overview.tiles.avgPerSession', { count: formatNumber(totals.averageTokensPerSession) })}
         />
         <StatTile
-          label="Total Events"
+          label={th('overview.tiles.totalEvents')}
           icon={<IconMessage size={14} stroke={1.7} />}
           value={formatNumber(totals.totalEvents)}
-          delta={`Avg duration: ${formatDuration(totals.averageDurationMs)}`}
+          delta={th('overview.tiles.avgDuration', { duration: formatDuration(totals.averageDurationMs) })}
         />
         <StatTile
-          label="Tool Error Rate"
+          label={th('overview.tiles.toolErrorRate')}
           icon={<IconAlertTriangle size={14} stroke={1.7} />}
           value={
             <span style={{ color: errorRateHigh ? 'var(--ds-err)' : 'var(--ds-ok)' }}>
               {formatPercent(toolTotals.errorRate)}
             </span>
           }
-          delta={`${formatNumber(toolTotals.totalCalls)} total calls`}
+          delta={th('overview.tiles.totalCalls', { count: formatNumber(toolTotals.totalCalls) })}
         />
         {totals.totalCachedInputTokens > 0 && (
           <StatTile
-            label="Prompt Cache Hit Rate"
+            label={th('overview.tiles.cacheHit')}
             icon={<IconDatabase size={14} stroke={1.7} />}
             value={formatPercent(calcCacheHitRate(totals.totalInputTokens, totals.totalCachedInputTokens))}
-            delta={`${formatNumber(totals.totalCachedInputTokens)} cached tokens`}
+            delta={th('overview.tiles.cachedTokens', { count: formatNumber(totals.totalCachedInputTokens) })}
           />
         )}
       </div>
 
       {/* Quick Start Info Card */}
       <CollapsibleInfo
-        title="Instrument your agents quickly"
+        title={th('overview.quickStart.title')}
         action={
           <Button
             variant="light"
@@ -230,13 +256,13 @@ export default function AgentTracingPage() {
             target="_blank"
             rightSection={<IconExternalLink size={12} />}
           >
-            View SDK
+            {th('overview.quickStart.viewSdk')}
           </Button>
         }
       >
         <Stack gap={4}>
           <Text size="xs" c="dimmed">
-            Install{' '}
+            {th('overview.quickStart.install')}{' '}
             <Anchor
               href="https://www.npmjs.com/package/@cognipeer/agent-sdk"
               target="_blank"
@@ -245,13 +271,12 @@ export default function AgentTracingPage() {
             >
               @cognipeer/agent-sdk
             </Anchor>{' '}
-            to instrument your Node.js agent in minutes. The SDK automatically
-            creates sessions, events, and payload timelines.
+            {th('overview.quickStart.installRest')}
           </Text>
           <Text size="xs" c="dimmed">
-            Prefer HTTP? Generate an API key under{' '}
-            <Anchor component={Link} href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
-            and POST your agent payloads to{' '}
+            {th('overview.quickStart.http')}{' '}
+            <Anchor component={Link} href="/dashboard/tokens" size="xs">{th('overview.quickStart.tokensLink')}</Anchor>{' '}
+            {th('overview.quickStart.httpMid')}{' '}
             <span className="ds-mono" style={{ background: 'var(--ds-surface-raised)', padding: '1px 4px', borderRadius: 3 }}>
               /api/client/v1/tracing/sessions
             </span>
@@ -260,79 +285,67 @@ export default function AgentTracingPage() {
       </CollapsibleInfo>
 
       {/* Analytics Section */}
-      <div className="ds-card ds-card-pad-lg">
+      <div className="ds-card ds-card-pad-lg" aria-busy={refreshing} style={{ opacity: refreshing ? 0.7 : 1 }}>
         <div style={{ marginBottom: 16 }}>
-          <div className="ds-h3">Workspace Analytics</div>
+          <div className="ds-h3">{th('overview.analytics.title')}</div>
           <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-            Usage summaries across all agents
+            {th('overview.analytics.subtitle')}
           </div>
         </div>
 
-        {/* Daily Trend */}
-        <div className="ds-h4" style={{ marginBottom: 10 }}>Recent Trend (Last 7 Days)</div>
-        <div className="ds-tbl-wrap" style={{ marginBottom: 18 }}>
-          <table className="ds-tbl">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th style={{ textAlign: 'right' }}>Sessions</th>
-                <th style={{ textAlign: 'right' }}>Events</th>
-                <th style={{ textAlign: 'right' }}>Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {dailyRows.length === 0 ? (
-                <tr>
-                  <td colSpan={4}>
-                    <div className="ds-empty" style={{ padding: 24 }}>
-                      <span className="ds-muted" style={{ fontSize: 13 }}>
-                        No activity in the selected range.
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                dailyRows.map((row) => (
-                  <tr key={row.date}>
-                    <td style={{ fontSize: 12.5, fontWeight: 500 }}>
-                      {dayjs(row.date).format('MMM D, YYYY')}
-                    </td>
-                    <td
-                      className="ds-mono"
-                      style={{
-                        textAlign: 'right',
-                        fontSize: 12.5,
-                        fontVariantNumeric: 'tabular-nums',
-                      }}
-                    >
-                      {formatNumber(row.sessionsCount)}
-                    </td>
-                    <td
-                      className="ds-mono"
-                      style={{
-                        textAlign: 'right',
-                        fontSize: 12.5,
-                        fontVariantNumeric: 'tabular-nums',
-                      }}
-                    >
-                      {formatNumber(row.totalEvents)}
-                    </td>
-                    <td
-                      className="ds-mono"
-                      style={{
-                        textAlign: 'right',
-                        fontSize: 12.5,
-                        fontVariantNumeric: 'tabular-nums',
-                      }}
-                    >
-                      {formatNumber(row.totalTokens)}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        {/* Daily trend */}
+        <div className="ds-h4" style={{ marginBottom: 10 }}>{th('overview.analytics.trendTitle')}</div>
+        {trendRows.length > 1 ? (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: 14,
+              marginBottom: 18,
+            }}
+          >
+            <div role="img" aria-label={th('overview.analytics.trendSessions')}>
+              <div className="ds-muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                {th('overview.analytics.trendSessions')}
+              </div>
+              <AreaChart
+                h={180}
+                data={trendRows}
+                dataKey="day"
+                series={[{ name: 'sessions', label: th('overview.analytics.series.sessions'), color: 'teal.6' }]}
+                curveType="monotone"
+                connectNulls={false}
+                withDots={trendRows.length <= 31}
+                gridAxis="x"
+                tickLine="x"
+                valueFormatter={(value) => formatHealthCount(value, locale)}
+              />
+            </div>
+            <div role="img" aria-label={th('overview.analytics.trendTokens')}>
+              <div className="ds-muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                {th('overview.analytics.trendTokens')}
+              </div>
+              <AreaChart
+                h={180}
+                data={trendRows}
+                dataKey="day"
+                series={[{ name: 'tokens', label: th('overview.analytics.series.tokens'), color: 'blue.6' }]}
+                curveType="monotone"
+                connectNulls={false}
+                withDots={trendRows.length <= 31}
+                gridAxis="x"
+                tickLine="x"
+                valueFormatter={(value) => formatHealthCount(value, locale)}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="ds-empty" style={{ padding: 24, marginBottom: 18 }}>
+            <span className="ds-muted" style={{ fontSize: 13 }}>
+              {th('overview.analytics.trendEmpty')}
+            </span>
+          </div>
+        )}
 
         {/* Status, Models, Tools Breakdown */}
         <div
@@ -347,20 +360,20 @@ export default function AgentTracingPage() {
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconChartBar size={16} />
               </ThemeIcon>
-              <div className="ds-h4">Status Breakdown</div>
+              <div className="ds-h4">{th('overview.analytics.statusBreakdown')}</div>
             </Group>
             <Stack gap={8}>
               {(analytics?.statuses || []).map((item) => (
                 <Group key={item.status} justify="space-between">
                   <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(item.status)}>
-                    {(item.status || 'Unknown').toUpperCase()}
+                    {(item.status || th('common.unknown')).toUpperCase()}
                   </Badge>
                   <Text size="sm" fw={500}>{formatNumber(item.count)}</Text>
                 </Group>
               ))}
               {(analytics?.statuses || []).length === 0 && (
                 <Text size="sm" c="dimmed">
-                  No status data available.
+                  {th('overview.analytics.noStatus')}
                 </Text>
               )}
             </Stack>
@@ -370,7 +383,7 @@ export default function AgentTracingPage() {
               <ThemeIcon size={32} radius="md" variant="light" color="teal">
                 <IconCpu size={16} />
               </ThemeIcon>
-              <div className="ds-h4">Top Models</div>
+              <div className="ds-h4">{th('overview.analytics.topModels')}</div>
             </Group>
             <Stack gap={8}>
               {(analytics?.models || []).slice(0, 6).map((item) => (
@@ -385,7 +398,7 @@ export default function AgentTracingPage() {
               ))}
               {(analytics?.models || []).length === 0 && (
                 <Text size="sm" c="dimmed">
-                  No model usage captured.
+                  {th('overview.analytics.noModels')}
                 </Text>
               )}
             </Stack>
@@ -395,7 +408,7 @@ export default function AgentTracingPage() {
               <ThemeIcon size={32} radius="md" variant="light" color="orange">
                 <IconPlug size={16} />
               </ThemeIcon>
-              <div className="ds-h4">Tool Summary</div>
+              <div className="ds-h4">{th('overview.analytics.toolSummary')}</div>
             </Group>
             <Stack gap={8}>
               {toolItems.slice(0, 6).map((item) => (
@@ -408,8 +421,10 @@ export default function AgentTracingPage() {
                       {item.toolName}
                     </Text>
                     <Text size="xs" c="dimmed">
-                      {formatNumber(item.totalCalls)} calls ·{' '}
-                      {formatNumber(item.errorCalls)} errors
+                      {th('overview.analytics.callsAndErrors', {
+                        calls: formatNumber(item.totalCalls),
+                        errors: formatNumber(item.errorCalls),
+                      })}
                     </Text>
                   </Stack>
                   <Badge
@@ -422,7 +437,7 @@ export default function AgentTracingPage() {
               ))}
               {toolItems.length === 0 && (
                 <Text size="sm" c="dimmed">
-                  No tool calls recorded.
+                  {th('overview.analytics.noTools')}
                 </Text>
               )}
             </Stack>
@@ -433,7 +448,7 @@ export default function AgentTracingPage() {
               <ThemeIcon size={32} radius="md" variant="light" color="blue">
                 <IconRobot size={16} />
               </ThemeIcon>
-              <div className="ds-h4">Top Token Consumers</div>
+              <div className="ds-h4">{th('overview.analytics.topConsumers')}</div>
             </Group>
             <Stack gap={8}>
               {agentAnalytics.slice(0, 6).map((item: AgentTracingAgentSummary) => (
@@ -443,7 +458,10 @@ export default function AgentTracingPage() {
                       {item.label || item.name}
                     </Text>
                     <Text size="xs" c="dimmed">
-                      {formatNumber(item.sessionsCount)} sessions · avg {formatNumber(item.averageTokensPerSession)} tokens
+                      {th('overview.analytics.consumerLine', {
+                        sessions: formatNumber(item.sessionsCount),
+                        tokens: formatNumber(item.averageTokensPerSession),
+                      })}
                     </Text>
                   </Stack>
                   <Badge size="sm" variant="light" color="blue">
@@ -453,7 +471,7 @@ export default function AgentTracingPage() {
               ))}
               {agentAnalytics.length === 0 && (
                 <Text size="sm" c="dimmed">
-                  No agent-level token data available.
+                  {th('overview.analytics.noConsumers')}
                 </Text>
               )}
             </Stack>
@@ -465,9 +483,9 @@ export default function AgentTracingPage() {
       <div className="ds-card ds-card-pad-lg">
         <div className="ds-row-between" style={{ marginBottom: 16 }}>
           <div>
-            <div className="ds-h3">Recent Sessions</div>
+            <div className="ds-h3">{th('overview.recent.title')}</div>
             <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-              Latest agent execution sessions
+              {th('overview.recent.subtitle')}
             </div>
           </div>
           <Group gap="xs">
@@ -475,13 +493,13 @@ export default function AgentTracingPage() {
               variant="light"
               onClick={() => router.push('/dashboard/tracing/threads')}
               rightSection={<IconArrowUpRight size={14} />}>
-              Browse Threads
+              {th('overview.recent.browseThreads')}
             </Button>
             <Button
               variant="light"
               onClick={() => handleShowAllSessions()}
               rightSection={<IconArrowUpRight size={14} />}>
-              Show All Sessions
+              {th('overview.recent.showAll')}
             </Button>
           </Group>
         </div>
