@@ -47,6 +47,7 @@ const ROLE_COLOR: Record<string, string> = {
   admin: 'grape',
   project_admin: 'cyan',
   user: 'gray',
+  portal_user: 'teal',
 };
 
 export function roleColor(role: string): string {

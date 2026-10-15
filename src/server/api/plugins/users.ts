@@ -503,6 +503,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const verdict = checkPermissionsEdit({ id: session.userId, role: session.userRole }, targetOf(target));
       if (!verdict.ok) return refuse(reply, verdict);
+      if (target.role === 'portal_user') {
+        return fail(reply, 400, 'invalid_body', 'A portal user holds no service permission. Change their role first.');
+      }
 
       // Clamped to the granting admin's own effective permission, same as
       // POST /users/invite — an admin can never grant a target user a
@@ -935,11 +938,14 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       // Clamped to the inviting admin's own effective permission — an admin
       // can never grant a new user a higher service permission than they
       // themselves hold (same rule as token minting in tokens.ts).
-      const servicePermissions = (await resolveRequestedTokenScope(
-        db,
-        session.userId,
-        body.servicePermissions,
-      )) ?? {};
+      // A portal user holds no service permission, whatever the request carries.
+      const servicePermissions = body.role === 'portal_user'
+        ? {}
+        : (await resolveRequestedTokenScope(
+          db,
+          session.userId,
+          body.servicePermissions,
+        )) ?? {};
 
       const user = await db.createUser({
         canLogin,
