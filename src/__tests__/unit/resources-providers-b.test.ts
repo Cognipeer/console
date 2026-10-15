@@ -117,6 +117,23 @@ describe('operations mappers never expose secrets', () => {
     expect(r.attributes).toEqual(expect.arrayContaining([{ key: 'channelCount', value: 1 }, { key: 'modelKey', value: 'gpt' }]));
   });
 
+  it('alert rule keeps sealed channel blobs and entity secrets out of the record', () => {
+    const r = mapAlertRule({
+      ...base, _id: 'ar2', projectId: 'p1', name: 'Agent errors', module: 'agents', enabled: true, metric: 'agent_error_rate',
+      entity: { entityType: 'agent', mode: 'selected', keys: ['A'] },
+      channels: [
+        { id: 'ch_1', type: 'slack', urlHint: 'hooks.slack.com', sealed: SECRET },
+        { id: 'ch_2', type: 'pagerduty', sealed: SECRET },
+        { id: 'ch_3', type: 'email', recipients: [SECRET] },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+    expect(r.attributes).toEqual(expect.arrayContaining([
+      { key: 'channelCount', value: 3 },
+      { key: 'channelTypes', value: 'slack, pagerduty, email' },
+    ]));
+  });
+
   it('config group', () => {
     const r = mapConfigGroup({ ...base, _id: 'cg1', projectId: undefined, key: 'k', name: 'G', tags: ['a', 'b'], metadata: { s: SECRET } });
     expect(JSON.stringify(r)).not.toContain(SECRET);

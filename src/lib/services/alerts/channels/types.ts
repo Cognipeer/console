@@ -12,7 +12,6 @@ import type {
   AlertModule,
   EntityMetricType,
   IAlertChannel,
-  IAlertEvent,
   IIncidentContext,
   IncidentSeverity,
 } from '@/lib/database';
@@ -75,26 +74,9 @@ export interface ChannelMessage {
   footer?: string;
 }
 
-/**
- * The event-shaped payload channels received before notifications existed.
- * @deprecated Transitional: the evaluator still hands the stored event to the
- * dispatcher until it sends an `AlertNotification`; remove with that change.
- */
-export type LegacyAlertDispatchPayload = Omit<IAlertEvent, '_id'>;
-
 export interface IAlertDispatcher {
   readonly type: IAlertChannel['type'];
-  dispatch(
-    notification: AlertNotification | LegacyAlertDispatchPayload,
-    channel: IAlertChannel,
-    context: AlertContext,
-  ): Promise<DispatchResult[]>;
+  dispatch(notification: AlertNotification, channel: IAlertChannel, context: AlertContext): Promise<DispatchResult[]>;
   /** Optional: deliver a generic message (digests). */
   sendMessage?(message: ChannelMessage, channel: IAlertChannel, context: AlertContext): Promise<DispatchResult[]>;
-}
-
-export function isAlertNotification(
-  payload: AlertNotification | LegacyAlertDispatchPayload,
-): payload is AlertNotification {
-  return typeof (payload as AlertNotification).kind === 'string' && 'rule' in payload;
 }

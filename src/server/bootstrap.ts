@@ -33,6 +33,7 @@ import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startWebhookQueueConsumer } from '@/lib/services/webhooks/webhookConsumer';
 import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
 import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
+import { startTracingSessionFinalizer } from '@/lib/services/tracing/sessionFinalizer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
@@ -351,6 +352,7 @@ async function runBootstrap(): Promise<void> {
   startCrawlerScheduler();
   startAgentScheduler();
   startAgentRunReconciler();
+  startTracingSessionFinalizer();
   startAnalysisScheduler();
   startRedTeamScheduler();
 

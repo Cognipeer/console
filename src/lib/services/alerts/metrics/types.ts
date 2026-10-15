@@ -28,10 +28,23 @@ export interface MetricResult {
   sampleCount: number;
 }
 
+/** A per-entity evaluation request (`entityKeys` omitted = every entity with data). */
+export interface EntityMetricQuery extends MetricQuery {
+  entityKeys?: string[];
+  /** Evaluation time (epoch ms); defaults to now. */
+  nowMs?: number;
+}
+
 export interface IMetricCollector {
   /** The metric names this collector can handle */
   readonly supportedMetrics: AlertMetric[];
 
   /** Compute the metric value for the given query */
   collect(query: MetricQuery): Promise<MetricResult>;
+
+  /**
+   * Optional: one value per entity, for fan-out rules over entity-scoped
+   * metrics (agents, models, knowledge bases, MCP servers, tools).
+   */
+  collectByEntity?(query: EntityMetricQuery): Promise<Map<string, MetricResult>>;
 }

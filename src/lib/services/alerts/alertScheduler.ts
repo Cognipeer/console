@@ -23,7 +23,14 @@ const logger = createLogger('alert-scheduler');
 
 const ALERT_CHECK_INTERVAL_MS = 60_000; // 60 seconds
 const SCHEDULER_LOCK_KEY = 'scheduler:alert-evaluation';
-const SCHEDULER_LOCK_TTL_SECONDS = 5 * 60;
+/**
+ * Fan-out rules (one state per agent / model / ...) make a sweep longer than the
+ * old 60 s tick, so the lock outlives a worst-case sweep. A tick that finds the
+ * previous sweep still running is skipped (`running`), and a sweep stops taking
+ * new tenants shortly before the lock would expire, so two sweeps never overlap.
+ */
+const SCHEDULER_LOCK_TTL_SECONDS = 10 * 60;
+const SWEEP_BUDGET_MS = (SCHEDULER_LOCK_TTL_SECONDS - 30) * 1000;
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
@@ -59,6 +66,8 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
 
     // Try the global lock for unassigned rules. Rules with explicit
     // assignments are handled per node regardless of who holds the lock.
+    // Evaluation covers the whole tenant at once (state machine per rule/entity),
+    // so a held lock simply makes this node skip the unassigned rules this tick.
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
     const holdsGlobalLock = Boolean(lockToken);
     const thisNode = getThisNodeName();
@@ -68,6 +77,13 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
 
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      if (Date.now() - startedAt.getTime() > SWEEP_BUDGET_MS) {
+        logger.warn('Sweep budget exhausted; the remaining tenants are evaluated on the next tick', {
+          processedTenants,
+          totalTenants: tenants.length,
+        });
+        break;
+      }
       processedTenants += 1;
       const tenantId = String(tenant._id);
 

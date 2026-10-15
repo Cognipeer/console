@@ -112,4 +112,29 @@ describe('alert rule edges', () => {
     expect(JSON.stringify(r.edges)).not.toContain('secret@x.com');
     expect(mapAlertRule({ ...base, _id: 'r', name: 'r' }).edges).toBeUndefined();
   });
+
+  it('an agents rule on selected entities links each agent by tracing name', () => {
+    const r = mapAlertRule({
+      ...base, _id: 'r', projectId: 'p', name: 'r', module: 'agents', metric: 'agent_error_rate',
+      entity: { entityType: 'agent', mode: 'selected', keys: ['Pulse Main', 'Triage'] },
+      channels: [{ type: 'slack', sealed: 'SEALED-BLOB', urlHint: 'hooks.slack.com' }],
+    });
+    expect(pick(r.edges)).toEqual(['alert.agent:Pulse Main@entity.keys', 'alert.agent:Triage@entity.keys']);
+    expect(JSON.stringify(r)).not.toContain('SEALED-BLOB');
+    expect(r.attributes).toEqual(expect.arrayContaining([
+      { key: 'entityMode', value: 'selected' },
+      { key: 'entityType', value: 'agent' },
+      { key: 'entityCount', value: 2 },
+      { key: 'channelTypes', value: 'slack' },
+    ]));
+  });
+
+  it('an all-entities agents rule, or a selection on another module, adds no agent edge', () => {
+    expect(mapAlertRule({
+      ...base, _id: 'r', name: 'r', module: 'agents', entity: { entityType: 'agent', mode: 'all' },
+    }).edges).toBeUndefined();
+    expect(mapAlertRule({
+      ...base, _id: 'r', name: 'r', module: 'models', entity: { entityType: 'agent', mode: 'selected', keys: ['x'] },
+    }).edges).toBeUndefined();
+  });
 });

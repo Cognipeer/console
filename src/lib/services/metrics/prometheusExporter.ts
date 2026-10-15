@@ -7,7 +7,7 @@
  * Reference: https://prometheus.io/docs/instrumenting/exposition_formats/
  */
 
-import { getTenantDatabase } from '@/lib/database';
+import { getTenantDatabase, type DatabaseProvider } from '@/lib/database';
 
 // ── Prometheus text format helpers ─────────────────────────────────────────
 
@@ -50,6 +50,144 @@ function renderFamily(family: MetricFamily): string {
 
 function renderFamilies(families: MetricFamily[]): string {
   return families.map(renderFamily).join('\n\n') + '\n';
+}
+
+// ── Entity health windows ───────────────────────────────────────────────────
+
+/** Window every health gauge covers; named in each help text and metric name. */
+const HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Scrapes are typically 15-60 s apart; one grouped read per tenant per TTL. */
+const HEALTH_CACHE_TTL_MS = 45_000;
+const HEALTH_CACHE_MAX_TENANTS = 200;
+
+const healthCache = new Map<string, { expiresAt: number; families: MetricFamily[] }>();
+const healthInflight = new Map<string, Promise<MetricFamily[]>>();
+
+/** Test hook: the cache is module-level state. */
+export function __resetPrometheusHealthCacheForTests(): void {
+  healthCache.clear();
+  healthInflight.clear();
+}
+
+async function buildHealthWindowFamilies(
+  tenantId: string,
+  db: DatabaseProvider,
+): Promise<MetricFamily[]> {
+  const toMs = Date.now();
+  const fromMs = toMs - HEALTH_WINDOW_MS;
+  const families: MetricFamily[] = [];
+
+  // Typed gauges over the last 24h from the tracing aggregate. They used to be
+  // computed from the newest 50 sessions and exposed as counters, which was
+  // neither a window nor monotonic.
+  try {
+    const { analytics } = await db.aggregateAgentTracingDashboard({
+      from: new Date(fromMs).toISOString(),
+      to: new Date(toMs).toISOString(),
+    });
+    families.push(
+      {
+        name: 'console_tracing_sessions_total',
+        help: 'Number of agent tracing sessions per status in the last 24 hours.',
+        type: 'gauge',
+        samples: analytics.statuses.map(({ status, count }) => ({
+          labels: { status: status || 'unknown' },
+          value: count,
+        })),
+      },
+      // Renamed from console_tracing_{input,output}_tokens_total: these are
+      // 24h window gauges, not monotonic counters, so the _total suffix misled
+      // rate() queries. Dashboards on the old names need updating.
+      {
+        name: 'console_tracing_input_tokens_24h',
+        help: 'Input tokens across agent tracing sessions in the last 24 hours.',
+        type: 'gauge',
+        samples: [{ value: analytics.totals.totalInputTokens }],
+      },
+      {
+        name: 'console_tracing_output_tokens_24h',
+        help: 'Output tokens across agent tracing sessions in the last 24 hours.',
+        type: 'gauge',
+        samples: [{ value: analytics.totals.totalOutputTokens }],
+      },
+    );
+  } catch {
+    // non-fatal
+  }
+
+  // Entity health rollup, tenant-wide (every project). Two grouped reads
+  // regardless of how many entities exist.
+  try {
+    const [byType, agents] = await Promise.all([
+      db.aggregateEntityMetrics({ tenantId, fromMs, toMs, groupBy: ['entityType'] }),
+      db.aggregateEntityMetrics({
+        tenantId,
+        entityType: 'agent',
+        fromMs,
+        toMs,
+        groupBy: ['entityKey'],
+      }),
+    ]);
+    families.push(
+      // Counts distinct agents from the entity rollup, so hosted agents are
+      // included alongside externally traced ones.
+      {
+        name: 'console_tracing_agents_total',
+        help: 'Number of distinct agents with at least one session in the last 24 hours.',
+        type: 'gauge',
+        samples: [{ value: agents.filter((row) => row.requests > 0).length }],
+      },
+      {
+        name: 'console_entity_requests_24h',
+        help: 'Requests per entity type (agent, model, tool, mcp, kb) in the last 24 hours. MCP counts include composite member hops.',
+        type: 'gauge',
+        samples: byType
+          .filter((row) => row.entityType)
+          .map((row) => ({ labels: { entity_type: String(row.entityType) }, value: row.requests })),
+      },
+      {
+        name: 'console_entity_errors_24h',
+        help: 'Failed requests per entity type (agent, model, tool, mcp, kb) in the last 24 hours. MCP counts include composite member hops.',
+        type: 'gauge',
+        samples: byType
+          .filter((row) => row.entityType)
+          .map((row) => ({ labels: { entity_type: String(row.entityType) }, value: row.errors })),
+      },
+    );
+  } catch {
+    // non-fatal
+  }
+
+  return families;
+}
+
+/** Per-tenant cached (45 s) so a tight scrape interval does not re-aggregate. */
+async function collectHealthWindowFamilies(
+  tenantDbName: string,
+  tenantId: string,
+  db: DatabaseProvider,
+): Promise<MetricFamily[]> {
+  const cacheKey = `${tenantDbName}|${tenantId}`;
+  const now = Date.now();
+  const cached = healthCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.families;
+  const inflight = healthInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const promise = buildHealthWindowFamilies(tenantId, db)
+    .then((families) => {
+      if (healthCache.size >= HEALTH_CACHE_MAX_TENANTS) {
+        const oldest = healthCache.keys().next().value;
+        if (oldest !== undefined) healthCache.delete(oldest);
+      }
+      healthCache.set(cacheKey, { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, families });
+      return families;
+    })
+    .finally(() => {
+      healthInflight.delete(cacheKey);
+    });
+  healthInflight.set(cacheKey, promise);
+  return promise;
 }
 
 // ── Metrics collection ──────────────────────────────────────────────────────
@@ -302,51 +440,9 @@ export async function collectPrometheusMetrics(
     // non-fatal
   }
 
-  // ── Agent Tracing ─────────────────────────────────────────────────────
+  // ── Agent tracing + entity health (last 24h windows) ────────────────
   try {
-    const [sessionsResult, distinctAgents] = await Promise.all([
-      db.listAgentTracingSessions(),
-      db.countAgentTracingDistinctAgents(),
-    ]);
-    const sessions = sessionsResult.sessions;
-    const byStatus: Record<string, number> = {};
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    for (const s of sessions) {
-      const status = s.status ?? 'unknown';
-      byStatus[status] = (byStatus[status] ?? 0) + 1;
-      totalInputTokens += s.totalInputTokens ?? 0;
-      totalOutputTokens += s.totalOutputTokens ?? 0;
-    }
-    families.push(
-      {
-        name: 'console_tracing_sessions_total',
-        help: 'Total number of agent tracing sessions per status.',
-        type: 'gauge',
-        samples: Object.entries(byStatus).map(([status, count]) => ({
-          labels: { status },
-          value: count,
-        })),
-      },
-      {
-        name: 'console_tracing_agents_total',
-        help: 'Total number of distinct traced agents.',
-        type: 'gauge',
-        samples: [{ value: distinctAgents }],
-      },
-      {
-        name: 'console_tracing_input_tokens_total',
-        help: 'Total input tokens across all traced sessions.',
-        type: 'counter',
-        samples: [{ value: totalInputTokens }],
-      },
-      {
-        name: 'console_tracing_output_tokens_total',
-        help: 'Total output tokens across all traced sessions.',
-        type: 'counter',
-        samples: [{ value: totalOutputTokens }],
-      },
-    );
+    families.push(...(await collectHealthWindowFamilies(tenantDbName, tenantId, db)));
   } catch {
     // non-fatal
   }

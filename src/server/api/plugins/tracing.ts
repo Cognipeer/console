@@ -1,6 +1,18 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import { runWithTenantScope } from '@/lib/database';
+import { ENTITY_METRIC_BUCKET_MS } from '@/lib/database/provider/types.base';
+import type {
+  AlertStatePhase,
+  IAlertRule,
+  IAlertState,
+  IIncident,
+  IncidentSeverity,
+} from '@/lib/database/provider/types.domain';
+import { getEntityBaselineProvider, type EntityBandPoint } from '@/enterprise/alert-extensions';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { getEntitySeries, getEntitySummaries } from '@/lib/services/entityMetrics';
 import { resolveTraceSession } from '@/lib/services/agents/traceSession';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -26,6 +38,271 @@ function parseMetadataFilter(query: Record<string, string | undefined>):
     return { error: '`metadataKey` must match /^[a-zA-Z0-9_]{1,40}$/' };
   }
   return { metadataKey: key, metadataValue: query.metadataValue };
+}
+
+const DAY_MS = 86_400_000;
+const HEALTH_SPARK_POINTS = 24;
+const HEALTH_DEFAULT_LIMIT = 200;
+const HEALTH_MAX_LIMIT = 500;
+const BASELINE_LOOKBACK_DAYS = 14;
+/** Upper bound of sessions read to find the first time each agent version was seen. */
+const VERSION_MARKER_SESSION_LIMIT = 5000;
+const INCIDENT_MARKER_LIMIT = 200;
+/** Silent agents with an active alert that are added to the scoreboard. */
+const HEALTH_MISSING_KEYS_LIMIT = 50;
+const SEVERITY_RANK: Record<IncidentSeverity, number> = { critical: 3, warning: 2, info: 1 };
+
+type HealthRange = { fromMs: number; toMs: number };
+
+/**
+ * Time range of the health endpoints. An explicit `from`/`to` wins (as in the
+ * other tracing handlers), otherwise `period` is resolved by the shared
+ * dashboard parser. No (or an unknown) period means the last 24 hours: the
+ * parser has no `last_24_hours`, `last_day` is its 24h period, and the SPEC's
+ * "last_24_hours" intent is kept (clients should still send `period`
+ * explicitly). `total` is bounded to 30 days, since health data is a rolling
+ * rollup, not all-time history.
+ * Returns an error message for an unusable range.
+ */
+function resolveHealthRange(query: Record<string, string | undefined>, nowMs = Date.now()): HealthRange | { error: string } {
+  const searchParams = new URLSearchParams(Object.entries(query).filter((e): e is [string, string] => typeof e[1] === 'string'));
+  const rawFrom = searchParams.get('from');
+  const rawTo = searchParams.get('to');
+  const explicitFrom = rawFrom ? new Date(rawFrom).getTime() : undefined;
+  const explicitTo = rawTo ? new Date(rawTo).getTime() : undefined;
+  if ((rawFrom && !Number.isFinite(explicitFrom)) || (rawTo && !Number.isFinite(explicitTo))) {
+    return { error: '`from` and `to` must be valid dates' };
+  }
+
+  let fromMs: number;
+  let toMs: number;
+  if (explicitFrom !== undefined || explicitTo !== undefined) {
+    toMs = Math.min(explicitTo ?? nowMs, nowMs);
+    fromMs = explicitFrom ?? toMs - DAY_MS;
+  } else {
+    const filter = parseDashboardDateFilterFromSearchParams(searchParams);
+    toMs = nowMs;
+    if (filter.period === 'total') {
+      // `total` is what the parser answers for a missing period too: tell the two apart.
+      fromMs = searchParams.get('period') === 'total' ? nowMs - 30 * DAY_MS : nowMs - DAY_MS;
+    } else {
+      fromMs = filter.from?.getTime() ?? nowMs - DAY_MS;
+      toMs = Math.min(filter.to?.getTime() ?? nowMs, nowMs);
+    }
+  }
+  if (fromMs >= toMs) return { error: '`from` must be earlier than `to`' };
+
+  // Align to the rollup bucket and keep inside retention, so the numbers reported here are the ones queried.
+  const retentionFloor = nowMs - getConfig().health.entityMetricsRetentionDays * DAY_MS;
+  const aligned = Math.max(fromMs, retentionFloor);
+  fromMs = aligned - (aligned % ENTITY_METRIC_BUCKET_MS);
+  if (toMs <= fromMs) return { error: 'The requested range is outside the retained health data' };
+  return { fromMs, toMs };
+}
+
+/** Bucket size the summaries use for a sparkline of `points` buckets (kept in step with entityHealthService). */
+function sparkBucketMs(range: HealthRange, points: number): number {
+  const raw = (range.toMs - range.fromMs) / points;
+  return Math.max(ENTITY_METRIC_BUCKET_MS, Math.ceil(raw / ENTITY_METRIC_BUCKET_MS) * ENTITY_METRIC_BUCKET_MS);
+}
+
+function parseHealthLimit(raw: string | undefined): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return HEALTH_DEFAULT_LIMIT;
+  return Math.min(parsed, HEALTH_MAX_LIMIT);
+}
+
+type AlertMaps = { rules: Map<string, IAlertRule>; incidents: Map<string, IIncident> };
+
+/** Pending/firing alert states of enabled agent-module rules, by agent name. Two cheap reads, no incident reads. */
+async function loadAgentAlertStates(
+  scope: { tenantDbName: string; tenantId: string; projectId: string },
+): Promise<{ states: Map<string, IAlertState[]> } & AlertMaps> {
+  const states = new Map<string, IAlertState[]>();
+  const rules = new Map<string, IAlertRule>();
+  const incidents = new Map<string, IIncident>();
+  await runWithTenantScope(scope.tenantDbName, async (db) => {
+    const agentRules = (await db.listAlertRules(scope.tenantId, { projectId: scope.projectId, enabled: true }))
+      .filter((rule) => rule.module === 'agents' && rule._id !== undefined);
+    if (agentRules.length === 0) return;
+    for (const rule of agentRules) rules.set(String(rule._id), rule);
+    const active = await db.listAlertStates({
+      projectId: scope.projectId,
+      ruleIds: [...rules.keys()],
+      phases: ['pending', 'firing'],
+    });
+    for (const state of active) {
+      if (!state.entityKey) continue;
+      const list = states.get(state.entityKey) ?? [];
+      list.push(state);
+      states.set(state.entityKey, list);
+    }
+  });
+  return { states, rules, incidents };
+}
+
+/**
+ * Severity of a firing alert is the one of its incident: read the incidents of the firing states of
+ * `entityKeys` only (the agents actually shown), into `maps.incidents`. Best effort per incident.
+ */
+async function loadFiringIncidents(
+  scope: { tenantDbName: string; projectId: string },
+  states: Map<string, IAlertState[]>,
+  entityKeys: Iterable<string>,
+  maps: AlertMaps,
+): Promise<void> {
+  const incidentIds = new Set<string>();
+  for (const key of entityKeys) {
+    for (const state of states.get(key) ?? []) {
+      if (state.phase === 'firing' && state.incidentId) incidentIds.add(state.incidentId);
+    }
+  }
+  if (incidentIds.size === 0) return;
+  await runWithTenantScope(scope.tenantDbName, (db) =>
+    Promise.all([...incidentIds].map(async (id) => {
+      try {
+        const incident = await db.findIncidentById(id, scope.projectId);
+        if (incident) maps.incidents.set(id, incident);
+      } catch (error) {
+        logger.warn('Incident of a firing agent alert unavailable', { error });
+      }
+    })),
+  );
+}
+
+function severityOf(
+  state: IAlertState,
+  maps: AlertMaps,
+): IncidentSeverity | undefined {
+  const incident = state.incidentId ? maps.incidents.get(state.incidentId) : undefined;
+  if (incident) return incident.severity;
+  const configured = maps.rules.get(state.ruleId)?.severity;
+  return configured && configured !== 'auto' ? configured : undefined;
+}
+
+type AgentAlertSummary = { phase: AlertStatePhase | null; severity?: IncidentSeverity; incidentId?: string };
+
+/** The state to show for an agent: firing before pending, then the most severe. */
+function summarizeAgentAlert(
+  agentStates: IAlertState[] | undefined,
+  maps: AlertMaps,
+): AgentAlertSummary {
+  if (!agentStates || agentStates.length === 0) return { phase: null };
+  let best: { state: IAlertState; severity?: IncidentSeverity } | null = null;
+  const rank = (entry: { state: IAlertState; severity?: IncidentSeverity }) =>
+    (entry.state.phase === 'firing' ? 10 : 0) + (entry.severity ? SEVERITY_RANK[entry.severity] : 0);
+  for (const state of agentStates) {
+    const candidate = { state, severity: severityOf(state, maps) };
+    if (!best || rank(candidate) > rank(best)) best = candidate;
+  }
+  if (!best) return { phase: null };
+  return {
+    phase: best.state.phase === 'firing' ? 'firing' : 'pending',
+    ...(best.severity ? { severity: best.severity } : {}),
+    ...(best.state.incidentId ? { incidentId: best.state.incidentId } : {}),
+  };
+}
+
+type HealthMarker = { t: number; type: 'version' | 'incident'; label: string; href?: string };
+
+/**
+ * First time each agent version was seen in the range, from a bounded read of the agent's sessions
+ * (newest first). When the read hit the bound the oldest part of the range was not read: the
+ * versions first seen within one rollup bucket of the oldest session read may have started earlier
+ * (their time is unknown), so they are left out and `partial` tells the client that earlier
+ * versions may be missing.
+ */
+async function loadVersionMarkers(
+  scope: { tenantDbName: string; projectId: string },
+  agentName: string,
+  range: HealthRange,
+): Promise<{ markers: HealthMarker[]; partial: boolean }> {
+  const { sessions } = await runWithTenantScope(scope.tenantDbName, (db) =>
+    db.listAgentTracingSessions({
+      agentNameExact: agentName,
+      from: new Date(range.fromMs).toISOString(),
+      to: new Date(range.toMs).toISOString(),
+      limit: String(VERSION_MARKER_SESSION_LIMIT),
+      includeTotal: false,
+      projection: { agentVersion: 1, startedAt: 1, createdAt: 1 },
+    }, scope.projectId),
+  );
+  const partial = sessions.length >= VERSION_MARKER_SESSION_LIMIT;
+  const firstSeen = new Map<string, number>();
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const row of sessions) {
+    const at = new Date((row.startedAt ?? row.createdAt) as Date | string).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (at < oldest) oldest = at;
+    const version = typeof row.agentVersion === 'string' ? row.agentVersion.trim() : '';
+    if (!version) continue;
+    const known = firstSeen.get(version);
+    if (known === undefined || at < known) firstSeen.set(version, at);
+  }
+  const href = `/dashboard/tracing/sessions?agent=${encodeURIComponent(agentName)}`;
+  const markers: HealthMarker[] = [];
+  for (const [version, t] of firstSeen) {
+    if (partial && t - oldest < ENTITY_METRIC_BUCKET_MS) continue;
+    markers.push({ t, type: 'version', label: /^v\d/i.test(version) ? version : `v${version}`, href });
+  }
+  return { markers, partial };
+}
+
+/** Incidents opened for the agent inside the range. */
+async function loadIncidentMarkers(
+  scope: { tenantDbName: string; tenantId: string; projectId: string },
+  agentName: string,
+  range: HealthRange,
+): Promise<HealthMarker[]> {
+  const incidents = await runWithTenantScope(scope.tenantDbName, (db) =>
+    db.listIncidents(scope.tenantId, {
+      projectId: scope.projectId,
+      module: 'agents',
+      entityKey: agentName,
+      limit: INCIDENT_MARKER_LIMIT,
+    }),
+  );
+  const markers: HealthMarker[] = [];
+  for (const incident of incidents) {
+    const t = new Date(incident.firedAt).getTime();
+    if (!Number.isFinite(t) || t < range.fromMs || t > range.toMs) continue;
+    markers.push({
+      t,
+      type: 'incident',
+      label: incident.ruleName,
+      ...(incident._id ? { href: `/dashboard/alerts/incidents/${String(incident._id)}` } : {}),
+    });
+  }
+  return markers;
+}
+
+/** Normal-range band of the agent's error rate and p95 from the baseline seam; null without a provider or on failure. */
+async function loadBaselineBand(
+  scope: { tenantDbName: string; tenantId: string; projectId: string },
+  agentName: string,
+  range: HealthRange & { bucketMs: number },
+): Promise<{ errorRate: EntityBandPoint[]; p95Ms: EntityBandPoint[] } | null> {
+  const provider = getEntityBaselineProvider();
+  if (!provider) return null;
+  const base = {
+    ...scope,
+    entityType: 'agent' as const,
+    entityKey: agentName,
+    fromMs: range.fromMs,
+    toMs: range.toMs,
+    bucketMs: range.bucketMs,
+    lookbackDays: BASELINE_LOOKBACK_DAYS,
+  };
+  try {
+    const [errorRate, p95Ms] = await Promise.all([
+      provider.band({ ...base, metric: 'agent_error_rate' }),
+      provider.band({ ...base, metric: 'agent_p95_duration_ms' }),
+    ]);
+    return { errorRate, p95Ms };
+  } catch (error) {
+    logger.warn('Agent baseline band unavailable', { error });
+    return null;
+  }
 }
 
 export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
@@ -268,7 +545,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       const result = await AgentTracingService.getAgentOverview(
         session.tenantDbName,
         projectId,
-        decodeURIComponent(agentName),
+        agentName,
         {
           from: searchParams.get('from') || filter.from?.toISOString(),
           timezone: searchParams.get('timezone') || undefined,
@@ -317,6 +594,139 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Agent health scoreboard: rollup totals, previous period, sparkline and alert state per agent.
+  app.get('/tracing/agents/health', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const range = resolveHealthRange(query);
+      if ('error' in range) return reply.code(400).send({ error: range.error });
+      const limit = parseHealthLimit(query.limit);
+      const scope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+
+      const summaryInput = {
+        ...scope,
+        entityType: 'agent' as const,
+        fromMs: range.fromMs,
+        toMs: range.toMs,
+        sparkPoints: HEALTH_SPARK_POINTS,
+      };
+      const [rolledUp, alertInfo] = await Promise.all([
+        getEntitySummaries(summaryInput),
+        loadAgentAlertStates(scope).catch((error) => {
+          logger.warn('Agent alert states unavailable for health view', { error });
+          return null;
+        }),
+      ]);
+      const summaries = [...rolledUp];
+
+      // An agent that went silent for longer than the range has no rollup rows but may carry a firing
+      // absence alert: it still belongs on the scoreboard (zero totals).
+      if (alertInfo) {
+        const present = new Set(summaries.map((summary) => summary.entityKey));
+        const missing = [...alertInfo.states.keys()].filter((key) => !present.has(key)).slice(0, HEALTH_MISSING_KEYS_LIMIT);
+        if (missing.length > 0) {
+          try {
+            summaries.push(...await getEntitySummaries({ ...summaryInput, keys: missing }));
+            summaries.sort((a, b) => b.totals.requests - a.totals.requests || a.entityKey.localeCompare(b.entityKey));
+          } catch (error) {
+            logger.warn('Silent agents with active alerts unavailable for health view', { error });
+          }
+        }
+      }
+
+      const page = summaries.slice(0, limit);
+      if (alertInfo) {
+        await loadFiringIncidents(scope, alertInfo.states, page.map((summary) => summary.entityKey), alertInfo);
+      }
+      const agents = page.map((summary) => ({
+        name: summary.entityKey,
+        totals: summary.totals,
+        previous: summary.previous,
+        spark: summary.spark,
+        alert: alertInfo
+          ? summarizeAgentAlert(alertInfo.states.get(summary.entityKey), alertInfo)
+          : { phase: null },
+      }));
+
+      const bucketMs = sparkBucketMs(range, HEALTH_SPARK_POINTS);
+      return reply.code(200).send({
+        // Spark point i starts at `sparkFromMs + i * bucketMs` (the first bucket is floored to a bucket boundary, so it can start before `fromMs`).
+        range: { ...range, bucketMs, sparkFromMs: Math.floor(range.fromMs / bucketMs) * bucketMs },
+        agents,
+        total: summaries.length,
+      });
+    } catch (error) {
+      logger.error('Get tracing agents health error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to fetch agents health',
+        });
+    }
+  }));
+
+  // Health of one agent: bucketed series, baseline band, version/incident markers and alert counts.
+  app.get('/tracing/agents/:agentName/health', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { agentName } = request.params as { agentName: string };
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const range = resolveHealthRange(query);
+      if ('error' in range) return reply.code(400).send({ error: range.error });
+      const scope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+
+      const series = await getEntitySeries({
+        ...scope,
+        entityType: 'agent',
+        entityKey: agentName,
+        fromMs: range.fromMs,
+        toMs: range.toMs,
+      });
+      const seriesRange = series.range;
+
+      // Context around the series is best effort: a failure here must not blank the charts.
+      const [baseline, versionMarkers, incidentMarkers, alertInfo] = await Promise.all([
+        loadBaselineBand(scope, agentName, seriesRange),
+        loadVersionMarkers(scope, agentName, seriesRange).catch((error) => {
+          logger.warn('Agent version markers unavailable', { error });
+          return { markers: [] as HealthMarker[], partial: false };
+        }),
+        loadIncidentMarkers(scope, agentName, seriesRange).catch((error) => {
+          logger.warn('Agent incident markers unavailable', { error });
+          return [] as HealthMarker[];
+        }),
+        loadAgentAlertStates(scope).catch((error) => {
+          logger.warn('Agent alert states unavailable for health view', { error });
+          return null;
+        }),
+      ]);
+
+      const agentStates = alertInfo?.states.get(agentName) ?? [];
+      const markers = [...versionMarkers.markers, ...incidentMarkers].sort((a, b) => a.t - b.t);
+
+      return reply.code(200).send({
+        range: seriesRange,
+        buckets: series.buckets,
+        totals: series.totals,
+        previous: series.previous,
+        baseline,
+        markers,
+        // True when the session read behind the version markers hit its bound: earlier versions may be missing.
+        markersPartial: versionMarkers.partial,
+        alerts: {
+          firing: agentStates.filter((state) => state.phase === 'firing').length,
+          pending: agentStates.filter((state) => state.phase === 'pending').length,
+        },
+      });
+    } catch (error) {
+      logger.error('Get tracing agent health error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to fetch agent health',
+        });
+    }
+  }));
+
   const modelOverviewHandler = withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -326,7 +736,7 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       const result = await AgentTracingService.getModelOverview(
         session.tenantDbName,
         projectId,
-        decodeURIComponent(modelName),
+        modelName,
         {
           from: searchParams.get('from') || filter.from?.toISOString(),
           timezone: searchParams.get('timezone') || undefined,

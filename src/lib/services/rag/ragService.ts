@@ -25,6 +25,7 @@ import {
 } from '@/lib/services/vector/vectorService';
 import { runReranker } from '@/lib/services/reranker';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { chunkConfigRequiresReindex, chunkText, resolveParentWindow, type ChunkContext } from './chunking';
 import { publishRagIngestJob } from './ragIngestJob';
@@ -1193,12 +1194,71 @@ async function applyParentWindows(params: {
   });
 }
 
+/** What `runRagQuery` learned about the module, for the failure path in `queryRag`. */
+interface RagQueryState {
+  moduleFound: boolean;
+  key?: string;
+  projectId?: string;
+}
+
+/**
+ * Runs a knowledge-base query and feeds the health rollup. Success is recorded
+ * by `runRagQuery` (it knows the match count); a failure anywhere in the
+ * pipeline is recorded here as an error (or cancelled when the caller aborted)
+ * plus a usage event, then rethrown unchanged. Failures are deliberately NOT
+ * written to `rag_query_logs`: that collection feeds the zero-result panel and
+ * the score histogram, which would misread an error row as an empty search.
+ */
 export async function queryRag(
   tenantDbName: string,
   tenantId: string,
   projectId: string | undefined,
   request: RagQueryRequest,
   options?: { signal?: AbortSignal },
+): Promise<RagQueryResult> {
+  const startTime = Date.now();
+  const state: RagQueryState = { moduleFound: false };
+  try {
+    return await runRagQuery(tenantDbName, tenantId, projectId, request, options, state);
+  } catch (err) {
+    // An unknown module key and a rejected request filter are caller mistakes,
+    // not knowledge-base faults: recording them would mint a health row per
+    // mistyped key and push the error rate up for a healthy knowledge base.
+    if (state.moduleFound && !(err instanceof VectorFilterError)) {
+      const aborted = options?.signal?.aborted === true
+        || (err instanceof Error && err.name === 'AbortError');
+      const latencyMs = Date.now() - startTime;
+      recordEntityMetric({
+        tenantDbName,
+        tenantId,
+        projectId: state.projectId ?? projectId,
+        entityType: 'kb',
+        entityKey: state.key ?? request.ragModuleKey,
+        source: 'service',
+        outcome: aborted ? 'cancelled' : 'error',
+        latencyMs,
+      });
+      recordUsageEvent({
+        tenantDbName,
+        tenantId,
+        projectId,
+        service: 'rag',
+        refKey: request.ragModuleKey,
+        status: aborted ? 'cancelled' : 'error',
+        latencyMs,
+      });
+    }
+    throw err;
+  }
+}
+
+async function runRagQuery(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  request: RagQueryRequest,
+  options: { signal?: AbortSignal } | undefined,
+  state: RagQueryState,
 ): Promise<RagQueryResult> {
   const signal = options?.signal;
   const startTime = Date.now();
@@ -1207,6 +1267,9 @@ export async function queryRag(
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  state.moduleFound = true;
+  state.key = ragModule.key;
+  state.projectId = ragModule.projectId;
 
   // 1. Embed the query
   const embeddingStartedAt = Date.now();
@@ -1407,6 +1470,17 @@ export async function queryRag(
     status: 'success',
     latencyMs,
     units: { matches: matches.length },
+  });
+  recordEntityMetric({
+    tenantDbName,
+    tenantId,
+    projectId: ragModule.projectId ?? projectId,
+    entityType: 'kb',
+    entityKey: ragModule.key,
+    source: 'service',
+    outcome: 'ok',
+    latencyMs,
+    emptyResults: matches.length === 0 ? 1 : 0,
   });
   // Where the time actually went. vectorLatencyMs used to be computed and then
   // thrown away unless a reranker ran, which made slow searches undiagnosable.

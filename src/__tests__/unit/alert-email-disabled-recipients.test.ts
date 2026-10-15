@@ -8,7 +8,12 @@ vi.mock('@/lib/database', () => ({ getTenantDatabase: vi.fn(async () => h.db) })
 import { EmailAlertChannel } from '@/lib/services/alerts/channels/emailChannel';
 
 const event = {
-  ruleName: 'Latency', metric: 'avg_latency_ms', threshold: 1, actualValue: 2, firedAt: new Date(),
+  kind: 'fired',
+  rule: {
+    id: 'r1', name: 'Latency', module: 'models', metric: 'avg_latency_ms', metricLabel: 'Average Latency', unit: 'ms',
+    mode: 'threshold', windowMinutes: 15, operator: 'gt', threshold: 1,
+  },
+  value: 2, severity: 'warning', firedAt: new Date(), projectName: 'P', companyName: 'Acme', dashboardUrl: 'u',
 } as never;
 const ctx = {
   tenantDbName: 'tenant_acme', projectName: 'P', companyName: 'Acme', dashboardUrl: 'u', incidentUrl: 'i', incidentId: '1',
@@ -57,5 +62,10 @@ describe('EmailAlertChannel and disabled users', () => {
       event, { type: 'email', recipients: ['dev@acme.test'] } as never, ctx,
     );
     expect(h.sendEmail).toHaveBeenCalledWith('dev@acme.test', 'alert-fired', expect.anything());
+  });
+
+  it('reads the user list once per dispatch', async () => {
+    await new EmailAlertChannel().dispatch(event, { type: 'email', recipients: [] } as never, ctx);
+    expect(h.db.listUsers).toHaveBeenCalledTimes(1);
   });
 });

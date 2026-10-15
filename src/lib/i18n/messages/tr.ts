@@ -11,6 +11,7 @@ import { accountPageTr } from './accountPage.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
+import { healthDigestTr } from './healthDigest.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { portalsNowTr } from './portalsNow.tr';
 import { tracingHealthTr } from './tracingHealth.tr';
@@ -1221,6 +1222,7 @@ export const tr: typeof en = {
   incidents: incidentsTr,
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
+  healthDigest: healthDigestTr,
   accountPage: accountPageTr,
   iamPrincipals: {
     segments: {
@@ -2617,6 +2619,7 @@ export const tr: typeof en = {
       feedback: 'Geri bildirim',
       agent_run: 'Arka plan çalıştırmaları',
       schedule: 'Zamanlamalar',
+      alert: 'Uyarılar',
     },
     events: {
       session_idled: 'Bir oturum boşa çıktı (her durma nedeni)',
@@ -2630,6 +2633,8 @@ export const tr: typeof en = {
       agent_run_requires_action: 'Bir arka plan çalıştırması bir kişiyi bekliyor',
       schedule_fired: 'Bir zamanlama tetiklendi',
       schedule_failed: 'Bir zamanlama başarısız oldu',
+      alert_fired: 'Bir uyarı tetiklendi',
+      alert_resolved: 'Bir uyarı çözüldü',
     },
     secret: {
       title: 'İmza sırrı',
@@ -4751,6 +4756,7 @@ export const tr: typeof en = {
       'analysis.extractionModel': 'Çıkarım modeli',
       'analysis.judgeModel': 'Hakem modeli',
       alert: 'Alarm kapsamı',
+      'alert.agent': 'Alarm kapsamı: ajan',
       'alert.model': 'Alarm kapsamı: model',
       'alert.guardrail': 'Alarm kapsamı: guardrail',
       'alert.ragModule': 'Alarm kapsamı: bilgi modülü',

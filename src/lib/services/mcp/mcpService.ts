@@ -36,6 +36,8 @@ import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport
 import { deleteInstanceAssignment, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
+import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
+import { resolveTenantDbName } from '@/lib/services/guardrail/hooks/recordCache';
 import {
   defaultAnnotationsForSource,
   describeMcpTools,
@@ -1822,21 +1824,85 @@ export async function getMcpMonitorSnapshot(
 
 // ── MCP Proxy ─────────────────────────────────────────────────────────────
 
+/**
+ * Records one health observation for an MCP server call. The tenant database
+ * name is not in the request context and a routed call may start on a node
+ * without one, so it is resolved from the server's tenant (cached). Never
+ * throws and is never awaited by the caller.
+ */
+function recordMcpServerMetric(
+  server: IMcpServer,
+  outcome: 'ok' | 'error',
+  latencyMs: number,
+): void {
+  void (async () => {
+    try {
+      const tenantDbName = await resolveTenantDbName(server.tenantId);
+      if (!tenantDbName) return;
+      recordEntityMetric({
+        tenantDbName,
+        tenantId: server.tenantId,
+        projectId: server.projectId,
+        entityType: 'mcp',
+        entityKey: server.key,
+        source: 'service',
+        outcome,
+        latencyMs,
+      });
+    } catch (error) {
+      logger.debug('MCP health metric skipped', { error });
+    }
+  })();
+}
+
+/**
+ * A disabled tool and a guardrail enforce-mode block are policy outcomes, not
+ * server faults. They are told apart by message (the same text a routed call
+ * carries back from another node) and kept out of the health rollup so they
+ * cannot raise the server's error rate.
+ */
+function isMcpPolicyOutcome(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : '';
+  return /^Tool ".*" is disabled on MCP server /.test(message)
+    || message.startsWith('Blocked by Aegis shield')
+    || message.startsWith('Response blocked by Aegis shield');
+}
+
+/**
+ * The single choke point for MCP tool execution (dashboard playground, client
+ * API, public MCP and agents all come through here), so health is recorded
+ * here and nowhere else: not in `logMcpRequest` (composite member rows would
+ * double count) and not in `executeMcpToolLocal` (a routed call would be
+ * counted on both nodes). A composite call is counted once under the
+ * composite's key and its member hop once under the member's key, so
+ * tenant-wide MCP totals include member hops. Policy outcomes (disabled tool,
+ * guardrail block) are not recorded.
+ */
 export async function executeMcpTool(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
-  return routeInstanceCall(
-    {
-      entityType: 'mcp',
-      entityId: mcpEntityId(server.tenantId, server.key),
-      jobName: 'invoke',
-    },
-    { server, toolName, args, runtimeHeaders } as unknown as QueuePayload,
-    () => executeMcpToolLocal(server, toolName, args, runtimeHeaders),
-  );
+  const startedAt = Date.now();
+  try {
+    const outcome = await routeInstanceCall(
+      {
+        entityType: 'mcp',
+        entityId: mcpEntityId(server.tenantId, server.key),
+        jobName: 'invoke',
+      },
+      { server, toolName, args, runtimeHeaders } as unknown as QueuePayload,
+      () => executeMcpToolLocal(server, toolName, args, runtimeHeaders),
+    );
+    recordMcpServerMetric(server, 'ok', Date.now() - startedAt);
+    return outcome;
+  } catch (error) {
+    if (!isMcpPolicyOutcome(error)) {
+      recordMcpServerMetric(server, 'error', Date.now() - startedAt);
+    }
+    throw error;
+  }
 }
 
 export async function executeMcpToolLocal(

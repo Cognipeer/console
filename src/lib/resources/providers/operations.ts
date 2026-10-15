@@ -14,10 +14,19 @@ import { baseRecord } from './modelsSafety';
 
 type Doc = Record<string, any>;
 
-/** channels (recipient emails / webhook targets) and the condition body are not surfaced. */
+/**
+ * Channels (recipient emails, webhook / Slack / Teams URLs, routing keys and the
+ * sealed credentials behind them) and the condition body are never surfaced:
+ * only the channel count and the distinct channel types.
+ */
 export function mapAlertRule(r: Doc): ResourceRecord {
   const scope = (r.scope ?? {}) as Record<string, unknown>;
+  const entity = (r.entity && typeof r.entity === 'object' ? r.entity : null) as Doc | null;
   const e = createEdgeCollector('alert-rule');
+  // Per-agent rules name agents by their tracing name.
+  if (r.module === 'agents' && entity?.mode === 'selected' && Array.isArray(entity.keys)) {
+    for (const key of entity.keys) e.add('alert.agent', key, 'entity.keys');
+  }
   e.add('alert.model', scope.modelKey, 'scope.modelKey');
   e.add('alert.guardrail', scope.guardrailKey, 'scope.guardrailKey');
   e.add('alert.ragModule', scope.ragModuleKey, 'scope.ragModuleKey');
@@ -35,6 +44,12 @@ export function mapAlertRule(r: Doc): ResourceRecord {
       windowMinutes: typeof r.windowMinutes === 'number' ? r.windowMinutes : undefined,
       cooldownMinutes: typeof r.cooldownMinutes === 'number' ? r.cooldownMinutes : undefined,
       channelCount: Array.isArray(r.channels) ? r.channels.length : undefined,
+      channelTypes: Array.isArray(r.channels)
+        ? [...new Set(r.channels.map((c: Doc) => str(c?.type)).filter(Boolean))].join(', ') || undefined
+        : undefined,
+      entityMode: str(entity?.mode),
+      entityType: str(entity?.entityType),
+      entityCount: entity?.mode === 'selected' && Array.isArray(entity.keys) ? entity.keys.length : undefined,
       modelKey: str(scope.modelKey),
       serverKey: str(scope.serverKey),
       guardrailKey: str(scope.guardrailKey),

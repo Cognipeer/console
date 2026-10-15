@@ -28,6 +28,10 @@ export function newChannelId(): string {
   return `ch_${randomBytes(6).toString('hex')}`;
 }
 
+export function isChannelId(value: unknown): value is string {
+  return typeof value === 'string' && CHANNEL_ID_PATTERN.test(value);
+}
+
 /** `https://hooks.slack.com/…/abcd`: the destination host and the last characters of the path, never the secret part. */
 export function urlHint(url: string): string {
   try {
@@ -107,7 +111,7 @@ export async function sealChannels(
   const out: IAlertChannel[] = [];
 
   for (const channel of input) {
-    let id = channel.id && CHANNEL_ID_PATTERN.test(channel.id) && !usedIds.has(channel.id) ? channel.id : '';
+    let id = isChannelId(channel.id) && !usedIds.has(channel.id) ? channel.id : '';
     if (!id) {
       do {
         id = newChannelId();
@@ -119,7 +123,7 @@ export async function sealChannels(
 
     switch (withId.type) {
       case 'email': {
-        const recipients = (withId.recipients ?? []).map(trimmed).filter(Boolean);
+        const recipients = (Array.isArray(withId.recipients) ? withId.recipients : []).map(trimmed).filter(Boolean);
         out.push({ id, type: 'email', recipients });
         break;
       }
@@ -161,18 +165,38 @@ export async function sealChannels(
 }
 
 /**
- * API-safe view of stored channels: everything but the `sealed` credentials
- * (the type is kept as IAlertChannel for compatibility, so do not feed masked
- * channels back into `sealChannels` as `existing`: they cannot be unsealed).
+ * API-safe view of stored channels: id, type and the display hints, never the
+ * `sealed` credentials (the type is kept as IAlertChannel for compatibility, so
+ * do not feed masked channels back into `sealChannels` as `existing`: they
+ * cannot be unsealed). Built field by field, so nothing else stored on a
+ * channel can leak.
  */
 export function maskChannels(stored: IAlertChannel[] | null | undefined): IAlertChannel[] {
   if (!Array.isArray(stored)) return [];
-  return stored.map((channel) => {
-    if (channel.type === 'email') {
-      return { ...(channel.id ? { id: channel.id } : {}), type: 'email', recipients: [...(channel.recipients ?? [])] };
+  const out: IAlertChannel[] = [];
+  for (const channel of stored) {
+    const id = channel.id ? { id: channel.id } : {};
+    switch (channel.type) {
+      case 'email':
+        out.push({ ...id, type: 'email', recipients: [...(channel.recipients ?? [])] });
+        break;
+      case 'webhook':
+        out.push({ ...id, type: 'webhook', urlHint: channel.urlHint, hasSecret: Boolean(channel.hasSecret) } as IAlertChannel);
+        break;
+      case 'slack':
+      case 'teams':
+        out.push({ ...id, type: channel.type, urlHint: channel.urlHint } as IAlertChannel);
+        break;
+      case 'pagerduty':
+        out.push({ ...id, type: 'pagerduty', keyHint: channel.keyHint } as IAlertChannel);
+        break;
+      default:
+        // A type registered by another module (or a damaged row): keep the
+        // entry by id and type only, so an edit never silently deletes it and
+        // nothing else stored on it can leak.
+        out.push({ ...id, type: (channel as { type: IAlertChannel['type'] }).type } as IAlertChannel);
+        break;
     }
-    const { sealed: _sealed, ...rest } = channel as IAlertChannel & { sealed?: string };
-    void _sealed;
-    return rest as IAlertChannel;
-  });
+  }
+  return out;
 }

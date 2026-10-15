@@ -230,11 +230,6 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     pickLabel: (b) => wrappedName(b, 'migration'),
     excludeValues: ['new'],
   }),
-  createStandardResolver({
-    path: ['tracing', 'agents'],
-    buildUrl: (name) => `/api/tracing/agents/${encodeURIComponent(name)}/overview`,
-    pickLabel: (b) => wrappedName(b, 'agent', 'label', 'name', 'key'),
-  }),
 ];
 
 /* ----- Custom resolvers --------------------------------------------------- */
@@ -376,8 +371,36 @@ const tracingThreadResolver: BreadcrumbResolver = {
   },
 };
 
+/**
+ * Tracing agents: `/dashboard/tracing/agents/:name`.
+ * The segment is the agent's name (that is what the overview's label always
+ * was), so the label is the decoded segment itself - no request, which used to
+ * read the agent's whole history only to learn it.
+ */
+const tracingAgentResolver: BreadcrumbResolver = {
+  id: 'custom:tracing-agent',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'agents'
+    ) return [];
+    const raw = segments[3];
+    if (!raw) return [];
+    let name = raw;
+    try {
+      name = decodeURIComponent(raw);
+    } catch {
+      // A name with a stray `%` stays as it is.
+    }
+    return [{ index: 3, label: name }];
+  },
+};
+
 const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   projectsResolver,
+  tracingAgentResolver,
   vectorIndexResolver,
   tracingSessionResolver,
   tracingThreadResolver,

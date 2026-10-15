@@ -2,6 +2,7 @@ import { accountPageEn } from './accountPage.en';
 import { alertsEn, incidentsEn } from './alerts.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
+import { healthDigestEn } from './healthDigest.en';
 import { iamDirectoryEn } from './iamDirectory.en';
 import { portalsNowEn } from './portalsNow.en';
 import { tracingHealthEn } from './tracingHealth.en';
@@ -2140,6 +2141,7 @@ export const en = {
       feedback: 'Feedback',
       agent_run: 'Background runs',
       schedule: 'Schedules',
+      alert: 'Alerts',
     },
     events: {
       session_idled: 'A session went idle (any stop reason)',
@@ -2153,6 +2155,8 @@ export const en = {
       agent_run_requires_action: 'A background run is waiting for a person',
       schedule_fired: 'A schedule fired',
       schedule_failed: 'A schedule failed',
+      alert_fired: 'An alert fired',
+      alert_resolved: 'An alert resolved',
     },
     secret: {
       title: 'Signing secret',
@@ -3911,6 +3915,7 @@ export const en = {
   incidents: incidentsEn,
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,
+  healthDigest: healthDigestEn,
   memory: {
     title: 'Agent Memory',
     subtitle: 'Persistent memory with vector-backed semantic search',
@@ -6406,6 +6411,7 @@ export const en = {
       'analysis.extractionModel': 'Extraction model',
       'analysis.judgeModel': 'Judge model',
       alert: 'Alert scope',
+      'alert.agent': 'Alert scope: agent',
       'alert.model': 'Alert scope: model',
       'alert.guardrail': 'Alert scope: guardrail',
       'alert.ragModule': 'Alert scope: knowledge module',

@@ -41,7 +41,8 @@ const catalog = WEBHOOK_EVENT_CATALOG.map((event) => ({ ...event }));
 
 describe('editing the event list', () => {
   it('groups the catalog in order', () => {
-    expect(eventGroups(catalog)).toEqual(['session', 'action', 'budget', 'feedback', 'agent_run', 'schedule']);
+    expect(eventGroups(catalog)).toEqual(['session', 'action', 'budget', 'feedback', 'agent_run', 'schedule', 'alert']);
+    expect(groupEvents(catalog, 'alert')).toEqual(['alert.fired', 'alert.resolved']);
     expect(groupEvents(catalog, 'schedule')).toEqual(['schedule.fired', 'schedule.failed']);
   });
 

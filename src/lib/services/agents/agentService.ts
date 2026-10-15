@@ -100,6 +100,12 @@ import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
 import { buildWebFetchAgentTools } from '@/lib/services/crawler';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import {
+    isTerminalSessionStatus,
+    recordAgentSessionOutcome,
+    recordTraceEventMetrics,
+} from '@/lib/services/tracing/traceEntityMetrics';
+import { countTraceErrors, deriveSessionStatus } from '@/lib/shared/traceHealth';
+import {
     buildToolDefinitionsSection,
     TOOL_DEFINITIONS_SECTION_KIND,
     type TraceToolDefinition,
@@ -2271,12 +2277,16 @@ async function runBoundToolCleanup(
  * Capture is per event, never per session — the SDK binds one menu per
  * invoke, but a session/thread spans invocations whose menus can differ, so
  * each call must record the menu it actually saw.
+ *
+ * Exported so the ingest tests can drive `onSession` directly.
  */
-async function createInternalTracingSink(
+export async function createInternalTracingSink(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
     toolDefinitions?: TraceToolDefinition[],
+    /** Stable key of the hosted agent, stamped into the session `metadata.agentKey` (the session's `agentName` is the display name). */
+    agentKey?: string,
 ) {
     const { customSink } = await import('@cognipeer/agent-sdk');
     const toolDefinitionsSection = toolDefinitions && toolDefinitions.length > 0
@@ -2316,6 +2326,18 @@ async function createInternalTracingSink(
                 }
                 if (session?.agent?.model) modelsUsed.add(session.agent.model);
 
+                // Same health rule as the HTTP ingest: the SDK's own status stays authoritative; counters and a
+                // derived status fill in when it is absent. SDK sink failures are not run failures.
+                const errorCounts = countTraceErrors(events);
+                const sessionErrors = session.errors ?? [];
+                const nonSinkErrors = sessionErrors.filter((error) => (error as Record<string, unknown> | null)?.type !== 'sink').length;
+                const sessionStatus = deriveSessionStatus({
+                    clientStatus: session.status,
+                    errorEvents: errorCounts.errorEvents,
+                    nonSinkErrors,
+                    ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
+                });
+
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
                     traceId: session.traceId,
@@ -2329,13 +2351,16 @@ async function createInternalTracingSink(
                     agentVersion: session.agent?.version ?? undefined,
                     agentModel: session.agent?.model ?? undefined,
                     config: session.config ?? {},
-                    metadata: session.metadata ?? {},
+                    metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
                     summary: session.summary ?? {},
-                    status: session.status || 'unknown',
+                    status: sessionStatus,
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
                     durationMs: session.durationMs ?? undefined,
-                    errors: session.errors ?? [],
+                    errorEvents: errorCounts.errorEvents,
+                    toolErrors: errorCounts.toolErrors,
+                    aiErrors: errorCounts.aiErrors,
+                    errors: sessionErrors,
                     modelsUsed: Array.from(modelsUsed),
                     toolsUsed: Array.from(toolsUsed),
                     eventCounts: session.summary?.eventCounts ?? {},
@@ -2369,8 +2394,12 @@ async function createInternalTracingSink(
                     });
                 }
 
-                // Replace events
+                // Replace events. What the previous post of this session counted is subtracted from the health counters.
+                const previousEvents = existing
+                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
+                    : [];
                 await db.deleteAgentTracingEvents(session.sessionId, projectId);
+                const eventDocs: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
                 for (const event of events) {
                     let sections = (Array.isArray(event?.sections)
                         ? event.sections
@@ -2463,6 +2492,29 @@ async function createInternalTracingSink(
                     };
 
                     await db.createAgentTracingEvent(eventDoc);
+                    eventDocs.push(eventDoc);
+                }
+
+                // Hosted runs feed agent health only: their model and tool calls are counted where they execute.
+                await recordTraceEventMetrics({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    agentName: sessionDoc.agentName,
+                    events: eventDocs,
+                    previousEvents,
+                    source: 'hosted',
+                });
+                if (isTerminalSessionStatus(sessionDoc.status)) {
+                    await recordAgentSessionOutcome({
+                        tenantDbName,
+                        tenantId,
+                        projectId,
+                        session: sessionDoc,
+                        previousOutcome: existing?.metricsOutcome,
+                        source: 'hosted',
+                        events: eventDocs,
+                    });
                 }
 
                 logger.info('Internal tracing session saved', {
@@ -3922,7 +3974,7 @@ async function buildLocalAgentRun(input: {
     // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
     // own rules are the gateway's business, not this layer's.
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
+    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions, agentKey);
 
     const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
         tenantDbName,

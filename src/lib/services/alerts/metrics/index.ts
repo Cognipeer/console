@@ -18,6 +18,7 @@ import { McpCollector } from './mcpCollector';
 import { AnalysisCollector } from './analysisCollector';
 import { EvaluationCollector } from './evaluationCollector';
 import { RedTeamCollector } from './redTeamCollector';
+import { EntityMetricsCollector } from './entityMetricsCollector';
 // Hook-plane decisions (block rate, approval rate, risk score, total). Serves
 // the four `guardrail_*` decision metrics and their persisted `aegis_*` aliases
 // from `guardrail_evaluation_logs`, which every edition writes. The enterprise
@@ -64,7 +65,7 @@ register(new AnalysisCollector());
 register(new EvaluationCollector());
 register(new RedTeamCollector());
 register(new GuardrailDecisionCollector());
-// The per-entity health collector (`EntityMetricsCollector`, agent/model/kb/mcp/tool
-// metrics over `entity_metrics`) is registered here once it exists.
+// Per-entity health metrics (agent/model/kb/mcp/tool) over `entity_metrics`.
+register(new EntityMetricsCollector());
 
-export type { IMetricCollector, MetricQuery, MetricResult } from './types';
+export type { EntityMetricQuery, IMetricCollector, MetricQuery, MetricResult } from './types';

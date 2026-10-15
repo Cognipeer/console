@@ -281,6 +281,18 @@ describe('resolution per scope rule', () => {
     });
   });
 
+  describe('alert.agent (tracing name, strict project, warning)', () => {
+    const rule = (projectId: string | null) => rec({ type: 'alert-rule', id: 'al', key: 'al', projectId });
+    it('resolves an agent of the rule project and flags a traced-only name as unresolved or cross-project', () => {
+      const e = edge('alert.agent', 'Pulse Main');
+      const agent = (projectId: string | null) => rec({ type: 'agent', id: 'a', key: 'Pulse Main', projectId });
+      expect(resolve(rule('p1'), e, [agent('p1')]).status).toBe('ok');
+      expect(resolve(rule('p1'), e, [agent('p2')]).status).toBe('cross-project');
+      expect(resolve(rule('p1'), e, []).status).toBe('missing');
+      expect(EDGE_KINDS['alert.agent'].severity).toBe('warning');
+    });
+  });
+
   describe('tenant (alert.inferenceServer)', () => {
     it('any row of the tenant', () => {
       const alert = rec({ type: 'alert-rule', id: 'al', key: 'al', projectId: 'p1' });

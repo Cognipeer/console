@@ -142,4 +142,18 @@ describe('maskChannels', () => {
     expect(maskChannels(undefined)).toEqual([]);
     expect(maskChannels(null)).toEqual([]);
   });
+
+  it('keeps a channel of an unknown type by id and type only', () => {
+    const stored = [
+      { id: 'ch_bbbbbbbbbbbb', type: 'sms', sealed: 'secret', phone: '+100' },
+    ] as unknown as IAlertChannel[];
+    expect(maskChannels(stored)).toEqual([{ id: 'ch_bbbbbbbbbbbb', type: 'sms' }]);
+  });
+
+  it('copies only the display fields, so extra stored properties never reach an API', () => {
+    const stored = [
+      { id: 'ch_aaaaaaaaaaaa', type: 'slack', urlHint: 'https://hooks.slack.com/…/ABCD', sealed: 'x', url: SLACK_URL },
+    ] as unknown as IAlertChannel[];
+    expect(maskChannels(stored)).toEqual([{ id: 'ch_aaaaaaaaaaaa', type: 'slack', urlHint: 'https://hooks.slack.com/…/ABCD' }]);
+  });
 });
