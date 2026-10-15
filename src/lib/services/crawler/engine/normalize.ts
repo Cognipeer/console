@@ -51,14 +51,21 @@ export function getHostname(raw: string): string {
   }
 }
 
+function stripWww(host: string): string {
+  return host.startsWith('www.') ? host.slice(4) : host;
+}
+
 export function isSameOrSubdomain(
   candidate: string,
   root: string,
   includeSubdomains: boolean,
 ): boolean {
   if (!root || !candidate) return false;
-  const c = candidate.toLowerCase();
-  const r = root.toLowerCase();
+  // A leading `www.` is the same site, not a subdomain: seeding `example.com`
+  // that redirects to `www.example.com` (or linking back to the apex) must
+  // not take the crawl out of scope when includeSubdomains is off.
+  const c = stripWww(candidate.toLowerCase());
+  const r = stripWww(root.toLowerCase());
   if (c === r) return true;
   return includeSubdomains && c.endsWith(`.${r}`);
 }

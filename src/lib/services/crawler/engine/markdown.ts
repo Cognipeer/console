@@ -5,10 +5,13 @@
 
 import * as cheerio from 'cheerio';
 import { decodeHTML } from 'entities';
-import { JSDOM } from 'jsdom';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
+import { createLogger } from '@/lib/core/logger';
 import type { CrawlMarkdownOptions } from './types';
+
+const logger = createLogger('crawler:markdown');
 
 export interface MarkdownInput {
   html: string;
@@ -190,7 +193,16 @@ function preprocessHtml(html: string, url: string | undefined, options?: CrawlMa
  */
 function extractReadabilityContent(html: string, url?: string): string | undefined {
   try {
-    const dom = new JSDOM(html, url ? { url } : undefined);
+    // jsdom's default virtual console forwards every internal error to
+    // `console.error` — for a stylesheet it can't parse (modern CSS such as
+    // @layer / container queries / nesting) that dumps the ENTIRE stylesheet
+    // into the server log. Readability only needs the DOM, so swallow those
+    // and keep just the short message at debug level.
+    const virtualConsole = new VirtualConsole();
+    virtualConsole.on('jsdomError', (err: Error) => {
+      logger.debug('jsdom error while extracting article', { error: err.message });
+    });
+    const dom = new JSDOM(html, { virtualConsole, ...(url ? { url } : {}) });
     const article = new Readability(dom.window.document).parse();
     const content = article?.content?.trim();
     return content || undefined;

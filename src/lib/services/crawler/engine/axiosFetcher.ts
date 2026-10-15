@@ -33,6 +33,12 @@ export interface FetchResult {
   fileBytes?: number;
   /** Raw bytes of a downloaded attachment. Present when `type === 'file'`. */
   fileBuffer?: Buffer;
+  /**
+   * URL the response was actually served from after following redirects
+   * (only set when it differs from the requested URL). Lets a browser
+   * fallback skip the redirect chain axios already resolved.
+   */
+  finalUrl?: string;
 }
 
 export async function fetchWithAxios(
@@ -124,6 +130,7 @@ export async function fetchWithAxios(
           contentType: contentType || mime.lookup(currentUrl) || 'application/octet-stream',
           fileBytes: buffer.length,
           fileBuffer: buffer,
+          finalUrl: currentUrl !== url ? currentUrl : undefined,
         };
       }
 
@@ -134,6 +141,7 @@ export async function fetchWithAxios(
         contentType: contentType || 'text/html',
         html,
         htmlBytes: buffer.length,
+        finalUrl: currentUrl !== url ? currentUrl : undefined,
       };
     } catch (error) {
       clearTimeout(tid);
