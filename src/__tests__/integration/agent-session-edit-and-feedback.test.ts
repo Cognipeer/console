@@ -37,7 +37,7 @@ vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => {
   return { ...actual, logModelUsage: hoisted.logModelUsage };
 });
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
-  buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined })),
+  buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined, collectOutputs: async () => ({ attachments: [], warnings: [] }) })),
   destroyConversationSandbox: vi.fn(),
   resolveSandboxAvailability: vi.fn(),
 }));

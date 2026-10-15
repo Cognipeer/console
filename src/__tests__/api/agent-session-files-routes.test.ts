@@ -100,6 +100,10 @@ vi.mock('@/lib/services/agents/sessionFiles', async () => {
     readSessionFileContent: vi.fn(),
   };
 });
+vi.mock('@/lib/services/agents/agentSandboxSeedStorage', () => ({
+  uploadSeedFile: vi.fn(),
+  deleteSeedFile: vi.fn(),
+}));
 vi.mock('@/lib/services/agents/responseInputFiles', async () => {
   const actual = await vi.importActual<typeof import('@/lib/services/agents/responseInputFiles')>('@/lib/services/agents/responseInputFiles');
   return { ...actual, storeResponseInputFiles: vi.fn() };
@@ -138,6 +142,7 @@ import {
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
 import { deleteSessionFile, listSessionFiles, readSessionFileContent, uploadSessionFile } from '@/lib/services/agents/sessionFiles';
+import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 import { resolveAgentExecutionLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
@@ -301,6 +306,87 @@ describe('dashboard: list and delete', () => {
     mockFn(deleteSessionFile).mockResolvedValue(false);
     res = await app.inject({ method: 'DELETE', url: `${DASH_URL}/zzz`, headers: dashHeaders });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// POST and DELETE /agents/:agentId/sandbox-seed-files: the files an agent's sandbox is preloaded with.
+// The limits and the storage are agentSandboxSeedStorage's (unit/agent-sandbox-seed-files.test.ts); faked here.
+describe('dashboard: sandbox seed files', () => {
+  const SEED_URL = '/api/agents/agent-1/sandbox-seed-files';
+  const SEED_FILE = { bucketKey: 'docs', objectKey: 'agent-seed/field-ops/data-1.csv', name: 'data.csv', size: 5 };
+  const SCOPE = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' };
+
+  beforeEach(() => {
+    mockFn(uploadSeedFile).mockResolvedValue(SEED_FILE);
+    mockFn(deleteSeedFile).mockResolvedValue(true);
+  });
+
+  it('uploads a raw body with its name in ?name= and answers the config entry', async () => {
+    const bytes = Buffer.from([0x61, 0x2c, 0x62, 0x0a, 0xff]);
+    const res = await app.inject({
+      method: 'POST', url: `${SEED_URL}?name=data.csv`, headers: { ...dashHeaders, 'content-type': 'text/csv' }, payload: bytes,
+    });
+    expect(res.statusCode).toBe(201);
+    expect(parseJsonBody<{ seedFile: unknown }>(res.body).seedFile).toEqual(SEED_FILE);
+    const call = mockFn(uploadSeedFile).mock.calls[0]![0];
+    expect(call).toMatchObject({ scope: SCOPE, fileName: 'data.csv', contentType: 'text/csv', userId: 'user-1' });
+    expect(call.agent._id).toBe('agent-1');
+    expect(Buffer.compare(call.data, bytes)).toBe(0);
+  });
+
+  it('decodes a JSON body with base64 data, with or without a data: URL prefix', async () => {
+    for (const data of [Buffer.from('hello').toString('base64'), `data:text/plain;base64,${Buffer.from('hello').toString('base64')}`]) {
+      mockFn(uploadSeedFile).mockClear();
+      const res = await app.inject({ method: 'POST', url: SEED_URL, headers: dashHeaders, payload: { name: 'hello.txt', contentType: 'text/plain', data } });
+      expect(res.statusCode).toBe(201);
+      const call = mockFn(uploadSeedFile).mock.calls[0]![0];
+      expect(call.data.toString('utf8')).toBe('hello');
+    }
+  });
+
+  it('refuses a request that names no file, and answers the service’s refusals with their own status and code', async () => {
+    const noName = await app.inject({ method: 'POST', url: SEED_URL, headers: { ...dashHeaders, 'content-type': 'text/csv' }, payload: Buffer.from('x') });
+    expect(noName.statusCode).toBe(400);
+    expect(uploadSeedFile).not.toHaveBeenCalled();
+
+    mockFn(uploadSeedFile).mockRejectedValue(new AgentAttachmentError(409, 'too_many_files', 'An agent can preload at most 20 files.'));
+    const tooMany = await app.inject({ method: 'POST', url: `${SEED_URL}?name=a.csv`, headers: { ...dashHeaders, 'content-type': 'text/csv' }, payload: 'x' });
+    expect(tooMany.statusCode).toBe(409);
+    expect(parseJsonBody<Record<string, unknown>>(tooMany.body)).toMatchObject({ code: 'too_many_files' });
+  });
+
+  it('deletes a file by bucket and object key, 404s one that is gone and 400s a request that names none', async () => {
+    let res = await app.inject({ method: 'DELETE', url: `${SEED_URL}?bucketKey=docs&objectKey=${encodeURIComponent(SEED_FILE.objectKey)}`, headers: dashHeaders });
+    expect(res.statusCode).toBe(200);
+    expect(mockFn(deleteSeedFile).mock.calls[0]![0]).toMatchObject({ scope: SCOPE, bucketKey: 'docs', objectKey: SEED_FILE.objectKey, userId: 'user-1' });
+
+    mockFn(deleteSeedFile).mockResolvedValue(false);
+    res = await app.inject({ method: 'DELETE', url: `${SEED_URL}?bucketKey=docs&objectKey=gone.csv`, headers: dashHeaders });
+    expect(res.statusCode).toBe(404);
+
+    mockFn(deleteSeedFile).mockClear();
+    res = await app.inject({ method: 'DELETE', url: `${SEED_URL}?objectKey=gone.csv`, headers: dashHeaders });
+    expect(res.statusCode).toBe(400);
+    expect(deleteSeedFile).not.toHaveBeenCalled();
+  });
+
+  it('answers the service refusing an object key that is not the agent’s', async () => {
+    mockFn(deleteSeedFile).mockRejectedValue(new AgentAttachmentError(400, 'invalid_object_key', 'Not a file uploaded for this agent.'));
+    const res = await app.inject({ method: 'DELETE', url: `${SEED_URL}?bucketKey=docs&objectKey=other/agent.csv`, headers: dashHeaders });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'invalid_object_key' });
+  });
+
+  it('404s an agent that does not exist or belongs to another project, before the service sees anything', async () => {
+    for (const agent of [null, { ...AGENT, projectId: 'proj-2' }]) {
+      mockFn(getAgentById).mockResolvedValue(agent);
+      const upload = await app.inject({ method: 'POST', url: `${SEED_URL}?name=a.csv`, headers: { ...dashHeaders, 'content-type': 'text/csv' }, payload: 'x' });
+      expect(upload.statusCode).toBe(404);
+      const remove = await app.inject({ method: 'DELETE', url: `${SEED_URL}?bucketKey=docs&objectKey=a.csv`, headers: dashHeaders });
+      expect(remove.statusCode).toBe(404);
+    }
+    expect(uploadSeedFile).not.toHaveBeenCalled();
+    expect(deleteSeedFile).not.toHaveBeenCalled();
   });
 });
 

@@ -32,7 +32,7 @@ vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.re
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
 vi.mock('@/lib/services/agents/gatewayChatModel', () => ({ buildGatewayChatModel: hoisted.buildGatewayChatModel, isDynamicModel: () => false, }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
-  buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined })),
+  buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined, collectOutputs: async () => ({ attachments: [], warnings: [] }) })),
   destroyConversationSandbox: vi.fn(),
   resolveSandboxAvailability: vi.fn(),
 }));
