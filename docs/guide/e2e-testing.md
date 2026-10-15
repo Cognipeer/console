@@ -47,7 +47,7 @@ npm run test:load
 ```
 
 The console image used by the stack is built with `E2E_BUILD=1`, which relaxes
-the strict build-time type/lint gate (see `next.config.ts`); normal
+the strict build-time type/lint gate (see `next.config.mjs`); normal
 `npm run build` stays fully strict.
 
 See `cognipeer-console-test/README.md` for the full reference: every spec, the

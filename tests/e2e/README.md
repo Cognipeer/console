@@ -36,4 +36,4 @@ layer: a real dockerized stack driven over HTTP with a real LLM.
 
 > Note: the console's production Docker image used by the test stack is built
 > with `E2E_BUILD=1`, which relaxes the strict build-time type/lint gate (see
-> `next.config.ts`). Normal `npm run build` stays fully strict.
+> `next.config.mjs`). Normal `npm run build` stays fully strict.

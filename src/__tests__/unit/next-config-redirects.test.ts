@@ -3,7 +3,7 @@
  * answered by redirects in the Next config (no stub pages), temporary for now.
  */
 import { describe, expect, it } from 'vitest';
-import nextConfig from '../../../next.config';
+import nextConfig from '../../../next.config.mjs';
 
 describe('next.config redirects', async () => {
   const rules = (await nextConfig.redirects?.()) ?? [];
