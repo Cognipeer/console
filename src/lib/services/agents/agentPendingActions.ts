@@ -34,6 +34,7 @@ import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientT
 import { MAX_STATE_BYTES, serializeCarriedState, toPlainMessage } from './agentTurnState';
 import type { ResolvedHitlConfig } from './agentHumanInTheLoop';
 import type { SessionEventWriter } from './sessionEvents';
+import { closePausedTrace, type PausedTraceClosure, type PausedTraceDb } from './pausedTraceClosure';
 
 const logger = createLogger('agents:pending-actions');
 
@@ -107,7 +108,15 @@ export type PauseSource = 'agent' | 'agent-playground';
  * The ctx keys the SDK needs to continue a paused run. Everything else in
  * `ctx` is per-run (live handles, one-run verdicts) and must not be stored.
  */
-const RESUME_CTX_KEYS = ['__awaitingApproval', '__awaitingUserQuestion', '__resumeStage', '__subagentPending'] as const;
+const RESUME_CTX_KEYS = [
+    '__awaitingApproval',
+    '__awaitingUserQuestion',
+    '__resumeStage',
+    '__subagentPending',
+    // Where the paused run's trace session left off (agent-sdk ≥ 0.14): the
+    // resumed invoke records into the same session instead of opening a new one.
+    '__traceContinuation',
+] as const;
 
 interface PausedEnvelope {
     v: 1;
@@ -447,7 +456,7 @@ const NEW_MESSAGE_CANCEL = 'system:new_message';
 export async function cancelPendingForNewMessage(
     db: Pick<DatabaseProvider,
         'listAgentPendingActions' | 'updateAgentPendingAction' | 'updateAgentConversation'
-        | 'findAgentConversationState' | 'saveAgentConversationState'>,
+        | 'findAgentConversationState' | 'saveAgentConversationState'> & Partial<PausedTraceDb>,
     conversation: IAgentConversation,
     emit?: SessionEventWriter['emit'],
     resolvedBy: string = NEW_MESSAGE_CANCEL,
@@ -479,18 +488,38 @@ export async function cancelPendingForNewMessage(
         await db.updateAgentConversation(conversationId, { messages });
         current = { ...conversation, messages };
     }
-    await dropPausedSnapshot(db, conversationId);
+    await dropPausedSnapshot(db, conversationId, {
+        outcome: 'cancelled',
+        resolvedBy,
+        actions: open.filter((action) => updates.has(String(action._id))),
+        projectId: conversation.projectId,
+        tenantId: conversation.tenantId,
+    });
     return current;
 }
 
-/** Removes the paused state, keeping the normal snapshot. */
+/**
+ * Removes the paused state, keeping the normal snapshot. The run it held will
+ * not resume, so its trace session is closed with the step that ended the wait
+ * (`closure`) — otherwise it would read "paused" forever.
+ */
 export async function dropPausedSnapshot(
-    db: Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState'>,
+    db: Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState'> & Partial<PausedTraceDb>,
     conversationId: string,
+    closure?: PausedTraceClosure & { projectId: string; tenantId: string },
 ): Promise<void> {
     try {
         const stored = await db.findAgentConversationState(conversationId);
         if (!stored?.pausedSnapshot) return;
+        if (closure && closure.actions.length > 0 && db.findAgentTracingSessionById && db.updateAgentTracingSession && db.createAgentTracingEvent) {
+            const paused = parsePausedState(stored.pausedSnapshot);
+            await closePausedTrace(db as PausedTraceDb, {
+                projectId: closure.projectId,
+                tenantId: closure.tenantId,
+                pausedCtx: (paused?.state as { ctx?: unknown } | undefined)?.ctx,
+                closure,
+            });
+        }
         const { pausedSnapshot: _dropped, _id, createdAt: _c, updatedAt: _u, ...rest } = stored;
         void _dropped; void _id; void _c; void _u;
         await db.saveAgentConversationState(rest);

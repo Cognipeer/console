@@ -15,6 +15,7 @@ import { calculateCost } from '@/lib/services/models/usageLogger';
 import { resolveExternalPricingForDay } from '@/lib/services/modelPriceCatalog/externalPricing';
 import { toUtcDay } from '@/lib/services/usage/usageBreakdown';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
+import { eventResponse, humanStep, type SectionShell } from '@/lib/shared/tracingSections';
 import dayjs from 'dayjs';
 
 const logger = createLogger('agent-tracing');
@@ -348,6 +349,25 @@ const SESSION_EVENT_SUMMARY_PROJECTION = {
   // returns full sections; the summary mapper extracts the same names.)
   'sections.kind': 1,
   'sections.tools.name': 1,
+  // Section shells (no content) so the summary can tell what a model call
+  // answered — see `eventResponse` — and who ran each step.
+  'sections.role': 1,
+  'sections.label': 1,
+  'sections.tool': 1,
+  'sections.toolName': 1,
+  'sections.name': 1,
+  'sections.direction': 1,
+  // Human-step keys of a metadata section (approval / question / client
+  // tool), so the summary can say who decided what — see `humanStep`.
+  'sections.data.approvalId': 1,
+  'sections.data.questionId': 1,
+  'sections.data.decision': 1,
+  'sections.data.status': 1,
+  'sections.data.decidedBy': 1,
+  'sections.data.answeredBy': 1,
+  actor: 1,
+  actorName: 1,
+  actorRole: 1,
 } as const;
 
 /**
@@ -474,6 +494,8 @@ function legacyEventReasoningTokens(event: IAgentTracingEvent): number | undefin
 
 function mapTracingEventSummary(event: IAgentTracingEvent) {
   const toolMenu = getToolDefinitionNames(event);
+  const response = eventResponse(event.type, event.sections as SectionShell[] | undefined);
+  const human = humanStep({ type: event.type, status: event.status, sections: event.sections as SectionShell[] | undefined });
   return {
     id: event.id || event._id,
     sequence: event.sequence,
@@ -492,10 +514,24 @@ function mapTracingEventSummary(event: IAgentTracingEvent) {
     finishReason: legacyEventFinishReason(event),
     spanId: event.spanId,
     parentSpanId: event.parentSpanId,
+    actor: summaryActor(event),
     ...(toolMenu
       ? { toolDefinitionNames: toolMenu.names, toolDefinitionCount: toolMenu.count }
       : {}),
+    ...(response
+      ? { responseToolNames: response.toolNames, responseAnswered: response.answered }
+      : {}),
+    ...(human ? { human } : {}),
   };
+}
+
+/** Actor reduced to the fields a timeline row shows. */
+function summaryActor(event: IAgentTracingEvent): { scope?: string; name?: string; role?: string } | undefined {
+  const actor = toRecord(event.actor);
+  const scope = typeof actor?.scope === 'string' ? actor.scope : undefined;
+  const name = typeof actor?.name === 'string' ? actor.name : event.actorName;
+  const role = typeof actor?.role === 'string' ? actor.role : event.actorRole;
+  return scope || name || role ? { scope, name, role } : undefined;
 }
 
 function mapTracingEventDetail(event: IAgentTracingEvent) {
