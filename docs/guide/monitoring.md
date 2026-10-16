@@ -8,7 +8,13 @@ Alert rules watch a metric and open an **incident** when it goes wrong. Rules ar
 
 ![Alerts list](/screenshots/monitoring/01-alerts-overview.png)
 
-The counters at the top show **Active Rules**, **Disabled Rules**, **Entities Firing Now** (the firing entities, added up over all rules) and **Rules Fired (24h)** (the rules that fired in the last 24 hours). From here you can author a rule (**New Rule**), work through open incidents (**Incidents**), or open the full audit timeline (**View History**). The **State** column of a rule counts its entities that are firing, pending or OK. Rules, incidents and history belong to the project you are working in.
+The counters at the top cover every rule of the project, whatever the filters: **Active Rules** (enabled, muted ones included), **Entities Firing Now** (the firing entities, added up over all rules), **Muted** and **Noisy · 7d** (rules that fired 10 times or more in the last 7 days). From here you can author a rule (**New Rule**), work through incidents (**Incidents**), manage the shared notification channels (**Channels**), or open the full audit timeline (**View History**). Rules, incidents and history belong to the project you are working in.
+
+The list can be searched (rule name, description and metric id) and filtered by module, by status (**Firing**, **Pending**, **OK**, **Muted**, **No data**, **Disabled**) and by owner (**Created by me**, or another user when you may list users). It is sorted by **noisiest** (fires in the last 7 days) by default, or by **last fired** or **name**. Per rule:
+
+- **State** counts the rule's entities that are firing (a link to their incidents), pending or OK. **No data** means the rule is enabled but none of its targets reported data in its last evaluation, and a muted rule shows until when (**Muted · in 3 hours**).
+- **Fired · 7d** is the number of times the rule fired in the last 7 days (one per entity that fired), with a sparkline of the seven days. A rule that fired 10 times or more is marked **noisy**: consider a longer **Hold for**, a higher threshold or a [backtest](#condition-types). The counts are read from at most 5000 alert events; the footer says when that cap was reached.
+- **Last fired**, **Mute** (below) and the **Enabled** switch.
 
 ### Metrics
 
@@ -78,7 +84,7 @@ A per-entity rule has a target:
 - **All entities of the type** (the default): every agent, model, knowledge base, MCP server or tool that has data is evaluated, each on its own. Entities that start reporting later are picked up automatically. A rule evaluates at most its 2,000 busiest entities.
 - **Selected entities**: 1 to 50 keys. The picker lists entities with data in the last 30 days, and you can type a key that has not reported yet.
 
-Rules on the metrics that are not per entity have no entity target. They cover the whole project, or one resource through the rule's scope.
+Rules on the metrics that are not per entity have no entity target. They cover the whole project, or one resource through the rule's scope. The Model Monitoring metrics are the exception: inference servers belong to the workspace, so a rule without a server in its scope reads every inference server of the workspace.
 
 ### Condition types
 
@@ -117,6 +123,10 @@ Baseline and SLO burn need an Enterprise build and an active Enterprise licence.
 
 Before saving, **Preview now** evaluates the rule against current data without sending anything or storing state. It lists up to 50 entities, those that would fire first.
 
+**Backtest · last 7 days** replays the rule as it stands in the form over the last 7 days, again without saving or sending anything. It shows how many times the rule would have fired, the median duration of the replayed incidents that recovered, and the five entities that would have fired most. When a **Threshold** rule would have fired more than twice (and its operator is not `=`), it also suggests the mildest threshold at which it would have fired at most twice; **Apply threshold** puts that value into the form, and nothing changes until you save. Only per-entity metrics with a **Threshold** or **Absence** condition can be replayed, and at most the 200 busiest entities are. A backtest is limited to 10 per minute per user and 30 per minute per project.
+
+**Runbook URL** (optional, `http` or `https`) links the page your team follows when the rule fires. It appears as **Open the runbook** on the rule's incidents.
+
 ### From breach to incident
 
 Each entity of a rule has its own state:
@@ -128,7 +138,7 @@ Each entity of a rule has its own state:
 | Firing | The alert fired: one alert event and one incident were created and the channels were notified |
 
 - **Cooldown** (0 to 10,080 minutes, default 60) is the minimum time between two firings of the same rule and entity. A breach inside the cooldown stays pending and fires when the cooldown is over if it still holds.
-- **Remind every** (0 for never, or 15 to 1,440 minutes) repeats the notification while the incident is still **Open**. Acknowledging, investigating or resolving it stops the reminders.
+- **Remind every** (0 for never, or 15 to 1,440 minutes) repeats the notification while the incident is still **Open**. Acknowledging, investigating or resolving it stops the reminders, and [snoozing](#incidents) it or muting the rule holds them back.
 - **Resolve:** a firing alert resolves after two consecutive evaluation windows in which the condition no longer holds (a window without data counts as not holding, except for absence alerts). Per-entity rules evaluate whole 5-minute buckets, so this takes about 10 minutes. The incident is resolved automatically (`autoResolved`) with a note, unless a person already resolved or closed it. With **Notify when resolved** (on by default) every channel receives a recovery message.
 - Disabling, deleting or reshaping a rule (metric, module, target, condition, window or hold time) forgets its per-entity states. Incidents that were open stay open and receive a system note, so close them yourself.
 
@@ -158,6 +168,8 @@ A rule has 1 to 10 channels. Every channel receives the alert when it fires, whe
 | PagerDuty | The 32-character Events API v2 integration key | `trigger` when it fires or is re-notified, `resolve` when it recovers |
 
 PagerDuty events carry the deduplication key `cognipeer:<ruleId>:<entityKey>` (`_` for a rule without an entity), so a reminder updates the open PagerDuty incident and a recovery closes it. The resolve event is only sent when **Notify when resolved** is on.
+
+**Shared channels.** A rule can also use a channel of the workspace's library instead of its own copy. **Alerts & Incidents → Channels** keeps each one once for every project, with a name (up to 80 characters, unique in the workspace), a type that cannot change after creation, and the destination. Change the Slack URL there and every rule that uses it sends to the new one from its next notification. The list shows the destinations masked and, under **Used by**, the rules that use each channel (the rules of the current project, or of every project for owners and admins). Workspace owners and admins create, edit, test and delete shared channels, up to 100; everyone who works with alerts can add them to a rule under **Shared channels**, where they count toward the rule's 10 channels. A channel that rules still use cannot be deleted. If a shared channel is gone anyway, its deliveries fail (the incident's **Notifications** card says the library channel no longer exists) and the rule's other channels are still notified.
 
 **Webhook payload.** The body is `{ "type", "id", "occurredAt", "data" }`. `type` is `alert.fired`, `alert.resolved`, `alert.renotify` or `alert.test`, `id` starts with `alr_`, and `data` carries the rule, the entity, the value, the baseline, the severity, the links and the incident context:
 
@@ -203,6 +215,8 @@ PagerDuty events carry the deduplication key `cognipeer:<ruleId>:<entityKey>` (`
 }
 ```
 
+`entityUrl` links the entity's page in the console. An agent links to its page in Agent Observability. A model, knowledge base, MCP server or tool links to its health page in the Enterprise edition. Without it, they link to their own page, and `entityUrl` is absent for a model, MCP server or tool the console has no record of, such as a model that is only seen in traces.
+
 The request has the headers `x-cognipeer-event` (the type), `x-cognipeer-event-id` (the `id`) and, when the channel has a signing secret, `x-cognipeer-signature: t=<unix seconds>,v1=<hex>`. The signature is `HMAC-SHA256(secret, "<t>.<raw body>")` as hex, the same scheme the [webhook subscriptions](/guide/webhooks#what-you-receive) use. Verify it against the raw request body, before parsing, and reject old timestamps:
 
 ```javascript
@@ -220,15 +234,15 @@ function verifyAlertWebhook(rawBody, header, secret, toleranceSeconds = 300) {
 
 Redirects are not followed, and a delivery that fails is not retried: for guaranteed delivery with retries subscribe to the `alert.fired` and `alert.resolved` events of [Agents → Webhooks](/guide/webhooks#events) instead.
 
-**Secrets.** Webhook URLs and signing secrets, Slack and Teams URLs and PagerDuty keys are stored encrypted. The API and the dashboard show them masked: a short hint of the URL (`https://hooks.slack.com/…/abcd`), `hasSecret` for a webhook and the last four characters of a PagerDuty key. Leave a secret field empty when you edit a rule to keep the stored value. **Duplicate** does not copy these channels (only email recipients), so add them again on the copy.
+**Secrets.** Webhook URLs and signing secrets, Slack and Teams URLs and PagerDuty keys are stored encrypted. The API and the dashboard show them masked: a short hint of the URL (`https://hooks.slack.com/…/abcd`), `hasSecret` for a webhook and the last four characters of a PagerDuty key. Leave a secret field empty when you edit a rule to keep the stored value. **Duplicate** does not copy these channels (only email channels and shared channels), so add them again on the copy.
 
 **Destinations.** Webhook, Slack and Teams URLs must use `https`, must not contain credentials, and must resolve to a public address. This is checked when you save and again on every delivery. Redirects are not followed, and each delivery times out after `ALERT_CHANNEL_TIMEOUT_MS` (10 seconds by default).
 
-**Send test** sends a clearly labelled test notification on one channel, either as typed or from a saved rule, and shows the result. It is limited to 5 tests per minute per user and 20 per minute per project (`429` with a `Retry-After` header), and an unsaved email channel can be tested against at most 5 recipients. A PagerDuty test opens and immediately resolves its own throw-away incident.
+**Send test** sends a clearly labelled test notification on one channel, either as typed or from a saved rule, and shows the result. Shared channels are tested on the **Channels** page, by workspace owners and admins. It is limited to 5 tests per minute per user and 20 per minute per project (`429` with a `Retry-After` header), and an unsaved email channel can be tested against at most 5 recipients. A PagerDuty test opens and immediately resolves its own throw-away incident.
 
 ### Incidents
 
-An incident is created when an alert fires, one per rule and entity, and follows the alert through its life. **Incidents** lists them with a count per status and filters for status, severity, module, rule and entity. Select several to **Acknowledge**, **Resolve** or **Close** up to 100 at once; an incident that cannot make that move is reported and the rest are updated.
+An incident is created when an alert fires, one per rule and entity, and follows the alert through its life.
 
 | Status | Meaning |
 |--------|---------|
@@ -236,9 +250,44 @@ An incident is created when an alert fires, one per rule and entity, and follows
 | `acknowledged` | Someone has seen it |
 | `investigating` | Someone is working on it |
 | `resolved` | The cause is addressed, or the alert recovered by itself (shown as **Auto-resolved**) |
-| `closed` | Done. A resolved or closed incident can be **Reopened** |
+| `closed` | Done. A resolved or closed incident can be **Reopened** (with a bulk action, an acknowledged or investigating one too); it returns to `open` and shows how often it was reopened |
 
-An incident can be assigned (**Assign to me**, or any user through the API) and collects notes and a timeline: fired, acknowledged and resolved with the name of the person, closed, and every note. On the detail page the actions (**Refresh**, the status moves and **Assign to me** or **Unassign**) sit in a toolbar row under the header. The page shows the detection (condition type, entity, metric, value, peak, latest value, the baseline when there is one) and a **Links** card with **Open the rule**, **Open entity health** (for an agent) and **Related incidents** (the other incidents of the same rule and entity).
+**The inbox.** **Incidents** opens on the open incidents of the project:
+
+- **Summary.** **Open** and **Acknowledged** are live counts. **Fired**, **Resolved**, **Median time to acknowledge** and **Median time to resolve** cover the range you pick (**Last 24 h**, **Last 7 days** or **Last 30 days**), and each median says how many incidents it was taken over. An acknowledgement made before the incident was last reopened does not count, and an incident closed without being resolved has no time to resolve. The summary reads at most 5000 incidents of the range and says so when the range has more.
+- **Tabs** per status (**Open**, **Acknowledged**, **Investigating**, **Resolved**, **Closed**, **All**), each with the project's count.
+- **Search and filters.** Search matches the rule name, the entity and the metric id, ignoring case (a Turkish `ı` or `İ` matches `i` and `I`). Filter by severity, module, assignee (**Assigned to me**, **Unassigned**) and snooze, and sort by when the incident fired, when it was last updated, or its severity. **Group by rule** or **Group by entity** gathers the page into cards, worst severity first.
+- **Views.** **All open**, **Assigned to me**, **Unassigned critical**, **Snoozed** and **Recently resolved** set the filters in one click. **Save current filters…** keeps your own views (up to 20) in this browser.
+- **Preview.** Click a row to see the incident beside the list (under it on a narrow screen), with **Acknowledge**, **Resolve**, **Snooze** and **Assign to me**, and **View Detail** for the whole page.
+- **Bulk actions.** Select incidents to **Acknowledge**, **Resolve**, **Close**, **Reopen**, **Assign…**, **Snooze…** or **Clear snooze**, up to 100 at once. Each action is sent only for the selected incidents that can make that move (when none can, nothing is sent), and the result says how many were updated and how many the server could not change. **Assign…** picks any user of the workspace; without access to the user list you can assign to yourself or clear the assignee.
+- **Live.** While the tab is visible the inbox checks for changes every 15 seconds and reloads the page you are on when an incident of the project changed. Rows that are new or changed are marked for a few seconds. Turn **Live** off to hold the list still.
+
+The link in a notification opens the incident highlighted in the inbox.
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` (or the arrow keys) | Next / previous incident |
+| `x` | Select or deselect |
+| `a`, `r`, `s`, `e` | Acknowledge, resolve, snooze, assign to me: the selected incidents, or the focused one |
+| `/` | Search |
+| `Enter` | Open the incident |
+| `Esc` | Close the preview |
+| `?` | Show the shortcuts |
+
+Shortcuts are off while you type in a field. Resolving more than one incident asks for confirmation first.
+
+**Snooze** stops the reminders of one incident (**For 1 hour**, **For 4 hours**, **Until tomorrow 09:00**, or a time up to 30 days ahead). Its status does not change and the resolve notification is still sent. Only an open, acknowledged or investigating incident can be snoozed, and resolving or closing it ends the snooze. To silence every notification of a rule, mute the rule instead.
+
+**Muting a rule.** **Mute** in the rule list (1 hour, 4 hours, 24 hours, 7 days, or **Custom…** with an end up to 30 days ahead and an optional reason), or **Mute rule** on one of its incidents, silences the rule's channels: fired, reminder and resolve notifications are held back. The rule keeps evaluating, incidents are still opened and resolved, and [webhook subscriptions](/guide/webhooks#events) still receive `alert.fired` and `alert.resolved`. The mute ends by itself; **Unmute** ends it early.
+
+**The incident page.** The toolbar under the header holds **Refresh**, the status moves, **Snooze**, **Mute rule** and **Assign to me** or **Unassign**. Badges show when the incident was auto-resolved or reopened, is snoozed, or its rule is muted. The page shows:
+
+- **Detection**: condition type, entity, metric, value, peak, latest value, and the baseline when there is one.
+- **Around the incident** (agents): the agent's health charts from 3 hours before the alert fired to an hour after it ended (or now, while it is open), at least 6 hours and at most 7 days, with a link to the failing sessions of that window.
+- **Context** (below) and the **Activity** timeline: fired, acknowledged and resolved with the name of the person, closed, and every note.
+- **Notifications**: every attempt to notify, per channel: **Sent**, **Failed** with its error, or **Held back** because the rule was muted or the incident snoozed. The newest 200 attempts are shown, and attempts are kept for 30 days.
+- **Links**: **Open the rule**, **Open entity health**, **Related incidents** (the other incidents of the same rule and entity) and **Open the runbook** when the rule has a [runbook URL](#condition-types). **Open entity health**, like the entity in the inbox, leads to the entity's page, the same one as `entityUrl` in the [webhook payload](#notification-channels): an agent's page in Agent Observability, and for a model, knowledge base, MCP server or tool its health page in the Enterprise edition, otherwise its own page (none for one the console has no record of).
+- **Similar incidents**: how often the same rule fired for the same entity in the last 30 days (counted up to 200), their median duration and the five most recent.
 
 The **Context** card is gathered once, when the alert fires:
 
@@ -265,7 +314,7 @@ The agent `pulse-main` starts failing and slowing down after a new version is ro
 
 1. Open **Alerts & Incidents → New Rule**. Pick the **Agents** module and the metric **Agent Error Rate**. Leave the target on all agents.
 2. Choose the condition. With the Enterprise edition pick **Baseline**, direction **Above normal** and the **Balanced** preset: the rule fires when an agent's error rate is at least twice what is normal for that time of day, so a busy morning and a quiet night each have their own yardstick. Without it pick **Threshold**, `>` 5 over a 15-minute window, and set **Minimum samples** to 20 so a handful of sessions does not trigger it.
-3. Set **Hold for** to 10 minutes and add a **Slack** channel. Use **Send test** to check the destination, then **Preview now** to see which agents would fire today.
+3. Set **Hold for** to 10 minutes and add a **Slack** channel. Use **Send test** to check the destination, then **Preview now** to see which agents would fire today. With a Threshold condition, **Run backtest** shows how often the rule would have fired over the last 7 days, and suggests a threshold when that is more than twice.
 4. Add a second rule on **Agent P95 Duration**, so a slowdown that does not raise errors is caught as well.
 5. When `pulse-main` degrades, the Slack message names the agent, the value and, from the incident context, the version that changed (`1.4.0 → 1.5.0`, and how long before the alert it first appeared), the most common errors and a link to the failing sessions. **Acknowledge** the incident so reminders stop.
 6. After the fix, two clean 5-minute windows resolve the alert on their own, the incident is closed out as **Auto-resolved** and Slack receives the recovery message.
