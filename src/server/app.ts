@@ -49,7 +49,7 @@ function parseBodySize(input: string): number {
   }
 }
 
-function registerBodyParsers(app: FastifyInstance): void {
+export function registerBodyParsers(app: FastifyInstance): void {
   if (app.hasContentTypeParser('application/json')) {
     app.removeContentTypeParser('application/json');
   }

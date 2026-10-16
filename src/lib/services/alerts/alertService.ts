@@ -10,6 +10,7 @@
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import type {
   AlertChannelInput,
   AlertConditionMode,
@@ -25,9 +26,12 @@ import type {
   IAlertEvent,
   IAlertRule,
   IAlertRuleEntityScope,
+  IAlertRuleTemplateRef,
   IAlertSloConfig,
   IAlertState,
   IAlertDelivery,
+  IIncident,
+  IncidentStatus,
 } from '@/lib/database';
 import { ENTITY_LATENCY_BUCKET_UPPER_MS } from '@/lib/database/provider/types.base';
 import { listActiveEntityKeys } from '@/lib/services/entityMetrics/entityHealthService';
@@ -50,6 +54,7 @@ import {
 import { maskChannels, sealChannels } from './channels/channelSecrets';
 import { assertPublicChannelUrl, ChannelUrlError, isValidPagerDutyRoutingKey, MAX_CHANNEL_URL_LENGTH } from './channels/channelUrl';
 import { dispatchNotification } from './channels';
+import { MAX_TEST_EMAIL_RECIPIENTS } from './channels/emailChannel';
 import type { AlertNotification, DispatchResult } from './channels';
 
 export { AlertApiError } from './alertApiError';
@@ -362,7 +367,10 @@ export function normalizeChannelInput(raw: unknown, index: number, existing: IAl
         }
         if (!recipients.includes(email)) recipients.push(email);
       }
-      return { ...(id ? { id } : {}), type, recipients };
+      if (raw.audience !== undefined && raw.audience !== null && raw.audience !== 'project_admins') {
+        throw bad('invalid_channel', `channels[${index}].audience must be "project_admins"`);
+      }
+      return { ...(id ? { id } : {}), type, recipients, ...(raw.audience === 'project_admins' ? { audience: 'project_admins' as const } : {}) };
     }
     case 'webhook': {
       const url = optionalSecret(raw.url, `channels[${index}].url`, MAX_CHANNEL_URL_LENGTH)?.trim();
@@ -606,13 +614,20 @@ function maskRule<T extends IAlertRule | null>(rule: T): T {
   return { ...rule, channels: maskChannels(rule.channels) };
 }
 
-/** Most addresses one unsaved email channel is tested against. */
-const MAX_TEST_EMAIL_RECIPIENTS = 5;
-
 export interface RuleScopeOptions {
   /** When set, a rule of another project reads as missing. */
   projectId?: string;
 }
+
+export interface CreateRuleOptions {
+  /** Marks the rule as added from a rule template (server-side callers only, never the request body). */
+  template?: IAlertRuleTemplateRef;
+}
+
+/** Statuses a person still has to act on; a deleted project's incidents in them are closed. */
+const ACTIONABLE_INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating'];
+/** Upper bound on the incidents closed for one deleted project (pages of 200). */
+const MAX_PROJECT_INCIDENTS_CLOSED = 5_000;
 
 export interface RulePreviewTarget {
   entityKey: string;
@@ -632,6 +647,7 @@ export class AlertService {
     projectId: string,
     userId: string,
     input: CreateAlertRuleInput,
+    options: CreateRuleOptions = {},
   ): Promise<IAlertRule> {
     const rule = validateRuleInput(input, { mode: 'create' });
     await assertModeAvailable(tenantId, rule.condition);
@@ -657,6 +673,7 @@ export class AlertService {
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
       ...(rule.runbookUrl ? { runbookUrl: rule.runbookUrl } : {}),
+      ...(options.template ? { template: { key: options.template.key, version: options.template.version } } : {}),
       channels,
       createdBy: userId,
     });
@@ -701,6 +718,8 @@ export class AlertService {
     };
     if (rule.channels) patch.channels = await sealChannels(rule.channels, existing.channels ?? []);
     if (updatedBy) patch.updatedBy = updatedBy;
+    // Retargeted to another metric or module: it no longer is that template's rule (`null` clears it in both providers).
+    if (existing.template && (rule.metric !== existing.metric || rule.module !== existing.module)) patch.template = null;
 
     const updated = await db.updateAlertRule(ruleId, patch, options.projectId);
     if (!updated) return null;
@@ -724,6 +743,51 @@ export class AlertService {
       : await db.deleteAlertRule(ruleId, options.projectId);
     if (deleted) await AlertService.retireStates(tenantDbName, ruleId, 'Rule deleted', { keepCooldown: true });
     return deleted;
+  }
+
+  /**
+   * A project is being deleted: its rules go (so nothing evaluates or notifies
+   * for it any more) and the incidents someone still had to act on are closed
+   * with a note. Alert history, closed incidents and delivery logs stay.
+   */
+  static async removeProjectAlerts(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+  ): Promise<{ rulesDeleted: number; incidentsClosed: number }> {
+    const db = await getTenantDatabase(tenantDbName);
+    let rulesDeleted = 0;
+    for (const rule of await db.listAlertRules(tenantId, { projectId })) {
+      if (await AlertService.deleteRule(tenantDbName, String(rule._id), { projectId })) rulesDeleted += 1;
+    }
+
+    let incidentsClosed = 0;
+    for (const status of ACTIONABLE_INCIDENT_STATUSES) {
+      // Closing moves an incident out of this status, so the first page is read again until it is empty.
+      while (incidentsClosed < MAX_PROJECT_INCIDENTS_CLOSED) {
+        const page = await IncidentService.listIncidents(tenantDbName, tenantId, { projectId, status, limit: 200 });
+        if (page.length === 0) break;
+        let progressed = false;
+        for (const incident of page) {
+          const id = String(incident._id);
+          let closed: IIncident | null = null;
+          try {
+            closed = await IncidentService.updateStatus(tenantDbName, id, 'closed', 'system', { projectId });
+          } catch (error) {
+            // Closed or resolved by someone in the meantime: nothing left to do for this one.
+            if (!(error instanceof AlertApiError && error.code === 'invalid_transition')) throw error;
+          }
+          if (!closed) continue;
+          progressed = true;
+          incidentsClosed += 1;
+          try {
+            await IncidentService.addSystemNote(tenantDbName, id, 'Closed: the project was deleted');
+          } catch { /* the note is informational */ }
+        }
+        if (!progressed) break;
+      }
+    }
+    return { rulesDeleted, incidentsClosed };
   }
 
   static async getRule(
@@ -1030,6 +1094,9 @@ export class AlertService {
     let ruleDef = getMetricDef('agent_error_rate');
     let alertModule: AlertModule = 'agents';
     let metric: AlertMetric = 'agent_error_rate';
+    // The project the notification is about: the caller's, or the stored rule's own.
+    let notifyProjectId = scope.projectId;
+    let notifyProjectName = scope.projectName;
 
     if (body.channel !== undefined) {
       const input = normalizeChannelInput(body.channel, 0, null);
@@ -1059,6 +1126,14 @@ export class AlertService {
       ruleDef = getMetricDef(rule.metric);
       alertModule = rule.module;
       metric = rule.metric;
+      // A `project_admins` channel mails the admins of the rule's project, not those of the caller's active project.
+      notifyProjectId = rule.projectId;
+      if (rule.projectId !== scope.projectId) {
+        try {
+          const project = await db.findProjectById(rule.projectId);
+          if (project?.name) notifyProjectName = project.name;
+        } catch { /* the caller's project name is a fine fallback */ }
+      }
     } else {
       throw bad('invalid_body', 'Send either { channel } or { ruleId, channelId }');
     }
@@ -1087,7 +1162,7 @@ export class AlertService {
       value: null,
       severity: 'info',
       firedAt: now,
-      projectName: scope.projectName,
+      projectName: notifyProjectName,
       companyName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     };
@@ -1097,7 +1172,8 @@ export class AlertService {
       tenantId: session.tenantId,
       tenantSlug: session.tenantSlug,
       companyName,
-      projectName: scope.projectName,
+      projectId: notifyProjectId,
+      projectName: notifyProjectName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     });
     if (results.length === 0) return { type: stored.type, target: stored.type, success: false, error: 'No delivery attempted' };
@@ -1164,6 +1240,24 @@ export class AlertService {
   ): Promise<number> {
     const db = await getTenantDatabase(tenantDbName);
     return db.countActiveAlerts(tenantId, projectId);
+  }
+}
+
+const cleanupLog = createLogger('alerts:project-cleanup');
+
+/**
+ * After a project is deleted: its alert rules stop evaluating and its open
+ * incidents are closed. Best effort: the project is already gone, so a failure
+ * is only logged.
+ */
+export async function removeDeletedProjectAlerts(tenantDbName: string, tenantId: string, projectId: string): Promise<void> {
+  try {
+    await AlertService.removeProjectAlerts(tenantDbName, tenantId, projectId);
+  } catch (error) {
+    cleanupLog.error('Removing the alerts of a deleted project failed', {
+      projectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

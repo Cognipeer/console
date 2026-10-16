@@ -23,6 +23,7 @@ import { AlertApiError } from '@/lib/services/alerts/alertApiError';
 import { AlertBacktestService } from '@/lib/services/alerts/alertBacktest';
 import { AlertChannelLibraryService } from '@/lib/services/alerts/alertChannelLibrary';
 import { resolveEntityPath } from '@/lib/services/alerts/entityLinks';
+import { AlertTemplateService } from '@/lib/services/alerts/alertTemplates';
 import { authz } from '@/lib/iam/routeAuthz';
 import { RULE_SORTS, RULE_STATUS_FILTERS } from '@/lib/services/alerts/ruleInsights';
 import {
@@ -212,17 +213,40 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/alerts/rules', guarded('Create alert rule', async (request, reply) => {
     const { projectId, session } = await requireProjectContextForRequest(request);
-    const body = readObjectBody(request);
+    const { templateKey, ...body } = readObjectBody(request);
+    // A template customised in the rule form before saving keeps its template mark.
+    const rule = templateKey !== undefined
+      ? await AlertTemplateService.createFromTemplate(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        body as never,
+        templateKey,
+      )
+      : await AlertService.createRule(session.tenantDbName, session.tenantId, projectId, session.userId, body as never);
 
-    const rule = await AlertService.createRule(
+    return reply.code(201).send({ rule });
+  }));
+
+  app.get('/alerts/templates', guarded('List alert rule templates', async (request, reply) => {
+    const { projectId, session } = await requireProjectContextForRequest(request);
+    const list = await AlertTemplateService.list(session.tenantDbName, session.tenantId, projectId);
+    return reply.code(200).send(list);
+  }));
+
+  app.post('/alerts/templates', guarded('Add alert rule templates', async (request, reply) => {
+    const { projectId, session } = await requireProjectContextForRequest(request);
+    const empty = request.body === undefined || request.body === null || request.body === '';
+    const body = empty ? {} : readObjectBody(request);
+    const result = await AlertTemplateService.apply(
       session.tenantDbName,
       session.tenantId,
       projectId,
       session.userId,
-      body as never,
+      { keys: body.keys },
     );
-
-    return reply.code(201).send({ rule });
+    return reply.code(result.created.length > 0 ? 201 : 200).send(result);
   }));
 
   app.post('/alerts/rules/preview', guarded('Preview alert rule', async (request, reply) => {

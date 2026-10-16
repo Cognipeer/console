@@ -55,6 +55,8 @@ export interface MaskedChannel {
   type: AlertChannelType | 'library';
   libraryId?: string;
   recipients?: string[];
+  /** email: `project_admins` also mails the project's admins, resolved when it sends. */
+  audience?: 'project_admins';
   urlHint?: string;
   hasSecret?: boolean;
   keyHint?: string;
@@ -112,6 +114,8 @@ export interface AlertRuleDto {
   lastTriggeredAt?: string;
   createdAt?: string;
   createdBy?: string;
+  /** Set when the rule was added from a rule template. */
+  template?: { key: string; version: number } | null;
   runbookUrl?: string | null;
   mutedUntil?: string | null;
   mutedBy?: string | null;
@@ -302,4 +306,66 @@ export interface ChannelTestResult {
   target: string;
   success: boolean;
   error?: string;
+}
+
+/** The rule categories of the template catalog (`GET /alerts/templates` → `items[].category`). */
+export type AlertTemplateCategoryDto = 'errors' | 'latency' | 'traffic' | 'cost' | 'quality' | 'safety';
+
+/** `added`: a rule of the project came from the template. `covered`: another enabled rule already watches the same metric and mode. */
+export type AlertTemplateStateDto = 'added' | 'covered' | 'available';
+
+/** Whether this build and licence can run the template's rule. */
+export type AlertTemplateAvailabilityDto =
+  | { available: true }
+  | { available: false; reason: 'not_enterprise_build' | 'license_required' };
+
+/** The rule a template creates, in the shape `POST /alerts/rules` takes (the rule form's prefill). */
+export interface AlertTemplateInputDto {
+  name: string;
+  description?: string;
+  module: AlertModule;
+  metric: string;
+  condition: AlertConditionDto;
+  windowMinutes: number;
+  cooldownMinutes?: number;
+  entity?: { entityType: EntityMetricType; mode: 'all' | 'selected'; keys?: string[] };
+  severity?: AlertRuleSeverity;
+  notifyOnResolve?: boolean;
+  renotifyMinutes?: number;
+  channels?: Array<{ type: AlertChannelType; recipients?: string[]; audience?: 'project_admins' }>;
+  enabled?: boolean;
+}
+
+export interface AlertTemplateItemDto {
+  key: string;
+  version: number;
+  category: AlertTemplateCategoryDto;
+  module: AlertModule;
+  metric: string;
+  mode: AlertConditionMode;
+  /** Part of the default set new projects get. */
+  default: boolean;
+  name: string;
+  description: string;
+  state: AlertTemplateStateDto;
+  /** The rule added from the template (`added`) or the one covering it (`covered`). */
+  rule?: { id: string; name: string; enabled: boolean };
+  availability: AlertTemplateAvailabilityDto;
+  input: AlertTemplateInputDto;
+}
+
+/** `GET /alerts/templates`. */
+export interface AlertTemplateListDto {
+  version: number;
+  items: AlertTemplateItemDto[];
+  /** Admins the template rules notify in this project; 0 means the workspace owners and admins get them. */
+  projectAdminRecipients: number;
+  /** Whether new projects get the default rules in this installation. */
+  defaultRulesOnNewProjects: boolean;
+}
+
+/** `POST /alerts/templates` (201 when anything was created, else 200). */
+export interface AlertTemplateApplyResultDto {
+  created: AlertRuleDto[];
+  skipped: Array<{ key: string; reason: 'exists' | 'covered' | 'unavailable' }>;
 }

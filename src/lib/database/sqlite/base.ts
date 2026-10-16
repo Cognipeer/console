@@ -985,6 +985,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.alertRules, 'muteReason', 'muteReason TEXT');
     this.ensureTableColumn(db, TABLES.alertRules, 'runbookUrl', 'runbookUrl TEXT');
     this.ensureTableColumn(db, TABLES.alertRules, 'lastEvaluation', 'lastEvaluation TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'template', 'template TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'entityType', 'entityType TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'entityKey', 'entityKey TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'baselineValue', 'baselineValue REAL');

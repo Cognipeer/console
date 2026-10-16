@@ -231,3 +231,17 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   takes filters, a sort and `include=stats`; the incident list takes `q`, `assignee`, `snoozed`, `updatedAfter` and
   `sort` and returns `serverTime`; incidents can be snoozed (`snoozedUntil`), and bulk updates can reopen, assign,
   snooze and unsnooze. See [Alerts API](docs/api/alerts.md) and [Incidents API](docs/api/incidents.md).
+- **Alert rule templates.** **Alerts → Templates** is a catalog of 26 recommended rules in six categories (errors,
+  latency, traffic, cost, quality, safety): pick the ones a project needs, or customise one in the rule form first.
+  Five of them are the **default set**: error-rate rules that watch every agent, model, knowledge base, MCP server and
+  tool of a project (above 20%, or 30% for MCP servers and tools, over 30 minutes with at least 20 requests and a
+  10-minute hold). A new project gets the default set enabled unless its creator opts out (`defaultAlertRules: false`),
+  and a new workspace gets it on its Default Project; `ALERT_DEFAULT_RULES_ON_CREATE=false` turns that default off. The
+  baseline and error-budget templates need Enterprise. New API: `GET`/`POST /api/alerts/templates`, `templateKey` on
+  `POST /api/alerts/rules`; the client API adds the default set to a project it creates only with
+  `defaultAlertRules: true`. Rules added from a template carry a `template` mark.
+- **Project admins as recipients.** An email channel can set `audience: "project_admins"`: each notification then also
+  goes to the admins of the rule's project, looked up when it is sent. With no project admin it falls back to the
+  workspace owners and admins. The default rules use it.
+- **Deleting a project** now deletes its alert rules, so they no longer evaluate and notify under "Unknown Project", and
+  closes its open incidents. Its alert history is kept.

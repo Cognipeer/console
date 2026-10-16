@@ -17,6 +17,8 @@ export interface ChannelItem {
   type: AlertChannelType;
   /** email */
   recipients: string[];
+  /** email: also mail the project's admins. */
+  audience?: 'project_admins';
   /** Masked hints of a stored channel. */
   urlHint?: string;
   keyHint?: string;
@@ -79,6 +81,7 @@ export function channelsFromStored(stored: MaskedChannel[] | null | undefined): 
     id: channel.id,
     type: channel.type,
     recipients: [...(channel.recipients ?? [])],
+    ...(channel.audience === 'project_admins' ? { audience: 'project_admins' as const } : {}),
     urlHint: channel.urlHint,
     keyHint: channel.keyHint,
     hasSecret: channel.hasSecret,
@@ -145,7 +148,12 @@ export function channelToInput(item: ChannelItem): Record<string, unknown> {
   const base = item.id ? { id: item.id } : {};
   switch (item.type) {
     case 'email':
-      return { ...base, type: 'email', recipients: item.recipients.map((recipient) => recipient.trim()).filter(Boolean) };
+      return {
+        ...base,
+        type: 'email',
+        recipients: item.recipients.map((recipient) => recipient.trim()).filter(Boolean),
+        ...(item.audience === 'project_admins' ? { audience: 'project_admins' } : {}),
+      };
     case 'webhook': {
       const url = item.url?.trim();
       const secret = item.secret?.trim();
