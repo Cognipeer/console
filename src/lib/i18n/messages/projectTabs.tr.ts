@@ -33,6 +33,10 @@ export const projectTabsTr = {
       fixProviders: 'Sağlayıcı ata',
       fixMembers: 'Kişi ekle',
       fixLimits: 'Limit ekle',
+      alerts: 'Uyarılar: {done}/{total} varsayılan kural',
+      alertsDone: 'Varsayılan uyarı kuralları ekli.',
+      alertsMissing: 'Bazı hata oranları henüz izlenmiyor.',
+      fixAlerts: 'Kur',
     },
     activity: {
       title: 'Son etkinlik',

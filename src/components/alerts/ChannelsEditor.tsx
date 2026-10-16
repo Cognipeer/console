@@ -54,6 +54,8 @@ export interface ChannelsEditorProps {
   disabled?: boolean;
   /** One fixed channel (the channel library form): no remove button and no "add" bar. */
   single?: boolean;
+  /** Offers "also notify the project's admins" on email channels; `count` is how many there are (null: unknown). */
+  adminAudience?: { count: number | null };
 }
 
 type TestState = { status: 'loading' } | { status: 'done'; ok: boolean; message: string };
@@ -67,6 +69,7 @@ export default function ChannelsEditor({
   maxChannels = MAX_CHANNELS,
   disabled = false,
   single = false,
+  adminAudience,
 }: ChannelsEditorProps) {
   const t = useTranslations('alerts');
   const [tests, setTests] = useState<Record<string, TestState>>({});
@@ -179,6 +182,25 @@ export default function ChannelsEditor({
                 error={issue?.code === 'invalidEmail' ? issueText(issue) : undefined}
                 onChange={(recipients) => update(item.key, { recipients })}
               />
+            ) : null}
+
+            {item.type === 'email' && adminAudience ? (
+              <div>
+                <Checkbox
+                  size="xs"
+                  label={
+                    adminAudience.count === null
+                      ? t('channels.audienceProjectAdmins')
+                      : t('channels.audienceProjectAdminsCount', { count: adminAudience.count })
+                  }
+                  checked={item.audience === 'project_admins'}
+                  disabled={disabled}
+                  onChange={(event) => update(item.key, { audience: event.currentTarget.checked ? 'project_admins' : undefined })}
+                />
+                <Text size="xs" c="dimmed" mt={4}>
+                  {t('channels.audienceHint')}
+                </Text>
+              </div>
             ) : null}
 
             {item.type === 'webhook' || item.type === 'slack' || item.type === 'teams' ? (

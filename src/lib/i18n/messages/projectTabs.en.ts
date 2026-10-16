@@ -33,6 +33,10 @@ export const projectTabsEn = {
       fixProviders: 'Assign providers',
       fixMembers: 'Add people',
       fixLimits: 'Add a limit',
+      alerts: 'Alerts: {done} of {total} default rules',
+      alertsDone: 'The default alert rules are in place.',
+      alertsMissing: 'Some error rates are not watched yet.',
+      fixAlerts: 'Set up',
     },
     activity: {
       title: 'Recent activity',

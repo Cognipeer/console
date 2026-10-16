@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Alert, Button, Checkbox, Select, Text, TextInput, Textarea } from '@mantine/core';
+import { ActionIcon, Alert, Button, Checkbox, Select, Switch, Text, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconFolderPlus, IconPlus, IconX } from '@tabler/icons-react';
 import FormShell, {
@@ -67,6 +67,9 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
   const [providerIds, setProviderIds] = useState<Set<string>>(new Set());
   const [newProviderIds, setNewProviderIds] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
+  // The default alert rules: on unless this installation turned the default off (read below).
+  const [defaultAlerts, setDefaultAlerts] = useState(true);
+  const [defaultAlertsTouched, setDefaultAlertsTouched] = useState(false);
 
   const [people, setPeople] = useState<PersonOption[]>([]);
   const [groupOptions, setGroupOptions] = useState<GroupOption[]>([]);
@@ -131,6 +134,7 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
     setGroups(new Map());
     setProviderIds(new Set());
     setNewProviderIds(new Set());
+    setDefaultAlertsTouched(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -216,6 +220,18 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
     onCreated: handleProviderCreated,
   };
 
+  useEffect(() => {
+    if (!open || defaultAlertsTouched) return;
+    const controller = new AbortController();
+    void fetch('/api/alerts/templates', { signal: controller.signal })
+      .then((res) => (res.ok ? (res.json() as Promise<{ defaultRulesOnNewProjects?: boolean }>) : null))
+      .then((body) => {
+        if (body && typeof body.defaultRulesOnNewProjects === 'boolean') setDefaultAlerts(body.defaultRulesOnNewProjects);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [open, defaultAlertsTouched]);
+
   const submit = async () => {
     if (submitting || !canCreateProject(readiness)) return;
     setSubmitting(true);
@@ -230,6 +246,7 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
           members: roleEntries(members, 'userId'),
           groups: roleEntries(groups, 'groupId'),
           providerIds: [...providerIds],
+          defaultAlertRules: defaultAlerts,
         }),
       });
       if (!res.ok) throw new Error(await errorText(res, t('failed')));
@@ -324,6 +341,7 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
             { id: 'name', label: t('readiness.name'), done: done('name') },
             { id: 'modelProvider', label: t('readiness.modelProvider'), done: done('modelProvider') },
             { id: 'projectAdmin', label: t('readiness.projectAdmin'), done: done('projectAdmin') },
+            { id: 'defaultAlerts', label: t('readiness.defaultAlerts'), done: defaultAlerts },
           ]}
         />
       </SummaryGroup>
@@ -489,6 +507,7 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
               { id: 'name', label: t('readiness.name'), done: done('name') },
               { id: 'modelProvider', label: t('readiness.modelProvider'), done: done('modelProvider') },
               { id: 'projectAdmin', label: t('readiness.projectAdmin'), done: done('projectAdmin') },
+              { id: 'defaultAlerts', label: t('readiness.defaultAlerts'), done: defaultAlerts },
             ]}
           />
           {!done('modelProvider') ? (
@@ -499,6 +518,22 @@ export default function CreateProjectShell({ open, onClose, onCreated }: Props) 
           {!done('projectAdmin') ? (
             <Alert color="yellow" icon={<IconAlertTriangle size={16} />} mt="xs">
               {t('readiness.projectAdminWarn')}
+            </Alert>
+          ) : null}
+          <Switch
+            mt="md"
+            checked={defaultAlerts}
+            onChange={(event) => {
+              setDefaultAlerts(event.currentTarget.checked);
+              setDefaultAlertsTouched(true);
+            }}
+            disabled={submitting}
+            label={t('readiness.defaultAlertsTitle')}
+            description={t('readiness.defaultAlertsHint')}
+          />
+          {defaultAlerts && !done('projectAdmin') ? (
+            <Alert color="yellow" icon={<IconAlertTriangle size={16} />} mt="xs">
+              {t('readiness.defaultAlertsNoAdmin')}
             </Alert>
           ) : null}
         </FormSection>

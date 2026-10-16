@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { Button, NumberInput, Select, Text, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconBell, IconChevronDown, IconChevronRight, IconPlayerPlay } from '@tabler/icons-react';
@@ -51,6 +52,7 @@ import EntityPicker from './EntityPicker';
 import { moduleIcon } from './moduleIcons';
 import { translateServerNotes } from './incidentUi';
 import { useAlertMeta } from './useAlertMeta';
+import { useProjectAdminCount } from './useProjectAdminCount';
 import {
   BASELINE_PRESETS,
   COOLDOWN_MINUTES,
@@ -124,6 +126,10 @@ export default function AlertRuleForm({
   const [saving, setSaving] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const adminCount = useProjectAdminCount(opened);
+  // Set when the rule came from a rule template (or is being customized from one).
+  const templateKey = ((initialData as Partial<AlertRuleDto> | undefined)?.template?.key ?? null) as string | null;
+  const templateName = templateKey ? (templateKey && typeof initialData?.name === 'string' ? initialData.name : templateKey) : null;
 
   // Re-seed when the form opens (or switches rule), from whatever was handed in at that moment. The data is read through
   // a ref so a new object identity on a parent re-render never wipes what the user has typed.
@@ -228,6 +234,7 @@ export default function AlertRuleForm({
     setSaving(true);
     try {
       const body = buildRulePayload(values, { catalog, isEdit, channelsUnchanged });
+      if (!isEdit && templateKey) body.templateKey = templateKey;
       const res = await fetch(isEdit ? `/api/alerts/rules/${ruleId}` : '/api/alerts/rules', {
         method: isEdit ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -371,6 +378,15 @@ export default function AlertRuleForm({
       }}
       secondaryAction={{ label: t('cancel'), onClick: onClose }}
     >
+      {templateName ? (
+        <Text size="xs" c="dimmed" mb="md">
+          {t('templates.fromTemplate', { name: templateName })} ·{' '}
+          <Link href="/dashboard/alerts/templates" style={{ color: 'inherit' }}>
+            {t('templates.allTemplates')}
+          </Link>
+        </Text>
+      ) : null}
+
       {/* 1 · module & metric */}
       <FormSection number={1} title={t('form.sectionMetric')} description={t('form.sectionMetricDescription')} done={checks.metric}>
         <FormRow cols={1}>
@@ -722,6 +738,7 @@ export default function AlertRuleForm({
               onTest={onTestChannel}
               canTest={canTestChannel}
               maxChannels={Math.max(0, MAX_CHANNELS - values.libraryRefs.length)}
+              adminAudience={{ count: adminCount }}
             />
           </FormField>
         </FormRow>

@@ -357,6 +357,7 @@ export interface AlertTemplateItemDto {
 /** `GET /alerts/templates`. */
 export interface AlertTemplateListDto {
   version: number;
+  projectId: string;
   items: AlertTemplateItemDto[];
   /** Admins the template rules notify in this project; 0 means the workspace owners and admins get them. */
   projectAdminRecipients: number;

@@ -104,7 +104,7 @@ export default function OverviewTab({ projectId }: { projectId: string }) {
   }, [projectId, reloadKey, t]);
 
   const readinessItems = useMemo(
-    () => (data ? buildReadinessItems(data.readiness, data.stats) : []),
+    () => (data ? buildReadinessItems(data.readiness, data.stats, data.defaultAlerts) : []),
     [data],
   );
 
@@ -141,6 +141,7 @@ export default function OverviewTab({ projectId }: { projectId: string }) {
     if (!item.fix) return false;
     // Providers and limits are workspace-level settings; members the tab itself gates by project role.
     if (item.fix === 'providers' || item.fix === 'limits') return isTenantAdmin;
+    // Alert rules are written by whoever may write alerts; the templates page refuses the rest.
     return true;
   };
 
@@ -162,6 +163,12 @@ export default function OverviewTab({ projectId }: { projectId: string }) {
           : t('readiness.adminMissing'),
       };
     }
+    if (item.id === 'alerts') {
+      return {
+        title: t('readiness.alerts', { done: item.count ?? 0, total: item.total ?? 0 }),
+        detail: item.ok ? t('readiness.alertsDone') : t('readiness.alertsMissing'),
+      };
+    }
     if (item.id === 'limits') {
       return { title: t('readiness.limits'), detail: item.ok ? t('readiness.limitsSet') : t('readiness.limitsMissing') };
     }
@@ -177,6 +184,7 @@ export default function OverviewTab({ projectId }: { projectId: string }) {
   const fixLabel = (item: ReadinessItem): string => {
     if (item.fix === 'members') return t('readiness.fixMembers');
     if (item.fix === 'limits') return t('readiness.fixLimits');
+    if (item.fix === 'alerts') return t('readiness.fixAlerts');
     return t('readiness.fixProviders');
   };
 

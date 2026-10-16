@@ -338,6 +338,8 @@ export interface AlertTemplateItem {
 
 export interface AlertTemplateList {
   version: number;
+  /** The project the list is for (the UI keys per-project choices on it). */
+  projectId: string;
   items: AlertTemplateItem[];
   /** Admins the template rules notify in this project; 0 means the workspace owners and admins get them. */
   projectAdminRecipients: number;
@@ -368,6 +370,15 @@ function stateOf(def: AlertTemplateDefinition, rules: IAlertRule[]): Pick<AlertT
     && watchesWholeTarget(rule));
   if (covering) return { state: 'covered', rule: ref(covering) };
   return { state: 'available' };
+}
+
+/** How much of the default set a project has: a default template counts once a rule of the project added it or already covers it. */
+export function defaultSetProgress(rules: IAlertRule[]): { done: number; total: number } {
+  const defaults = ALERT_TEMPLATES.filter((def) => def.default);
+  return {
+    done: defaults.filter((def) => stateOf(def, rules).state !== 'available').length,
+    total: defaults.length,
+  };
 }
 
 async function availabilityOf(def: AlertTemplateDefinition, gate: ModeGate): Promise<AlertTemplateAvailability> {
@@ -519,6 +530,7 @@ export class AlertTemplateService {
     const gate = createModeGate(tenantId);
     return {
       version: ALERT_TEMPLATE_CATALOG_VERSION,
+      projectId,
       items: await Promise.all(ALERT_TEMPLATES.map((def) => toItem(def, rules, gate))),
       projectAdminRecipients: admins.length,
       defaultRulesOnNewProjects: defaultAlertRulesOnCreate(),

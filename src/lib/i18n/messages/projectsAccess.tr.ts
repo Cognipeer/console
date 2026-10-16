@@ -121,6 +121,10 @@ export const projectsAccessTr: typeof projectsAccessEn = {
         modelProviderWarn: 'Henüz model provider yok: biri atanana kadar bu projedeki ajanlar ve modeller çalışmaz.',
         projectAdmin: 'Bir proje yöneticisi belirlendi',
         projectAdminWarn: 'Henüz proje yöneticisi yok: bu projeyi yalnızca çalışma alanı sahipleri ve yöneticileri yönetir.',
+        defaultAlerts: 'Varsayılan uyarı kuralları',
+        defaultAlertsTitle: 'Varsayılan uyarı kurallarını ekle',
+        defaultAlertsHint: '5 kural; ajanların, modellerin, bilgi tabanlarının, MCP sunucularının ve araçların hata oranlarını izler. Bildirimler proje admin’lerine gider. Diğer şablonlar Uyarılar → Şablonlar sayfasında.',
+        defaultAlertsNoAdmin: 'Proje admin’i seçilmedi: bu bildirimler çalışma alanı sahiplerine ve admin’lerine gider.',
       },
       summary: {
         title: 'Özet',

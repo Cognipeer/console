@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Badge, Button, Switch, Text } from '@mantine/core';
+import { Alert, Badge, Button, Switch, Text } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
@@ -15,6 +15,7 @@ import {
   IconExclamationCircle,
   IconFlame,
   IconHistory,
+  IconLayoutList,
   IconRipple,
   IconTrash,
 } from '@tabler/icons-react';
@@ -45,6 +46,7 @@ import {
 } from '@/components/alerts/alertCatalog';
 import type {
   AlertMeta,
+  AlertTemplateListDto,
   AlertRuleDto,
   RuleDerivedDto,
   RuleKpisDto,
@@ -107,6 +109,43 @@ export default function AlertsPage() {
   const [prefill, setPrefill] = useState<Record<string, unknown> | undefined>();
 
   const catalog = useMemo(() => createAlertCatalog(meta?.catalog), [meta?.catalog]);
+
+  // Rule templates: the default-set banner and the "Customize…" deep link read the template list.
+  const [templateList, setTemplateList] = useState<AlertTemplateListDto | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const templateParam = searchParams?.get('template') ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/alerts/templates')
+      .then((res) => (res.ok ? (res.json() as Promise<AlertTemplateListDto>) : null))
+      .then((data) => {
+        if (!cancelled && data) setTemplateList(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rules.length]);
+  const bannerStorageKey = templateList ? `alerts.defaultBanner.dismissed.${templateList.projectId}` : null;
+  useEffect(() => {
+    if (!bannerStorageKey) return;
+    try {
+      setBannerDismissed(localStorage.getItem(bannerStorageKey) === '1');
+    } catch {
+      setBannerDismissed(false);
+    }
+  }, [bannerStorageKey]);
+  const dismissBanner = () => {
+    setBannerDismissed(true);
+    if (!bannerStorageKey) return;
+    try {
+      localStorage.setItem(bannerStorageKey, '1');
+    } catch {
+      // The banner just comes back next time.
+    }
+  };
+  const defaultTemplates = (templateList?.items ?? []).filter((item) => item.default && item.availability.available);
+  const missingDefaults = defaultTemplates.filter((item) => item.state === 'available').length;
 
   // ── Load ───────────────────────────────────────────────────────────────
   const controllerRef = useRef<AbortController | null>(null);
@@ -196,6 +235,18 @@ export default function AlertsPage() {
     router.replace(pathname ?? '/dashboard/alerts');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createParam, loading, moduleParam, metricParam, entityTypeParam, entityKeyParam]);
+
+  // ?template=<key> ("Customize…" in the template gallery) opens the create form with that template's rule.
+  useEffect(() => {
+    if (!templateParam || loading || !templateList) return;
+    router.replace(pathname ?? '/dashboard/alerts');
+    const item = templateList.items.find((entry) => entry.key === templateParam);
+    if (!item) return;
+    setEditingRule(null);
+    setPrefill({ ...item.input, template: { key: item.key, version: item.version } } as Record<string, unknown>);
+    formControls.open();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateParam, loading, templateList]);
 
   useEffect(() => {
     if (!editParam || loading) return;
@@ -317,6 +368,11 @@ export default function AlertsPage() {
         <div style={{ minWidth: 0 }}>
           <Text size="sm" fw={600} lineClamp={1}>
             {rule.name}
+            {rule.template ? (
+              <Badge size="xs" variant="outline" color="gray" ml={6} style={{ verticalAlign: 'middle' }}>
+                {t('templates.templateBadge')}
+              </Badge>
+            ) : null}
           </Text>
           {rule.description ? (
             <Text size="xs" c="dimmed" lineClamp={1}>
@@ -520,6 +576,15 @@ export default function AlertsPage() {
             <Button component={Link} href="/dashboard/alerts/history" variant="default" size="sm" leftSection={<IconHistory size={14} stroke={1.7} />}>
               {t('viewHistory')}
             </Button>
+            <Button
+              component={Link}
+              href="/dashboard/alerts/templates"
+              variant="default"
+              size="sm"
+              leftSection={<IconLayoutList size={14} stroke={1.7} />}
+            >
+              {t('templates.button')}
+            </Button>
             <Button color="teal" size="sm" leftSection={<IconBellPlus size={14} stroke={1.7} />} onClick={openCreate}>
               {t('newRule')}
             </Button>
@@ -545,6 +610,17 @@ export default function AlertsPage() {
             <div style={{ marginBottom: 12 }}>
               <LoadError message={loadError} onRetry={() => void load(true)} />
             </div>
+          ) : null}
+
+          {!pageEmpty && missingDefaults > 0 && !bannerDismissed ? (
+            <Alert color="blue" variant="light" mb="md" withCloseButton closeButtonLabel={t('templates.bannerDismiss')} onClose={dismissBanner}>
+              <Text size="sm" component="span">
+                {t(pluralKey('templates.bannerText', missingDefaults), { missing: missingDefaults, total: defaultTemplates.length })}
+              </Text>{' '}
+              <Text size="sm" component={Link} href="/dashboard/alerts/templates?show=default" fw={600} style={{ color: 'inherit' }}>
+                {t('templates.bannerReview')}
+              </Text>
+            </Alert>
           ) : null}
 
           <DataGrid<AlertRuleDto>
@@ -593,7 +669,32 @@ export default function AlertsPage() {
               icon: <IconBell size={28} />,
               title: pageEmpty ? t('noRules') : t('noMatchingRules'),
               description: pageEmpty ? t('noRulesDescription') : t('noMatchingRulesDescription'),
-              primaryAction: pageEmpty ? { label: t('createFirstRule'), icon: <IconBellPlus size={14} />, onClick: openCreate } : undefined,
+              primaryAction: pageEmpty
+                ? defaultTemplates.length > 0
+                  ? {
+                      label: t('templates.addDefaults', { count: defaultTemplates.length }),
+                      icon: <IconLayoutList size={14} />,
+                      onClick: () => router.push('/dashboard/alerts/templates?show=default&select=default'),
+                    }
+                  : { label: t('createFirstRule'), icon: <IconBellPlus size={14} />, onClick: openCreate }
+                : undefined,
+              extra: pageEmpty ? (
+                <>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <Button component={Link} href="/dashboard/alerts/templates" variant="default" size="sm">
+                      {t('templates.browse')}
+                    </Button>
+                    {defaultTemplates.length > 0 ? (
+                      <Button variant="default" size="sm" onClick={openCreate}>
+                        {t('createFirstRule')}
+                      </Button>
+                    ) : null}
+                  </div>
+                  <Text size="xs" c="dimmed" mt="sm">
+                    {t('templates.emptyNote')}
+                  </Text>
+                </>
+              ) : undefined,
             }}
             pagination={{
               page,
