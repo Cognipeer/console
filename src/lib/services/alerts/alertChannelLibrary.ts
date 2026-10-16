@@ -95,9 +95,16 @@ async function load(tenantDbName: string, tenantId: string, id: string) {
 }
 
 export class AlertChannelLibraryService {
-  static async list(tenantDbName: string, tenantId: string): Promise<LibraryEntryView[]> {
+  /**
+   * The masked entries. `usedBy` lists the rules of `scope.projectId` only when it is set (a member reads the
+   * library from one project and must not learn the rules of the others); owners and admins see every project.
+   */
+  static async list(tenantDbName: string, tenantId: string, scope: { projectId?: string } = {}): Promise<LibraryEntryView[]> {
     const db = await getTenantDatabase(tenantDbName);
-    const [entries, rules] = await Promise.all([db.listAlertChannelLibrary(tenantId), db.listAlertRules(tenantId)]);
+    const [entries, rules] = await Promise.all([
+      db.listAlertChannelLibrary(tenantId),
+      db.listAlertRules(tenantId, scope.projectId ? { projectId: scope.projectId } : undefined),
+    ]);
     const usage = usageIndex(rules);
     return entries.map((entry) => toView(entry, usage.get(String(entry._id)) ?? []));
   }

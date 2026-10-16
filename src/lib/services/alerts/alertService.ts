@@ -1019,9 +1019,11 @@ export class AlertService {
   static async testChannel(
     tenantDbName: string,
     session: { tenantId: string; tenantSlug: string },
-    scope: { projectId: string; projectName: string; ruleScopeProjectId?: string },
+    scope: { projectId: string; projectName: string; ruleScopeProjectId?: string; canTestLibrary?: boolean },
     body: { channel?: unknown; ruleId?: unknown; channelId?: unknown; libraryChannelId?: unknown },
   ): Promise<DispatchResult> {
+    const libraryTestForbidden = () =>
+      new AlertApiError(403, 'forbidden', 'Only workspace owners and admins can test a shared library channel');
     let stored: IAlertChannel;
     let ruleName = 'Channel test';
     let ruleId = 'test';
@@ -1038,6 +1040,7 @@ export class AlertService {
       await verifyChannelDestinations([input]);
       [stored] = await sealChannels([input], []);
     } else if (typeof body.libraryChannelId === 'string') {
+      if (!scope.canTestLibrary) throw libraryTestForbidden();
       const entry = await (await getTenantDatabase(tenantDbName)).findAlertChannelLibraryEntry(body.libraryChannelId);
       if (!entry || entry.tenantId !== session.tenantId) throw new AlertApiError(404, 'channel_not_found', 'Channel not found');
       stored = entry.config;
@@ -1047,6 +1050,7 @@ export class AlertService {
       if (!rule) throw new AlertApiError(404, 'rule_not_found', 'Rule not found');
       const found = (rule.channels ?? []).find((channel) => channel.id === body.channelId);
       if (!found) throw new AlertApiError(404, 'channel_not_found', 'Channel not found');
+      if (found.type === 'library' && !scope.canTestLibrary) throw libraryTestForbidden();
       stored = found;
       ruleName = rule.name;
       ruleId = String(rule._id);

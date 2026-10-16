@@ -2107,7 +2107,7 @@ export interface IAlertRule {
   mutedUntil?: Date | null;
   mutedBy?: string | null;
   muteReason?: string | null;
-  /** http(s) link to the team's runbook; shown on incidents and in notifications. Not part of the evaluation shape. */
+  /** http(s) link to the team's runbook; shown on the rule's incidents. Not part of the evaluation shape. */
   runbookUrl?: string | null;
   /** Last evaluation summary (throttled writes) behind the derived "No data" state. */
   lastEvaluation?: IAlertRuleLastEvaluation | null;

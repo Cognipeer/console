@@ -257,6 +257,8 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         projectName: context.project?.name ?? '',
         ruleScopeProjectId: recordScope(context).projectId,
+        // a shared library channel is tested by the people who manage the library, on every path
+        canTestLibrary: canManageLibrary(context),
       },
       body,
     );
@@ -326,8 +328,9 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Channel library (tenant-wide; owners and admins manage it, everyone with alerts access reads the masked list) ──
 
   app.get('/alerts/channels/library', guarded('List library channels', async (request, reply) => {
-    const { session } = await requireProjectContextForRequest(request);
-    const channels = await AlertChannelLibraryService.list(session.tenantDbName, session.tenantId);
+    const context = await requireProjectContextForRequest(request);
+    const { session } = context;
+    const channels = await AlertChannelLibraryService.list(session.tenantDbName, session.tenantId, recordScope(context));
     return reply.code(200).send({ channels });
   }));
 
@@ -380,7 +383,7 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
     const result = await AlertService.testChannel(
       session.tenantDbName,
       session,
-      { projectId, projectName: context.project?.name ?? '' },
+      { projectId, projectName: context.project?.name ?? '', canTestLibrary: true },
       { libraryChannelId: id },
     );
     return reply.code(200).send({ result });

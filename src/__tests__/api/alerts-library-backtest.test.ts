@@ -222,6 +222,40 @@ describe('channel library routes', () => {
     expect((await call('DELETE', `/alerts/channels/library/${entry.id}`)).status).toBe(200);
   });
 
+  it('shows a member only the rules of the active project among the users of an entry', async () => {
+    const entry = await createLibraryChannel('Scoped usage');
+    const mine = await call('POST', '/alerts/rules', ruleBody([{ type: 'library', libraryId: entry.id }], 'Rule here'));
+    const theirs = await call('POST', '/alerts/rules', ruleBody([{ type: 'library', libraryId: entry.id }], 'Rule elsewhere'));
+    expect(mine.status).toBe(201);
+    expect(theirs.status).toBe(201);
+    const db = await getTenantDatabase(TENANT_DB_NAME);
+    await db.updateAlertRule(theirs.body.rule._id, { projectId: 'library-project-b' });
+
+    const usedBy = async () => (await call('GET', '/alerts/channels/library')).body.channels.find((c: Json) => c.id === entry.id).usedBy;
+    expect((await usedBy()).map((u: Json) => u.ruleName).sort()).toEqual(['Rule elsewhere', 'Rule here']);
+    currentUserRole = 'member';
+    expect(await usedBy()).toEqual([expect.objectContaining({ ruleId: mine.body.rule._id, ruleName: 'Rule here' })]);
+  });
+
+  it('lets only owners and admins test a shared channel, whichever route is used', async () => {
+    const entry = await createLibraryChannel('Shared test');
+    const rule = await call('POST', '/alerts/rules', ruleBody([{ type: 'library', libraryId: entry.id }], 'Rule with shared'));
+    const channelId = rule.body.rule.channels[0].id;
+    expect(channelId).toBeTruthy();
+
+    currentUserRole = 'member';
+    const byLibrary = await call('POST', '/alerts/channels/test', { libraryChannelId: entry.id });
+    expect(byLibrary.status).toBe(403);
+    expect(byLibrary.body.code).toBe('forbidden');
+    expect((await call('POST', '/alerts/channels/test', { ruleId: rule.body.rule._id, channelId })).status).toBe(403);
+    expect(delivered).toHaveLength(0);
+
+    currentUserRole = 'admin';
+    expect((await call('POST', '/alerts/channels/test', { libraryChannelId: entry.id })).status).toBe(200);
+    expect((await call('POST', '/alerts/channels/test', { ruleId: rule.body.rule._id, channelId })).status).toBe(200);
+    expect(delivered).toHaveLength(2);
+  });
+
   it('tests a library channel through its resolved credentials', async () => {
     const entry = await createLibraryChannel('Testable');
     const res = await call('POST', `/alerts/channels/library/${entry.id}/test`);
