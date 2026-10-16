@@ -512,7 +512,7 @@ export default function IncidentDetailPage() {
             )}
           </DetailCard>
 
-          <DeliveryTimeline incidentId={incident._id} refreshKey={`${incident.status}|${incident.updatedAt ?? ''}|${incident.snoozedUntil ?? ''}`} />
+          <DeliveryTimeline incidentId={incident._id} firedAt={incident.firedAt} refreshKey={`${incident.status}|${incident.updatedAt ?? ''}|${incident.snoozedUntil ?? ''}`} />
 
           <DetailCard title={t('activity')}>
             <Timeline active={entries.length - 1} bulletSize={24} lineWidth={2}>

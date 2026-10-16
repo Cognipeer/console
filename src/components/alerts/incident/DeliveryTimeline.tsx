@@ -5,10 +5,20 @@ import { Text } from '@mantine/core';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { formatDateTime } from '@/components/iam/timeFormat';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { deliveryReasonKey, groupDeliveries, type DeliveryDto, type DeliveryStatus } from './incidentModel';
+import {
+  DELIVERY_RETENTION_DAYS,
+  LIBRARY_KIND,
+  deliveriesBeyondRetention,
+  deliveryCodeKey,
+  groupDeliveries,
+  type DeliveryDto,
+  type DeliveryStatus,
+} from './incidentModel';
 
 interface Props {
   incidentId: string;
+  /** When the incident fired: an empty log of an older one is explained by the retention, not by "nothing was sent". */
+  firedAt?: string | null;
   /** Changes whenever the incident does (a new status can mean a new notification). */
   refreshKey: string;
 }
@@ -20,7 +30,7 @@ const STATUS_CLASS: Record<DeliveryStatus, string> = {
 };
 
 /** Who was notified about the incident, per channel: every attempt, what became of it, and why one was held back. */
-export default function DeliveryTimeline({ incidentId, refreshKey }: Props) {
+export default function DeliveryTimeline({ incidentId, firedAt, refreshKey }: Props) {
   const t = useTranslations('incidents');
   const ta = useTranslations('alerts');
   const locale = useLocale();
@@ -47,11 +57,13 @@ export default function DeliveryTimeline({ incidentId, refreshKey }: Props) {
 
   const groups = useMemo(() => groupDeliveries(rows ?? []), [rows]);
   const kindLabel = (kind: string) => {
+    if (kind === LIBRARY_KIND) return t('ux.deliveries.sharedChannel');
     const known = ['email', 'webhook', 'slack', 'teams', 'pagerduty'];
     return known.includes(kind) ? ta(`channelTypes.${kind}`) : kind;
   };
-  const reasonText = (reason: string | null | undefined) => {
-    const key = deliveryReasonKey(reason);
+  // A known code reads as its localized sentence, whether the row stored it as the reason or as the error text.
+  const codeText = (attempt: DeliveryDto) => {
+    const key = deliveryCodeKey(attempt);
     return key ? t(`ux.deliveries.reason.${key}`) : null;
   };
 
@@ -63,7 +75,9 @@ export default function DeliveryTimeline({ incidentId, refreshKey }: Props) {
         </Text>
       ) : rows && groups.length === 0 ? (
         <Text size="sm" c="dimmed">
-          {t('ux.deliveries.empty')}
+          {deliveriesBeyondRetention(firedAt)
+            ? t('ux.deliveries.emptyExpired', { days: DELIVERY_RETENTION_DAYS })
+            : t('ux.deliveries.empty')}
         </Text>
       ) : (
         <div className="ds-col ds-gap-md">
@@ -93,14 +107,14 @@ export default function DeliveryTimeline({ incidentId, refreshKey }: Props) {
                         {formatDateTime(attempt.attemptAt, locale)}
                       </span>
                     </div>
-                    {attempt.status === 'suppressed' && reasonText(attempt.reason) ? (
+                    {attempt.status === 'suppressed' && codeText(attempt) ? (
                       <Text size="xs" c="dimmed">
-                        {reasonText(attempt.reason)}
+                        {codeText(attempt)}
                       </Text>
                     ) : null}
                     {attempt.status === 'failed' ? (
                       <Text size="xs" c="red" style={{ wordBreak: 'break-word' }}>
-                        {attempt.error || reasonText(attempt.reason) || t('ux.deliveries.unknownError')}
+                        {codeText(attempt) ?? (attempt.error || t('ux.deliveries.unknownError'))}
                       </Text>
                     ) : null}
                   </li>

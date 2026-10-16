@@ -13,6 +13,7 @@ import type {
   IAlertDelivery,
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { isLibraryRef } from './channels/libraryResolve';
 import type { AlertNotification, DispatchResult } from './channels/types';
 
 const logger = createLogger('alert-deliveries');
@@ -90,13 +91,29 @@ export async function recordDeliveries(
     channelName: result.channelName ?? null,
     trigger,
     status: (result.success ? 'sent' : 'failed') as AlertDeliveryStatus,
-    reason: null,
+    // a failure with a machine-readable cause (`channel_missing`) keeps it, so the UI can word it
+    reason: result.success ? null : (result.reason ?? null),
     error: result.success ? null : clipError(result.error),
     attemptAt: result.at ?? fallbackAt,
   })));
 }
 
-/** Record that every channel of the rule was skipped, and why. */
+/** What a library reference stands for right now (its entry's name and real kind), or null when it cannot be read. */
+async function describeLibraryRef(
+  db: DatabaseProvider,
+  tenantId: string,
+  channel: IAlertChannel,
+): Promise<{ name: string; kind: string } | null> {
+  if (!isLibraryRef(channel)) return null;
+  try {
+    const entry = await db.findAlertChannelLibraryEntry(channel.libraryId);
+    return entry && entry.tenantId === tenantId ? { name: entry.name, kind: entry.kind } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record that every channel of the rule was skipped, and why. A library reference is logged under its entry's name and kind. */
 export async function recordSuppressed(
   db: DatabaseProvider,
   base: DeliveryBase,
@@ -106,15 +123,17 @@ export async function recordSuppressed(
 ): Promise<void> {
   const trigger = deliveryTrigger(kind);
   const attemptAt = new Date();
-  await write(db, base, (channels ?? []).map((channel) => ({
+  const list = channels ?? [];
+  const described = await Promise.all(list.map((channel) => describeLibraryRef(db, base.tenantId, channel)));
+  await write(db, base, list.map((channel, index) => ({
     tenantId: base.tenantId,
     projectId: base.projectId,
     ruleId: base.ruleId,
     incidentId: base.incidentId ?? null,
     eventId: base.eventId ?? null,
     channelId: channel.id ?? '',
-    channelKind: String((channel as { type?: unknown }).type ?? 'unknown'),
-    channelName: null,
+    channelKind: described[index]?.kind ?? String((channel as { type?: unknown }).type ?? 'unknown'),
+    channelName: described[index]?.name ?? null,
     trigger,
     status: 'suppressed' as AlertDeliveryStatus,
     reason,

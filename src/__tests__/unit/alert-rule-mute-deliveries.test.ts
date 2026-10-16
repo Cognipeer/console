@@ -26,6 +26,8 @@ import {
   lastEvaluationDue,
 } from '@/lib/services/alerts/alertEvaluator';
 import { getTenantDatabase } from '@/lib/database';
+import { DELIVERY_RETENTION_MS } from '@/lib/services/alerts/deliveryLog';
+import { DELIVERY_RETENTION_DAYS } from '@/components/alerts/incident/incidentModel';
 import { collectMetric } from '@/lib/services/alerts/metrics';
 import { dispatchNotification } from '@/lib/services/alerts/channels';
 import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
@@ -151,6 +153,21 @@ describe('delivery log', () => {
     expect((h.deliveries[0].error as string).length).toBeLessThanOrEqual(500);
   });
 
+  it('keeps the reason code of a failed delivery, so a deleted shared channel can be worded', async () => {
+    (dispatchNotification as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { type: 'library', target: 'library', success: false, error: 'channel_missing', reason: 'channel_missing', channelId: 'ch_libref000000', at: new Date() },
+    ]);
+    h.rules = [{ ...rule, channels: [{ id: 'ch_libref000000', type: 'library', libraryId: 'gone' }] }];
+    await tick();
+    expect(h.deliveries).toEqual([
+      expect.objectContaining({ status: 'failed', channelKind: 'library', channelName: null, reason: 'channel_missing', error: 'channel_missing' }),
+    ]);
+  });
+
+  it('keeps rows as long as the incident page says it does', () => {
+    expect(DELIVERY_RETENTION_DAYS * 86_400_000).toBe(DELIVERY_RETENTION_MS);
+  });
+
   it('never breaks the evaluation when the log cannot be written', async () => {
     h.db.createAlertDeliveries.mockRejectedValue(new Error('disk full'));
     h.rules = [rule];
@@ -172,6 +189,42 @@ describe('rule mute', () => {
     ]);
     // integrations still get the event
     expect(publishWebhookEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'alert.fired' }));
+  });
+
+  it('logs a held-back shared channel under its entry name and real kind, a deleted or foreign one as a shared channel', async () => {
+    const entry = { _id: 'lib1', tenantId: 'tenant-1', name: 'On-call Slack', kind: 'slack', config: { type: 'slack', url: 'https://hooks.slack.com/x' }, createdBy: 'u1' };
+    h.db.findAlertChannelLibraryEntry.mockImplementation(async (id: string) => {
+      if (id === 'lib1') return entry;
+      if (id === 'other') return { ...entry, _id: 'other', tenantId: 'tenant-2' };
+      return null;
+    });
+    h.rules = [{
+      ...rule,
+      ...muted(120),
+      channels: [
+        { id: 'ch_aaaaaaaaaaaa', type: 'email', recipients: ['ops@acme.com'] },
+        { id: 'ch_libref000001', type: 'library', libraryId: 'lib1' },
+        { id: 'ch_libref000002', type: 'library', libraryId: 'gone' },
+        { id: 'ch_libref000003', type: 'library', libraryId: 'other' },
+      ],
+    }];
+    await tick();
+    expect(h.deliveries.map((d) => [d.channelId, d.channelKind, d.channelName, d.status, d.reason])).toEqual([
+      ['ch_aaaaaaaaaaaa', 'email', null, 'suppressed', 'rule_muted'],
+      ['ch_libref000001', 'slack', 'On-call Slack', 'suppressed', 'rule_muted'],
+      ['ch_libref000002', 'library', null, 'suppressed', 'rule_muted'],
+      // another workspace's entry is never read
+      ['ch_libref000003', 'library', null, 'suppressed', 'rule_muted'],
+    ]);
+  });
+
+  it('still logs the held-back rows when the library cannot be read', async () => {
+    h.db.findAlertChannelLibraryEntry.mockRejectedValue(new Error('db down'));
+    h.rules = [{ ...rule, ...muted(120), channels: [{ id: 'ch_libref000001', type: 'library', libraryId: 'lib1' }] }];
+    expect(await tick()).toBe(1);
+    expect(h.deliveries).toEqual([
+      expect.objectContaining({ channelId: 'ch_libref000001', channelKind: 'library', channelName: null, status: 'suppressed' }),
+    ]);
   });
 
   it('suppresses resolve and renotify while muted, and notifies again once the mute expired', async () => {

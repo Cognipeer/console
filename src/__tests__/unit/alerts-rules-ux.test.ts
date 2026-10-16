@@ -200,6 +200,21 @@ describe('rule form: library references, runbook and backtest', () => {
     expect('channels' in draft).toBe(false);
     expect(applyBacktestSuggestion(values, { threshold: 8 })).toMatchObject({ mode: 'threshold', threshold: 8 });
   });
+
+  it('sends the form cooldown with the backtest (the server assumes 60 minutes without it), but not with the live preview', () => {
+    const values = valuesFromRule(rule, catalog);
+    const rows = (cooldownMinutes: string) => ({ ...values, cooldownMinutes });
+    const cooldownOf = (cooldownMinutes: string) => (buildBacktestBody(rows(cooldownMinutes), { catalog, isEdit: true }).rule as Record<string, unknown>).cooldownMinutes;
+    expect(cooldownOf('15')).toBe(15);
+    expect(cooldownOf('1440')).toBe(1440);
+    // "None" is a real choice: 0, never a missing field
+    expect(cooldownOf('0')).toBe(0);
+    // the save payload reads the same value; the preview shape does not carry one, so editing it does not refetch the preview
+    expect(buildRulePayload(rows('15'), { catalog, isEdit: true }).cooldownMinutes).toBe(15);
+    expect('cooldownMinutes' in buildRulePayload(rows('15'), { catalog, isEdit: true, preview: true })).toBe(false);
+    // a change of the cooldown makes an earlier backtest result stale
+    expect(JSON.stringify(buildBacktestBody(rows('15'), { catalog, isEdit: true }))).not.toBe(JSON.stringify(buildBacktestBody(rows('30'), { catalog, isEdit: true })));
+  });
 });
 
 describe('channel library form', () => {
@@ -217,7 +232,8 @@ describe('channel library form', () => {
 
   it('validates the name and the destination', () => {
     expect(validateLibraryForm(emptyLibraryForm('email'))).toEqual({ code: 'nameRequired' });
-    expect(validateLibraryForm({ ...emptyLibraryForm('email'), name: 'x' })).toEqual({ code: 'recipientsRequired' });
+    // like the server, and like the field's hint ("leave empty to notify the workspace owners and admins"), no recipient is fine
+    expect(validateLibraryForm({ ...emptyLibraryForm('email'), name: 'x' })).toBeNull();
     expect(validateLibraryForm({ ...emptyLibraryForm('email'), name: 'x', recipients: ['bad'] })).toMatchObject({ code: 'invalidEmail' });
     expect(validateLibraryForm({ ...emptyLibraryForm('email'), name: 'x', recipients: ['a@b.co'] })).toBeNull();
     expect(validateLibraryForm({ ...emptyLibraryForm('slack'), name: 'x' })).toEqual({ code: 'urlRequired' });
@@ -241,6 +257,18 @@ describe('channel library form', () => {
       name: 'On-call Slack',
       config: { url: 'https://hooks.slack.com/new' },
     });
+  });
+
+  it('sends an email channel without recipients as an empty list, on create and on edit', () => {
+    expect(buildCreateLibraryBody({ ...emptyLibraryForm('email'), name: ' Admins ' })).toEqual({
+      name: 'Admins',
+      kind: 'email',
+      config: { recipients: [] },
+    });
+    const email: LibraryChannelDto = { ...entry, kind: 'email', config: { type: 'email', recipients: ['a@b.co'] } };
+    const cleared = { ...libraryFormFromEntry(email), recipients: [] };
+    expect(validateLibraryForm(cleared, email)).toBeNull();
+    expect(buildUpdateLibraryBody(cleared, email)).toEqual({ name: 'On-call Slack', config: { recipients: [] } });
   });
 
   it('always sends the recipients of an email channel on edit', () => {

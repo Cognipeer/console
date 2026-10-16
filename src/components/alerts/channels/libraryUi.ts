@@ -51,16 +51,16 @@ export function libraryFormToItem(values: LibraryFormValues, entry?: LibraryChan
   };
 }
 
-export type LibraryIssue = { code: 'nameRequired' } | { code: 'nameTooLong' } | { code: 'recipientsRequired' } | ChannelIssue;
+export type LibraryIssue = { code: 'nameRequired' } | { code: 'nameTooLong' } | ChannelIssue;
 
-/** The first problem with the form, or null. */
+/**
+ * The first problem with the form, or null. An email channel may list no recipients: the server accepts that and
+ * mails the workspace owners and admins then, as the field's hint says.
+ */
 export function validateLibraryForm(values: LibraryFormValues, entry?: LibraryChannelDto | null): LibraryIssue | null {
   const name = values.name.trim();
   if (!name) return { code: 'nameRequired' };
   if (name.length > MAX_LIBRARY_NAME) return { code: 'nameTooLong' };
-  if (values.kind === 'email' && values.recipients.filter((recipient) => recipient.trim()).length === 0) {
-    return { code: 'recipientsRequired' };
-  }
   return validateChannel(libraryFormToItem(values, entry));
 }
 

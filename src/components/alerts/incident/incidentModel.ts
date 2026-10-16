@@ -74,6 +74,9 @@ export interface DeliveryDto {
   attemptAt: string;
 }
 
+/** `channelKind` of a delivery row whose channel is a reference to a shared (library) channel. */
+export const LIBRARY_KIND = 'library';
+
 export interface ChannelDeliveries {
   key: string;
   kind: string;
@@ -97,6 +100,8 @@ export function groupDeliveries(deliveries: DeliveryDto[]): ChannelDeliveries[] 
     }
     group.attempts.push(delivery);
     if (!group.name && delivery.channelName) group.name = delivery.channelName;
+    // A held-back row of a library reference only knows it is "library"; a row that resolved it names the real kind.
+    if (group.kind === LIBRARY_KIND && delivery.channelKind !== LIBRARY_KIND) group.kind = delivery.channelKind;
     if (delivery.status === 'failed') group.failed += 1;
     else if (delivery.status === 'suppressed') group.suppressed += 1;
     else group.sent += 1;
@@ -108,9 +113,28 @@ export function groupDeliveries(deliveries: DeliveryDto[]): ChannelDeliveries[] 
   return groups.sort((a, b) => Number(b.failed > 0) - Number(a.failed > 0) || latest(b) - latest(a));
 }
 
-/** The translation key suffix of a suppression reason (`deliveries.reason.<x>`), or null for an unknown one. */
-export function deliveryReasonKey(reason: string | null | undefined): 'rule_muted' | 'incident_snoozed' | 'channel_missing' | null {
+export type DeliveryReasonKey = 'rule_muted' | 'incident_snoozed' | 'channel_missing';
+
+/** The translation key suffix of a delivery reason code (`deliveries.reason.<x>`), or null for an unknown one. */
+export function deliveryReasonKey(reason: string | null | undefined): DeliveryReasonKey | null {
   return reason === 'rule_muted' || reason === 'incident_snoozed' || reason === 'channel_missing' ? reason : null;
+}
+
+/**
+ * The reason code of an attempt, wherever it was stored: `reason`, or `error` (rows written before a failed
+ * delivery kept its code in `reason` carry it as the error text).
+ */
+export function deliveryCodeKey(attempt: Pick<DeliveryDto, 'reason' | 'error'>): DeliveryReasonKey | null {
+  return deliveryReasonKey(attempt.reason) ?? deliveryReasonKey(attempt.error);
+}
+
+/** How long the server keeps delivery attempts (`DELIVERY_RETENTION_MS` in `deliveryLog.ts`; a test keeps the two equal). */
+export const DELIVERY_RETENTION_DAYS = 30;
+
+/** Whether an incident fired so long ago that its delivery history may already be gone. */
+export function deliveriesBeyondRetention(firedAt: string | null | undefined, now: number = Date.now()): boolean {
+  const fired = firedAt ? Date.parse(firedAt) : Number.NaN;
+  return Number.isFinite(fired) && now - fired > DELIVERY_RETENTION_DAYS * 86_400_000;
 }
 
 // ── State line ──────────────────────────────────────────────────────────────

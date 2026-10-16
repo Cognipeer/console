@@ -79,7 +79,6 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
     if (!issue) return undefined;
     if (issue.code === 'nameRequired') return t('libraryUx.nameRequired');
     if (issue.code === 'nameTooLong') return t('libraryUx.nameTooLong', { max: MAX_LIBRARY_NAME });
-    if (issue.code === 'recipientsRequired') return t('libraryUx.recipientsRequired');
     return undefined;
   };
 
@@ -149,11 +148,6 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
 
       <FormSection number={2} title={t('libraryUx.sectionDestination')} description={t('libraryUx.sectionDestinationDescription')} done={!issue}>
         <ChannelsEditor value={[item]} onChange={(next) => next[0] && applyItem(next[0])} single maxChannels={1} onTest={onTest} canTest={testable} />
-        {issue?.code === 'recipientsRequired' && values.name.trim() ? (
-          <Text size="xs" c="red" role="alert">
-            {issueText()}
-          </Text>
-        ) : null}
         {entry && entry.usedBy.length > 0 ? (
           <Text size="xs" c="dimmed">
             {t(pluralKey('libraryUx.editImpact', rulesUsing), { count: rulesUsing })}

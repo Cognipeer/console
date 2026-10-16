@@ -2139,7 +2139,7 @@ export interface IAlertDelivery {
   channelName?: string | null;
   trigger: AlertDeliveryTrigger;
   status: AlertDeliveryStatus;
-  /** e.g. `rule_muted`, `incident_snoozed` for suppressed rows. */
+  /** `rule_muted` / `incident_snoozed` for suppressed rows, `channel_missing` for a failed delivery to a deleted library channel. */
   reason?: string | null;
   /** Already scrubbed by the channel; at most 500 characters. */
   error?: string | null;

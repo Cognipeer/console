@@ -381,6 +381,19 @@ describe('POST /alerts/rules/backtest', () => {
     expect(res.body.suggestion.note).toContain('70');
   });
 
+  it('replays with the cooldown it is sent: a long one swallows the later episodes', async () => {
+    // the episodes of the first test (3 h apart); the form sends its own cooldown, the server otherwise assumes 60 minutes
+    const target = { entity: { entityType: 'agent', mode: 'selected', keys: ['bt-bot'] } };
+    const short = await call('POST', '/alerts/rules/backtest', { rule: rule({ ...target, cooldownMinutes: 5 }), days: 2 });
+    const long = await call('POST', '/alerts/rules/backtest', { rule: rule({ ...target, cooldownMinutes: 1440 }), days: 2 });
+    expect(short.status).toBe(200);
+    expect(long.status).toBe(200);
+    expect(short.body.fires).toBe(4);
+    expect(long.body.fires).toBe(1);
+    // the same range the form offers: 0 ("None") is accepted too
+    expect((await call('POST', '/alerts/rules/backtest', { rule: rule({ ...target, cooldownMinutes: 0 }), days: 2 })).body.fires).toBe(4);
+  });
+
   it('is read-only and honours a pending duration (forMinutes)', async () => {
     const db = await getTenantDatabase(TENANT_DB_NAME);
     const before = await db.listAlertRules(TENANT_ID);

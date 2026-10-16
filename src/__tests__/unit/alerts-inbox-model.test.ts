@@ -28,6 +28,8 @@ import {
   visibleOrder,
 } from '@/components/alerts/inbox/inboxModel';
 import {
+  deliveriesBeyondRetention,
+  deliveryCodeKey,
   groupDeliveries,
   incidentChartRange,
   incidentFlags,
@@ -261,6 +263,33 @@ describe('incident detail model', () => {
     expect(groups.map((g) => g.key)).toEqual(['c2', 'c1']);
     expect(groups[1]!.attempts.map((a) => a._id)).toEqual(['1', '3']);
     expect(groups[1]).toMatchObject({ suppressed: 1, sent: 1, failed: 0, name: 'Ops' });
+  });
+
+  it('names the real kind of a channel when a held-back row only knows it is a shared (library) one', () => {
+    const rows: DeliveryDto[] = [
+      // newest first, as the API returns them: the held-back row of the reference comes first
+      { _id: '2', channelId: 'c1', channelKind: 'library', channelName: null, trigger: 'renotify', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T11:00:00Z' },
+      { _id: '1', channelId: 'c1', channelKind: 'slack', channelName: 'On-call Slack', trigger: 'fire', status: 'sent', attemptAt: '2026-10-15T10:00:00Z' },
+    ];
+    expect(groupDeliveries(rows)[0]).toMatchObject({ kind: 'slack', name: 'On-call Slack' });
+    // with nothing that resolved it, the group stays a shared channel (the card words it)
+    expect(groupDeliveries([rows[0]!])[0]).toMatchObject({ kind: 'library', name: null });
+  });
+
+  it('reads a delivery code wherever it was stored: the reason, or the error text of an older row', () => {
+    expect(deliveryCodeKey({ reason: 'channel_missing', error: 'channel_missing' })).toBe('channel_missing');
+    expect(deliveryCodeKey({ reason: null, error: 'channel_missing' })).toBe('channel_missing');
+    expect(deliveryCodeKey({ reason: 'rule_muted', error: null })).toBe('rule_muted');
+    expect(deliveryCodeKey({ reason: null, error: 'SMTP is down' })).toBeNull();
+    expect(deliveryCodeKey({})).toBeNull();
+  });
+
+  it('tells an incident older than the delivery retention from a recent one', () => {
+    const now = Date.parse('2026-10-16T12:00:00Z');
+    expect(deliveriesBeyondRetention('2026-09-01T00:00:00Z', now)).toBe(true);
+    expect(deliveriesBeyondRetention('2026-10-10T00:00:00Z', now)).toBe(false);
+    expect(deliveriesBeyondRetention(undefined, now)).toBe(false);
+    expect(deliveriesBeyondRetention('not a date', now)).toBe(false);
   });
 
   it('reads the snooze state', () => {

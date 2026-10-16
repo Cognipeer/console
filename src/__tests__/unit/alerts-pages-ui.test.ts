@@ -158,7 +158,7 @@ describe('AlertsPage', () => {
     rulesApi();
     mounted = await mount(createElement(AlertsPage));
     await settle(100);
-    await setInput(q<HTMLInputElement>('input[placeholder="Search rules, metrics, targets…"]')!, 'pii');
+    await setInput(q<HTMLInputElement>('input[placeholder="Search by name, description or metric ID…"]')!, 'pii');
     await settle(400);
     expect(text()).toContain('PII guard');
     expect(text()).not.toContain('Support errors');
@@ -288,6 +288,63 @@ describe('DeliveryTimeline', () => {
     expect(text()).toContain('On-call Slack · Slack');
     expect(text()).toContain('SMTP is down');
     expect(text()).not.toContain('Email · Email');
+  });
+
+  const deliveriesApi = (deliveries: unknown[]) => {
+    api = installApiMock([['GET', '/api/alerts/incidents/i1/deliveries', () => ({ deliveries })]]);
+  };
+
+  it('words a deleted shared channel in plain language, whether the code arrived as the reason or as the error', async () => {
+    deliveriesApi([
+      // written by the recorder now: the code is the reason
+      { _id: 'd1', channelId: 'ch_a', channelKind: 'library', channelName: null, trigger: 'fire', status: 'failed', reason: 'channel_missing', error: 'channel_missing', attemptAt: '2026-10-15T10:00:00.000Z' },
+      // older rows: reason null, the code stored as the error text
+      { _id: 'd2', channelId: 'ch_b', channelKind: 'library', channelName: null, trigger: 'fire', status: 'failed', reason: null, error: 'channel_missing', attemptAt: '2026-10-15T10:00:01.000Z' },
+      { _id: 'd3', channelId: 'ch_c', channelKind: 'email', channelName: null, trigger: 'fire', status: 'failed', reason: null, error: 'SMTP is down', attemptAt: '2026-10-15T10:00:02.000Z' },
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    expect(text().match(/The library channel no longer exists\./g)).toHaveLength(2);
+    expect(text()).not.toContain('channel_missing');
+    // any other failure keeps its own text
+    expect(text()).toContain('SMTP is down');
+  });
+
+  it('heads a shared channel by its name, or as a "Shared channel" - never as the raw "library" kind', async () => {
+    deliveriesApi([
+      // a rule muted while its shared channel was already deleted: only the reference is known
+      { _id: 'd1', channelId: 'ch_lib', channelKind: 'library', channelName: null, trigger: 'fire', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:00.000Z' },
+      // held back under a live entry: the recorder knows its name and real kind
+      { _id: 'd2', channelId: 'ch_slack', channelKind: 'slack', channelName: 'On-call Slack', trigger: 'fire', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:01.000Z' },
+      // an older group whose newest row only says "library" but whose earlier row resolved it
+      { _id: 'd3', channelId: 'ch_ops', channelKind: 'library', channelName: null, trigger: 'renotify', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:03.000Z' },
+      { _id: 'd4', channelId: 'ch_ops', channelKind: 'teams', channelName: 'Ops Teams', trigger: 'fire', status: 'sent', attemptAt: '2026-10-15T10:00:02.000Z' },
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    const content = text();
+    expect(content).toContain('Shared channel');
+    expect(content).toContain('On-call Slack · Slack');
+    expect(content).toContain('Ops Teams · Teams');
+    expect(content).not.toMatch(/library/i);
+    expect(content).toContain('The rule was muted.');
+  });
+
+  it('does not claim nothing was attempted when the log is simply empty', async () => {
+    deliveriesApi([]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', firedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('No notification attempts were recorded for this incident.');
+    expect(text()).not.toContain('was attempted');
+    expect(text()).not.toContain('kept for');
+  });
+
+  it('says the history is kept for 30 days when the incident is older than that', async () => {
+    deliveriesApi([]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', firedAt: new Date(Date.now() - 45 * 86_400_000).toISOString(), refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('Delivery history is kept for 30 days');
+    expect(text()).not.toContain('No notification attempts were recorded');
   });
 });
 

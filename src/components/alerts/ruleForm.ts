@@ -303,7 +303,8 @@ export function prefillFromParams(params: PrefillParams, catalog: AlertCatalog):
 
 /**
  * Seed of the create form for a copy of a rule. A stored channel's secret cannot be read back, so only email channels
- * (plain recipients) carry over; `droppedChannels` counts the ones that did not.
+ * (plain recipients) and library references (no secret of their own) carry over; `droppedChannels` counts the ones
+ * that did not.
  */
 export function duplicateRuleSeed(rule: AlertRuleDto, name: string): { seed: Partial<AlertRuleDto>; droppedChannels: number } {
   // Email channels (plain recipients) and library references carry over; inline secrets cannot be read back.
@@ -395,6 +396,11 @@ export interface PayloadOptions {
   channelsUnchanged?: boolean;
 }
 
+/** The form's cooldown as the server reads it (`cooldownMinutes`). */
+function cooldownMinutesOf(values: Pick<RuleFormValues, 'cooldownMinutes'>): number {
+  return Number.parseInt(values.cooldownMinutes, 10) || 0;
+}
+
 export function buildRulePayload(values: RuleFormValues, options: PayloadOptions): Record<string, unknown> {
   const { catalog, isEdit, preview, channelsUnchanged } = options;
   const def = getDef(catalog, values.metric);
@@ -472,7 +478,7 @@ export function buildRulePayload(values: RuleFormValues, options: PayloadOptions
   body.severity = values.severity;
   body.notifyOnResolve = values.notifyOnResolve;
   body.renotifyMinutes = Number.parseInt(values.renotifyMinutes, 10) || 0;
-  body.cooldownMinutes = Number.parseInt(values.cooldownMinutes, 10) || 0;
+  body.cooldownMinutes = cooldownMinutesOf(values);
   body.enabled = values.enabled;
   const runbookUrl = values.runbookUrl.trim();
   // An edit sends '' to clear a stored runbook link.
@@ -621,9 +627,14 @@ export function describeRule(values: RuleFormValues, catalog: AlertCatalog, t: T
 
 // ── Backtest ────────────────────────────────────────────────────────────────
 
-/** Body of `POST /alerts/rules/backtest` for the current form (the preview shape, so it needs no name or channels). */
+/**
+ * Body of `POST /alerts/rules/backtest` for the current form (the preview shape, so it needs no name or channels).
+ * The replay also needs the cooldown (the least time between two firings of one target): the server assumes 60
+ * minutes when none is sent. The live preview does not use it, so it stays out of the preview shape.
+ */
 export function buildBacktestBody(values: RuleFormValues, options: { catalog: AlertCatalog; isEdit: boolean }, days = 7): Record<string, unknown> {
-  return { rule: buildRulePayload(values, { ...options, preview: true }), days };
+  const rule = buildRulePayload(values, { ...options, preview: true });
+  return { rule: { ...rule, cooldownMinutes: cooldownMinutesOf(values) }, days };
 }
 
 /** "Apply" on a backtest suggestion: the threshold it proposes. Nothing is saved until the rule is. */
