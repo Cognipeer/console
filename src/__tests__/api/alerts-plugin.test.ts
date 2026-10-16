@@ -854,7 +854,9 @@ describe('GET /alerts/incidents/stats', () => {
   it('counts statuses and computes MEDIAN MTTA / MTTR, excluding stale and closed-only rows', async () => {
     currentProjectId = 'alerts-project-stats';
     const hour = 3_600_000;
-    const fired = (agoH: number) => new Date(Date.now() - agoH * hour);
+    // one clock for every timestamp: durations are exact, not off by the milliseconds between two Date.now() calls
+    const now = Date.now();
+    const fired = (agoH: number) => new Date(now - agoH * hour);
     const db = await getTenantDatabase(TENANT_DB_NAME);
     const mk = async (agoH: number, over: Record<string, unknown> = {}) => {
       const id = await seedIncident('alerts-project-stats', { ruleId: 'rule-stats', firedAt: fired(agoH) });
