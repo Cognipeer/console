@@ -212,7 +212,7 @@ GET /api/alerts/incidents/:incidentId
 PATCH /api/alerts/incidents/:incidentId
 ```
 
-Change the status, the assignee, the snooze, or several of them in one call. At least one of `status`, `assignedTo` and `snoozedUntil` is required. They are applied in that order.
+Change the status, the assignee, the snooze, or several of them in one call. At least one of `status`, `assignedTo` and `snoozedUntil` is required. The assignee and the snooze time are checked before anything is written, and the changes are then applied in that order.
 
 ### Request
 
@@ -226,7 +226,7 @@ Change the status, the assignee, the snooze, or several of them in one call. At 
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | string | The new status (below). The move must be allowed from the current status |
-| `assignedTo` | string or `null` | A user id, `"me"` for the caller, or `null` to unassign |
+| `assignedTo` | string or `null` | The id of a user of the workspace, `"me"` for the caller, or `null` to unassign. An id that is not a user of the workspace answers `400` with `invalid_assignee` |
 | `snoozedUntil` | string or `null` | Snooze the incident until this time (ISO 8601), or `null` to end a snooze (see [Snooze](#snooze)) |
 
 Returns `{ "incident": { ... } }` with the display names filled in.
@@ -445,7 +445,7 @@ Errors are `{ "error": "<message>" }`; the ones that carry a `code` also have `c
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing or invalid status, `assignedTo` (`invalid_assignee` on bulk), filter (`invalid_filter`), `ids` (`invalid_ids`), `action` (`invalid_action`), snooze time (`invalid_snooze`) or note content, or a body that is not a JSON object (`invalid_body`) |
+| 400 | Missing or invalid status, `assignedTo` (`invalid_assignee`), filter (`invalid_filter`), `ids` (`invalid_ids`), `action` (`invalid_action`), snooze time (`invalid_snooze`) or note content, or a body that is not a JSON object (`invalid_body`) |
 | 401 | Not authenticated |
 | 403 | The caller lacks the `alerts` permission |
 | 404 | Incident not found |

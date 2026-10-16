@@ -424,6 +424,8 @@ Looks up the console page of up to 100 entities at once. Nothing is written, so 
 
 `type` is `agent`, `model`, `kb`, `mcp` or `tool`, and `key` is at most 200 characters. Each link is a path without the origin, keyed `<type>:<key>`, or `null` when the entity has no page. An agent links to its page in Agent Observability and a knowledge base to its own page. A model, MCP server or tool links to its own page when the console has a record of it, and is `null` otherwise (for example a model seen only in traces). The Enterprise edition answers with the health page for every type but agents.
 
+The links are resolved in the active project. Add `"projectId"` to the body to resolve them in another project of the workspace, as for an incident opened by id: workspace owners and admins may name any project (`404`, `project_not_found`, for one that does not exist), anyone else only the active one (`404` otherwise). A `projectId` that is not a non-empty string answers `400` with `invalid_project`.
+
 ## Test a Channel
 
 ```
@@ -448,7 +450,7 @@ Sends a clearly labelled test notification on one channel. Send a channel as typ
 { "result": { "type": "slack", "target": "https://hooks.slack.com/…/XXXX", "success": true } }
 ```
 
-A library channel is tested only by workspace owners and admins, whether it is named by `libraryChannelId` or is the rule's channel that `channelId` names; anyone else gets `403` with `code: "forbidden"`. A channel typed into a rule can be tested by everyone who may change alerts.
+A library channel is tested only by workspace owners and admins, whether it is named by `libraryChannelId`, is the rule's channel that `channelId` names, or is sent as a `channel` of type `library`; anyone else gets `403` with `code: "forbidden"`. A channel typed into a rule can be tested by everyone who may change alerts.
 
 `target` names the destination without its credential: the recipient address, the URL hint, or `pagerduty …wxyz`. A failed delivery is still a `200` with `success: false` and an `error` message in `result`. An unsaved email channel can be tested against at most 5 recipients (`too_many_recipients`). Tests are limited to 5 per minute per user and 20 per minute per project; beyond that the answer is `429` with a `Retry-After` header. A test through a PagerDuty channel opens and immediately resolves its own throw-away incident.
 
@@ -580,11 +582,11 @@ Errors are `{ "error": "<message>", "code": "<code>", "message": "<message>" }`.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Malformed JSON, or an invalid field. `code` names the problem: `invalid_body`, `invalid_name`, `invalid_description`, `invalid_module`, `invalid_metric`, `metric_module_mismatch`, `invalid_window`, `invalid_condition`, `invalid_mode`, `invalid_number`, `out_of_range`, `invalid_value`, `invalid_baseline`, `invalid_slo`, `invalid_scope`, `invalid_entity`, `invalid_renotify`, `invalid_runbook_url`, `invalid_channel`, `invalid_filter`, `invalid_entity_type`, `invalid_entities`, `invalid_until`, `invalid_reason`, `invalid_days`, `limit_reached`, `too_many_recipients` |
+| 400 | Malformed JSON, or an invalid field. `code` names the problem: `invalid_body`, `invalid_name`, `invalid_description`, `invalid_module`, `invalid_metric`, `metric_module_mismatch`, `invalid_window`, `invalid_condition`, `invalid_mode`, `invalid_number`, `out_of_range`, `invalid_value`, `invalid_baseline`, `invalid_slo`, `invalid_scope`, `invalid_entity`, `invalid_renotify`, `invalid_runbook_url`, `invalid_channel`, `invalid_filter`, `invalid_entity_type`, `invalid_entities`, `invalid_project`, `invalid_until`, `invalid_reason`, `invalid_days`, `limit_reached`, `too_many_recipients` |
 | 401 | Not authenticated |
 | 402 | The `baseline` or `slo_burn` condition mode is not available: `code` is `not_enterprise_build` (the build does not include it) or `license_required` (no active Enterprise licence), and the body carries `requiresEnterprise: true`, `module: "alerts-advanced"` and `error: "Payment Required"` |
 | 403 | The caller lacks the `alerts` permission, or changes or tests a library channel without being a workspace owner or admin (`forbidden`) |
-| 404 | Rule, event or channel not found in the project |
+| 404 | Rule, event or channel not found in the project, or a project that is not found for entity links (`project_not_found`) |
 | 409 | A library channel name in use (`name_taken`), or a library channel that rules still reference (`channel_in_use`) |
 | 429 | Too many channel tests or backtests (`rate_limited`, with a `Retry-After` header) |
 | 500 | Internal server error |
