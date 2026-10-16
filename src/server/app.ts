@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
@@ -98,6 +99,32 @@ export function registerBodyParsers(app: FastifyInstance): void {
   );
 }
 
+/**
+ * Hand every request no Fastify route claimed — the UI pages, Next's own assets
+ * and the middleware that guards them — over to Next.js.
+ *
+ * Next reads the request body itself (its middleware layer clones the stream and
+ * waits for it to end), so Fastify must not read it first: a body that has
+ * already been consumed does not end a second time and the request never
+ * completes. The hand-off therefore lives in its own scope, whose only content
+ * type parser leaves the stream alone. The API plugin keeps the parsers
+ * registered on the root instance.
+ */
+export async function registerNextHandoff(
+  app: FastifyInstance,
+  handle: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
+): Promise<void> {
+  await app.register(async (scope) => {
+    scope.removeAllContentTypeParsers();
+    scope.addContentTypeParser('*', (_request, _payload, done) => done(null));
+
+    scope.all('/*', async (request, reply) => {
+      await handle(request.raw, reply.raw);
+      reply.hijack();
+    });
+  });
+}
+
 export async function createServer(dev: boolean): Promise<FastifyInstance> {
   const nextApp = next({
     dev,
@@ -133,12 +160,7 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
   registerBodyParsers(app);
   await app.register(fastifyApiPlugin, { prefix: '/api' });
 
-  const nextHandler = nextApp.getRequestHandler();
-
-  app.all('/*', async (request, reply) => {
-    await nextHandler(request.raw, reply.raw);
-    reply.hijack();
-  });
+  await registerNextHandoff(app, nextApp.getRequestHandler());
 
   if (dev) {
     // Next's Fast Refresh pushes recompiled-module notifications to the

@@ -135,13 +135,13 @@ describe('changing a role', () => {
 
     it('leaves a directory account whose connection does not sync roles editable', () => {
       expect(checkRoleChange(ADMIN, T_LDAP, 'project_admin')).toEqual({ ok: true });
-      expect(assignableRoles(ADMIN, T_LDAP)).toEqual(['admin', 'project_admin', 'user']);
+      expect(assignableRoles(ADMIN, T_LDAP)).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
     });
   });
 
   it('lists the roles an actor could give', () => {
-    expect(assignableRoles(OWNER, T_USER)).toEqual(['admin', 'project_admin', 'user']);
-    expect(assignableRoles(ADMIN, T_ADMIN)).toEqual(['admin', 'project_admin', 'user']);
+    expect(assignableRoles(OWNER, T_USER)).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
+    expect(assignableRoles(ADMIN, T_ADMIN)).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
     expect(assignableRoles(ADMIN, T_OWNER)).toEqual([]);
     expect(assignableRoles(OWNER, T_OWNER)).toEqual([]);
     expect(assignableRoles(ADMIN, { ...T_USER, id: ADMIN.id })).toEqual([]);

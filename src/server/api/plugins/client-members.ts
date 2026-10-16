@@ -34,7 +34,7 @@ import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestConte
 
 const logger = createLogger('api:client-members');
 
-const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user'];
+const GRANTABLE_TENANT_ROLES: UserRole[] = ['admin', 'project_admin', 'user', 'portal_user'];
 
 /** Member management requires an owner/admin-owned token. */
 function isTenantAdmin(auth: ApiTokenContext): boolean {

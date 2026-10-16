@@ -337,6 +337,8 @@ POST /api/client/v1/mcp/console/execute
 
 Authentication is the same `Bearer cpeer_…` token used everywhere else; the project context is resolved from the token and applied to every tool call.
 
+The `mcp` permission opens the endpoint, and each tool additionally needs read access to the service whose data it returns — here `tracing`. That is the token owner's access, capped by the token's own `servicePermissions` scope, exactly as for `/api/client/v1/tracing`. A token without it does not see these tools in `tools/list` (or in the REST listing) and is refused when it calls one — `403` on the REST route, an error result over JSON-RPC — so a token scoped to `mcp` alone also needs `tracing: read` to read observability data through this server.
+
 Tools exposed:
 
 | Tool | Purpose |

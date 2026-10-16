@@ -43,7 +43,7 @@ interface InvitePersonShellProps {
 }
 
 const EMAIL_PATTERN = /^\S+@\S+\.\S+$/;
-const ROLE_ORDER = ['user', 'project_admin', 'admin'] as const;
+const ROLE_ORDER = ['user', 'project_admin', 'admin', 'portal_user'] as const;
 type RoleValue = (typeof ROLE_ORDER)[number];
 
 const copyBoxStyle = {
@@ -129,7 +129,8 @@ export default function InvitePersonShell({
         role,
         canLogin: !service,
         sendInvite: !service && sendInvite,
-        servicePermissions: toPermissions(draft),
+        // A portal user holds no service permission by design: nothing is sent, so nothing can raise it.
+        servicePermissions: role === 'portal_user' ? {} : toPermissions(draft),
         // An admin reaches every project already: nothing to assign.
         ...(role !== 'admin' && projectPicks.length > 0 ? { projects: toGrants(projectPicks) } : {}),
       });
@@ -417,16 +418,18 @@ export default function InvitePersonShell({
         </FormSection>
       ) : null}
 
-      <FormSection
-        number={service ? 5 : 6}
-        title={t('invite.sections.accessTitle')}
-        description={t('invite.sections.access')}
-        done
-        collapsible
-        defaultOpen={false}
-      >
-        <ServicePermissionMatrix draft={draft} onChange={setDraft} role={role} mode="person" disabled={saving} />
-      </FormSection>
+      {role === 'portal_user' ? null : (
+        <FormSection
+          number={service ? 5 : 6}
+          title={t('invite.sections.accessTitle')}
+          description={t('invite.sections.access')}
+          done
+          collapsible
+          defaultOpen={false}
+        >
+          <ServicePermissionMatrix draft={draft} onChange={setDraft} role={role} mode="person" disabled={saving} />
+        </FormSection>
+      )}
 
       {error ? <FormError error={error} t={t} /> : null}
     </FormShell>

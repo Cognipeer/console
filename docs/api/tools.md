@@ -114,6 +114,8 @@ POST /api/client/v1/tools/:toolKey/actions/:actionKey/execute
 
 Accepts `arguments` or `args` as the key for the action parameters.
 
+For `openapi` tools, the arguments are matched against the operation. Only parameters the operation declares are sent upstream; other argument names are ignored. Path parameters are required, must be non-empty strings or numbers, and cannot be relative path segments (`.` or `..`, also when percent-encoded) or contain control characters. A request body is sent only for an operation that declares one. The request always goes to the tool's configured upstream base URL, under the operation's path.
+
 ### Response
 
 ```json
@@ -155,7 +157,7 @@ Accepts `arguments` or `args` as the key for the action parameters.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Execution failed (upstream error returned) |
+| 400 | Execution failed (upstream error returned), or an argument is missing or invalid |
 | 401 | Invalid API token |
 | 403 | Tool is disabled |
 | 404 | Tool or action not found |

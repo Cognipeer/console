@@ -733,7 +733,7 @@ export async function listGroupMembers(
 // ── a draft of someone's access ──────────────────────────────────────────
 
 export interface AccessDraft {
-  role?: 'admin' | 'project_admin' | 'user';
+  role?: 'admin' | 'project_admin' | 'user' | 'portal_user';
   servicePermissions?: UserServicePermissions;
 }
 

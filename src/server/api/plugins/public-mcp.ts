@@ -11,33 +11,55 @@
  * endpoint slug — the pair is unguessable, but treat it like a webhook URL:
  * anyone who has it can call the tools. Access mode 'token' servers return
  * 404 here regardless of slug knowledge.
+ *
+ * Because anyone holding the URL can reach these routes, they are bounded:
+ * a request rate per client address and endpoint, a request rate per endpoint
+ * for all callers together, a body size limit, a cap on the tool calls a
+ * tenant has running at once, a cap on open SSE streams, JSON-only POSTs, and
+ * error messages that say a call failed without saying what the upstream
+ * answered (see docs/guide/configuration.md, "MCP Gateway"). A failed call's
+ * detail goes to the tenant's request log; the caller gets the log row's id to
+ * quote.
  */
 
-import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
+  isMcpToolInputError,
+  isMcpUpstreamError,
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
   resolveExposure,
   resolveSourceType,
+  type McpRequestClientInfo,
 } from '@/lib/services/mcp';
 import {
-  createSseSession,
-  encodeSseEndpointEvent,
-  getRemoteSseSession,
-  getSseSession,
-  removeSseSession,
-  sendSseResponse,
+  acquirePublicCallSlot,
+  checkPublicAddressRate,
+  checkPublicEndpointRate,
+  clientAddressBucket,
+  type PublicLimitDecision,
+} from '@/lib/services/mcp/publicGuard';
+import {
+  PUBLIC_SSE_PRINCIPAL,
+  deliverSseResponse,
+  getRemoteSseSessionFor,
 } from '@/lib/services/mcp/sseSessionManager';
 import { authz } from '@/lib/iam/routeAuthz';
-import { readJsonBody } from '../fastify-utils';
+import { getClientIp } from '../fastify-utils';
+import {
+  hasJsonContentType,
+  jsonRpcErrorBody as jsonRpcError,
+  lookupMessageSession,
+  readJsonRpcRequest,
+  sendSessionNotFound,
+  startMcpSseResponse,
+} from '../mcpTransport';
 
 const logger = createLogger('api:public-mcp');
 
@@ -52,12 +74,14 @@ const SERVER_INFO = {
   version: '1.0.0',
 };
 
+/** Caller-supplied text echoed back in an error is cut to this. */
+const ECHOED_TEXT_MAX_CHARS = 100;
+const USER_AGENT_MAX_CHARS = 256;
+/** A caller turned away for load may retry after this long. */
+const BUSY_RETRY_AFTER_SECONDS = 5;
+
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
-}
-
-function jsonRpcError(id: string | number | null, code: number, message: string) {
-  return { error: { code, message }, id, jsonrpc: JSONRPC_VERSION };
 }
 
 async function withTenantDb<T>(
@@ -91,18 +115,51 @@ async function resolvePublicServer(
   return { tenant, server };
 }
 
+/** Who is calling, for the request log: the address Fastify resolved and a bounded user agent. */
+function clientInfoOf(request: FastifyRequest): McpRequestClientInfo {
+  const userAgent = request.headers['user-agent'];
+  return {
+    ip: getClientIp(request),
+    userAgent: typeof userAgent === 'string' ? userAgent.slice(0, USER_AGENT_MAX_CHARS) : undefined,
+  };
+}
+
+type PublicToolOutcome =
+  | { ok: true; result: unknown }
+  /** `inputError`: the call itself was wrong (unknown tool, bad argument); `message` is safe to show. */
+  | { ok: false; inputError: boolean; message: string };
+
+/**
+ * What an anonymous caller is told about a failed call. The tool-input errors
+ * carry messages written for any caller; for everything else — an upstream's
+ * response body, a hostname, a subprocess's stderr, a database error — the
+ * caller learns only that it failed, and with what status when the upstream
+ * answered one.
+ */
+function describePublicFailure(error: unknown): { inputError: boolean; message: string } {
+  if (isMcpToolInputError(error)) return { inputError: true, message: error.message };
+  if (isMcpUpstreamError(error)) {
+    return { inputError: false, message: `Upstream request failed (status ${error.status})` };
+  }
+  return { inputError: false, message: 'Tool execution failed' };
+}
+
 async function runPublicToolCall(
   tenant: ITenant,
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   transport: 'jsonrpc' | 'sse',
-  sessionId?: string,
-): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> {
+  sessionId: string | undefined,
+  client: McpRequestClientInfo,
+): Promise<PublicToolOutcome> {
   const db = await getDatabase();
   // Public surface forwards no runtime headers, but the server's own static
-  // upstream credential can still be echoed back — scrub it from the response.
+  // upstream credential can still be echoed back — scrub it from the log.
   const secretValues = mcpRequestSecretValues(server);
+  // Anyone can call these endpoints, so what a call leaves in the log is
+  // smaller than for a token caller, and says where it came from.
+  const logOptions = { payloadLimitBytes: getConfig().mcp.public.logPayloadLimitBytes, client };
   try {
     const { result, latencyMs } = await withTenantDb(db, tenant.dbName, () =>
       executeMcpTool(server, toolName, args));
@@ -122,11 +179,13 @@ async function runPublicToolCall(
       transport,
       sourceType: resolveSourceType(server),
       sessionId,
-    }, secretValues);
+    }, secretValues, logOptions);
     return { ok: true, result };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
-    void logMcpRequest(tenant.dbName, {
+    const failure = describePublicFailure(error);
+    // The log row holds the full detail; its id is what the caller can quote.
+    const logId = await logMcpRequest(tenant.dbName, {
       tenantId: server.tenantId,
       projectId: server.projectId,
       serverId: String(server._id),
@@ -140,56 +199,79 @@ async function runPublicToolCall(
       transport,
       sourceType: resolveSourceType(server),
       sessionId,
-    }, secretValues);
-    return { ok: false, error: errorMessage };
+    }, secretValues, logOptions);
+    return {
+      ok: false,
+      inputError: failure.inputError,
+      message: failure.inputError || !logId ? failure.message : `${failure.message} (ref: ${logId})`,
+    };
   }
+}
+
+function sendRateLimited(reply: FastifyReply, decision: PublicLimitDecision) {
+  return reply
+    .code(429)
+    .header('Retry-After', String(decision.retryAfterSeconds))
+    .send({ error: 'Rate limit exceeded' });
 }
 
 async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply) {
   const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
-  const query = (request.query ?? {}) as { sessionId?: string };
-  const sessionId = query.sessionId;
-  let isSse = Boolean(sessionId && getSseSession(sessionId));
 
   const resolved = await resolvePublicServer(tenantId, endpointSlug);
   if (!resolved) {
     return reply.code(404).send({ error: 'Not found' });
   }
   const { tenant, server } = resolved;
-  // The stream may be held by another node: accept the session only when its
-  // registered owner is this very server/tenant (a foreign sessionId must never
-  // route a response into someone else's stream).
-  if (sessionId && !isSse) {
-    const remote = await getRemoteSseSession(sessionId);
-    isSse = Boolean(remote && remote.serverKey === server.key && remote.tenantId === server.tenantId);
+
+  // Counted under the stored record's ids, not under the URL's path parameters.
+  const rate = await checkPublicEndpointRate({ server, clientAddress: getClientIp(request) });
+  if (!rate.allowed) return sendRateLimited(reply, rate);
+
+  // A message that names an SSE session is delivered into that stream — only
+  // when the session was opened on this endpoint, by an anonymous caller.
+  const binding = {
+    tenantId: server.tenantId,
+    projectId: server.projectId,
+    serverKey: server.key,
+    principal: PUBLIC_SSE_PRINCIPAL,
+  };
+  const lookup = lookupMessageSession(request, binding);
+  let isSse = lookup.kind === 'session';
+  let sessionId = lookup.kind === 'session' ? lookup.sessionId : undefined;
+  if (lookup.kind === 'unknown') {
+    // The stream may be held by another node (Redis relay). It counts only when
+    // its registered binding is this very endpoint and an anonymous caller; any
+    // other id is answered like an unknown one.
+    const claimed = (request.query as { sessionId?: unknown } | undefined)?.sessionId;
+    if (typeof claimed !== 'string' || !(await getRemoteSseSessionFor(claimed, binding))) {
+      return sendSessionNotFound(reply);
+    }
+    isSse = true;
+    sessionId = claimed;
   }
+
   const exposure = resolveExposure(server);
   const requiredProtocol = isSse ? 'sse' : 'streamable-http';
   if (!exposure.protocols.includes(requiredProtocol)) {
     return reply.code(403).send({ error: `${requiredProtocol} access is disabled for this MCP server` });
   }
 
-  let body: {
-    id?: string | number | null;
-    jsonrpc?: string;
-    method?: string;
-    params?: Record<string, unknown>;
-  };
-  try {
-    body = readJsonBody(request);
-  } catch {
-    return reply.code(400).send(jsonRpcError(null, -32700, 'Parse error'));
+  const parsed = readJsonRpcRequest(request);
+  if (!parsed.ok) {
+    return reply.code(400).send(jsonRpcError(null, parsed.code, parsed.message));
   }
+  const body = parsed.body;
 
   const { id = null, method } = body;
-  if (!method) {
+  if (typeof method !== 'string' || method === '') {
     return reply.code(400).send(jsonRpcError(id, -32600, 'Invalid Request: method is required'));
   }
 
   const respond = async (payload: Record<string, unknown>) => {
     if (isSse && sessionId) {
       try {
-        await sendSseResponse(sessionId, payload);
+        await deliverSseResponse(sessionId, payload);
       } catch (error) {
         logger.error('Public MCP SSE relay publish failed', { sessionId, error });
         return reply.code(502).send(jsonRpcError((payload.id as string | number | null | undefined) ?? null, -32603, 'SSE relay unavailable'));
@@ -226,33 +308,67 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
       return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
     }
 
-    const outcome = await runPublicToolCall(
-      tenant,
-      server,
-      toolName,
-      args,
-      isSse ? 'sse' : 'jsonrpc',
-      sessionId ?? undefined,
-    );
+    const releaseSlot = acquirePublicCallSlot(server.tenantId);
+    if (!releaseSlot) {
+      return reply
+        .code(503)
+        .header('Retry-After', String(BUSY_RETRY_AFTER_SECONDS))
+        .send({ error: 'Too many tool calls are running for this endpoint; retry shortly' });
+    }
 
+    let outcome: PublicToolOutcome;
+    try {
+      outcome = await runPublicToolCall(
+        tenant,
+        server,
+        toolName,
+        args,
+        isSse ? 'sse' : 'jsonrpc',
+        sessionId,
+        clientInfoOf(request),
+      );
+    } finally {
+      releaseSlot();
+    }
+
+    if (outcome.ok) {
+      return respond(jsonRpcOk(id, {
+        content: [
+          {
+            text: typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result),
+            type: 'text',
+          },
+        ],
+        isError: false,
+      }));
+    }
+    if (outcome.inputError) {
+      return respond(jsonRpcError(id, -32602, outcome.message));
+    }
     return respond(jsonRpcOk(id, {
-      content: [
-        {
-          text: outcome.ok
-            ? (typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result))
-            : outcome.error,
-          type: 'text',
-        },
-      ],
-      isError: !outcome.ok,
+      content: [{ text: outcome.message, type: 'text' }],
+      isError: true,
     }));
   }
 
-  return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+  return respond(jsonRpcError(id, -32601, `Method not found: ${method.slice(0, ECHOED_TEXT_MAX_CHARS)}`));
 }
 
 export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/public/mcp/:tenantId/:endpointSlug/message', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
+  const postOptions = { bodyLimit: getConfig().mcp.public.bodyLimitBytes, config: PUBLIC_SLUG_AUTHZ };
+
+  // Before the body is read or the endpoint is looked up: turn away callers
+  // that are over their address-wide rate, and POSTs that are not JSON.
+  app.addHook('onRequest', async (request, reply) => {
+    const rate = checkPublicAddressRate(getClientIp(request));
+    if (!rate.allowed) return sendRateLimited(reply, rate);
+    if (request.method === 'POST' && !hasJsonContentType(request)) {
+      return reply.code(415).send({ error: 'Content-Type must be application/json' });
+    }
+    return undefined;
+  });
+
+  app.post('/public/mcp/:tenantId/:endpointSlug/message', postOptions, async (request, reply) => {
     try {
       return await handlePublicMessage(request, reply);
     } catch (error) {
@@ -264,7 +380,7 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Streamable HTTP transport: accept JSON-RPC POSTs on the advertised `/sse`
   // URL so streamable-HTTP-first MCP clients connect without a failed attempt +
   // SSE fallback (mirrors the client gateway).
-  app.post('/public/mcp/:tenantId/:endpointSlug/sse', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
+  app.post('/public/mcp/:tenantId/:endpointSlug/sse', postOptions, async (request, reply) => {
     try {
       return await handlePublicMessage(request, reply);
     } catch (error) {
@@ -273,7 +389,9 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get('/public/mcp/:tenantId/:endpointSlug/sse', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
+  // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
+  // session) it would never read.
+  app.get('/public/mcp/:tenantId/:endpointSlug/sse', { exposeHeadRoute: false, config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
       const resolved = await resolvePublicServer(tenantId, endpointSlug);
@@ -285,49 +403,26 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'SSE access is disabled for this MCP server' });
       }
 
-      const sessionId = randomUUID();
-      const forwardedProto = request.headers['x-forwarded-proto'];
-      const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
-        ? forwardedProto
-        : 'http';
-      const host = typeof request.headers.host === 'string' && request.headers.host.length > 0
-        ? request.headers.host
-        : 'localhost';
-      const messageEndpoint = `${protocol}://${host}/api/public/mcp/${tenantId}/${endpointSlug}/message?sessionId=${sessionId}`;
+      const clientAddress = getClientIp(request);
+      const rate = await checkPublicEndpointRate({ server, clientAddress });
+      if (!rate.allowed) return sendRateLimited(reply, rate);
 
-      const stream = new ReadableStream<Uint8Array>({
-        cancel() {
-          logger.info('Public MCP SSE session closed', { serverKey: server.key, sessionId });
-          removeSseSession(sessionId);
+      return startMcpSseResponse(request, reply, {
+        messagePath: `/api/public/mcp/${encodeURIComponent(tenantId)}/${encodeURIComponent(endpointSlug)}/message`,
+        session: {
+          clientIp: clientAddressBucket(clientAddress),
+          principal: PUBLIC_SSE_PRINCIPAL,
+          projectId: server.projectId,
+          serverKey: server.key,
+          tenantDbName: tenant.dbName,
+          tenantId: server.tenantId,
+          tokenId: undefined,
         },
-        start(controller) {
-          createSseSession(sessionId, {
-            controller,
-            projectId: server.projectId,
-            serverKey: server.key,
-            tenantDbName: tenant.dbName,
-            tenantId: server.tenantId,
-            tokenId: undefined,
-          });
-          controller.enqueue(encodeSseEndpointEvent(messageEndpoint));
-        },
+        logFields: { serverKey: server.key, ip: clientAddress },
       });
-
-      logger.info('Public MCP SSE session opened', { serverKey: server.key, sessionId });
-
-      reply.raw.setHeader('Content-Type', 'text/event-stream');
-      reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-      reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Mcp-Session-Id', sessionId);
-
-      return reply.send(
-        Readable.fromWeb(stream as unknown as NodeReadableStream<Uint8Array>),
-      );
     } catch (error) {
       logger.error('Public MCP SSE error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return reply.code(500).send({ error: 'Internal error' });
     }
   });
 };

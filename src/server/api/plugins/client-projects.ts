@@ -24,6 +24,7 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import { DEFAULT_PROJECT_KEY, generateUniqueProjectKey } from '@/lib/services/projects/projectService';
+import { removeProjectMember } from '@/lib/services/projects/projectMembership';
 import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
 import { seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
@@ -35,10 +36,6 @@ const logger = createLogger('api:client-projects');
 /** Token writes to the project surface require an owner/admin-owned token. */
 function isTenantAdmin(auth: ApiTokenContext): boolean {
   return auth.user?.role === 'owner' || auth.user?.role === 'admin';
-}
-
-function legacyIds(projectIds?: string[]): string[] {
-  return (projectIds ?? []).map(String).filter(Boolean);
 }
 
 export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -227,14 +224,9 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (target.role === 'owner' || target.role === 'admin') {
         return reply.code(400).send({ error: 'Cannot remove owners/admins from projects' });
       }
-      const removed = await db.deleteUserProject(String(target._id), projectId);
-      if (!removed) {
-        const next = legacyIds(target.projectIds).filter((id) => id !== String(projectId));
-        if (next.length === legacyIds(target.projectIds).length) {
-          return reply.code(404).send({ error: 'Membership not found' });
-        }
-        await db.updateUser(String(target._id), { projectIds: next });
-      }
+      const result = await removeProjectMember({ db, projectId, target, tenantDbName: auth.tenantDbName });
+      if (result === 'not_found') return reply.code(404).send({ error: 'Membership not found' });
+      if (result === 'failed') return reply.code(500).send({ error: 'Failed to update membership' });
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client remove project member error', { error });

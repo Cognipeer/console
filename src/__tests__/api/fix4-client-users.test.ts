@@ -50,7 +50,10 @@ const TENANT = 'tenant-1';
 
 const OWNER = { _id: 'owner-1', role: 'owner', tenantId: TENANT };
 const ADMIN = { _id: 'admin-1', role: 'admin', tenantId: TENANT };
-const REGULAR = { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true };
+const REGULAR = { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true, projectIds: ['proj-1'] };
+// Can log in, but is a member of a different project only.
+const OTHER_PROJECT_MEMBER = { _id: 'user-2', role: 'user', tenantId: TENANT, canLogin: true, projectIds: ['proj-2'] };
+const SERVICE_ACCOUNT = { _id: 'svc-1', role: 'user', tenantId: TENANT, canLogin: false };
 
 function authContext(user: Record<string, unknown>, tokenScope: Record<string, string> | null) {
   return {
@@ -79,7 +82,13 @@ describe('client users API', () => {
     db.createUser.mockImplementation(async (input: Record<string, unknown>) => ({ _id: 'new-user', ...input }) as never);
     db.createApiToken.mockImplementation(async (input: Record<string, unknown>) => ({ _id: 'tok-new', ...input }) as never);
     db.findUserById.mockImplementation(async (id: string) => (
-      ({ 'owner-1': OWNER, 'admin-1': ADMIN, 'user-1': REGULAR } as Record<string, unknown>)[id] as never
+      ({
+        'owner-1': OWNER,
+        'admin-1': ADMIN,
+        'user-1': REGULAR,
+        'user-2': OTHER_PROJECT_MEMBER,
+        'svc-1': SERVICE_ACCOUNT,
+      } as Record<string, unknown>)[id] as never
     ) ?? null);
     app = await createFastifyApiTestApp(clientUsersApiPlugin);
   });
@@ -160,6 +169,38 @@ describe('client users API', () => {
       const res = await mint('user-1');
       expect(res.statusCode).toBe(201);
       expect(parseJsonBody<{ servicePermissions: unknown }>(res.body).servicePermissions).toBeNull();
+    });
+
+    describe('project access of the token owner', () => {
+      it('refuses a login-capable user who cannot access the token\'s project', async () => {
+        as(authContext(ADMIN, null));
+        const res = await mint('user-2');
+        expect(res.statusCode).toBe(400);
+        expect(parseJsonBody<{ error: string }>(res.body).error).toBe('User does not have access to this project');
+        expect(db.createApiToken).not.toHaveBeenCalled();
+      });
+
+      it('mints for a user with a project membership row', async () => {
+        as(authContext(ADMIN, null));
+        db.findUserProject.mockImplementation(async (userId: string, projectId: string) => (
+          userId === 'user-2' && projectId === 'proj-1' ? ({ userId, projectId, role: 'member' } as never) : null
+        ));
+        expect((await mint('user-2')).statusCode).toBe(201);
+      });
+
+      it('mints for a user who reaches the project through a group', async () => {
+        as(authContext(ADMIN, null));
+        db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1', userId: 'user-2' }] as never);
+        db.listGroupProjectsByProject.mockResolvedValue([{ groupId: 'g1', projectId: 'proj-1', role: 'member' }] as never);
+        expect((await mint('user-2')).statusCode).toBe(201);
+      });
+
+      it('mints for a login-disabled service account created without any project', async () => {
+        as(authContext(ADMIN, null));
+        const res = await mint('svc-1');
+        expect(res.statusCode).toBe(201);
+        expect(db.createApiToken).toHaveBeenCalledWith(expect.objectContaining({ userId: 'svc-1', projectId: 'proj-1' }));
+      });
     });
   });
 });

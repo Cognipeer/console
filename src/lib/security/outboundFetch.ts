@@ -370,6 +370,14 @@ export interface SafeFetchOptions extends OutboundGuardOptions {
    * by the fetch signal alone.
    */
   keepAbortLinked?: boolean;
+
+  /**
+   * Header names (case-insensitive) that carry a credential the caller injected
+   * — a configured API-key header, a passthrough runtime header — and must not
+   * follow a redirect to ANOTHER origin. They are dropped on top of the headers
+   * that are always dropped; a same-origin redirect keeps them.
+   */
+  sensitiveHeaders?: readonly string[];
 }
 
 /**
@@ -382,17 +390,22 @@ export interface SafeFetchOptions extends OutboundGuardOptions {
  */
 const CROSS_ORIGIN_STRIPPED_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie']);
 
-function isStrippedOnCrossOrigin(name: string): boolean {
+function isStrippedOnCrossOrigin(name: string, extra: ReadonlySet<string>): boolean {
   const lower = name.toLowerCase();
-  return CROSS_ORIGIN_STRIPPED_HEADERS.has(lower) || lower.startsWith('x-cognipeer-signature');
+  return CROSS_ORIGIN_STRIPPED_HEADERS.has(lower)
+    || lower.startsWith('x-cognipeer-signature')
+    || extra.has(lower);
 }
 
 /** `init.headers` in any of its three shapes, minus the credentials above. */
-function stripCrossOriginHeaders(headers: HeadersInit | undefined): Record<string, string> | undefined {
+function stripCrossOriginHeaders(
+  headers: HeadersInit | undefined,
+  extra: ReadonlySet<string>,
+): Record<string, string> | undefined {
   if (!headers) return undefined;
   const out: Record<string, string> = {};
   new Headers(headers).forEach((value, name) => {
-    if (!isStrippedOnCrossOrigin(name)) out[name] = value;
+    if (!isStrippedOnCrossOrigin(name, extra)) out[name] = value;
   });
   return out;
 }
@@ -408,6 +421,11 @@ export async function safeFetch(
   options?: SafeFetchOptions,
 ): Promise<Response> {
   const timeoutMs = options?.timeoutMs ?? getConfig().outboundHttp.defaultTimeoutMs;
+  const extraSensitiveHeaders: ReadonlySet<string> = new Set(
+    (options?.sensitiveHeaders ?? [])
+      .filter((name): name is string => typeof name === 'string' && name.trim() !== '')
+      .map((name) => name.trim().toLowerCase()),
+  );
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const externalSignal = init?.signal;
@@ -471,7 +489,7 @@ export async function safeFetch(
           // Cross-origin: the bearer token, cookies and the body signature
           // were meant for the host the tenant configured, not for wherever
           // it points next.
-          init = { ...init, headers: stripCrossOriginHeaders(init?.headers) };
+          init = { ...init, headers: stripCrossOriginHeaders(init?.headers, extraSensitiveHeaders) };
         }
         currentUrl = nextUrl.toString();
         // Per fetch semantics, drop the body when a redirect downgrades to GET.

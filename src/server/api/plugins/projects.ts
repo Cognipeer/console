@@ -25,9 +25,9 @@ import {
   generateUniqueProjectKey,
   listAccessibleProjects,
 } from '@/lib/services/projects/projectService';
+import { getLegacyProjectIds, resolveProjectMembership } from '@/lib/services/projects/projectAccess';
+import { removeProjectMember } from '@/lib/services/projects/projectMembership';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
-import type { UserServicePermissions } from '@/lib/security/rbac';
-import { mergeServicePermissions } from '@/lib/security/rbac';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { foldSearchText } from '@/lib/shared/searchFold';
 import { listDirectoryProjectRules } from '@/enterprise/external-auth';
@@ -54,47 +54,6 @@ const logger = createLogger('api:projects');
 
 function canManageProjects(userRole: string): boolean {
   return userRole === 'owner' || userRole === 'admin';
-}
-
-function getLegacyProjectIds(projectIds?: string[]): string[] {
-  return (projectIds ?? []).map(String).filter(Boolean);
-}
-
-/**
- * Resolves the strongest project role + merged service overrides a user has for
- * a project, unioning direct UserProject membership, legacy projectIds, and any
- * group→project assignment the user inherits. Returns null when none apply.
- */
-async function resolveProjectMembership(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  params: { userId: string; userRole: string; projectId: string; legacyProjectIds?: string[] },
-): Promise<{ role: ProjectRole; servicePermissions?: UserServicePermissions } | null> {
-  const { userId, userRole, projectId, legacyProjectIds } = params;
-  const sources: Array<{ role: ProjectRole; servicePermissions?: UserServicePermissions | null }> = [];
-
-  const direct = await db.findUserProject(userId, projectId);
-  if (direct) {
-    sources.push({ role: direct.role, servicePermissions: direct.servicePermissions });
-  } else if (getLegacyProjectIds(legacyProjectIds).includes(String(projectId))) {
-    sources.push({ role: userRole === 'project_admin' ? 'project_admin' : 'member' });
-  }
-
-  const groupMemberships = await db.listGroupMembersByUser(userId);
-  if (groupMemberships.length > 0) {
-    const groupIds = new Set(groupMemberships.map((m) => String(m.groupId)));
-    const groupProjects = await db.listGroupProjectsByProject(projectId);
-    for (const groupProject of groupProjects) {
-      if (groupIds.has(String(groupProject.groupId))) {
-        sources.push({ role: groupProject.role, servicePermissions: groupProject.servicePermissions });
-      }
-    }
-  }
-
-  if (sources.length === 0) return null;
-
-  const role: ProjectRole = sources.some((s) => s.role === 'project_admin') ? 'project_admin' : 'member';
-  const servicePermissions = mergeServicePermissions(sources.map((s) => s.servicePermissions));
-  return { role, servicePermissions };
 }
 
 async function loadTenantUser(session: ReturnType<typeof requireSessionContext>) {
@@ -680,22 +639,19 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Cannot remove owners/admins from projects' });
       }
 
-      const removed = await access.db.deleteUserProject(String(target._id), projectId);
-      if (!removed) {
-        const nextProjectIds = getLegacyProjectIds(target.projectIds).filter((id) => id !== String(projectId));
-        const legacyAssigned = nextProjectIds.length !== getLegacyProjectIds(target.projectIds).length;
+      const result = await removeProjectMember({
+        db: access.db,
+        projectId,
+        target,
+        tenantDbName: session.tenantDbName,
+      });
 
-        if (!legacyAssigned) {
-          return reply.code(404).send({ error: 'Membership not found' });
-        }
+      if (result === 'not_found') {
+        return reply.code(404).send({ error: 'Membership not found' });
+      }
 
-        const updated = await access.db.updateUser(String(target._id), {
-          projectIds: nextProjectIds,
-        });
-
-        if (!updated) {
-          return reply.code(500).send({ error: 'Failed to update membership' });
-        }
+      if (result === 'failed') {
+        return reply.code(500).send({ error: 'Failed to update membership' });
       }
 
       return reply.code(200).send({ success: true });
@@ -797,6 +753,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         remove,
         setRole,
+        tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
       });
 

@@ -1280,6 +1280,7 @@ export const tr: typeof en = {
       admin: 'Yönetici',
       project_admin: 'Proje yöneticisi',
       user: 'Kullanıcı',
+      portal_user: 'Yalnız portal',
     },
     statuses: {
       active: 'Aktif',
@@ -2374,6 +2375,7 @@ export const tr: typeof en = {
       admin: 'Yönetici',
       project_admin: 'Eski proje yöneticisi',
       user: 'Kullanıcı',
+      portal_user: 'Yalnız portal',
     },
     columns: {
       member: 'Üye',
@@ -5417,6 +5419,16 @@ export const tr: typeof en = {
       noData: 'Bu dönemde hareket yok.',
     },
     runtime: {
+      chooser: {
+        title: 'Portallarınız',
+        subtitle: 'Devam etmek için bir portal seçin.',
+        loading: 'Portallarınız aranıyor…',
+        open: 'Aç',
+        emptyTitle: 'Henüz size ait bir portal yok',
+        emptyText: 'Hesabınızla paylaşılmış bir portal yok. Yöneticinizden sizi bir portala eklemesini isteyin.',
+        errorTitle: 'Portallar yüklenemedi',
+        retry: 'Tekrar dene',
+      },
       defaultDisclaimer: 'Yapay zeka hata yapabilir. Önemli bilgileri doğrulayın.',
       signOut: 'Çıkış yap',
       otherAccount: 'Başka hesapla giriş yap',

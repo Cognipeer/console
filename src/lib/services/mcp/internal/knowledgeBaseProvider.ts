@@ -16,6 +16,7 @@
  */
 
 import { currentTurnSignal } from '@/lib/core/turnSignal';
+import { McpToolInputError } from '../errors';
 import {
   listRagModules,
   getRagDocument,
@@ -29,6 +30,9 @@ import type {
   InternalMcpProvider,
   InternalMcpProviderContext,
 } from './types';
+
+/** Longest piece of a caller-supplied id an error repeats back. */
+const ECHOED_ID_MAX_CHARS = 100;
 
 const SEARCH_TOOL_NAME = 'search';
 const READ_TOOL_NAME = 'read_document';
@@ -181,7 +185,7 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     if (toolName === SEARCH_TOOL_NAME) {
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       if (!query) {
-        throw new Error('"query" is required');
+        throw new McpToolInputError('"query" is required');
       }
       const filter =
         args.filter && typeof args.filter === 'object' && !Array.isArray(args.filter)
@@ -202,14 +206,23 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
     if (toolName === READ_TOOL_NAME || toolName === READ_LINES_TOOL_NAME) {
       const documentId = typeof args.documentId === 'string' ? args.documentId.trim() : '';
       if (!documentId) {
-        throw new Error('"documentId" is required');
+        throw new McpToolInputError('"documentId" is required');
       }
       // A documentId is trusted to be one this instance's own "search" just
-      // returned, but a caller can pass any string — checking ragModuleKey
-      // keeps a read scoped to the module this MCP tool was published from.
+      // returned, but a caller can pass any string. A read is scoped to the
+      // module this MCP tool was published from and to that module's project; a
+      // document stamped with another project is reported exactly like an
+      // unknown id. (A document with no project stamp — rows from before
+      // stamping, ingests through a tenant-wide token — stays readable, as it
+      // does through the Knowledge Engine's own routes.)
       const document = await getRagDocument(ctx.tenantDbName, documentId);
-      if (!document || document.ragModuleKey !== instanceKey) {
-        throw new Error(`Document "${documentId}" not found in this knowledge base`);
+      const inThisProject = !ctx.projectId
+        || !document?.projectId
+        || String(document.projectId) === String(ctx.projectId);
+      if (!document || document.ragModuleKey !== instanceKey || !inThisProject) {
+        throw new McpToolInputError(
+          `Document "${documentId.slice(0, ECHOED_ID_MAX_CHARS)}" not found in this knowledge base`,
+        );
       }
 
       if (toolName === READ_TOOL_NAME) {

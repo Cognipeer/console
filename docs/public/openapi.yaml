@@ -2734,7 +2734,7 @@ paths:
       tags:
         - Browser
       summary: Send a browser MCP JSON-RPC message
-      description: "Sends a JSON-RPC 2.0 message to a browser profile's MCP server. Supported methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. When `sessionId` matches an open SSE session the JSON-RPC response is delivered over that stream and this call returns 202 Accepted; otherwise the JSON-RPC response is returned inline (200). The browser toolset mirrors the Browser Use tools (browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_pdf, browser_close, …)."
+      description: "Sends a JSON-RPC 2.0 message to a browser profile's MCP server. Supported methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. When `sessionId` names an SSE stream this token opened for this browser, the JSON-RPC response is delivered over that stream and this call returns 202 Accepted; any other `sessionId` is answered 404; without one the JSON-RPC response is returned inline (200). The browser toolset mirrors the Browser Use tools (browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_pdf, browser_close, …)."
       operationId: sendBrowserMcpMessage
       parameters:
         - name: browserKey
@@ -2772,6 +2772,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: "`sessionId` does not name an open stream that this token opened for this browser (JSON-RPC error `-32001`, `Session not found`)."
         "500":
           $ref: "#/components/responses/InternalError"
   /browser/{browserKey}/mcp/sse:
@@ -2790,7 +2792,7 @@ paths:
             type: string
       responses:
         "200":
-          description: SSE stream. Emits an `endpoint` event with the JSON-RPC message URL; subsequent JSON-RPC responses are delivered as `message` events.
+          description: SSE stream. Emits an `endpoint` event with the JSON-RPC message path (not an absolute URL; resolve it against the URL the stream was opened on); subsequent JSON-RPC responses are delivered as `message` events.
           content:
             text/event-stream:
               schema:
@@ -2801,8 +2803,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          description: Too many open MCP streams. Retry after the `Retry-After` interval.
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          description: The gateway has reached its limit of open MCP streams. Retry after the `Retry-After` interval.
   /budgets:
     get:
       tags:
@@ -4985,7 +4991,7 @@ paths:
       tags:
         - MCP
       summary: Send a built-in console MCP JSON-RPC message
-      description: "Send an MCP JSON-RPC 2.0 message to the built-in `console` MCP server. When a `sessionId` for an open SSE stream is supplied, the response is pushed through that stream and the HTTP call returns 202 Accepted; otherwise (stateless mode) the JSON-RPC response is returned directly in the HTTP body. Supported methods: `initialize` (returns capabilities and server info, protocol version 2024-11-05), `notifications/initialized` (acknowledgment, no response body — 202), `ping`, `tools/list`, and `tools/call` (execute a tool named by `params.name` with `params.arguments`)."
+      description: "Send an MCP JSON-RPC 2.0 message to the built-in `console` MCP server. When a `sessionId` for an SSE stream this token opened is supplied, the response is pushed through that stream and the HTTP call returns 202 Accepted; any other `sessionId` is answered 404; without one (stateless mode) the JSON-RPC response is returned directly in the HTTP body. Supported methods: `initialize` (returns capabilities and server info, protocol version 2024-11-05), `notifications/initialized` (acknowledgment, no response body — 202), `ping`, `tools/list`, and `tools/call` (execute a tool named by `params.name` with `params.arguments`)."
       operationId: sendConsoleMcpMessage
       parameters:
         - name: sessionId
@@ -5017,6 +5023,8 @@ paths:
                 $ref: "#/components/schemas/McpJsonRpcResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: "`sessionId` does not name an open stream that this token opened (JSON-RPC error `-32001`, `Session not found`)."
         "500":
           $ref: "#/components/responses/InternalError"
   /mcp/console/sse:
@@ -5024,11 +5032,11 @@ paths:
       tags:
         - MCP
       summary: Open built-in console MCP SSE stream
-      description: Open a Server-Sent Events stream for the built-in `console` MCP server. The stream immediately emits an `endpoint` event whose data is the URL the client must POST JSON-RPC messages to, including the generated `sessionId` query parameter. The session id is also returned in the `X-Mcp-Session-Id` response header.
+      description: Open a Server-Sent Events stream for the built-in `console` MCP server. The stream immediately emits an `endpoint` event whose data is the path the client must POST JSON-RPC messages to, including the generated `sessionId` query parameter. It is a path, never an absolute URL; resolve it against the URL the stream was opened on. The session id is also returned in the `X-Mcp-Session-Id` response header.
       operationId: openConsoleMcpSse
       responses:
         "200":
-          description: "SSE stream opened. The first event is `event: endpoint` whose data is the JSON-RPC message endpoint URL."
+          description: "SSE stream opened. The first event is `event: endpoint` whose data is the JSON-RPC message endpoint path."
           headers:
             X-Mcp-Session-Id:
               description: Generated SSE session id, also embedded in the endpoint URL.
@@ -5045,8 +5053,12 @@ paths:
                 description: "Server-Sent Events stream. Opens with `event: endpoint` followed by JSON-RPC response payloads pushed as they are produced."
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "429":
+          description: Too many open MCP streams. Retry after the `Retry-After` interval.
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          description: The gateway has reached its limit of open MCP streams. Retry after the `Retry-After` interval.
   /mcp/hubs:
     get:
       tags:
@@ -5317,7 +5329,7 @@ paths:
       tags:
         - MCP
       summary: Send an MCP JSON-RPC message
-      description: "Send an MCP JSON-RPC 2.0 message to the server. When a `sessionId` for an open SSE stream is supplied, the response is pushed through that stream and the HTTP call returns 202 Accepted; otherwise (stateless mode) the JSON-RPC response is returned directly in the HTTP body. Supported methods: `initialize` (returns capabilities and server info, protocol version 2025-03-26), `notifications/initialized` (acknowledgment, no response body — 202), `ping` (health check), `tools/list` (list enabled tools with schemas), and `tools/call` (execute a tool named by `params.name` with `params.arguments`; request-scoped runtime context may ride in `params._meta.runtime_context`)."
+      description: "Send an MCP JSON-RPC 2.0 message to the server. When a `sessionId` for an SSE stream this token opened is supplied, the response is pushed through that stream and the HTTP call returns 202 Accepted; any other `sessionId` is answered 404; without one (stateless mode) the JSON-RPC response is returned directly in the HTTP body. Supported methods: `initialize` (returns capabilities and server info, protocol version 2025-03-26), `notifications/initialized` (acknowledgment, no response body — 202), `ping` (health check), `tools/list` (list enabled tools with schemas), and `tools/call` (execute a tool named by `params.name` with `params.arguments`; request-scoped runtime context may ride in `params._meta.runtime_context`)."
       operationId: sendMcpServerMessage
       parameters:
         - name: serverKey
@@ -5355,6 +5367,8 @@ paths:
                 $ref: "#/components/schemas/McpJsonRpcResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: "`sessionId` does not name an open stream that this token opened for this server (JSON-RPC error `-32001`, `Session not found`)."
         "500":
           $ref: "#/components/responses/InternalError"
   /mcp/{serverKey}/refresh-tools:
@@ -5394,7 +5408,7 @@ paths:
       tags:
         - MCP
       summary: Open MCP SSE stream
-      description: Open a Server-Sent Events stream implementing the MCP protocol over SSE transport (the server's `sse` exposure must be enabled). The stream immediately emits an `endpoint` event whose data is the URL the client must POST JSON-RPC messages to, including the generated `sessionId` query parameter. The session id is also returned in the `X-Mcp-Session-Id` response header.
+      description: Open a Server-Sent Events stream implementing the MCP protocol over SSE transport (the server's `sse` exposure must be enabled). The stream immediately emits an `endpoint` event whose data is the path the client must POST JSON-RPC messages to, including the generated `sessionId` query parameter. It is a path, never an absolute URL; resolve it against the URL the stream was opened on. The session id is also returned in the `X-Mcp-Session-Id` response header.
       operationId: openMcpServerSse
       parameters:
         - name: serverKey
@@ -5405,7 +5419,7 @@ paths:
             type: string
       responses:
         "200":
-          description: "SSE stream opened. The first event is `event: endpoint` whose data is the JSON-RPC message endpoint URL."
+          description: "SSE stream opened. The first event is `event: endpoint` whose data is the JSON-RPC message endpoint path."
           headers:
             X-Mcp-Session-Id:
               description: Generated SSE session id, also embedded in the endpoint URL.
@@ -5426,8 +5440,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          description: Too many open MCP streams. Retry after the `Retry-After` interval.
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          description: The gateway has reached its limit of open MCP streams. Retry after the `Retry-After` interval.
   /memory/stores:
     get:
       tags:
@@ -11545,7 +11563,7 @@ paths:
       tags:
         - Tools
       summary: Execute a tool action
-      description: Execute a specific action on a tool. The tool must be active. Arguments are passed under `arguments` (or the alias `args`). Execution is logged with latency, arguments, results, and errors.
+      description: Execute a specific action on a tool. The tool must be active. Arguments are passed under `arguments` (or the alias `args`). For OpenAPI tools only the parameters the operation declares are sent upstream, and a missing or invalid path parameter is answered 400. Execution is logged with latency, arguments, results, and errors.
       operationId: executeToolAction
       parameters:
         - name: toolKey

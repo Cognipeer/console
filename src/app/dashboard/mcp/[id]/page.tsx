@@ -1479,7 +1479,8 @@ export default function McpDetailPage() {
              Header: Authorization: Bearer <token>
 
 2. Server  → SSE event: "endpoint"
-             data: ${origin}/api/client/v1/mcp/${server.key}/message?sessionId=<id>
+             data: /api/client/v1/mcp/${server.key}/message?sessionId=<id>
+             (a path; resolve it against the URL of the SSE connection)
 
 3. Client  → POST to the endpoint above
              { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {

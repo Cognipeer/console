@@ -15,7 +15,7 @@ import type { ParamReader } from '../links';
 
 export type ListType = 'user' | 'group' | 'token';
 
-export const USER_ROLES = ['owner', 'admin', 'project_admin', 'user'] as const;
+export const USER_ROLES = ['owner', 'admin', 'project_admin', 'user', 'portal_user'] as const;
 export const USER_STATUS_FILTERS = ['active', 'disabled', 'invited'] as const;
 export const ACCESS_FILTERS = ['requested'] as const;
 export const USER_KINDS = ['person', 'service', 'external'] as const;
