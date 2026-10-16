@@ -217,6 +217,7 @@ import {
 } from './agentReasoning';
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
+import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import {
     AgentResumeError,
     PAUSE_UNAVAILABLE_WARNING,
@@ -2299,7 +2300,21 @@ export async function createInternalTracingSink(
                 const db = await getDatabase();
                 await db.switchToTenant(tenantDbName);
 
-                const events = Array.isArray(session.events) ? session.events : [];
+                // A run that paused (tool approval, question, client tool)
+                // and resumed sends its session in parts: the later parts
+                // carry only their own events and are APPENDED, while the
+                // session-level totals they carry already cover every part.
+                const continuation = readTraceContinuationMarker(session);
+                const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
+                const stored = continuation && existing
+                    ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sequence: 1 } })
+                    : [];
+                const storedSequences = new Set(stored.map((event) => event.sequence));
+                const allEvents = Array.isArray(session.events) ? session.events : [];
+                // A retried part must not insert its events twice.
+                const events = continuation && existing
+                    ? allEvents.filter((event) => !storedSequences.has(event?.sequence ?? 0))
+                    : allEvents;
 
                 // Extract models and tools used, plus the diagnostic rollups
                 // (`totalReasoningTokens` / `truncatedEvents`) mirroring what
@@ -2376,8 +2391,14 @@ export async function createInternalTracingSink(
                     totalBytesOut: session.summary?.totalBytesOut ?? undefined,
                 };
 
+                if (continuation && existing) {
+                    mergeContinuedSessionDoc(sessionDoc, existing, {
+                        storedEvents: stored.length,
+                        newEvents: events.length,
+                    });
+                }
+
                 // Upsert session
-                const existing = await db.findAgentTracingSessionById(session.sessionId, projectId);
                 if (existing) {
                     await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
                 } else {
@@ -2396,11 +2417,16 @@ export async function createInternalTracingSink(
                     });
                 }
 
-                // Replace events. What the previous post of this session counted is subtracted from the health counters.
-                const previousEvents = existing
+                // Replace events — or, for a continued session, add this part's.
+                // A replaced post's previous events are subtracted from the health
+                // counters; an appended part only adds its own events.
+                const appending = Boolean(continuation && existing);
+                const previousEvents = existing && !appending
                     ? await db.listAgentTracingEvents(session.sessionId, projectId, { projection: { sections: 0, metadata: 0 } })
                     : [];
-                await db.deleteAgentTracingEvents(session.sessionId, projectId);
+                if (!appending) {
+                    await db.deleteAgentTracingEvents(session.sessionId, projectId);
+                }
                 const eventDocs: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
                 for (const event of events) {
                     let sections = (Array.isArray(event?.sections)

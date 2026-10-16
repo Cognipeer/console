@@ -241,3 +241,23 @@ describe('deep links into the Limits tab', () => {
     expect(parse('/dashboard/iam?tab=limits&new=1&scope=tenant&scopeId=x').seed).toEqual({ scope: 'tenant' });
   });
 });
+
+describe('project filter (?projectId=)', () => {
+  const rows = [
+    row({ _id: 'own', scope: 'user', domain: 'llm', projectId: 'p1' }),
+    row({ _id: 'other', scope: 'user', domain: 'llm', projectId: 'p2' }),
+    row({ _id: 'group-wide', scope: 'group', domain: 'llm', projectId: undefined }),
+    row({ _id: 'agent-wide', scope: 'tenant', domain: 'agent', projectId: undefined }),
+    row({ _id: 'inert', scope: 'user', domain: 'llm', projectId: undefined }),
+  ];
+
+  it('keeps the project own limits and the tenant-wide kinds, drops other projects and inert rows', () => {
+    const ids = filterLimitRows(rows, { scope: 'all', domain: 'all', query: '', projectId: 'p1' }).map((r) => r._id);
+    expect(ids).toEqual(['own', 'group-wide', 'agent-wide']);
+  });
+
+  it('shows everything without a project', () => {
+    expect(filterLimitRows(rows, { scope: 'all', domain: 'all', query: '' })).toHaveLength(5);
+    expect(filterLimitRows(rows, { scope: 'all', domain: 'all', query: '', projectId: '' })).toHaveLength(5);
+  });
+});

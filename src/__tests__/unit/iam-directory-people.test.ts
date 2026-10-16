@@ -311,6 +311,7 @@ describe('the row menu', () => {
       'Change role',
       'Edit access',
       'Disable',
+      'Add to projects',
       'Add to groups',
       'New token',
       'Delete',

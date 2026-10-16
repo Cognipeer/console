@@ -9,6 +9,7 @@ import {
   applyAgentModelChoice,
   resolveAgentRunModel,
 } from '@/lib/services/agents/agentModelSelection';
+import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValidation';
 
 const config = {
   modelKey: 'main',
@@ -90,8 +91,7 @@ describe('advertisedAgentModels', () => {
 });
 
 describe('additionalModels in the config check', () => {
-  it('accepts a clean list and rejects the main model, a duplicate, an empty key and more than ten', async () => {
-    const { validateAgentConfigShape } = await import('@/lib/services/agents/agentConfigValidation');
+  it('accepts a clean list and rejects the main model, a duplicate, an empty key and more than ten', () => {
     const base = { modelKey: 'main', systemPrompt: 'x' } as never;
     expect(validateAgentConfigShape({ ...(base as object), additionalModels: [{ modelKey: 'a' }, { modelKey: 'b', label: 'B' }] } as never).errors).toEqual([]);
     const fields = (list: unknown[]) => validateAgentConfigShape({ ...(base as object), additionalModels: list } as never).errors.map((e) => e.field);

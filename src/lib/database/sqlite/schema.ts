@@ -318,6 +318,7 @@ export const TENANT_SCHEMA_SQL = `
     disabledAt TEXT,
     disabledBy TEXT,
     disabledReason TEXT,
+    accessRequest TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -861,6 +862,7 @@ export const TENANT_SCHEMA_SQL = `
     settings TEXT DEFAULT '{}',
     capabilitiesOverride TEXT DEFAULT '[]',
     metadata TEXT DEFAULT '{}',
+    lastTest TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -2398,6 +2400,7 @@ export const TENANT_SCHEMA_SQL = `
     role TEXT NOT NULL DEFAULT 'member',
     servicePermissions TEXT DEFAULT '{}',
     invitedBy TEXT,
+    source TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL,
     UNIQUE(tenantId, userId, projectId)

@@ -32,6 +32,7 @@ import {
   type ProjectRef,
 } from './client';
 import { Muted } from './detailParts';
+import { membershipSource, roleEditable } from './projectGrantModel';
 import { providerLabel } from './managed';
 import { formatDateTime, formatRelativeTime, translateOr, type Translate } from './format';
 import styles from './PrincipalDetail.module.css';
@@ -151,14 +152,9 @@ function ProjectRow({
   handlers?: ProjectRowHandlers;
 }) {
   const td = useTranslations('iamDirectory');
-  const via =
-    project.via === 'group'
-      ? project.groupName
-        ? t('drawer.projects.via.group', { name: project.groupName })
-        : t('drawer.projects.via.groupUnnamed')
-      : project.via
-        ? translateOr(t, NS, `drawer.projects.via.${project.via}`, '')
-        : '';
+  const source = membershipSource(project);
+  const groupLabel = source.groupName ?? td('drawer.projects.source.groupUnnamed');
+  const roleLabel = project.role ? translateOr(t, NS, `drawer.projects.role.${project.role}`, project.role) : null;
   const editable = Boolean(handlers) && isDirect(project);
   return (
     <div className={styles.listRow} data-testid="project-row">
@@ -166,17 +162,29 @@ function ProjectRow({
         <Text size="sm" fw={500} style={{ wordBreak: 'break-word' }}>
           {project.name}
         </Text>
-        {via ? (
-          <Text size="xs" c="dimmed">
-            {via}
-          </Text>
-        ) : null}
+        <Text size="xs" c="dimmed" data-testid="project-source">
+          {td('drawer.projects.sourceLabel')}
+          {': '}
+          {source.kind === 'group' ? (
+            source.groupId ? (
+              <Link href={iamLinks.principal('group', source.groupId)} style={{ color: 'inherit' }}>
+                {td('drawer.projects.source.group', { name: groupLabel })}
+              </Link>
+            ) : (
+              td('drawer.projects.source.group', { name: groupLabel })
+            )
+          ) : (
+            td(`drawer.projects.source.${source.kind}`)
+          )}
+        </Text>
       </div>
       <Group gap={6} wrap="nowrap">
-        {project.role ? (
-          <Badge size="sm" variant="default" tt="none">
-            {translateOr(t, NS, `drawer.projects.role.${project.role}`, project.role)}
-          </Badge>
+        {roleLabel ? (
+          <Tooltip label={td('drawer.projects.roleManagedInGroup')} withArrow disabled={roleEditable(source)}>
+            <Badge size="sm" variant="default" tt="none">
+              {roleLabel}
+            </Badge>
+          </Tooltip>
         ) : null}
         {editable && handlers ? (
           <Menu withinPortal position="bottom-end">
@@ -222,7 +230,10 @@ export function ProjectsSection({
   handlers,
   onAdd,
   reasonText,
+  external = false,
 }: {
+  /** An external account never joins a project (its access is the token's project and policies). */
+  external?: boolean;
   projects: ProjectRef[];
   /** The viewer's `manageProjects` action; undefined = read-only. */
   manage?: AllowedAction;
@@ -255,7 +266,9 @@ export function ProjectsSection({
           ) : null}
         </>
       )}
-      {manage && onAdd && addable ? (
+      {external ? (
+        <Muted>{td('drawer.projects.externalNote')}</Muted>
+      ) : manage && onAdd && addable ? (
         <div>
           {canEdit ? (
             <Button size="compact-xs" variant="subtle" leftSection={<IconPlus size={12} />} onClick={onAdd}>
@@ -508,7 +521,7 @@ export function ActivitySection({ userId, locale }: { userId: string; locale: st
                   </Text>
                   <Group gap={6} mt={2}>
                     <Text size="xs" c="dimmed">{formatDateTime(event.at, locale)}</Text>
-                    <Badge size="xs" variant="light" color={OUTCOME_COLOR[event.outcome] ?? 'gray'}>
+                    <Badge size="xs" variant={badgeVariant(OUTCOME_COLOR[event.outcome] ?? 'gray')} color={OUTCOME_COLOR[event.outcome] ?? 'gray'}>
                       {translateOr(td, 'iamDirectory', `drawer.activity.outcomes.${event.outcome}`, event.outcome)}
                     </Badge>
                     {event.viaToken ? (

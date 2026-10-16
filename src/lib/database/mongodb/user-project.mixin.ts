@@ -37,6 +37,15 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
       return docs.map((d) => this.mapUserProject(d));
     }
 
+    async listUserProjectsByTenant(tenantId: string): Promise<IUserProject[]> {
+      const db = this.getTenantDb();
+      const docs = await db.collection<IUserProject>(COLLECTIONS.userProjects)
+        .find({ tenantId })
+        .sort({ createdAt: -1 })
+        .toArray();
+      return docs.map((d) => this.mapUserProject(d));
+    }
+
     async upsertUserProject(
       data: Omit<IUserProject, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IUserProject> {
@@ -47,7 +56,14 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
       const result = await db.collection<IUserProject>(COLLECTIONS.userProjects).findOneAndUpdate(
         { tenantId: data.tenantId, userId: data.userId, projectId: data.projectId },
         {
-          $set: { role: data.role, servicePermissions, updatedAt: now },
+          // `source` is only written when the caller states it, so a role edit
+          // that does not care keeps whatever origin the row already has.
+          $set: {
+            role: data.role,
+            servicePermissions,
+            updatedAt: now,
+            ...(data.source ? { source: data.source } : {}),
+          },
           $setOnInsert: {
             tenantId: data.tenantId,
             userId: data.userId,
@@ -83,6 +99,7 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
         ...doc,
         _id: doc._id instanceof ObjectId ? doc._id.toString() : String(doc._id ?? ''),
         servicePermissions: normalizeServicePermissions(doc.servicePermissions),
+        source: doc.source === 'directory' ? 'directory' : 'manual',
       };
     }
 
@@ -196,6 +213,12 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
       return docs.map((d) => ({ ...d, _id: d._id?.toString() }));
     }
 
+    async listGroupMembersByTenant(tenantId: string): Promise<IGroupMember[]> {
+      const db = this.getTenantDb();
+      const docs = await db.collection<IGroupMember>(COLLECTIONS.groupMembers).find({ tenantId }).toArray();
+      return docs.map((d) => ({ ...d, _id: d._id?.toString() }));
+    }
+
     async listGroupMembersByUser(userId: string): Promise<IGroupMember[]> {
       const db = this.getTenantDb();
       const docs = await db.collection<IGroupMember>(COLLECTIONS.groupMembers).find({ userId }).toArray();
@@ -230,6 +253,12 @@ export function UserProjectMixin<TBase extends Constructor<MongoDBProviderBase>>
     async listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]> {
       const db = this.getTenantDb();
       const docs = await db.collection<IGroupProject>(COLLECTIONS.groupProjects).find({ projectId }).toArray();
+      return docs.map((d) => this.mapGroupProject(d));
+    }
+
+    async listGroupProjectsByTenant(tenantId: string): Promise<IGroupProject[]> {
+      const db = this.getTenantDb();
+      const docs = await db.collection<IGroupProject>(COLLECTIONS.groupProjects).find({ tenantId }).toArray();
       return docs.map((d) => this.mapGroupProject(d));
     }
 

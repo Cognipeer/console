@@ -94,6 +94,8 @@ export interface DirectoryFilters {
   providers?: AuthProvider[];
   groupId?: string;
   projectId?: string;
+  /** `access=requested`: only people who asked for access (see `IUser.accessRequest`). */
+  accessRequested?: boolean;
   sort?: UserSort;
   dir?: SortDirection;
   // groups
@@ -157,7 +159,7 @@ const GROUP_SOURCES: Record<string, Array<'local' | 'ldap' | 'oidc'>> = {
 /**
  * Validate the filters of one request (the query string as Fastify parsed it).
  * Parameter names: `role` (csv), `status`, `kind`, `source` (csv), `group` / `groupId`,
- * `project` / `projectId`, `sort`, `dir` for people; `source`, `project` for groups;
+ * `project` / `projectId`, `access` (`requested`), `sort`, `dir` for people; `source`, `project` for groups;
  * `status`, `ownerId`, `project`, `scoped` for tokens; `ids` (csv) for all.
  */
 export function parseDirectoryFilters(type: PrincipalType, raw: Record<string, unknown>): ParsedFilters {
@@ -203,6 +205,7 @@ export function parseDirectoryFilters(type: PrincipalType, raw: Record<string, u
     }
     filters.groupId = id('group', 'group', 'groupId');
     filters.projectId = id('project', 'project', 'projectId');
+    if (choice('access', ['requested'] as const) === 'requested') filters.accessRequested = true;
     filters.sort = choice('sort', USER_SORTS);
     filters.dir = choice('dir', SORT_DIRECTIONS);
   } else if (type === 'group') {
@@ -247,6 +250,11 @@ const iso = (value: unknown): string | null => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 };
 const userLabel = (user: Pick<IUser, 'name' | 'email'>): string => user.name || user.email || '';
+/** The person's last "I need access" request (null = never asked); a screen shows it only while they still have no project. */
+const accessRequestOf = (user: Pick<IUser, 'accessRequest'>): { at: string; message: string | null } | null => {
+  const at = iso(user.accessRequest?.at);
+  return at ? { at, message: user.accessRequest?.message ?? null } : null;
+};
 
 export interface DirectoryUserItem extends PrincipalListItem {
   type: 'user';
@@ -258,6 +266,7 @@ export interface DirectoryUserItem extends PrincipalListItem {
   roleManaged: boolean;
   createdAt: string | null;
   invitedAt: string | null;
+  accessRequest: { at: string; message: string | null } | null;
   allowedActions: AllowedActions;
 }
 
@@ -324,6 +333,7 @@ export function userFilterOf(tenantId: string, request: Pick<DirectoryRequest, '
   if (request.providers) filter.authProviders = request.providers;
   if (request.groupId) filter.groupId = request.groupId;
   if (request.projectId) filter.projectId = request.projectId;
+  if (request.accessRequested) filter.accessRequested = true;
   return filter;
 }
 
@@ -346,6 +356,15 @@ export async function listDirectory(
         request.count ? db.countExternalUsers() : Promise.resolve(undefined),
       ]);
       const roleManaged = await roleManagedPredicate(tenant, res.items);
+      // A request counts only while the person still reaches no project (owners and admins reach every one).
+      const asked = res.items.filter((user) => user.accessRequest && user.role !== 'owner' && user.role !== 'admin');
+      const waiting = new Set<string>();
+      await Promise.all(
+        asked.map(async (user) => {
+          const reached = await collectAccessibleProjectIds(db, String(user._id), user.projectIds);
+          if (reached.length === 0) waiting.add(String(user._id));
+        }),
+      );
       return {
         hasMore: res.hasMore,
         ...(total !== undefined ? { total } : {}),
@@ -365,6 +384,7 @@ export async function listDirectory(
           roleManaged: roleManaged(user),
           createdAt: iso(user.createdAt),
           invitedAt: iso(user.invitedAt),
+          accessRequest: waiting.has(String(user._id)) ? accessRequestOf(user) : null,
           allowedActions: computeAllowedActions(viewer, targetOf(user, { roleManaged: roleManaged(user) })),
         })),
       };
@@ -616,6 +636,7 @@ export async function augmentPrincipalDetail(
         createdAt: iso(user.createdAt),
         invitedAt: iso(user.invitedAt),
         inviteAcceptedAt: iso(user.inviteAcceptedAt),
+        accessRequest: accessRequestOf(user),
         pendingInvite: isPendingInvite(user),
         disabledAt: iso(user.disabledAt),
         disabledBy: user.disabledBy ?? null,

@@ -460,7 +460,9 @@ export interface InviteBody {
   canLogin: boolean;
   sendInvite: boolean;
   servicePermissions: UserServicePermissions;
+  /** The project the person joins as a member (older callers); `projects` says a role for each of several. */
   projectId?: string;
+  projects?: ProjectGrantInput[];
 }
 
 export interface InviteResult {
@@ -489,6 +491,57 @@ export function parseInviteResult(raw: unknown): InviteResult {
     invitationEmailSent: r.invitationEmailSent === true,
     generatedPassword: asString(r.generatedPassword),
   };
+}
+
+/** A project and the role a person gets in it. */
+export interface ProjectGrantInput {
+  projectId: string;
+  role: 'member' | 'project_admin';
+}
+
+/** Result of `POST /api/users/:id/projects`. */
+export interface AddProjectsResult {
+  added: string[];
+  updated: string[];
+  skipped: Array<{ projectId: string; reason: string }>;
+}
+
+export function parseAddProjectsResult(raw: unknown): AddProjectsResult {
+  const r = asRecord(raw);
+  const ids = (v: unknown) => asArray(v).filter((x): x is string => typeof x === 'string');
+  return {
+    added: ids(r.added),
+    updated: ids(r.updated),
+    skipped: asArray(r.skipped).flatMap((entry) => {
+      const e = asRecord(entry);
+      const projectId = asId(e.projectId);
+      return projectId ? [{ projectId, reason: asString(e.reason) ?? 'unknown' }] : [];
+    }),
+  };
+}
+
+/** An issuer the workspace trusts to vouch for people of a host application (a token delegation names it). */
+export interface DelegationIssuerChoice {
+  issuer: string;
+  enabled: boolean;
+  tokens: number;
+}
+
+export function parseDelegationIssuers(raw: unknown): DelegationIssuerChoice[] {
+  return asArray(asRecord(raw).issuers).flatMap((entry): DelegationIssuerChoice[] => {
+    const e = asRecord(entry);
+    const issuer = asString(e.issuer);
+    return issuer ? [{ issuer, enabled: e.enabled !== false, tokens: asNumber(e.tokens) ?? 0 }] : [];
+  });
+}
+
+export interface ExternalBody {
+  issuer: string;
+  subject: string;
+  name?: string;
+  email?: string;
+  groupIds?: string[];
+  active?: boolean;
 }
 
 export interface ImportSummary {
@@ -660,6 +713,28 @@ export const directoryApi = {
 
   async invite(body: InviteBody): Promise<InviteResult> {
     return parseInviteResult(await call('POST', '/api/users/invite', { body }));
+  },
+
+  async addUserProjects(
+    userId: string,
+    body: { projects: ProjectGrantInput[]; servicePermissions?: UserServicePermissions | null; notify?: boolean },
+  ): Promise<AddProjectsResult> {
+    return parseAddProjectsResult(await call('POST', `/api/users/${seg(userId)}/projects`, { body }));
+  },
+
+  async externalIssuers(signal?: AbortSignal): Promise<DelegationIssuerChoice[]> {
+    return parseDelegationIssuers(await call('GET', '/api/users/external/issuers', { signal }));
+  },
+
+  /** Add a person of a host application by hand (`(issuer, subject)` is unique: 409 `identity_taken`). */
+  async createExternal(body: ExternalBody): Promise<InviteResult> {
+    return parseInviteResult(await call('POST', '/api/users/external', { body }));
+  },
+
+  /** A signed-in person with no project asks the workspace's admins for access (429 `rate_limited`: once a day). */
+  async requestAccess(message?: string): Promise<{ at: string | null }> {
+    const r = asRecord(await call('POST', '/api/users/me/access-request', { body: message ? { message } : {} }));
+    return { at: asString(asRecord(r.accessRequest).at) };
   },
 
   async bulkImport(body: { csv: string; role: string; projectId?: string }): Promise<ImportSummary> {

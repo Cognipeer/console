@@ -5,6 +5,7 @@ import type {
 } from '@/lib/database/provider/types.base';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getConfig } from '@/lib/core/config';
+import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -1006,6 +1007,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       const existing = await db.findAgentTracingSessionById(sessionId, ctx.projectId);
+      // A later part of a session the SDK delivers in parts (a run resumed
+      // after a pause): append its events instead of replacing the session's.
+      const continuation = existing ? readTraceContinuationMarker(payload) : undefined;
       const agentName = typeof payload?.agent?.name === 'string' ? payload.agent.name.trim() : '';
       const maxAgents = quotaResult.effectiveLimits.quotas?.maxAgents;
       if (maxAgents !== undefined && maxAgents !== -1 && agentName) {
@@ -1050,6 +1054,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const storedEvents = continuation
+          ? await backgroundDb.listAgentTracingEvents(sessionId, ctx.projectId, { projection: { sequence: 1 } })
+          : [];
+        const storedSequences = new Set(storedEvents.map((event) => event.sequence));
+        // A retried part must not insert its events twice.
+        const partEvents = continuation
+          ? events.filter((event) => !storedSequences.has(event?.sequence ?? 0))
+          : events;
+        if (continuation && existing) {
+          mergeContinuedSessionDoc(sessionDoc, existing, { storedEvents: storedEvents.length, newEvents: partEvents.length });
+        }
+
         if (existing) {
           await backgroundDb.updateAgentTracingSession(sessionId, sessionDoc, ctx.projectId);
         } else {
@@ -1071,11 +1087,13 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         // This path deletes + recreates all events, so cost accounting must
         // work on the DELTA: tokens in the new event set minus what the old
         // set already accounted — a re-posted session contributes zero.
-        const previousEvents = await backgroundDb.listAgentTracingEvents(sessionId, ctx.projectId);
-        await backgroundDb.deleteAgentTracingEvents(sessionId, ctx.projectId);
+        // A continued part adds events: the earlier parts' tokens were
+        // accounted when they arrived, so there is nothing to subtract.
+        const previousEvents = continuation ? [] : await backgroundDb.listAgentTracingEvents(sessionId, ctx.projectId);
+        if (!continuation) await backgroundDb.deleteAgentTracingEvents(sessionId, ctx.projectId);
 
         const createdEvents: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>> = [];
-        for (const event of events) {
+        for (const event of partEvents) {
           const sections = getEventSections(event);
           const metadata = buildEventMetadata(event, sections);
           const toolDetails = getEventToolDetails(event, sections);

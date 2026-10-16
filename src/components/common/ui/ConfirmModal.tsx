@@ -13,6 +13,8 @@ export interface ConfirmModalProps {
     /** Red by default: it is for destructive actions. */
     confirmColor?: string;
     loading?: boolean;
+    /** Keeps the confirm button off until a condition holds (e.g. the name has been typed). */
+    confirmDisabled?: boolean;
     onConfirm: () => void;
     onClose: () => void;
 }
@@ -31,6 +33,7 @@ export default function ConfirmModal({
     cancelLabel,
     confirmColor = 'red',
     loading,
+    confirmDisabled,
     onConfirm,
     onClose,
 }: ConfirmModalProps) {
@@ -39,7 +42,7 @@ export default function ConfirmModal({
             <Text size="sm">{message}</Text>
             <Group justify="flex-end" gap="xs" mt="md">
                 <Button variant="default" onClick={onClose} disabled={loading}>{cancelLabel}</Button>
-                <Button color={confirmColor} loading={loading} onClick={onConfirm} data-testid="confirm-modal-confirm">{confirmLabel}</Button>
+                <Button color={confirmColor} loading={loading} disabled={confirmDisabled} onClick={onConfirm} data-testid="confirm-modal-confirm">{confirmLabel}</Button>
             </Group>
         </Modal>
     );

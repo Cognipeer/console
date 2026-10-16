@@ -1,194 +1,170 @@
 'use client';
 
-import { Suspense, use, useEffect, useMemo, useState } from 'react';
-import { Button, Paper, Tabs, Text } from '@mantine/core';
-import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import { Suspense, use, useCallback, useEffect, useMemo, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconArrowLeft, IconRefresh } from '@tabler/icons-react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import ProjectMembersManager from '@/components/projects/ProjectMembersManager';
-import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
-import QuotaManagement from '@/components/settings/QuotaManagement';
+import { IconFolder } from '@tabler/icons-react';
+import DetailShell, { type DetailShellTab } from '@/components/common/ui/DetailShell';
 import { notifyActiveProjectChanged } from '@/components/layout/useEffectivePermissions';
+import LimitsTab from '@/components/projects/detail/LimitsTab';
+import MembersTab from '@/components/projects/detail/MembersTab';
+import OverviewTab from '@/components/projects/detail/OverviewTab';
+import SettingsTab, { type ProjectSummary } from '@/components/projects/detail/SettingsTab';
+import TokensTab from '@/components/projects/detail/TokensTab';
+import ProjectProvidersManager from '@/components/projects/ProjectProvidersManager';
+import { LAST_LIST_URL_KEY, sanitizeListUrl } from '@/components/projects/projectsListModel';
+import { useTranslations } from '@/lib/i18n';
 
-type Project = {
-  _id: string;
-  name: string;
-  key: string;
-};
+const TABS = ['overview', 'members', 'providers', 'tokens', 'limits', 'settings'] as const;
+type TabId = (typeof TABS)[number];
 
-/**
- * The Users tab. `?member=<userId>` opens that member's project permission editor
- * (the Access check links here from "Project limit" reasons).
- */
-function ProjectMembers({ projectId }: { projectId: string }) {
-  const searchParams = useSearchParams();
-  const param = searchParams?.get('member') ?? null;
-  // Kept after the address is cleaned up below, until the editor has been opened.
-  const [memberId, setMemberId] = useState<string | null>(param);
-  useEffect(() => {
-    if (!param) return;
-    setMemberId(param);
-    // A one-shot link: drop it from the address so a refresh does not reopen the editor.
-    try {
-      const url = new URL(window.location.href);
-      url.searchParams.delete('member');
-      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-    } catch {
-      /* the History API is unavailable (embedded frame): the link just stays */
-    }
-  }, [param]);
-  return <ProjectMembersManager projectId={projectId} openMemberId={memberId} />;
-}
+/** Old spellings of a tab that bookmarks and the Access check may still carry. */
+const TAB_ALIASES: Record<string, TabId> = { users: 'members', quotas: 'limits' };
 
-export default function ProjectDetailPage({ params }: { params: Promise<{ projectId: string }> }) {
-  const { projectId } = use(params);
+function ProjectDetail({ projectId }: { projectId: string }) {
+  const t = useTranslations('projectsAccess.detail');
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<string | null>('users');
-  const [projects, setProjects] = useState<Project[]>([]);
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  const [project, setProject] = useState<ProjectSummary | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const [backHref, setBackHref] = useState('/dashboard/projects');
 
-  const ready = Boolean(activeProjectId && String(activeProjectId) === String(projectId));
   const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
+  const ready = Boolean(activeProjectId && String(activeProjectId) === String(projectId));
 
-  const currentProject = useMemo(() => {
-    const found = projects.find((p) => String(p._id) === String(projectId));
-    return found;
-  }, [projects, projectId]);
+  // The list's own address (its search and filters), kept by the list in sessionStorage.
+  useEffect(() => {
+    try {
+      setBackHref(sanitizeListUrl(sessionStorage.getItem(LAST_LIST_URL_KEY)));
+    } catch {
+      /* storage is unavailable: the plain list */
+    }
+  }, []);
 
-  const fetchProjects = async () => {
+  const tabParam = searchParams?.get('tab') ?? '';
+  const tabs = useMemo<TabId[]>(() => TABS.filter((tab) => tab !== 'limits' || isTenantAdmin), [isTenantAdmin]);
+  // A deep link to Limits waits for the role instead of flashing the overview first.
+  const allowed = (tab: TabId) => tab !== 'limits' || isTenantAdmin || !sessionLoaded;
+  // `?member=` (the Access check's link) lands on the people tab; otherwise the overview.
+  const requested = (TAB_ALIASES[tabParam] ?? tabParam) as TabId;
+  const activeTab: TabId = (TABS as readonly string[]).includes(requested) && allowed(requested)
+    ? requested
+    : searchParams?.get('member')
+      ? 'members'
+      : 'overview';
+
+  const changeTab = useCallback(
+    (id: string) => {
+      const next = new URLSearchParams(searchParams?.toString() ?? '');
+      next.set('tab', id);
+      // A one-shot deep link belongs to the tab it opened.
+      if (id !== 'members') next.delete('member');
+      router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
+
+  const fetchProject = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/projects', { cache: 'no-store' });
       if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to load projects');
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || t('loadFailed'));
       }
-      const data = (await res.json()) as { projects?: Project[]; activeProjectId?: string };
-      setProjects(data.projects ?? []);
+      const data = (await res.json()) as { projects?: ProjectSummary[]; activeProjectId?: string };
+      setProject((data.projects ?? []).find((p) => String(p._id) === String(projectId)) ?? null);
       setActiveProjectId(data.activeProjectId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load projects';
-      notifications.show({ title: 'Project', message, color: 'red' });
+      notifications.show({ color: 'red', message: error instanceof Error ? error.message : t('loadFailed') });
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId, t]);
 
-  const ensureActiveProject = async () => {
-    if (!projectId) return;
-    if (activeProjectId && String(activeProjectId) === String(projectId)) return;
+  useEffect(() => {
+    void fetchProject();
+    fetch('/api/auth/session', { cache: 'no-store' })
+      .then(async (res) => (res.ok ? ((await res.json()) as { role?: string }) : null))
+      .then((data) => setSessionRole(data?.role))
+      .catch(() => setSessionRole(undefined))
+      .finally(() => setSessionLoaded(true));
+  }, [fetchProject]);
 
-    try {
-      const res = await fetch('/api/projects/active', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to set active project');
+  // The providers tab (and what it lists) works on the active project: make this one active.
+  useEffect(() => {
+    if (loading || ready || !projectId) return;
+    void (async () => {
+      try {
+        const res = await fetch('/api/projects/active', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ projectId }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error || t('loadFailed'));
+        }
+        setActiveProjectId(projectId);
+        // What the navigation shows depends on the active project's limits.
+        notifyActiveProjectChanged();
+      } catch (error) {
+        notifications.show({ color: 'red', message: error instanceof Error ? error.message : t('loadFailed') });
       }
-      setActiveProjectId(projectId);
-      // What the navigation shows depends on the active project's limits.
-      notifyActiveProjectChanged();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to set active project';
-      notifications.show({ title: 'Project', message, color: 'red' });
-    }
-  };
+    })();
+  }, [loading, ready, projectId, t]);
 
-  const fetchSession = async () => {
-    try {
-      const res = await fetch('/api/auth/session', { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = (await res.json()) as { role?: string };
-      setSessionRole(data.role);
-    } catch {
-      setSessionRole(undefined);
-    }
-  };
-
-  useEffect(() => {
-    void fetchProjects();
-    void fetchSession();
-  }, []);
-
-  useEffect(() => {
-    if (!loading) {
-      ensureActiveProject();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, activeProjectId, projectId]);
+  const shellTabs: DetailShellTab[] = tabs.map((id) => ({ id, label: t(`tabs.${id}`) }));
 
   return (
-    <PageContainer>
-      <PageHeader
-        eyebrow="Configure · Project"
-        title={currentProject?.name ?? 'Project'}
-        subtitle="Project access, providers, and quotas."
-        actions={
+    <DetailShell
+      backHref={backHref}
+      backLabel={t('backTooltip')}
+      icon={<IconFolder size={16} />}
+      title={<h1 className="ds-h2">{project?.name ?? t('back')}</h1>}
+      meta={
+        project ? (
           <>
-            <Button
-              variant="default"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-              onClick={() => router.push('/dashboard/projects')}
-            >
-              Back
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              onClick={() => void fetchProjects()}
-              loading={loading}
-            >
-              Refresh
-            </Button>
+            <span className="ds-mono">{project.key}</span>
+            {ready ? <span className="ds-badge ds-badge-ok">{t('active')}</span> : null}
           </>
-        }
-      />
+        ) : undefined
+      }
+      tabs={shellTabs}
+      activeTab={activeTab}
+      onTabChange={changeTab}
+    >
+      {activeTab === 'overview' ? <OverviewTab projectId={projectId} /> : null}
+      {activeTab === 'members' ? <MembersTab projectId={projectId} projectName={project?.name} /> : null}
+      {activeTab === 'providers' ? (
+        ready ? (
+          <ProjectProvidersManager projectId={projectId} />
+        ) : (
+          <Text size="sm" c="dimmed" p="md">
+            {t('switching')}
+          </Text>
+        )
+      ) : null}
+      {activeTab === 'tokens' ? <TokensTab projectId={projectId} /> : null}
+      {activeTab === 'limits' && isTenantAdmin ? <LimitsTab projectId={projectId} canManage /> : null}
+      {activeTab === 'settings' && project ? (
+        <SettingsTab project={project} canManage={isTenantAdmin} backHref={backHref} onSaved={() => void fetchProject()} />
+      ) : null}
+    </DetailShell>
+  );
+}
 
-      <Paper shadow="sm" radius="md" withBorder>
-        <Tabs value={activeTab} onChange={setActiveTab}>
-          <Tabs.List>
-            <Tabs.Tab value="users">Users</Tabs.Tab>
-            <Tabs.Tab value="providers">Providers</Tabs.Tab>
-            {isTenantAdmin ? <Tabs.Tab value="quotas">Quotas</Tabs.Tab> : null}
-          </Tabs.List>
-
-          <Tabs.Panel value="users" pt="md">
-            <Suspense fallback={null}>
-              <ProjectMembers projectId={projectId} />
-            </Suspense>
-          </Tabs.Panel>
-
-          <Tabs.Panel value="providers" pt="md">
-            {ready ? (
-              <ProjectProvidersManager projectId={projectId} />
-            ) : (
-              <Text size="sm" c="dimmed" p="md">
-                Switching active project…
-              </Text>
-            )}
-          </Tabs.Panel>
-
-          {isTenantAdmin ? (
-            <Tabs.Panel value="quotas" pt="md">
-              {ready ? (
-                <QuotaManagement projectId={projectId} />
-              ) : (
-                <Text size="sm" c="dimmed" p="md">
-                  Switching active project…
-                </Text>
-              )}
-            </Tabs.Panel>
-          ) : null}
-        </Tabs>
-      </Paper>
-    </PageContainer>
+export default function ProjectDetailPage({ params }: { params: Promise<{ projectId: string }> }) {
+  const { projectId } = use(params);
+  return (
+    <Suspense fallback={null}>
+      <ProjectDetail projectId={projectId} />
+    </Suspense>
   );
 }

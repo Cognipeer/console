@@ -1,0 +1,197 @@
+<!-- subject: {{requesterName}} is asking for access on {{companyName}} -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Access request</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            line-height: 1.6;
+            color: #4a5260;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #fbfbfa;
+        }
+        .container {
+            background-color: #ffffff;
+            border: 1px solid #e8e8e3;
+            border-radius: 10px;
+            padding: 40px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo {
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #0c1118;
+            margin-bottom: 10px;
+        }
+        h1 {
+            color: #0c1118;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #0f1419;
+            color: #e6edf3;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .info-box {
+            background-color: #f7f7f4;
+            border-left: 4px solid #0fba94;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .warning-box {
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .credentials {
+            background-color: #f7f7f4;
+            border-left: 4px solid #c87b15;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .alert {
+            background-color: #f7f7f4;
+            border-left: 4px solid #2a6fdb;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+        }
+        .alert-badge {
+            display: inline-block;
+            padding: 5px 14px;
+            background-color: #f7f7f4;
+            border: 1px solid #e8e8e3;
+            color: #c87b15;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 18px;
+            background-color: #0f1419;
+            color: #e6edf3;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            letter-spacing: 2px;
+            margin: 20px 0;
+        }
+        .metric-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .metric-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #efefea;
+        }
+        .metric-table td:first-child {
+            color: #6b7280;
+            font-size: 13px;
+            font-weight: 500;
+            width: 40%;
+        }
+        .metric-table td:last-child {
+            font-weight: 600;
+            text-align: right;
+        }
+        .metric-value {
+            color: #c87b15;
+            font-size: 16px;
+        }
+        .threshold-value {
+            color: #6b7280;
+        }
+        .project-tag {
+            display: inline-block;
+            padding: 3px 10px;
+            background-color: #f4f4f1;
+            border: 1px solid #e8e8e3;
+            border-radius: 999px;
+            font-size: 12px;
+            color: #4a5260;
+            margin-bottom: 4px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0c1118;
+            color: #fbfbfa;
+            text-decoration: none;
+            border-radius: 999px;
+            margin: 20px 0;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .button-secondary {
+            display: inline-block;
+            padding: 12px 28px;
+            background-color: #0fba94;
+            color: #062a23;
+            text-decoration: none;
+            border-radius: 999px;
+            margin-top: 10px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e8e8e3;
+            text-align: center;
+            color: #6b7280;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">Cognipeer</div>
+        </div>
+
+        <h1>Someone is asking for access.</h1>
+
+        <p><strong>{{requesterName}}</strong> ({{requesterEmail}}) signed in to <strong>{{companyName}}</strong> but is not a member of any project yet, and asked for access.</p>
+
+        {{#if message}}
+        <div class="info-box">
+            <strong>Message:</strong><br>
+            {{message}}
+        </div>
+        {{/if}}
+
+        <p>Requested at {{requestedAt}}. You can add them to projects from the People page.</p>
+
+        <div style="text-align: center;">
+            <a href="{{peopleUrl}}" class="button">Review in People</a>
+        </div>
+
+        <div class="footer">
+            <p>This is an automated message from Cognipeer Console for {{companyName}}.</p>
+            <p>&copy; {{currentYear}} Cognipeer. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { Button, Menu } from '@mantine/core';
-import { IconChevronDown, IconKey, IconPlus, IconRobot, IconUpload, IconUserPlus, IconUsersGroup } from '@tabler/icons-react';
+import { IconChevronDown, IconKey, IconLink, IconPlus, IconRobot, IconUpload, IconUserPlus, IconUsersGroup } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { DirectoryCapabilities } from './directoryApi';
 import type { NewKind } from './listState';
@@ -21,6 +21,7 @@ interface Item {
 const ITEMS: readonly Item[] = [
   { kind: 'person', icon: <IconUserPlus size={14} />, needsPeople: true },
   { kind: 'service', icon: <IconRobot size={14} />, needsPeople: true },
+  { kind: 'external', icon: <IconLink size={14} />, needsPeople: true },
   { kind: 'import', icon: <IconUpload size={14} />, needsPeople: true },
   { kind: 'group', icon: <IconUsersGroup size={14} />, needsPeople: true },
   { kind: 'token', icon: <IconKey size={14} />, needsPeople: false },

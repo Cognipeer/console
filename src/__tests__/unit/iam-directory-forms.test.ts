@@ -597,22 +597,74 @@ describe('MembershipShell and AddToProjectShell', () => {
     expect(onPick).toHaveBeenCalledWith({ id: 'g-eng', name: 'Engineering' });
   });
 
-  it('adds a person to a project they are not in yet, with a role', async () => {
+  it('adds a person to several projects at once, locking the ones they are already in', async () => {
     const onDone = vi.fn();
     await show(
-      createElement(AddToProjectShell, { open: true, subject: { kind: 'user', id: 'u-ann', name: 'Ann Lee', projectIds: ['p-a'] }, onClose: vi.fn(), onDone } as never),
-      [['GET', '/api/projects', () => PROJECTS], ['POST', '/api/projects/p-b/members', () => ({ userProject: {} })]],
+      createElement(AddToProjectShell, {
+        open: true,
+        subject: { kind: 'user', id: 'u-ann', name: 'Ann Lee', projectIds: ['p-a'], memberships: [{ id: 'p-a', name: 'Alpha', role: 'member', via: 'direct', groupName: null }] },
+        onClose: vi.fn(),
+        onDone,
+      } as never),
+      [['GET', '/api/projects', () => PROJECTS], ['POST', '/api/users/u-ann/projects', () => ({ added: ['p-b'], updated: [], skipped: [] })]],
     );
-    await click(q('input', shell()));
     await settle(60);
-    const options = qa('[role="option"]').map((o) => o.textContent);
-    expect(options).toEqual(['Beta']); // Alpha: already a member
-    await click(qa('[role="option"]')[0]);
-    await click(chip('Project admin'));
-    await click(shellButton('Add to project'));
+    const alpha = qa('input[type="checkbox"]').find((c) => c.getAttribute('aria-label') === 'Alpha') as HTMLInputElement;
+    expect(alpha.disabled).toBe(true); // already a member: locked, with the reason
+    expect(shell().textContent).toContain('Already a member');
+    const beta = qa('input[type="checkbox"]').find((c) => c.getAttribute('aria-label') === 'Beta')!;
+    await click(beta);
+    await click(shellButton('Add to 1 project'));
     await settle(80);
-    expect(api.to('POST', '/api/projects/p-b/members')[0]?.body).toEqual({ userId: 'u-ann', role: 'project_admin' });
+    expect(api.to('POST', '/api/users/u-ann/projects')[0]?.body).toEqual({ projects: [{ projectId: 'p-b', role: 'member' }], servicePermissions: null });
     expect(onDone).toHaveBeenCalled();
+  });
+
+  it('names the role a person already has in a project it locks, not just "member"', async () => {
+    await show(
+      createElement(AddToProjectShell, {
+        open: true,
+        subject: { kind: 'user', id: 'u-ann', name: 'Ann Lee', projectIds: ['p-a'], memberships: [{ id: 'p-a', name: 'Alpha', role: 'project_admin', via: 'direct', groupName: null }] },
+        onClose: vi.fn(),
+        onDone: vi.fn(),
+      } as never),
+      [['GET', '/api/projects', () => PROJECTS]],
+    );
+    await settle(60);
+    const row = qa('[data-testid="project-offer"]', shell()).find((r) => r.textContent?.includes('Alpha'))!;
+    // the badge is a leaf of its own; the muted line above it is a sentence
+    expect(qa('span', row).some((s) => s.children.length === 0 && s.textContent === 'Project admin')).toBe(true);
+  });
+
+  it('explains why an external account cannot be added to a project', async () => {
+    await show(
+      createElement(AddToProjectShell, { open: true, subject: { kind: 'user', id: 'u-x', name: 'Ext', projectIds: [], external: true }, onClose: vi.fn(), onDone: vi.fn() } as never),
+      [],
+    );
+    expect(shell().textContent).toContain('External accounts cannot be added to projects');
+  });
+
+  it('adds an external identity and shows a duplicate inline', async () => {
+    let taken = true;
+    await show(
+      createElement(InvitePersonShell, { open: true, mode: 'external', assignableRoles: ['user'], onCreated: vi.fn(), onClose: vi.fn() } as never),
+      [
+        ['GET', '/api/users/external/issuers', () => ({ issuers: [{ issuer: 'https://idp.example', enabled: true, tokens: 1 }] })],
+        ['GET', '/api/iam/principals', () => ({ items: [], nextCursor: null })],
+        ['POST', '/api/users/external', () => (taken ? jsonResponse({ error: 'dup', code: 'identity_taken' }, 409) : jsonResponse({ user: { id: 'u-e', name: 'E', email: '', role: 'user', canLogin: false } }, 201))],
+      ],
+    );
+    await settle(60);
+    expect(shell().textContent).toContain('Cannot sign in');
+    await click(q('input[aria-label="Issuer"]', shell()));
+    await settle(30);
+    await click(qa('[role="option"]')[0]);
+    await setInput(textInputs().find((i) => i.getAttribute('placeholder') === 'e.g. user-1234')!, 'u-1');
+    await click(shellButton('Add external identity'));
+    await settle(80);
+    expect(api.to('POST', '/api/users/external')[0]?.body).toMatchObject({ issuer: 'https://idp.example', subject: 'u-1', active: true });
+    expect(shell().textContent).toContain('An account with this identity already exists');
+    taken = false;
   });
 
   it('assigns a group to a project through the group endpoint', async () => {

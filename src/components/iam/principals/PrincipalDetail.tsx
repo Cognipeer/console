@@ -63,12 +63,14 @@ import GroupMembersSection from './GroupMembersSection';
 import GroupShell from './GroupShell';
 import { ManagedBanner } from './managed';
 import MembershipShell from './MembershipShell';
+import SectionJumpBar from './SectionJumpBar';
+import { visibleSections } from './sectionNav';
 import { ActivitySection, GroupsSection, ProjectsSection, UserTokensSection, type ProjectRowHandlers } from './PersonSections';
 import { MATRIX_SERVICES } from './permissionModel';
 import { useServiceLabels } from './serviceLabels';
 import type { EditKind } from './listState';
 import type { PeopleActions } from './usePeopleActions';
-import { PrincipalAvatar } from './visuals';
+import { badgeVariant, PrincipalAvatar } from './visuals';
 import styles from './PrincipalDetail.module.css';
 import type { Translate } from './format';
 
@@ -175,7 +177,7 @@ function GrantsSummary({
   return (
     <Group gap={6} wrap="wrap" data-testid="group-grants">
       {entries.map(([service, level]) => (
-        <Badge key={service} variant="light" color={level === 'none' ? 'gray' : 'blue'} radius="sm" tt="none">
+        <Badge key={service} variant={badgeVariant(level === 'none' ? 'gray' : 'blue')} color={level === 'none' ? 'gray' : 'blue'} radius="sm" tt="none">
           {labelOf(service)}: {td(`matrix.levels.${level}`)}
         </Badge>
       ))}
@@ -354,7 +356,14 @@ export function PrincipalDetailView({
       {detail ? (
         <>
           {type === 'user' && wired ? (
-            <Section title={td('drawer.facts.title')} testId="section-profile">
+            <SectionJumpBar
+              sections={visibleSections({ hasGroups: true, hasTokens: Boolean(tokens) || detail.tokensHidden })}
+              label={td('jump.label')}
+              nameOf={(section) => td(`jump.sections.${section}`)}
+            />
+          ) : null}
+          {type === 'user' && wired ? (
+            <Section title={td('drawer.facts.title')} testId="section-profile" anchor="profile">
               <PersonFacts extras={extras} summary={summary} locale={locale} />
             </Section>
           ) : null}
@@ -371,6 +380,7 @@ export function PrincipalDetailView({
           ) : null}
 
           <Section
+            anchor={type === 'user' ? 'effective' : undefined}
             title={t('drawer.effective.title')}
             hint={t('drawer.effective.hint')}
             right={
@@ -411,7 +421,7 @@ export function PrincipalDetailView({
           ) : null}
 
           {type !== 'group' || groups.length > 0 ? (
-            <Section title={t('drawer.groups.title')} hint={t('drawer.groups.hint')}>
+            <Section title={t('drawer.groups.title')} hint={t('drawer.groups.hint')} anchor={type === 'user' ? 'groups' : undefined}>
               <GroupsSection
                 groups={groups}
                 manage={wired ? action('manageGroups') : undefined}
@@ -425,6 +435,7 @@ export function PrincipalDetailView({
           ) : null}
 
           <Section
+            anchor={type === 'user' ? 'projects' : undefined}
             title={t('drawer.projects.title')}
             right={
               type === 'group' && wired && action('manageProjects')?.allowed ? (
@@ -441,6 +452,7 @@ export function PrincipalDetailView({
                 projects={projects}
                 manage={type === 'user' && wired ? action('manageProjects') : undefined}
                 addable={joinsProjects}
+                external={summary.kind === 'external'}
                 t={t}
                 handlers={type === 'user' && wired ? handlers?.project : undefined}
                 onAdd={handlers?.addToProject}
@@ -449,7 +461,7 @@ export function PrincipalDetailView({
             )}
           </Section>
 
-          <Section title={t('drawer.policies.title')} hint={t('drawer.policies.hint')}>
+          <Section title={t('drawer.policies.title')} hint={t('drawer.policies.hint')} anchor={type === 'user' ? 'policies' : undefined}>
             <AttachedPolicies
               policies={policies}
               principal={{ type, id }}
@@ -460,7 +472,7 @@ export function PrincipalDetailView({
           </Section>
 
           {type === 'user' && tokens ? (
-            <Section title={t('drawer.tokens.title')} hint={t('drawer.tokens.hint')} testId="section-tokens">
+            <Section title={t('drawer.tokens.title')} hint={t('drawer.tokens.hint')} testId="section-tokens" anchor="tokens">
               <UserTokensSection
                 ownerId={id}
                 tokens={tokens}
@@ -479,12 +491,12 @@ export function PrincipalDetailView({
             </Section>
           ) : null}
           {type === 'user' ? (
-            <Section title={td('drawer.activity.title')} hint={td('drawer.activity.hint')} testId="section-activity">
+            <Section title={td('drawer.activity.title')} hint={td('drawer.activity.hint')} testId="section-activity" anchor="activity">
               <ActivitySection userId={id} locale={locale} />
             </Section>
           ) : null}
           {type === 'user' && !tokens && detail.tokensHidden ? (
-            <Section title={t('drawer.tokens.title')} hint={t('drawer.tokens.hint')} testId="section-tokens">
+            <Section title={t('drawer.tokens.title')} hint={t('drawer.tokens.hint')} testId="section-tokens" anchor="tokens">
               <UserTokensSection
                 ownerId={id}
                 tokens={[]}
@@ -779,6 +791,8 @@ export function PrincipalDetailContent({ target, canManage, context, onOpen, onB
         id: summary.id,
         name: summary.label,
         projectIds: (detail?.projects ?? []).filter((p) => (summary.type === 'group' ? true : p.via === 'direct' || p.via === 'legacy')).map((p) => p.id),
+        memberships: detail?.projects ?? [],
+        external: summary.kind === 'external',
       }
     : null;
 
@@ -863,9 +877,12 @@ export function PrincipalDetailContent({ target, canManage, context, onOpen, onB
       ) : null}
 
       <AddToProjectShell
-        open={addProjectOpen}
+        open={(addProjectOpen || edit === 'project') && Boolean(detail)}
         subject={subject}
-        onClose={() => setAddProjectOpen(false)}
+        onClose={() => {
+          setAddProjectOpen(false);
+          if (edit === 'project') onEdit(null);
+        }}
         onDone={refresh}
       />
 

@@ -14,6 +14,7 @@ import {
     Loader,
     Center,
     Alert,
+    Anchor,
     Paper,
     ScrollArea,
     Code,
@@ -23,9 +24,10 @@ import {
     Tooltip,
     ThemeIcon,
     Tabs,
-    Box,
     Collapse,
     Divider,
+    SegmentedControl,
+    UnstyledButton,
 } from '@mantine/core';
 import {
     IconBook,
@@ -62,6 +64,9 @@ import {
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
+import { createToolTurnKeys, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
+import HumanStepCard from '@/components/tracing/HumanStepCard';
+import ToolDefinitionsCard, { readToolDefinitions } from '@/components/tracing/ToolDefinitionsCard';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
 import type { TraceSessionFiles } from '@/components/common/llm/messageImages';
@@ -74,6 +79,10 @@ import LlmRequestDetailModal, {
     type LlmRequestItem,
 } from '@/components/common/llm/LlmRequestDetail';
 import { isAbnormalFinishReason, isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { buildSessionModel, cleanLabel, outcomeText, stepCategory, stepOutcome } from '@/components/tracing/sessionModel';
+import EventListGrouped from '@/components/tracing/EventListGrouped';
+import SessionWaterfall from '@/components/tracing/SessionWaterfall';
+import SessionTimeBreakdown from '@/components/tracing/SessionTimeBreakdown';
 
 dayjs.extend(relativeTime);
 
@@ -164,7 +173,18 @@ interface SessionDetailResponse {
          *  names may be capped — count is the full menu size). */
         toolDefinitionNames?: string[];
         toolDefinitionCount?: number;
+        /** What a model call answered — summary responses only (`stepOutcome` derives it from sections otherwise). */
+        responseToolNames?: string[];
+        responseAnswered?: boolean;
     }>;
+}
+
+type EventsView = 'grouped' | 'timeline' | 'list';
+
+/** Title for a row/panel: the label minus a baked-in ` #N` sequence suffix. */
+function eventTitle(event: { label?: string; type?: string; sequence?: number; id: string }): string {
+    const label = cleanLabel(event);
+    return label ? humanize(label) : humanize(event.type) || 'Event';
 }
 
 interface EventDetailResponse {
@@ -405,32 +425,7 @@ function KVRow({ label, children, mono }: { label: string; children: React.React
     );
 }
 
-// ─── Span hierarchy tree ───────────────────────────────────────
-
-interface SpanTreeNode { event: TracingEvent; children: SpanTreeNode[] }
-
-function buildSpanTree(events: TracingEvent[]): SpanTreeNode[] {
-    const map = new Map<string, SpanTreeNode>();
-    const roots: SpanTreeNode[] = [];
-
-    for (const event of events) {
-        const key = event.spanId || event.id;
-        map.set(key, { event, children: [] });
-    }
-
-    for (const event of events) {
-        const key = event.spanId || event.id;
-        const node = map.get(key)!;
-        const parentKey = event.parentSpanId;
-        if (parentKey && map.has(parentKey)) {
-            map.get(parentKey)!.children.push(node);
-        } else {
-            roots.push(node);
-        }
-    }
-
-    return roots;
-}
+// ─── Timeline row markers ──────────────────────────────────────
 
 /**
  * Compact per-turn tool-menu badge: "N tools" with the full name list in the
@@ -472,82 +467,6 @@ function TruncatedMarker({ event }: { event: TracingEvent }) {
     );
 }
 
-function SpanTreeItem({
-    node,
-    depth,
-    selectedEventId,
-    onSelect,
-}: {
-    node: SpanTreeNode;
-    depth: number;
-    selectedEventId: string | null;
-    onSelect: (id: string) => void;
-}) {
-    const [expanded, setExpanded] = useState(true);
-    const event = node.event;
-    const isSelected = event.id === selectedEventId;
-    const hasChildren = node.children.length > 0;
-
-    return (
-        <Box>
-            <Paper
-                withBorder
-                radius="md"
-                p="xs"
-                onClick={() => onSelect(event.id)}
-                style={{
-                    cursor: 'pointer',
-                    marginLeft: depth * 16,
-                    borderColor: isSelected ? 'var(--mantine-color-blue-4)' : undefined,
-                    backgroundColor: isSelected ? 'var(--mantine-color-blue-0)' : undefined,
-                }}
-            >
-                <Group gap={8} wrap="nowrap">
-                    {hasChildren ? (
-                        <ActionIcon
-                            variant="subtle"
-                            size="sm"
-                            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-                        >
-                            {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-                        </ActionIcon>
-                    ) : (
-                        <Box w={22} />
-                    )}
-                    <Badge size="sm" variant="light" color={eventTypeColor(event.type)} style={{ flexShrink: 0 }}>
-                        {humanize(event.type) || 'Span'}
-                    </Badge>
-                    <Text size="sm" fw={500} lineClamp={1} style={{ flex: 1 }}>
-                        {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
-                    </Text>
-                    <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
-                    <TruncatedMarker event={event} />
-                    {event.status && (
-                        <Badge size="sm" variant="dot" color={resolveStatusColor(event.status)} style={{ flexShrink: 0 }}>
-                            {event.status}
-                        </Badge>
-                    )}
-                    {event.durationMs != null && (
-                        <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>{formatDuration(event.durationMs)}</Text>
-                    )}
-                </Group>
-            </Paper>
-            {hasChildren && expanded && (
-                <Stack gap={4} mt={4}>
-                    {node.children.map((child) => (
-                        <SpanTreeItem
-                            key={child.event.spanId || child.event.id}
-                            node={child}
-                            depth={depth + 1}
-                            selectedEventId={selectedEventId}
-                            onSelect={onSelect}
-                        />
-                    ))}
-                </Stack>
-            )}
-        </Box>
-    );
-}
 
 // ─── Dynamic event info rows ───────────────────────────────────
 
@@ -568,7 +487,26 @@ function EventInfoRows({ event }: { event: TracingEvent }) {
             value: <Badge size="sm" variant="light" color="cyan">{event.model}</Badge>,
         });
     }
-    if (event.toolName) {
+    // A model call's stored `toolName` is derived at ingest from the first
+    // section that names a tool — usually one replayed from history — so for
+    // model calls show what the answer actually asked for instead.
+    const isModelCall = stepCategory(event.type) === 'model';
+    const outcome = isModelCall ? stepOutcome(event) : undefined;
+    if (outcome && outcome.toolNames.length > 0) {
+        rows.push({
+            key: 'requested',
+            label: 'Requested',
+            value: (
+                <Group gap={4}>
+                    {outcome.toolNames.map((name) => (
+                        <Badge key={name} size="sm" variant="light" color="violet">{formatToolName(name)}</Badge>
+                    ))}
+                </Group>
+            ),
+        });
+    } else if (outcome?.answered) {
+        rows.push({ key: 'requested', label: 'Outcome', value: <Text size="sm">Answered the user</Text> });
+    } else if (event.toolName && !isModelCall) {
         rows.push({
             key: 'tool',
             label: 'Tool',
@@ -700,6 +638,9 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function ToolDetailsBlock({ event }: { event: TracingEvent }) {
+    // Ingest synthesizes `{name}` details for any event that names a tool,
+    // model calls included — only a tool run has a definition worth showing.
+    if (stepCategory(event.type) !== 'tool') return null;
     // Both sides go through getRecord: a network payload can hand this the
     // literal string "undefined" (a bad upstream serializer's stringified
     // absence), and `||` alone would accept it as truthy — then spreading it
@@ -728,14 +669,40 @@ function ToolDetailsBlock({ event }: { event: TracingEvent }) {
         )),
     );
 
+    return <ToolDetailsPanel name={name} description={description} summaryEntries={summaryEntries} inputSchema={inputSchema} extraDetails={extraDetails} />;
+}
+
+/**
+ * The tool's definition, closed by default: what the step was called with and
+ * what came back (the sections below) is what a reader opens a tool step for.
+ */
+function ToolDetailsPanel({
+    name,
+    description,
+    summaryEntries,
+    inputSchema,
+    extraDetails,
+}: {
+    name?: string;
+    description?: string;
+    summaryEntries: Array<[string, unknown]>;
+    inputSchema: unknown;
+    extraDetails: Record<string, unknown>;
+}) {
+    const [open, setOpen] = useState(false);
     return (
-        <Paper withBorder p="sm" radius="md">
-            <Stack gap="sm">
-                <Group gap="xs">
+        <Paper withBorder px="sm" py={6} radius="md">
+            <UnstyledButton onClick={() => setOpen((value) => !value)} style={{ display: 'block', width: '100%', padding: '4px 0' }}>
+                <Group gap="xs" wrap="nowrap">
+                    {open ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
                     <ThemeIcon size="sm" variant="light" color="violet"><IconTool size={14} /></ThemeIcon>
-                    <Text size="sm" fw={600}>Tool Details</Text>
+                    <Text size="sm" fw={600}>Tool definition</Text>
                     {name && <Badge size="xs" variant="light" color="violet">{formatToolName(name)}</Badge>}
+                    {!open && description ? <Text size="xs" c="dimmed" lineClamp={1} style={{ minWidth: 0 }}>{description}</Text> : null}
                 </Group>
+            </UnstyledButton>
+            <Collapse in={open}>
+            <Stack gap="sm" mt="xs" mb={4}>
                 {description && <Text size="sm" c="dimmed">{description}</Text>}
                 {summaryEntries.length > 0 && (
                     <SimpleGrid cols={{ base: 1, sm: Math.min(summaryEntries.length, 3) }} spacing="xs">
@@ -760,6 +727,7 @@ function ToolDetailsBlock({ event }: { event: TracingEvent }) {
                     </Stack>
                 )}
             </Stack>
+            </Collapse>
         </Paper>
     );
 }
@@ -831,6 +799,11 @@ function RawJsonView({ event }: { event: TracingEvent }) {
 
 // ─── Event detail panel ────────────────────────────────────────
 
+/** An object result renders as a JSON tree; text and content parts as text. */
+function toolResultContent(value: unknown): unknown {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : messageContentToText(value);
+}
+
 /**
  * Maps tracing sections onto the shared item stream. `message`/`tool_call`/
  * `tool_result` become typed items (a `tool_call` and the `tool_result` that
@@ -843,23 +816,23 @@ function RawJsonView({ event }: { event: TracingEvent }) {
  */
 function sectionsToItems(sections: SectionEntry[], includeOther: boolean): LlmRequestItem[] {
     const items: LlmRequestItem[] = [];
+    const turnKeys = createToolTurnKeys();
     sections.forEach((section, index) => {
         const kind = typeof section.kind === 'string' ? section.kind : undefined;
         const role = typeof section.role === 'string' ? section.role : undefined;
         const tool = typeof section.tool === 'string' ? section.tool : (typeof section.toolName === 'string' ? section.toolName : undefined);
 
         if (kind === 'message' && role) {
+            turnKeys.reset();
             // A recorded message is handed over as parts (structured when the SDK kept them, else read back from the flattened text), so pictures and files are drawn by the inspector instead of printed as JSON.
             items.push({ itemType: 'message', role, content: tracedMessageContent(section) });
         } else if (kind === 'tool_call') {
-            const raw = section.content;
-            let args: unknown = raw;
-            if (typeof raw === 'string') {
-                try { args = JSON.parse(raw); } catch { /* leave as string */ }
-            }
-            items.push({ itemType: 'call', turnId: tool ?? `call-${index}`, name: tool, args });
+            items.push({ itemType: 'call', turnId: turnKeys.call(tool, index), name: tool, args: sectionToolArgs(section) });
         } else if (kind === 'tool_result') {
-            items.push({ itemType: 'result', turnId: tool ?? `result-${index}`, name: tool, content: messageContentToText(section.content) });
+            items.push({ itemType: 'result', turnId: turnKeys.result(tool, index), name: tool, content: toolResultContent(sectionToolResult(section)) });
+        } else if (kind === 'tool_definitions' || kind === 'response_format') {
+            // Drawn above the conversation by EventSections: the call's
+            // configuration reads before what was said, not after it.
         } else if (includeOther) {
             const key =
                 (typeof section.id === 'string' && section.id.length > 0 && `id-${section.id}`) ||
@@ -922,6 +895,10 @@ function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessio
     const [fullViewOpened, fullViewHandlers] = useDisclosure(false);
     const detailData = useMemo(() => buildEventDetailData(event), [event]);
     const hasSections = event.sections && event.sections.length > 0;
+    const toolDefinitions = useMemo(
+        () => (event.sections ?? []).filter((section) => section.kind === 'tool_definitions').flatMap(readToolDefinitions),
+        [event.sections],
+    );
     const hasMetadata = event.metadata && Object.keys(event.metadata).length > 0;
     // An abnormal stop (`length`, `content_filter`) explains a truncated or
     // unparseable answer, so it is surfaced next to the status rather than
@@ -936,7 +913,7 @@ function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessio
             <Stack gap={4}>
                 <Group gap="xs" wrap="nowrap">
                     <Text size="lg" fw={600}>
-                        {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
+                        {eventTitle(event)}
                     </Text>
                     {event.status && (
                         <Badge size="sm" variant="light" radius="xl" color={resolveStatusColor(event.status)}>
@@ -975,7 +952,7 @@ function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessio
             <LlmRequestDetailModal
                 opened={fullViewOpened}
                 onClose={fullViewHandlers.close}
-                title={event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
+                title={eventTitle(event)}
                 data={detailData}
                 sessionFiles={sessionFiles}
             />
@@ -985,6 +962,9 @@ function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessio
 
             {/* Token/byte stats */}
             <EventTokenStats event={event} />
+
+            {/* Approval / question / client tool: what the person did */}
+            <HumanStepCard event={event as Parameters<typeof HumanStepCard>[0]['event']} />
 
             {/* Tool details */}
             <ToolDetailsBlock event={event} />
@@ -1015,7 +995,13 @@ function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessio
 
                 <Tabs.Panel value="sections" pt="md">
                     {hasSections ? (
-                        <LlmRequestItemsView items={sectionsToItems(event.sections!, true)} sessionFiles={sessionFiles} />
+                        <Stack gap="sm">
+                            <ToolDefinitionsCard tools={toolDefinitions} />
+                            {event.sections!.map((section, index) => (section.kind === 'response_format'
+                                ? <SectionCard key={`response-format-${index}`} section={section} index={index} />
+                                : null))}
+                            <LlmRequestItemsView items={sectionsToItems(event.sections!, true)} sessionFiles={sessionFiles} />
+                        </Stack>
                     ) : (
                         <Text size="sm" c="dimmed">No structured sections for this event.</Text>
                     )}
@@ -1073,7 +1059,7 @@ function EventListFlat({
                                             {humanize(event.type) || 'Span'}
                                         </Badge>
                                         <Text size="sm" fw={600} lineClamp={1}>
-                                            {event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
+                                            {eventTitle(event)}
                                         </Text>
                                     </Group>
                                     <Text size="xs" c="dimmed">
@@ -1087,7 +1073,11 @@ function EventListFlat({
                                 )}
                             </Group>
                             <Group gap="xs">
-                                {event.toolName && (
+                                {stepCategory(event.type) === 'model' ? (
+                                    outcomeText(event) ? (
+                                        <Badge size="xs" variant="light" color="violet">{outcomeText(event)}</Badge>
+                                    ) : null
+                                ) : event.toolName && (
                                     <Badge size="xs" variant="light" color="violet">{formatToolName(event.toolName)}</Badge>
                                 )}
                                 <ToolMenuBadge names={event.toolDefinitionNames} count={event.toolDefinitionCount} />
@@ -1128,7 +1118,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const [eventDetailError, setEventDetailError] = useState<string | null>(null);
     const [eventDetailLoading, setEventDetailLoading] = useState(false);
     const [eventDetailsById, setEventDetailsById] = useState<Record<string, SessionDetailResponse['events'][number]>>({});
-    const [eventsView, setEventsView] = useState<'list' | 'tree'>('list');
+    // null = not chosen yet: grouped, unless the session can't be grouped.
+    const [chosenEventsView, setChosenEventsView] = useState<EventsView | null>(null);
     // Collapsed by default — thread/trace ids, models/tools and metadata are
     // follow-up detail, not the reason someone opened this page. Errors are
     // NOT gated behind this: they render unconditionally below the stat strip.
@@ -1157,7 +1148,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     useEffect(() => { void fetchDetail(false); }, [fetchDetail]);
 
     useEffect(() => {
-        if (detail?.session?.status !== 'in_progress') return;
+        // A paused session resumes in place: the approval or answer lands here.
+        if (detail?.session?.status !== 'in_progress' && detail?.session?.status !== 'paused') return;
         const interval = setInterval(() => { void fetchDetail(true); }, 5000);
         return () => clearInterval(interval);
     }, [detail?.session?.status, fetchDetail]);
@@ -1179,12 +1171,27 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
         return detail?.events ?? [];
     }, [detail]);
 
-    const hasSpanIds = useMemo(() => sortedEvents.some((e) => e.spanId), [sortedEvents]);
+    // Integration-agnostic reading of the session: turns (whatever the SDK
+    // calls them), resolved start/end times and the time breakdown.
+    const sessionModel = useMemo(
+        () => buildSessionModel(sortedEvents, {
+            startedAt: detail?.session?.startedAt,
+            durationMs: detail?.session?.durationMs,
+        }),
+        [sortedEvents, detail?.session?.startedAt, detail?.session?.durationMs],
+    );
 
-    const spanTree = useMemo(() => {
-        if (!hasSpanIds) return [];
-        return buildSpanTree(sortedEvents);
-    }, [sortedEvents, hasSpanIds]);
+    const viewOptions = useMemo(() => {
+        const options: Array<{ value: EventsView; label: string }> = [];
+        if (!sessionModel.legacyHandler) options.push({ value: 'grouped', label: 'Grouped' });
+        if (sessionModel.hasTiming) options.push({ value: 'timeline', label: 'Timeline' });
+        options.push({ value: 'list', label: 'List' });
+        return options;
+    }, [sessionModel.legacyHandler, sessionModel.hasTiming]);
+
+    const eventsView: EventsView = chosenEventsView && viewOptions.some((o) => o.value === chosenEventsView)
+        ? chosenEventsView
+        : viewOptions[0].value;
 
     useEffect(() => {
         if (sortedEvents.length === 0) {
@@ -1192,7 +1199,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
             return;
         }
         const hasSelection = selectedEventId ? sortedEvents.some((e) => e.id === selectedEventId) : false;
-        if (!hasSelection) setSelectedEventId(sortedEvents[0].id);
+        // Open on the first model call: wrapper spans and iterations usually carry no sections.
+        if (!hasSelection) setSelectedEventId((sortedEvents.find((e) => stepCategory(e.type) === 'model') ?? sortedEvents[0]).id);
     }, [sortedEvents, selectedEventId]);
 
     useEffect(() => {
@@ -1520,12 +1528,40 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                     </Card>
                 )}
 
+                {sessionModel.breakdown ? (
+                    <SessionTimeBreakdown breakdown={sessionModel.breakdown} onSelect={setSelectedEventId} />
+                ) : null}
+
+                {sessionModel.legacyHandler ? (
+                    <Alert icon={<IconInfoCircle size={16} />} color="gray" variant="light">
+                        This session was sent by the retired console-sdk LangChain handler, which records start and end as
+                        separate events without span ids or durations, so it can only be shown as a list. Switch to
+                        {' '}<Code>@cognipeer/observability</Code> to get grouped steps and a timeline.
+                    </Alert>
+                ) : null}
+
+                {sessionModel.resumed ? (
+                    <Alert icon={<IconInfoCircle size={16} />} color="yellow" variant="light">
+                        This session continues a turn that paused (for example for a tool approval), so its first
+                        iteration starts with the approved tools. The model call that requested them, and its tokens,
+                        are in the previous session of this thread.
+                        {session.threadId ? (
+                            <>
+                                {' '}
+                                <Anchor size="sm" onClick={() => router.push(`/dashboard/tracing/threads/${session.threadId}`)}>
+                                    Open the thread
+                                </Anchor>
+                            </>
+                        ) : null}
+                    </Alert>
+                ) : null}
+
                 {/* Two-pane workbench: this is now the dominant surface instead of
                     sharing 12 columns with a session-info sidebar. Splits at `lg`
                     (1200px) rather than the old `xl` (1440px) so it lands on more
                     real screens. */}
                 <Grid gutter="md" style={{ minHeight: 'calc(100vh - 420px)' }}>
-                    <Grid.Col span={{ base: 12, lg: 5 }}>
+                    <Grid.Col span={{ base: 12, lg: eventsView === 'timeline' ? 12 : 5 }}>
                         <Card withBorder p="md" h="100%">
                             <Stack gap="md" h="100%">
                                 <Group justify="space-between">
@@ -1533,17 +1569,13 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                         <Text fw={600}>Events</Text>
                                         <Text size="sm" c="dimmed">{sortedEvents.length} events captured</Text>
                                     </Stack>
-                                    {hasSpanIds && (
-                                        <Tooltip label={eventsView === 'list' ? 'Switch to tree view' : 'Switch to list view'}>
-                                            <ActionIcon
-                                                variant={eventsView === 'tree' ? 'filled' : 'light'}
-                                                size="sm"
-                                                color="blue"
-                                                onClick={() => setEventsView(eventsView === 'list' ? 'tree' : 'list')}
-                                            >
-                                                <IconBinaryTree size={14} />
-                                            </ActionIcon>
-                                        </Tooltip>
+                                    {viewOptions.length > 1 && (
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={eventsView}
+                                            onChange={(value) => setChosenEventsView(value as EventsView)}
+                                            data={viewOptions}
+                                        />
                                     )}
                                 </Group>
                                 {sortedEvents.length === 0 ? (
@@ -1552,18 +1584,20 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                     </Center>
                                 ) : (
                                     <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
-                                        {eventsView === 'tree' && hasSpanIds ? (
-                                            <Stack gap={4}>
-                                                {spanTree.map((node) => (
-                                                    <SpanTreeItem
-                                                        key={node.event.spanId || node.event.id}
-                                                        node={node}
-                                                        depth={0}
-                                                        selectedEventId={selectedEventId}
-                                                        onSelect={setSelectedEventId}
-                                                    />
-                                                ))}
-                                            </Stack>
+                                        {eventsView === 'grouped' ? (
+                                            <EventListGrouped
+                                                nodes={sessionModel.tree}
+                                                selectedEventId={selectedEventId}
+                                                onSelect={setSelectedEventId}
+                                            />
+                                        ) : eventsView === 'timeline' && sessionModel.breakdown ? (
+                                            <SessionWaterfall
+                                                nodes={sessionModel.tree}
+                                                windowStart={sessionModel.breakdown.windowStart}
+                                                windowEnd={sessionModel.breakdown.windowEnd}
+                                                selectedEventId={selectedEventId}
+                                                onSelect={setSelectedEventId}
+                                            />
                                         ) : (
                                             <EventListFlat
                                                 events={sortedEvents}
@@ -1577,7 +1611,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                         </Card>
                     </Grid.Col>
 
-                    <Grid.Col span={{ base: 12, lg: 7 }}>
+                    <Grid.Col span={{ base: 12, lg: eventsView === 'timeline' ? 12 : 7 }}>
                         <Card withBorder p="md" h="100%">
                             <Stack gap="md" h="100%">
                                 <Text fw={600}>Event detail</Text>

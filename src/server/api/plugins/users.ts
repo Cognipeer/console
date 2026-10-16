@@ -4,13 +4,17 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IUser } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
+import { isDelegationIssuer, listDelegationIssuers } from '@/lib/iam/delegationIssuers';
 import { forbiddenBody } from '@/lib/iam/enforce';
+import { createExternalAccount } from '@/lib/iam/externalAccount';
 import {
   isDirectoryManaged,
   isGroupDirectoryManaged,
   providerOf,
   type PeopleErrorCode,
 } from '@/lib/iam/identity';
+import { authz } from '@/lib/iam/routeAuthz';
+import { MAX_EXTERNAL_ISSUER_LENGTH, MAX_EXTERNAL_SUBJECT_LENGTH } from '@/lib/database/provider/externalIds';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import {
@@ -19,6 +23,16 @@ import {
   SERVICE_PERMISSION_LEVELS,
 } from '@/lib/security/rbac';
 import { createInvitationUrl } from '@/lib/services/auth/invitation';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
+import { sendAccessRequestEmails, sendProjectsAddedEmail } from '@/lib/services/users/accessMail';
+import {
+  applyProjectGrants,
+  inviteGrantsOf,
+  loadTenantProjects,
+  parseProjectGrants,
+  projectsAdministeredBy,
+  unknownProjectIds,
+} from '@/lib/services/users/projectGrants';
 import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
 import {
@@ -38,6 +52,7 @@ import {
   canActOnPerson,
   canAdministerPeople,
   checkDelete,
+  checkGroupMembership,
   checkPermissionsEdit,
   checkProfileChange,
   checkRoleChange,
@@ -73,15 +88,27 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_NAME_LENGTH = 2;
 const MAX_NAME_LENGTH = 120;
 const MAX_BULK_REASON_LENGTH = 500;
+const MAX_ACCESS_REQUEST_MESSAGE_LENGTH = 500;
+/** One access request per person in this long. */
+const ACCESS_REQUEST_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** Edits of one person per minute and per actor (a script, not a person, makes more). */
 const EDIT_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds: 60 };
 /** Bulk requests per minute and per actor. */
 const BULK_RATE_LIMIT: RateLimitConfig = { maxAttempts: 20, windowSeconds: 60 };
 
+/** The person's last request for access, as the screens read it (null = never asked). */
+function serializeAccessRequest(user: Pick<IUser, 'accessRequest'>) {
+  const request = user.accessRequest;
+  if (!request?.at) return null;
+  const at = new Date(request.at);
+  return Number.isNaN(at.getTime()) ? null : { at: at.toISOString(), message: request.message ?? null };
+}
+
 function serializeUser(user: IUser) {
   return {
     _id: user._id,
+    accessRequest: serializeAccessRequest(user),
     authProvider: providerOf(user),
     canLogin: user.canLogin !== false,
     createdAt: user.createdAt,
@@ -792,6 +819,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         email?: string;
         name?: string;
         projectId?: string;
+        /** Several projects, each with its own role: `[{ projectId, role: 'member' | 'project_admin' }]`. `projectId` stays for older callers. */
+        projects?: unknown;
         role?: string;
         sendInvite?: boolean;
         servicePermissions?: unknown;
@@ -826,6 +855,12 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const grantsResult = inviteGrantsOf(body);
+      if (!grantsResult.ok) {
+        return fail(reply, 400, 'invalid_body', grantsResult.error);
+      }
+      const grants = grantsResult.grants;
+
       const db = await getDatabase();
       const tenant = await db.findTenantById(session.tenantId);
       if (!tenant) {
@@ -833,6 +868,12 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       await db.switchToTenant(session.tenantDbName);
+      if (grants.length > 0) {
+        const missing = unknownProjectIds(grants, await loadTenantProjects(db, session.tenantId));
+        if (missing.length > 0) {
+          return fail(reply, 400, 'project_not_found', `Unknown project: ${missing.join(', ')}`);
+        }
+      }
       const trimmedEmail = (body.email ?? '').trim();
       if (trimmedEmail) {
         const existingUser = await db.findUserByEmail(trimmedEmail);
@@ -889,14 +930,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      let initialProjectIds: string[] | undefined;
-      if (
-        (body.role === 'user' || body.role === 'project_admin')
-        && body.projectId
-        && typeof body.projectId === 'string'
-      ) {
-        initialProjectIds = [body.projectId];
-      }
+      const initialProjectIds = grants.length > 0 ? grants.map((grant) => grant.projectId) : undefined;
 
       // Clamped to the inviting admin's own effective permission — an admin
       // can never grant a new user a higher service permission than they
@@ -923,16 +957,13 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
       });
 
-      if (
-        body.projectId
-        && typeof body.projectId === 'string'
-        && (body.role === 'user' || body.role === 'project_admin')
-      ) {
+      for (const grant of grants) {
         await db.upsertUserProject({
           invitedBy: session.userId,
-          projectId: body.projectId,
-          role: body.role === 'project_admin' ? 'project_admin' : 'member',
+          projectId: grant.projectId,
+          role: grant.role,
           servicePermissions: undefined,
+          source: 'manual',
           tenantId: session.tenantId,
           userId: String(user._id),
         });
@@ -1020,6 +1051,366 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
       logger.error('Create invitation link error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  /**
+   * Add one person to several projects at once, each with its own role. Who may: owners and admins, and a project admin
+   * of EVERY project named (like the single add under /projects/:id/members); the gate is the `projects` service, the
+   * per-project rule is here. Owners and admins already reach every project and an external account never joins one.
+   * A person who already has the role in a project is left alone (`skipped`); a different role is an update.
+   */
+  app.post('/users/:id/projects', { config: { ...authz.service('projects'), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const session = requireSessionContext(request);
+
+      let body: { projects?: unknown; servicePermissions?: unknown; notify?: unknown };
+      try {
+        body = readJsonBody<typeof body>(request);
+      } catch {
+        return fail(reply, 400, 'invalid_body', 'The request body is not valid JSON');
+      }
+      const parsed = parseProjectGrants(body?.projects);
+      if (!parsed.ok) return fail(reply, 400, 'invalid_body', parsed.error);
+      if (parsed.grants.length === 0) return fail(reply, 400, 'invalid_body', 'Name at least one project');
+      const custom = body.servicePermissions;
+      if (custom !== undefined && custom !== null && (typeof custom !== 'object' || Array.isArray(custom))) {
+        return fail(reply, 400, 'invalid_body', 'servicePermissions must be an object or null');
+      }
+      if (body.notify !== undefined && typeof body.notify !== 'boolean') {
+        return fail(reply, 400, 'invalid_body', 'notify must be true or false');
+      }
+
+      const db = await getDatabase();
+      await db.switchToTenant(session.tenantDbName);
+
+      const target = await findUserByIdSafe(db, id, session.tenantId);
+      if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
+      if (target.kind === 'external') {
+        return fail(reply, 400, 'external_user', 'External users cannot be project members');
+      }
+      if (target.role === 'owner' || target.role === 'admin') {
+        return fail(reply, 400, 'implicit_access', 'Owners and admins are implicitly assigned to all projects');
+      }
+
+      const projects = await loadTenantProjects(db, session.tenantId);
+      const skipped: Array<{ projectId: string; reason: string }> = [];
+      const known = parsed.grants.filter((grant) => {
+        if (projects.has(grant.projectId)) return true;
+        skipped.push({ projectId: grant.projectId, reason: 'project_not_found' });
+        return false;
+      });
+
+      const administered = await projectsAdministeredBy(db, { userId: session.userId, role: session.userRole }, known.map((grant) => grant.projectId));
+      if (known.some((grant) => !administered.has(grant.projectId))) {
+        return fail(reply, 403, 'forbidden', 'You can only add people to projects you administer');
+      }
+
+      // Service access a person is given is clamped to what the actor holds themself (the same rule as inviting a person).
+      const servicePermissions = custom === undefined || custom === null
+        ? custom
+        : (await resolveRequestedTokenScope(db, session.userId, custom)) ?? {};
+
+      const applied = await applyProjectGrants(db, {
+        actorId: session.userId,
+        grants: known,
+        servicePermissions,
+        tenantId: session.tenantId,
+        userId: String(target._id),
+      });
+      skipped.push(...applied.skipped);
+
+      if (applied.added.length > 0 || applied.updated.length > 0) {
+        recordPeopleAudit(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+          auditActorOf(request, session),
+          {
+            event: 'user.projects.add',
+            resourceType: 'user',
+            resourceId: String(target._id),
+            metadata: { added: applied.added, updated: applied.updated },
+          },
+        );
+      }
+
+      if (body.notify === true && applied.added.length > 0) {
+        const tenant = await db.findTenantById(session.tenantId);
+        // A mail that cannot be sent (no mail server, no address) never undoes the memberships.
+        await sendProjectsAddedEmail({
+          adderName: request.rbacUser?.name || session.userEmail || 'An administrator',
+          companyName: tenant?.companyName ?? '',
+          projects: applied.added.map((projectId) => ({
+            name: projects.get(projectId)?.name ?? projectId,
+            role: known.find((grant) => grant.projectId === projectId)?.role ?? 'member',
+          })),
+          to: target,
+        });
+      }
+
+      return reply.code(200).send({ added: applied.added, updated: applied.updated, skipped });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('Add user to projects error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  /** The issuers an external person can be added under: those with a token delegation in this workspace. */
+  app.get('/users/external/issuers', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!canAdministerPeople(session.userRole)) {
+        return fail(reply, 403, 'forbidden', 'Only owners and admins can manage external users');
+      }
+      return reply.code(200).send({ issuers: await listDelegationIssuers(session.tenantDbName) });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('List delegation issuers error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  /**
+   * Add an external person by hand: a person of a host application, known by `(issuer, subject)` - the same account a
+   * verified assertion would create on first sight (`createExternalAccount`). The issuer must be one the workspace trusts;
+   * the identity is unique. Groups may be given (never one that grants access); projects never.
+   */
+  app.post('/users/external', { config: { skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!canAdministerPeople(session.userRole)) {
+        return fail(reply, 403, 'forbidden', 'Only owners and admins can add external users');
+      }
+
+      let body: { issuer?: unknown; subject?: unknown; name?: unknown; email?: unknown; groupIds?: unknown; active?: unknown };
+      try {
+        body = readJsonBody<typeof body>(request);
+      } catch {
+        return fail(reply, 400, 'invalid_body', 'The request body is not valid JSON');
+      }
+
+      const issuer = typeof body.issuer === 'string' ? body.issuer.trim() : '';
+      const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+      if (!issuer || issuer.length > MAX_EXTERNAL_ISSUER_LENGTH) return fail(reply, 400, 'invalid_body', 'issuer is required');
+      if (!subject || subject.length > MAX_EXTERNAL_SUBJECT_LENGTH) return fail(reply, 400, 'invalid_body', 'subject is required');
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (body.name !== undefined && typeof body.name !== 'string') return fail(reply, 400, 'invalid_body', 'name must be text');
+      if (name.length > MAX_NAME_LENGTH) return fail(reply, 400, 'invalid_body', `name is at most ${MAX_NAME_LENGTH} characters`);
+      const email = typeof body.email === 'string' ? body.email.trim() : '';
+      if (body.email !== undefined && typeof body.email !== 'string') return fail(reply, 400, 'invalid_body', 'email must be text');
+      if (email && !EMAIL_PATTERN.test(email)) return fail(reply, 400, 'invalid_body', 'Invalid email format');
+      if (body.active !== undefined && typeof body.active !== 'boolean') return fail(reply, 400, 'invalid_body', 'active must be true or false');
+      let groupIds: string[] = [];
+      if (body.groupIds !== undefined) {
+        if (!Array.isArray(body.groupIds) || body.groupIds.some((g) => typeof g !== 'string' || !g.trim()) || body.groupIds.length > 50) {
+          return fail(reply, 400, 'invalid_body', 'groupIds must be a list of group ids');
+        }
+        groupIds = [...new Set((body.groupIds as string[]).map((g) => g.trim()))];
+      }
+
+      if (!(await isDelegationIssuer(session.tenantDbName, issuer))) {
+        return fail(reply, 400, 'invalid_issuer', 'This issuer is not configured in the workspace');
+      }
+
+      const db = await getDatabase();
+      const tenant = await db.findTenantById(session.tenantId);
+      if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
+      await db.switchToTenant(session.tenantDbName);
+
+      if (email && (await db.findUserByEmail(email))) {
+        return fail(reply, 409, 'email_taken', 'An account with this email address already exists');
+      }
+
+      const holders = await db.findUsersByExternalIdentity(issuer, subject);
+      if (holders.some((holder) => !holder.tenantId || String(holder.tenantId) === String(session.tenantId))) {
+        return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
+      }
+
+      // Groups first, so a refused group leaves no half-made account behind. An external account joins no group that grants access.
+      const groups = [];
+      for (const groupId of groupIds) {
+        const group = await db.findGroupById(groupId).catch(() => null);
+        if (!group || String(group.tenantId) !== String(session.tenantId)) {
+          return fail(reply, 400, 'group_not_found', 'Group not found');
+        }
+        const verdict = checkGroupMembership(
+          { id: session.userId, role: session.userRole },
+          targetOf({ role: 'user', kind: 'external', canLogin: false }),
+          group,
+        );
+        if (!verdict.ok) return refuse(reply, verdict);
+        groups.push(group);
+      }
+
+      // Counts toward the licence's user limit, like every other account (and like the one a verified assertion creates).
+      const defaultProject = await ensureDefaultProject(session.tenantDbName, session.tenantId, session.userId || session.tenantId);
+      const quota = await checkResourceQuota(
+        {
+          domain: 'global',
+          licenseType: tenant.licenseType as LicenseType,
+          projectId: defaultProject._id ? String(defaultProject._id) : '',
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userId: session.userId,
+        },
+        'users',
+        await db.iamCountUsers({ tenantId: session.tenantId }),
+      );
+      if (!quota.allowed) {
+        return fail(reply, 429, 'quota_exceeded', quota.reason || 'User quota exceeded');
+      }
+
+      const user = await createExternalAccount(db, {
+        email: email || undefined,
+        issuer,
+        licenseId: tenant.licenseType,
+        name: name || undefined,
+        subject,
+        tenantId: session.tenantId,
+      });
+
+      // No unique index (by design): of the accounts that hold the identity the OLDEST wins, a later one removes itself.
+      const rivals = await db.findUsersByExternalIdentity(issuer, subject);
+      const winner = rivals.find((candidate) => !candidate.tenantId || String(candidate.tenantId) === String(session.tenantId));
+      if (winner && String(winner._id) !== String(user._id)) {
+        await db.deleteUser(String(user._id)).catch((error: unknown) => {
+          logger.warn('Could not remove the duplicate of a concurrently created account', { error: error instanceof Error ? error.message : String(error) });
+        });
+        return fail(reply, 409, 'identity_taken', 'An account with this identity already exists');
+      }
+
+      for (const group of groups) {
+        await db.addGroupMember({
+          addedBy: session.userId,
+          groupId: String(group._id),
+          role: 'member',
+          source: 'local',
+          tenantId: session.tenantId,
+          userId: String(user._id),
+        });
+      }
+
+      let created: IUser = user;
+      if (body.active === false) {
+        const disabled = await setUserStatus({
+          actor: { type: 'user', userId: session.userId, email: session.userEmail, role: session.userRole },
+          ipAddress: getClientIp(request),
+          requestId: session.requestId,
+          status: 'disabled',
+          targetUserId: String(user._id),
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+        });
+        if (disabled.ok) created = disabled.user;
+      }
+
+      recordPeopleAudit(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+        auditActorOf(request, session),
+        {
+          event: 'user.external.create',
+          resourceType: 'user',
+          resourceId: String(user._id),
+          metadata: { issuer, groups: groups.map((group) => String(group._id)), active: body.active !== false },
+        },
+      );
+
+      return reply.code(201).send({ user: serializeUser(created) });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('Create external user error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  /**
+   * A signed-in person with no accessible project asks the workspace's owners and admins for access: the request is kept
+   * on the person (`accessRequest`, which the people list shows while they still have no project), the owners and admins
+   * are mailed (when mail is configured) and the request is audited. One request per person per 24 hours.
+   */
+  app.post('/users/me/access-request', { config: { ...authz.authenticated(), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+
+      let body: { message?: unknown };
+      try {
+        body = readJsonBody<{ message?: unknown }>(request) ?? {};
+      } catch {
+        body = {};
+      }
+      if (body.message !== undefined && body.message !== null && typeof body.message !== 'string') {
+        return fail(reply, 400, 'invalid_body', 'message must be text');
+      }
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
+      if (message.length > MAX_ACCESS_REQUEST_MESSAGE_LENGTH) {
+        return fail(reply, 400, 'invalid_body', `message is at most ${MAX_ACCESS_REQUEST_MESSAGE_LENGTH} characters`);
+      }
+
+      const db = await getDatabase();
+      const tenant = await db.findTenantById(session.tenantId);
+      if (!tenant) return reply.code(404).send({ error: 'Tenant not found' });
+      await db.switchToTenant(session.tenantDbName);
+
+      const user = await findUserByIdSafe(db, session.userId, session.tenantId);
+      if (!user) return fail(reply, 404, 'user_not_found', 'User not found');
+
+      // A stale id (a deleted project) is no access.
+      let hasAccess = user.role === 'owner' || user.role === 'admin';
+      if (!hasAccess) {
+        const reachable = await collectAccessibleProjectIds(db, String(user._id), user.projectIds);
+        if (reachable.length > 0) {
+          const existing = await loadTenantProjects(db, session.tenantId);
+          hasAccess = reachable.some((projectId) => existing.has(projectId));
+        }
+      }
+      if (hasAccess) {
+        return fail(reply, 409, 'already_has_access', 'You already have access to a project');
+      }
+
+      const now = new Date();
+      const last = user.accessRequest?.at ? new Date(user.accessRequest.at).getTime() : 0;
+      const waitMs = last + ACCESS_REQUEST_INTERVAL_MS - now.getTime();
+      if (last > 0 && waitMs > 0) {
+        return tooManyRequests(reply, Math.ceil(waitMs / 1000));
+      }
+
+      const accessRequest = { at: now, ...(message ? { message } : {}) };
+      await db.updateUser(String(user._id), { accessRequest });
+
+      recordPeopleAudit(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+        auditActorOf(request, session),
+        {
+          event: 'user.access.request',
+          resourceType: 'user',
+          resourceId: String(user._id),
+          metadata: { hasMessage: message.length > 0 },
+        },
+      );
+
+      await sendAccessRequestEmails(db, {
+        at: now,
+        companyName: tenant.companyName,
+        message: message || undefined,
+        requester: user,
+        tenantId: session.tenantId,
+      });
+
+      return reply.code(200).send({ accessRequest: { at: now.toISOString(), message: message || null } });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('Access request error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));

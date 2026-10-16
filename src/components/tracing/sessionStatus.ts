@@ -6,7 +6,7 @@
 import { statusVariant } from '@/lib/utils/tracingUtils';
 
 /** Statuses the sessions and threads filters offer, besides "all". */
-export const TRACING_STATUS_FILTER_VALUES = ['success', 'error', 'in_progress', 'abandoned'] as const;
+export const TRACING_STATUS_FILTER_VALUES = ['success', 'error', 'in_progress', 'paused', 'cancelled', 'abandoned'] as const;
 
 export type TracingStatusFilterValue = (typeof TRACING_STATUS_FILTER_VALUES)[number];
 
@@ -21,6 +21,7 @@ export const TRACING_STATUS_LABELED = [
   'partial',
   'cancelled',
   'paused',
+  'expired',
   'unknown',
 ] as const;
 

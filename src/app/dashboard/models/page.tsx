@@ -395,6 +395,21 @@ export default function ModelsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- open once per request id
   }, [dynamicEditRequested, modelsLoaded]);
 
+  // `?addModelsFor=<providerKey>` (after a provider was assigned to projects) opens the create flow
+  // with that provider preselected once the model list has loaded.
+  const addModelsFor = searchParams.get('addModelsFor');
+  const [presetProviderKey, setPresetProviderKey] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (!addModelsFor || !modelsLoaded) return;
+    setPresetProviderKey(addModelsFor);
+    setCreateModalOpen(true);
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete('addModelsFor');
+    const qs = next.toString();
+    router.replace(qs ? `/dashboard/models?${qs}` : '/dashboard/models');
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open once per request
+  }, [addModelsFor, modelsLoaded]);
+
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
@@ -937,6 +952,7 @@ export default function ModelsPage() {
         onClose={() => setCreateModalOpen(false)}
         providers={providers}
         defaultCategory={activeType === 'all' ? undefined : activeType}
+        defaultProviderKey={presetProviderKey}
         onCreated={handleModelCreated}
         onAddProvider={() => setProviderModalOpen(true)}
       />

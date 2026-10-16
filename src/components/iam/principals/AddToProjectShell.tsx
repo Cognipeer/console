@@ -10,7 +10,9 @@ import { isAbortError } from './client';
 import { directoryApi, type ProjectChoice } from './directoryApi';
 import { FormError } from './errors';
 
-export type ProjectRoleChoice = 'member' | 'project_admin';
+import AddUserProjectsShell from './AddUserProjectsShell';
+import type { ProjectRoleChoice } from './projectGrantModel';
+import type { ProjectRef } from './client';
 
 export interface ProjectMembershipSubject {
   /** A person joins as a project member; a group is assigned to the project. */
@@ -19,6 +21,10 @@ export interface ProjectMembershipSubject {
   name: string;
   /** Projects they already reach directly (left out of the offer). */
   projectIds: readonly string[];
+  /** A person: every project they reach and how (the multi-project form shows what is already theirs). */
+  memberships?: readonly ProjectRef[];
+  /** An external account never joins a project. */
+  external?: boolean;
 }
 
 interface AddToProjectShellProps {
@@ -28,8 +34,17 @@ interface AddToProjectShellProps {
   onDone: () => void;
 }
 
-/** A project and a role: a person becomes a member of it, or a group is assigned to it. */
-export default function AddToProjectShell({ open, subject, onClose, onDone }: AddToProjectShellProps) {
+/**
+ * A person is added to several projects at once, a role in each (`AddUserProjectsShell`);
+ * a group is assigned to one project with a role.
+ */
+export default function AddToProjectShell(props: AddToProjectShellProps) {
+  const { subject } = props;
+  if (subject?.kind === 'user') return <AddUserProjectsShell {...props} subject={subject} />;
+  return <AssignGroupProjectShell {...props} />;
+}
+
+function AssignGroupProjectShell({ open, subject, onClose, onDone }: AddToProjectShellProps) {
   const t = useTranslations('iamDirectory');
   const tCommon = useTranslations('common');
   const [projects, setProjects] = useState<ProjectChoice[]>([]);

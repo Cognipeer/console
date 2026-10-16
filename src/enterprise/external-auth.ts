@@ -70,3 +70,50 @@ export async function tryExternalAuthenticate(
   if (!registered) return { outcome: 'skip' };
   return registered(params);
 }
+
+// ── Directory project rules ─────────────────────────────────────────────────
+//
+// Read-only view of the projects the enterprise directory integrations
+// (SSO/OIDC, LDAP) hand to users on sign-in. The core only DISPLAYS these
+// (project list badge, project overview "Directory" card); the overlay owns
+// the settings and applies them during provisioning. Nothing is registered in
+// the community edition → `listDirectoryProjectRules` returns `[]`.
+
+export interface DirectoryProjectRule {
+  /** Which directory integration owns the rule. */
+  source: 'oidc' | 'ldap';
+  /** Human label of the integration, e.g. "Okta" or "Corporate LDAP". */
+  label?: string;
+  /**
+   * `fallback` — applied only when sign-in (incl. group rules) leaves the user
+   * with no project; `always` — applied to every provisioned user.
+   */
+  mode: 'fallback' | 'always';
+  applyOn: 'first_sign_in' | 'every_sign_in';
+  projects: Array<{ projectId: string; role: 'project_admin' | 'member' }>;
+}
+
+export type DirectoryProjectRulesProvider = (
+  tenantId: string,
+) => Promise<DirectoryProjectRule[]>;
+
+let rulesProvider: DirectoryProjectRulesProvider | null = null;
+
+/** Register the rules provider. Called once at boot by the enterprise overlay. */
+export function registerDirectoryProjectRulesProvider(
+  fn: DirectoryProjectRulesProvider | null,
+): void {
+  rulesProvider = fn;
+}
+
+/** Directory project rules for a tenant; `[]` when none are wired or on error. */
+export async function listDirectoryProjectRules(
+  tenantId: string,
+): Promise<DirectoryProjectRule[]> {
+  if (!rulesProvider) return [];
+  try {
+    return await rulesProvider(tenantId);
+  } catch {
+    return [];
+  }
+}

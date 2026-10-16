@@ -115,9 +115,19 @@ export interface LimitFilters {
   scope: QuotaScope | 'all';
   domain: QuotaDomain | 'all';
   query: string;
+  /** Only the limits that apply inside this project (`?projectId=`); empty / absent = every project. */
+  projectId?: string;
 }
 
 export const NO_FILTERS: LimitFilters = { scope: 'all', domain: 'all', query: '' };
+
+/**
+ * Whether a limit applies inside a project: it is that project's own, or it is
+ * tenant-wide (a group or agent-run limit with no project, which holds in every project).
+ */
+export function appliesToProject(row: Pick<QuotaPolicy, 'scope' | 'domain' | 'projectId'>, projectId: string): boolean {
+  return row.projectId ? String(row.projectId) === projectId : isTenantWideKind(row);
+}
 
 /** What a search matches: the policy's name, what it points at (name, e-mail, id) and its project. */
 export function limitSearchText(row: LimitRow): string {
@@ -136,6 +146,7 @@ export function filterLimitRows(rows: readonly LimitRow[], filters: LimitFilters
   return rows.filter((row) => {
     if (filters.scope !== 'all' && row.scope !== filters.scope) return false;
     if (filters.domain !== 'all' && row.domain !== filters.domain) return false;
+    if (filters.projectId && !appliesToProject(row, filters.projectId)) return false;
     return !query || includesFolded(limitSearchText(row), query);
   });
 }

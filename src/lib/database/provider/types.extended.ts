@@ -1716,6 +1716,8 @@ export interface IamUserFilter {
    * the project. (Owners and admins are in every project; they match only when they are listed explicitly.)
    */
   projectId?: string;
+  /** true = only accounts that asked for access (`IUser.accessRequest` is set), false = leave those out. */
+  accessRequested?: boolean;
 }
 
 export interface IamUserQuery extends IamUserFilter, IamPageRequest {
