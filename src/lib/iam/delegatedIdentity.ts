@@ -44,6 +44,7 @@ import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { lookupDefaultProjectId } from './projectNarrowing';
 import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import { MAX_EXTERNAL_ISSUER_LENGTH, MAX_EXTERNAL_SUBJECT_LENGTH } from '@/lib/database/provider/externalIds';
+import { DELEGATED_PASSWORD_PLACEHOLDER, createExternalAccount, delegatedAccountBase } from './externalAccount';
 import { syncDelegatedGroups, validateGroupMap, type DelegatedGroupMapEntry, type GroupSyncResult } from './delegatedGroups';
 
 const logger = createLogger('iam:delegated-identity');
@@ -132,8 +133,7 @@ export class DelegatedAccountRefusal extends Error {
   }
 }
 
-/** Not a hash of anything: no password can ever match it, so the account cannot sign in by password. */
-export const DELEGATED_PASSWORD_PLACEHOLDER = '!delegated-identity';
+export { DELEGATED_PASSWORD_PLACEHOLDER };
 
 // ── mapping check ────────────────────────────────────────────────────────
 
@@ -495,32 +495,17 @@ async function provision(db: DatabaseProvider, input: ProvisionInput): Promise<{
   }
 
   const tenant = await (await getDatabase()).findTenantById(tenantId);
-  const base = {
-    tenantId,
-    password: DELEGATED_PASSWORD_PLACEHOLDER,
-    role: 'user' as const,
-    licenseId: tenant?.licenseType ?? 'FREE',
-    features: [] as string[],
-    mustChangePassword: false,
-    externalIds: { [issuer]: subject },
-  };
+  const licenseId = tenant?.licenseType ?? 'FREE';
   const user = jit === 'person'
     ? await db.createUser({
-      ...base,
+      ...delegatedAccountBase({ tenantId, issuer, subject, licenseId }),
       email: email as string,
       name: name ?? (email as string).split('@')[0],
       // Managed by the identity provider: name, email and password are not edited here.
       authProvider: 'oidc',
       canLogin: true,
     })
-    : await db.createUser({
-      ...base,
-      email: email ?? '',
-      name: name ?? email ?? subject,
-      authProvider: 'local',
-      canLogin: false,
-      kind: 'external',
-    });
+    : await createExternalAccount(db, { tenantId, issuer, subject, licenseId, email, name });
 
   // No unique index (by design): of the accounts that now hold the identity, the OLDEST wins; a later one removes itself.
   const holders = await db.findUsersByExternalIdentity(issuer, subject);

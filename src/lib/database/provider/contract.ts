@@ -256,6 +256,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;
   listUserProjectsByUser(userId: string): Promise<IUserProject[]>;
   listUserProjectsByProject(projectId: string): Promise<IUserProject[]>;
+  /** Every membership row of the tenant in one read (project stats / overview — no per-project N+1). */
+  listUserProjectsByTenant(tenantId: string): Promise<IUserProject[]>;
   upsertUserProject(data: Omit<IUserProject, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUserProject>;
   deleteUserProject(userId: string, projectId: string): Promise<boolean>;
   deleteUserProjectsByProject(projectId: string): Promise<void>;
@@ -280,6 +282,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   removeGroupProject(groupId: string, projectId: string): Promise<boolean>;
   listGroupProjectsByProject(projectId: string): Promise<IGroupProject[]>;
   listGroupProjectsByGroup(groupId: string): Promise<IGroupProject[]>;
+  /** Every group→project grant of the tenant in one read. */
+  listGroupProjectsByTenant(tenantId: string): Promise<IGroupProject[]>;
+  /** Every group membership row of the tenant in one read. */
+  listGroupMembersByTenant(tenantId: string): Promise<IGroupMember[]>;
   /** Cascade helpers used when a group is deleted. */
   deleteGroupMembersByGroup(groupId: string): Promise<void>;
   deleteGroupProjectsByGroup(groupId: string): Promise<void>;

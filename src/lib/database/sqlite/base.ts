@@ -345,6 +345,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateEnc', 'storageStateEnc TEXT');
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateMeta', 'storageStateMeta TEXT');
 
+    // Result of the last "Test connection" of a provider (JSON). Nullable, no backfill.
+    this.ensureTableColumn(db, TABLES.providers, 'lastTest', 'lastTest TEXT');
+
+    // Project membership origin ('manual' | 'directory'). Legacy rows read as
+    // NULL, which the mapper treats as 'manual' — no data migration needed.
+    this.ensureTableColumn(db, TABLES.userProjects, 'source', 'source TEXT');
+
     // Browser flows: the declared return shape, and the raw captures a run
     // resolved it from. A flow recorded before this change updates through
     // the same UPDATE statement, so the columns have to exist for it too.
@@ -1046,6 +1053,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.users, 'disabledAt', 'disabledAt TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledBy', 'disabledBy TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledReason', 'disabledReason TEXT');
+    // Last "request access" of a person (JSON `{at, message?}`). Nullable, no backfill.
+    this.ensureTableColumn(db, TABLES.users, 'accessRequest', 'accessRequest TEXT');
     // Quota group scope: 'perMember' | 'shared'. Nullable with no default — a
     // NULL is read back as `undefined`, which the guard treats as perMember, and
     // only `scope = 'group'` rows carry it, so existing rows need no backfill.

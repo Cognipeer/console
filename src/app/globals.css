@@ -1660,6 +1660,9 @@ textarea.ds-input { height: auto; padding: 10px 12px; line-height: 1.5; resize: 
   margin-bottom: 32px;
 }
 .form-section:last-child { margin-bottom: 0; }
+/* A callout between sections keeps the rhythm of the sections instead of touching the next heading. */
+.form-form > .mantine-Alert-root { margin-bottom: 24px; }
+.form-form > .mantine-Alert-root:last-child { margin-bottom: 0; }
 .form-section-header {
   display: flex;
   align-items: center;

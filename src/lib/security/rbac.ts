@@ -394,10 +394,27 @@ export function resetPathServiceResolversForTests(): void {
   pathServiceResolvers.clear();
 }
 
+/**
+ * Paths that sit under a mapped prefix but are NOT gated by its service. First match wins; `null` = no service (the route
+ * declares `authz.authenticated()` itself, so any signed-in caller of the tenant reaches it - for what a person does to
+ * their own account).
+ *
+ *   /api/users/me/...              what a person does about themself (asking for access); nothing else may live here
+ *                                  without declaring how it is authorized
+ *   /api/users/:id/projects        adding a person to projects: the `projects` service, like /api/projects/:id/members;
+ *                                  the handler lets only owners, admins and the project admin of EVERY project named through
+ */
+const PATH_SERVICE_OVERRIDES: Array<{ pattern: RegExp; service: PermissionService | null }> = [
+  { pattern: /^\/api\/users\/me(\/|$)/, service: null },
+  { pattern: /^\/api\/users\/[^/]+\/projects$/, service: 'projects' },
+];
+
 export function getPermissionServiceForPath(pathname: string): PermissionService | null {
   const normalized = pathname.endsWith('/') && pathname !== '/'
     ? pathname.slice(0, -1)
     : pathname;
+  const override = PATH_SERVICE_OVERRIDES.find(({ pattern }) => pattern.test(normalized));
+  if (override) return override.service;
   for (const [prefix, resolver] of pathServiceResolvers) {
     if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
       let resolved: PermissionService | null = null;

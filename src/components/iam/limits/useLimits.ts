@@ -173,7 +173,7 @@ export function useLimits(): UseLimits {
 
   const remove = useCallback(
     async (row: LimitRow) => {
-      // Addressed by the project it is in, as the project Quotas tab does.
+      // Addressed by the project it is in, so the server can confirm which project the policy is in.
       const query = row.projectId ? `?projectId=${encodeURIComponent(row.projectId)}` : '';
       await call(`/api/quota/policies/${encodeURIComponent(String(row._id))}${query}`, { method: 'DELETE' });
       await reload();

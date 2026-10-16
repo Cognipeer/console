@@ -41,6 +41,7 @@ import {
   tokenExceedsPolicy,
 } from '@/lib/services/apiTokens/tokenPolicy';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { inviteGrantsOf, loadTenantProjects, unknownProjectIds } from '@/lib/services/users/projectGrants';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { canActOnTokensOf, EXTERNAL_TOKEN_OWNER_REFUSAL } from '@/lib/services/apiTokens/tokenGovernance';
@@ -78,7 +79,15 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
 
-      const body = readJsonBody<{ email?: string; name?: string; role?: string; servicePermissions?: unknown }>(request);
+      const body = readJsonBody<{
+        email?: string;
+        name?: string;
+        /** Memberships to create with the account: `[{ projectId, role: 'member' | 'project_admin' }]` (an admin has them all). */
+        projects?: unknown;
+        projectId?: string;
+        role?: string;
+        servicePermissions?: unknown;
+      }>(request);
       if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {
         return reply.code(400).send({ error: 'Name is required' });
       }
@@ -104,7 +113,16 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid email format' });
       }
 
+      const grantsResult = inviteGrantsOf({ projects: body.projects, projectId: body.projectId, role });
+      if (!grantsResult.ok) return reply.code(400).send({ error: grantsResult.error });
+      const grants = grantsResult.grants;
+
       const db = await getDatabase();
+
+      if (grants.length > 0) {
+        const missing = unknownProjectIds(grants, await loadTenantProjects(db, auth.tenantId));
+        if (missing.length > 0) return reply.code(400).send({ error: `Unknown project: ${missing.join(', ')}` });
+      }
 
       if (trimmedEmail) {
         const existing = await db.findUserByEmail(trimmedEmail);
@@ -153,10 +171,23 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         mustChangePassword: false,
         name: body.name.trim(),
         password: hashedPassword,
+        projectIds: grants.length > 0 ? grants.map((grant) => grant.projectId) : undefined,
         role: role as 'user' | 'admin' | 'project_admin',
         servicePermissions,
         tenantId: auth.tenantId,
       });
+
+      for (const grant of grants) {
+        await db.upsertUserProject({
+          invitedBy: String(auth.tokenRecord.userId),
+          projectId: grant.projectId,
+          role: grant.role,
+          servicePermissions: undefined,
+          source: 'manual',
+          tenantId: auth.tenantId,
+          userId: String(user._id),
+        });
+      }
 
       return reply.code(201).send({ user: serializeUser(user) });
     } catch (error) {

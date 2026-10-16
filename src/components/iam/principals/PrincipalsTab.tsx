@@ -30,6 +30,7 @@ import {
   IconUserEdit,
   IconUserOff,
   IconUserPlus,
+  IconFolderPlus,
   IconUsersGroup,
 } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn, type DataGridRowAction } from '@/components/common/ui/DataGrid';
@@ -72,6 +73,7 @@ import MembershipShell from './MembershipShell';
 import NewTokenShell from './NewTokenShell';
 import { PagerControls, useCursorPager } from './pager';
 import { principalHref } from '../links';
+import { writeLastListUrl } from './lastList';
 import { replaceUrlParams } from './urlState';
 import { useBulkFlow } from './useBulkFlow';
 import { usePeopleActions } from './usePeopleActions';
@@ -131,6 +133,11 @@ export default function PrincipalsTab(_props: { canManage: boolean }) {
     // Read once per address.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlType, urlId]);
+
+  // The list view (kind, search, filters) is remembered for the session: a person's page leads back to it.
+  useEffect(() => {
+    writeLastListUrl(`${window.location.pathname}${window.location.search}`);
+  }, [paramsKey, type, filters]);
 
   // Query strings this tab wrote itself: the router reports them back, and they must not be re-read as navigation.
   const written = useRef(new Set<string>([paramsKey]));
@@ -350,6 +357,13 @@ export default function PrincipalsTab(_props: { canManage: boolean }) {
               </div>
             ) : null}
           </div>
+          {row.accessRequest ? (
+            <Tooltip label={row.accessRequest.message ?? td('badges.requestedAccessHint')} withArrow multiline w={260}>
+              <Badge variant="light" color="orange" radius="sm" tt="none" style={NO_SHRINK} data-testid="requested-access-badge">
+                {td('badges.requestedAccess')}
+              </Badge>
+            </Tooltip>
+          ) : null}
         </UnstyledButton>
       ),
     };
@@ -647,6 +661,9 @@ export default function PrincipalsTab(_props: { canManage: boolean }) {
         } else if (may('disable', !isSelf && !isOwner)) {
           list.push({ id: 'disable', label: td('actions.disable'), icon: <IconUserOff size={14} />, onClick: () => void actions.disable(person) });
         }
+        if (row.kind !== 'external' && !isOwner && row.role !== 'admin' && may('manageProjects', true)) {
+          list.push({ id: 'projects', label: td('actions.addToProjects'), icon: <IconFolderPlus size={14} />, onClick: () => openFromList(row, 'project') });
+        }
         if (may('manageGroups', true)) {
           list.push({ id: 'groups', label: td('actions.addToGroups'), icon: <IconUsersGroup size={14} />, onClick: () => openFromList(row, 'memberships') });
         }
@@ -907,8 +924,8 @@ export default function PrincipalsTab(_props: { canManage: boolean }) {
 
       {/* creation forms */}
       <InvitePersonShell
-        open={overlay.new === 'person' || overlay.new === 'service'}
-        mode={overlay.new === 'service' ? 'service' : 'person'}
+        open={overlay.new === 'person' || overlay.new === 'service' || overlay.new === 'external'}
+        mode={overlay.new === 'service' ? 'service' : overlay.new === 'external' ? 'external' : 'person'}
         assignableRoles={caps.assignableRoles}
         onCreated={() => refresh()}
         onClose={(created?: InviteResult) => {

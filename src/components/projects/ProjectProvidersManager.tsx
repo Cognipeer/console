@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Modal, Select, Stack } from '@mantine/core';
+import { Button, Modal, Select, Stack, Text } from '@mantine/core';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
@@ -48,8 +48,11 @@ function statusVariant(status: string) {
 export default function ProjectProvidersManager({ projectId }: { projectId: string }) {
   const { confirmAction } = useConfirm();
   const tq = useTranslations('common.confirm.qos');
+  const tCommon = useTranslations('common');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
+  // The person may not read providers at all (a project admin without the providers permission).
+  const [forbidden, setForbidden] = useState(false);
   const [tenantScope, setTenantScope] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -63,10 +66,16 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
         const data = (await resTenant.json()) as { providers?: Provider[] };
         setProviders(data.providers ?? []);
         setTenantScope(true);
+        setForbidden(false);
         return;
       }
 
       const resProject = await fetch('/api/providers', { cache: 'no-store' });
+      if (resProject.status === 403) {
+        setProviders([]);
+        setForbidden(true);
+        return;
+      }
       if (!resProject.ok) {
         const body = await resProject.json().catch(() => null);
         throw new Error(body?.error || 'Failed to load providers');
@@ -74,6 +83,7 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
       const data = (await resProject.json()) as { providers?: Provider[] };
       setProviders(data.providers ?? []);
       setTenantScope(false);
+      setForbidden(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load providers';
       notifications.show({ title: 'Project providers', message, color: 'red' });
@@ -193,6 +203,16 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
   ];
 
   const records = tenantScope ? assignedProviders : rows;
+
+  if (forbidden) {
+    return (
+      <div className="ds-empty" style={{ padding: 48 }}>
+        <Text size="sm" c="dimmed">
+          {tCommon('forbidden')}
+        </Text>
+      </div>
+    );
+  }
 
   return (
     <>

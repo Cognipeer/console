@@ -1,20 +1,20 @@
 'use client';
 
+import { Suspense } from 'react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import ProjectsManagement from '@/components/settings/ProjectsManagement';
+import ProjectsList from '@/components/projects/ProjectsList';
 import { useTranslations } from '@/lib/i18n';
 
 export default function ProjectsPage() {
   const t = useTranslations('navigation');
+  const tList = useTranslations('projectsAccess.list');
 
   return (
     <PageContainer>
-      <PageHeader
-        eyebrow="Configure · Projects"
-        title={t('projects')}
-        subtitle={t('projectsDescription')}
-      />
-      <ProjectsManagement />
+      <PageHeader eyebrow={tList('eyebrow')} title={t('projects')} subtitle={tList('subtitle')} />
+      <Suspense fallback={null}>
+        <ProjectsList />
+      </Suspense>
     </PageContainer>
   );
 }

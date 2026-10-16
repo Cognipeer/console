@@ -311,7 +311,7 @@ describe('PrincipalDetailView for a token and a group', () => {
       'user',
       'u1',
     );
-    expect(view('en', { detail: viaGroup })).toContain('Via group Engineering');
+    expect(view('en', { detail: viaGroup })).toContain('Group: Engineering');
   });
 
   it('lists the owned tokens with their prefix, last use and scope', () => {

@@ -15,6 +15,8 @@ import { formatDateTime, formatRelativeTime, translateOr, type Translate } from 
 import { providerLabel } from './managed';
 import { badgeVariant, principalColor, roleColor, statusColor } from './visuals';
 
+import { sectionAnchor } from './sectionNav';
+
 const NS = 'iamPrincipals';
 
 export function Section({
@@ -23,15 +25,25 @@ export function Section({
   right,
   children,
   testId,
+  anchor,
 }: {
   title: string;
   hint?: string;
   right?: ReactNode;
   children: ReactNode;
   testId?: string;
+  /** The section's name on the jump bar: becomes the frame's `id` (`section-<anchor>`). */
+  anchor?: string;
 }) {
   return (
-    <Paper withBorder p="md" radius="md" data-testid={testId}>
+    <Paper
+      withBorder
+      p="md"
+      radius="md"
+      data-testid={testId}
+      id={anchor ? sectionAnchor(anchor) : undefined}
+      style={anchor ? { scrollMarginTop: 56 } : undefined}
+    >
       <Stack gap="sm">
         <Group justify="space-between" align="flex-start" wrap="wrap" gap="xs">
           <div style={{ minWidth: 0, flex: '1 1 200px' }}>

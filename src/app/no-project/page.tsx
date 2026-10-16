@@ -10,6 +10,7 @@ import {
   IconUserOff,
 } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
+import RequestAccess from '@/components/iam/principals/RequestAccess';
 import { useTranslations } from '@/lib/i18n';
 
 export default function NoProjectPage() {
@@ -78,6 +79,7 @@ export default function NoProjectPage() {
         >
           {t('note')}
         </p>
+        <RequestAccess />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Button
             className="auth-cta-primary"

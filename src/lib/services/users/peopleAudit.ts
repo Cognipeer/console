@@ -20,6 +20,10 @@ export type PeopleAuditEvent =
   | 'user.permissions.update'
   | 'user.delete'
   | 'user.bulk'
+  // access: memberships added in bulk, an external account added by hand, a person asking for access
+  | 'user.projects.add'
+  | 'user.external.create'
+  | 'user.access.request'
   | 'group.member.add'
   | 'group.member.remove'
   // verified identities (lib/iam/delegatedIdentity.ts): an account created for one, an account linked to one, a group created for an issuer

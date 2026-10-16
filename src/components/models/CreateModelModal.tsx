@@ -91,7 +91,9 @@ type CreateModelModalProps = {
   providers: ModelProviderView[];
   /** Pre-selects this category when the modal opens (e.g. from a type-filtered list). */
   defaultCategory?: ModelCategory;
-  onCreated: (options: { model: IModel; provider: ModelProviderView }) => void;
+  /** Pre-selects this provider (by key) when the modal opens, when the project can use it. */
+  defaultProviderKey?: string;
+  onCreated:(options: { model: IModel; provider: ModelProviderView }) => void;
   /** Opens the "Add provider" flow when no provider is available for this project. */
   onAddProvider?: () => void;
 };
@@ -178,6 +180,7 @@ export default function CreateModelModal({
   onClose,
   providers,
   defaultCategory,
+  defaultProviderKey,
   onCreated,
   onAddProvider,
 }: CreateModelModalProps) {
@@ -282,6 +285,9 @@ export default function CreateModelModal({
       // Honour the category the user was filtering by, when the provider supports it.
       if (defaultCategory) {
         setFieldValue('category', defaultCategory);
+      }
+      if (defaultProviderKey && providers.some((p) => p.key === defaultProviderKey)) {
+        setFieldValue('providerKey', defaultProviderKey);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

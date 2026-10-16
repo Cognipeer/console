@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -29,8 +28,13 @@ import DetailShell, {
 } from '@/components/common/ui/DetailShell';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import ProviderConnectionCard from '@/components/providers/ProviderConnectionCard';
+import ProviderProjectsTab, { useProviderUsage } from '@/components/providers/ProviderProjectsTab';
+import { AssignProviderShell } from '@/components/providers/ProviderAssignStep';
+import { effectiveProjectIds, usageSummary } from '@/components/providers/providerAccessModel';
 import {
   resolveServiceCatalogEntry,
   serviceGlyph,
@@ -79,7 +83,14 @@ export default function ProviderDetailPage() {
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
+  const t = useTranslations('providerAccess.detail');
+  const tList = useTranslations('providerAccess.list');
+  const role = useDashboardUser()?.role;
+  const canManage = role === 'owner' || role === 'admin';
   const providerId = params?.providerId;
+  const [activeTab, setActiveTab] = useState<string>('overview');
+  const [assignOpen, setAssignOpen] = useState(false);
+  const usage = useProviderUsage(providerId);
 
   const [provider, setProvider] = useState<ProviderRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -224,8 +235,13 @@ export default function ProviderDetailPage() {
     label: provider.label,
   });
 
-  const projectCount =
-    (provider.projectIds?.length ?? 0) + (provider.projectId ? 1 : 0);
+  const assignedIds = effectiveProjectIds(provider);
+  const summary = usage.entries.length > 0
+    ? usageSummary(usage.entries)
+    : { assigned: assignedIds.length, total: assignedIds.length };
+  const reloadAll = async () => {
+    await Promise.all([loadProvider(true), usage.reload()]);
+  };
 
   const actions = (
     <>
@@ -323,9 +339,32 @@ export default function ProviderDetailPage() {
         </>
       }
       actions={actions}
+      tabs={[
+        { id: 'overview', label: t('tabOverview') },
+        { id: 'projects', label: t('tabProjects'), count: summary.assigned },
+      ]}
+      activeTab={activeTab}
+      onTabChange={setActiveTab}
     >
+      {activeTab === 'projects' ? (
+        <ProviderProjectsTab
+          providerId={String(provider._id)}
+          providerName={provider.label}
+          entries={usage.entries}
+          loading={usage.loading}
+          error={usage.error}
+          canEdit={canManage}
+          onChanged={reloadAll}
+        />
+      ) : (
       <DetailTwoCol narrowAside>
         <Stack gap="md">
+          <ProviderConnectionCard
+            providerId={String(provider._id)}
+            lastTest={provider.lastTest}
+            canTest={canManage}
+            onTested={reloadAll}
+          />
           <DetailCard>
             <ResourceUsageSection type="provider" id={String(provider._id)} />
           </DetailCard>
@@ -483,21 +522,23 @@ export default function ProviderDetailPage() {
 
           <DetailCard title="Usage">
             <div className="ds-row-between" style={{ padding: '6px 0', fontSize: 12.5 }}>
-              <span className="ds-muted">Assigned to projects</span>
-              <span className="ds-mono">{projectCount}</span>
+              <span className="ds-muted">
+                {summary.assigned > 0
+                  ? t('usedBy', { assigned: summary.assigned, total: summary.total })
+                  : t('usedByNone')}
+              </span>
             </div>
-            {projectCount > 0 ? (
-              <Button
-                component={Link}
-                href="/dashboard/projects"
-                variant="subtle"
-                size="xs"
-                mt="sm"
-                style={{ paddingLeft: 0 }}
-              >
-                View assignments
-              </Button>
-            ) : null}
+            <Button
+              variant="subtle"
+              size="xs"
+              mt="sm"
+              style={{ paddingLeft: 0 }}
+              onClick={() =>
+                summary.assigned === 0 && canManage ? setAssignOpen(true) : setActiveTab('projects')
+              }
+            >
+              {summary.assigned === 0 && canManage ? tList('assign') : t('tabProjects')}
+            </Button>
           </DetailCard>
 
           <DetailCard title="Identifiers">
@@ -534,6 +575,24 @@ export default function ProviderDetailPage() {
           </DetailCard>
         </Stack>
       </DetailTwoCol>
+      )}
+
+      {assignOpen ? (
+        <AssignProviderShell
+          opened
+          provider={{
+            id: String(provider._id),
+            name: provider.label,
+            key: provider.key,
+            domain: provider.type,
+          }}
+          initialProjectIds={assignedIds}
+          onClose={() => {
+            setAssignOpen(false);
+            void reloadAll();
+          }}
+        />
+      ) : null}
 
       <ProviderConfigModal
         opened={editOpen}

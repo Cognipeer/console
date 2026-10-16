@@ -17,6 +17,7 @@ export type ListType = 'user' | 'group' | 'token';
 
 export const USER_ROLES = ['owner', 'admin', 'project_admin', 'user'] as const;
 export const USER_STATUS_FILTERS = ['active', 'disabled', 'invited'] as const;
+export const ACCESS_FILTERS = ['requested'] as const;
 export const USER_KINDS = ['person', 'service', 'external'] as const;
 export const USER_SOURCES = ['local', 'directory', 'ldap', 'oidc', 'saml'] as const;
 export const GROUP_SOURCES = ['local', 'directory', 'ldap', 'oidc'] as const;
@@ -48,6 +49,8 @@ export interface ListState {
   ownerId: string;
   /** Users: people who reach the project. Groups: groups assigned to it. Tokens: minted in it. */
   projectId: string;
+  /** Users: 'requested' = people who asked for access and still have no project. */
+  access: string;
   /** Tokens: 'true' = scoped only, 'false' = unscoped only. */
   scoped: string;
   sort: UserSort;
@@ -63,6 +66,7 @@ export const EMPTY_LIST_STATE: ListState = {
   groupId: '',
   ownerId: '',
   projectId: '',
+  access: '',
   scoped: '',
   sort: 'name',
   dir: 'asc',
@@ -79,6 +83,7 @@ export const LIST_PARAM_KEYS = [
   'project',
   'ownerId',
   'scoped',
+  'access',
   'sort',
   'dir',
   // an older name of `project`: read, and cleared from the address bar when the view is written
@@ -90,7 +95,7 @@ const oneOf = <T extends string>(allowed: readonly T[], value: string | null | u
 
 /** Which list parameters mean something for a segment. */
 const APPLICABLE: Record<ListType, ReadonlySet<string>> = {
-  user: new Set(['q', 'role', 'status', 'kind', 'source', 'group', 'project', 'sort', 'dir']),
+  user: new Set(['q', 'role', 'status', 'kind', 'source', 'group', 'project', 'access', 'sort', 'dir']),
   group: new Set(['q', 'source', 'project']),
   token: new Set(['q', 'status', 'ownerId', 'project', 'scoped']),
 };
@@ -127,6 +132,7 @@ export function parseListState(type: ListType, params: ParamReader): ListState {
     state.source = oneOf(USER_SOURCES, params.get('source'));
     state.groupId = idOf('group', 'groupId');
     state.projectId = idOf('project', 'projectId');
+    state.access = oneOf(ACCESS_FILTERS, params.get('access'));
     state.sort = oneOf(USER_SORTS, params.get('sort')) || EMPTY_LIST_STATE.sort;
     state.dir = oneOf(SORT_DIRECTIONS, params.get('dir')) || EMPTY_LIST_STATE.dir;
   } else if (type === 'group') {
@@ -159,6 +165,7 @@ export function listStateToParams(type: ListType, state: ListState): Record<stri
     if (state.source) out.source = state.source;
     if (state.groupId) out.group = state.groupId;
     if (state.projectId) out.project = state.projectId;
+    if (state.access) out.access = state.access;
     if (state.sort !== EMPTY_LIST_STATE.sort) out.sort = state.sort;
     if (state.dir !== EMPTY_LIST_STATE.dir) out.dir = state.dir;
   } else if (type === 'group') {
@@ -193,7 +200,8 @@ export function activeFilterCount(type: ListType, state: ListState): number {
       (state.kind ? 1 : 0) +
       (state.source ? 1 : 0) +
       (state.groupId ? 1 : 0) +
-      (state.projectId ? 1 : 0)
+      (state.projectId ? 1 : 0) +
+      (state.access ? 1 : 0)
     );
   }
   if (type === 'group') return (state.source ? 1 : 0) + (state.projectId ? 1 : 0);
@@ -235,7 +243,7 @@ export function normalizePageSize(value: unknown): number {
 
 // ── overlays (full-screen forms) ──────────────────────────────────────────
 
-export const NEW_KINDS = ['person', 'service', 'group', 'token', 'import'] as const;
+export const NEW_KINDS = ['person', 'service', 'external', 'group', 'token', 'import'] as const;
 export const EDIT_KINDS = ['profile', 'role', 'access', 'memberships', 'project', 'group', 'token'] as const;
 
 export type NewKind = (typeof NEW_KINDS)[number];
