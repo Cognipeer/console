@@ -5,6 +5,7 @@
 
 import { formatMetricValue, metricUnit, operatorSymbol, type AlertCatalog, type TFn } from './alertCatalog';
 import type { AlertConditionMode, IncidentDto, IncidentSeverity, IncidentStatus } from './alertTypes';
+import { pluralKey } from './plural';
 
 export const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
 export const INCIDENT_SEVERITIES: IncidentSeverity[] = ['critical', 'warning', 'info'];
@@ -192,7 +193,7 @@ export function describeRowValue(
   const mode = rowMode(row);
   const unit = metricUnit(catalog, row.metric);
   if (mode === 'absence') {
-    return { value: t('rowValue.absenceValue', { count: formatMetricValue(row.actualValue, '', locale) }), compare: t('rowValue.absenceCompare') };
+    return { value: t(pluralKey('rowValue.absenceValue', row.actualValue), { count: formatMetricValue(row.actualValue, '', locale) }), compare: t('rowValue.absenceCompare') };
   }
   const value = formatMetricValue(row.actualValue, unit, locale);
   if (mode === 'slo_burn') return { value, compare: t('rowValue.sloCompare') };

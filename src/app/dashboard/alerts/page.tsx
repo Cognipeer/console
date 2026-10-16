@@ -68,6 +68,7 @@ import {
 import { useUserDirectory } from '@/components/alerts/useUserDirectory';
 import { primeAlertMeta } from '@/components/alerts/useAlertMeta';
 import { duplicateRuleSeed, prefillFromParams } from '@/components/alerts/ruleForm';
+import { pluralKey } from '@/components/alerts/plural';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 const PAGE_SIZE = 25;
@@ -286,6 +287,7 @@ export default function AlertsPage() {
 
   useEffect(() => setPage(1), [filters, moduleFilter]);
   const pageRules = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const rulesTotal = matching !== null && moduleFilter === 'all' ? matching : visible.length;
 
   // Owner = who created the rule. The list of people is only there for viewers who may list users.
   const ownerOptions = useMemo(
@@ -437,7 +439,7 @@ export default function AlertsPage() {
           );
         }
         return (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={t('rulesUx.noiseTitle', { count: fired })}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={t(pluralKey('rulesUx.noiseTitle', fired), { count: fired })}>
             <div style={{ width: 64, flex: '0 0 64px' }} aria-hidden="true">
               <Spark data={dailySeries(entry)} height={22} filled={false} color={isNoisy(entry) ? 'var(--ds-danger, #e03131)' : undefined} />
             </div>
@@ -602,7 +604,7 @@ export default function AlertsPage() {
             }}
             footerLeft={
               <>
-                {t('showingRules', { shown: pageRules.length, total: matching !== null && moduleFilter === 'all' ? matching : visible.length })}
+                {t(pluralKey('showingRules', rulesTotal), { shown: pageRules.length, total: rulesTotal })}
                 {statsCapped ? ` · ${t('rulesUx.statsCapped')}` : ''}
               </>
             }

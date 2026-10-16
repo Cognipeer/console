@@ -13,6 +13,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import type { LibraryChannelDto } from '../alertTypes';
 import { readApiError } from '../apiError';
 import LoadError from '../LoadError';
+import { pluralKey } from '../plural';
 import LibraryChannelForm from './LibraryChannelForm';
 import { libraryDestinationHint, usedByNames } from './libraryUi';
 import { useChannelLibrary } from './useChannelLibrary';
@@ -145,7 +146,7 @@ export default function ChannelsLibraryView() {
         }
         return (
           <Text size="xs" title={names.join(', ')}>
-            {t('libraryUx.usedByCount', { count: names.length })}
+            {t(pluralKey('libraryUx.usedByCount', names.length), { count: names.length })}
           </Text>
         );
       },

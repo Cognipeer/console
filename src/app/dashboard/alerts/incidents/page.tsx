@@ -41,6 +41,7 @@ import {
   moduleLabel,
 } from '@/components/alerts/alertCatalog';
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
+import { pluralKey } from '@/components/alerts/plural';
 import { userLabel as resolveUserLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
 import type { IncidentCounts, IncidentDto, IncidentSeverity, IncidentStatsDto, IncidentStatus } from '@/components/alerts/alertTypes';
 import {
@@ -425,9 +426,10 @@ export default function IncidentsPage() {
       return;
     }
     if (options.confirm && (action === 'resolve' || action === 'close' || action === 'reopen')) {
+      const count = eligible.length;
       const ok = await confirm({
-        title: action === 'reopen' ? t('ux.bulk.reopenTitle') : t(`bulk.confirm.${action}.title`),
-        message: action === 'reopen' ? t('ux.bulk.reopenMessage', { count: eligible.length }) : t(`bulk.confirm.${action}.message`, { count: eligible.length }),
+        title: action === 'reopen' ? t(pluralKey('ux.bulk.reopenTitle', count)) : t(pluralKey(`bulk.confirm.${action}.title`, count)),
+        message: action === 'reopen' ? t(pluralKey('ux.bulk.reopenMessage', count), { count }) : t(pluralKey(`bulk.confirm.${action}.message`, count), { count }),
         confirmLabel: action === 'reopen' ? t('reopen') : t(`bulk.${action}`),
         tone: action === 'close' ? 'warning' : 'neutral',
       });
@@ -442,9 +444,10 @@ export default function IncidentsPage() {
       if (!res.ok) throw new Error(await readApiError(res, t('bulk.failed')));
       const data = (await res.json()) as { updated?: number; failed?: Array<{ id: string; error: string }> };
       const failed = data.failed?.length ?? 0;
+      const updated = data.updated ?? 0;
       notifications.show({
         title: t('bulk.doneTitle'),
-        message: failed > 0 ? t('bulk.donePartial', { updated: data.updated ?? 0, failed }) : t('bulk.done', { updated: data.updated ?? 0 }),
+        message: failed > 0 ? t(pluralKey('bulk.donePartial', updated), { updated, failed }) : t(pluralKey('bulk.done', updated), { updated }),
         color: failed > 0 ? 'orange' : 'teal',
       });
       if (options.clearSelection) setSelected(new Set());

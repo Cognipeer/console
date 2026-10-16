@@ -7,6 +7,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import { formatDurationBetween } from '../alertCatalog';
 import type { BacktestResultDto } from '../alertTypes';
 import { isAbortError, readApiError } from '../apiError';
+import { pluralKey } from '../plural';
 import { translateServerNotes } from '../incidentUi';
 import { backtestMedianDurationMs, topBacktestEntities } from './ruleListUi';
 
@@ -89,7 +90,7 @@ export default function BacktestPanel({ requestKey, ready, onApplyThreshold }: B
       {result?.supported ? (
         <div className="ds-col ds-gap-sm" role="status">
           <Text size="sm" fw={600}>
-            {t('rulesUx.backtest.summary', { count: result.fires, days: result.days })}
+            {t(pluralKey('rulesUx.backtest.summary', result.fires), { count: result.fires, days: result.days })}
           </Text>
           {median !== null ? (
             <Text size="xs" c="dimmed">
@@ -108,7 +109,7 @@ export default function BacktestPanel({ requestKey, ready, onApplyThreshold }: B
                     {row.entityKey}
                   </Text>{' '}
                   <Text size="xs" component="span" c="dimmed">
-                    {t('rulesUx.backtest.entityFires', { count: row.fires })}
+                    {t(pluralKey('rulesUx.backtest.entityFires', row.fires), { count: row.fires })}
                   </Text>
                 </li>
               ))}
@@ -117,7 +118,7 @@ export default function BacktestPanel({ requestKey, ready, onApplyThreshold }: B
           {result.suggestion ? (
             <div className="ds-col ds-gap-sm">
               <Text size="xs">
-                {t('rulesUx.backtest.suggestion', { threshold: result.suggestion.threshold, count: result.suggestion.firesAtThreshold })}
+                {t(pluralKey('rulesUx.backtest.suggestion', result.suggestion.firesAtThreshold), { threshold: result.suggestion.threshold, count: result.suggestion.firesAtThreshold })}
               </Text>
               <Button size="compact-xs" variant="light" style={{ alignSelf: 'flex-start' }} onClick={() => onApplyThreshold(result.suggestion!.threshold)}>
                 {t('rulesUx.backtest.apply')}

@@ -38,6 +38,7 @@ import {
   operatorSymbol,
 } from '@/components/alerts/alertCatalog';
 import { useAlertMeta } from '@/components/alerts/useAlertMeta';
+import { pluralKey } from '@/components/alerts/plural';
 import { userLabel as resolveUserLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
 import type { IncidentDto, IncidentStatus } from '@/components/alerts/alertTypes';
 import {
@@ -453,9 +454,9 @@ export default function IncidentDetailPage() {
                 {failing ? (
                   <ContextBlock title={t('failingSessions')}>
                     {failingPath ? (
-                      <Link href={failingPath}>{t('failingSessionsLink', { count: failing.count })}</Link>
+                      <Link href={failingPath}>{t(pluralKey('failingSessionsLink', failing.count), { count: failing.count })}</Link>
                     ) : (
-                      <Text size="sm">{t('failingSessionsCount', { count: failing.count })}</Text>
+                      <Text size="sm">{t(pluralKey('failingSessionsCount', failing.count), { count: failing.count })}</Text>
                     )}
                   </ContextBlock>
                 ) : null}

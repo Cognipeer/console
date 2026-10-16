@@ -33,6 +33,7 @@ vi.mock('next/navigation', () => ({
 import IncidentsPage from '@/app/dashboard/alerts/incidents/page';
 import AlertHistoryPage from '@/app/dashboard/alerts/history/page';
 import ActiveIncidentsCard from '@/components/alerts/ActiveIncidentsCard';
+import AssignDialog from '@/components/alerts/inbox/AssignDialog';
 import type { AlertEventDto, IncidentDto, IncidentStatus } from '@/components/alerts/alertTypes';
 
 let mounted: Mounted;
@@ -267,6 +268,28 @@ describe('IncidentsPage', () => {
     expect(buttonByText('Clear filters')).toBeUndefined();
   });
 
+  it('words one incident and one entity in the singular in the grouped view', async () => {
+    nav.search = 'group=rule';
+    incidentsApi([ROWS[0]!]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('1 incident');
+    expect(text()).toContain('1 entity');
+    expect(text()).not.toContain('1 incidents');
+    expect(text()).not.toContain('1 entities');
+  });
+
+  it('asks about a single incident in the singular before resolving it', async () => {
+    incidentsApi();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    await click(rowCheckboxes()[0]);
+    await click(qa('button').find((button) => button.textContent === 'Resolve'));
+    await settle(50);
+    expect(text()).toContain('Mark this incident as resolved?');
+    expect(text()).not.toContain('Mark 1 incidents');
+  });
+
   it('renders the empty filtered state in Turkish', async () => {
     nav.search = 'q=zzz';
     incidentsApi([]);
@@ -284,6 +307,23 @@ describe('IncidentsPage', () => {
     expect(text()).toContain('Olaylar');
     expect(text()).toContain('Ajan Hata Oranı');
     expect(text()).not.toMatch(/(alerts|incidents)\.[a-zA-Z]/);
+  });
+});
+
+describe('AssignDialog', () => {
+  const directory = { meId: 'u1', meName: 'Ada', names: { u1: 'Ada', u2: 'Bob' } };
+  const open = (count: number) => createElement(AssignDialog, { opened: true, count, directory, onClose: vi.fn(), onConfirm: vi.fn() });
+
+  it('titles the dialog for one incident or for several', async () => {
+    mounted = await mount(open(1));
+    await settle(50);
+    expect(text()).toContain('Assign incident');
+    expect(text()).not.toContain('Assign 1 incident');
+    await mounted.unmount();
+    mounted = await mount(open(3));
+    await settle(50);
+    expect(text()).toContain('Assign 3 incidents');
+    expect(text()).not.toContain('incident(s)');
   });
 });
 

@@ -8,6 +8,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import { entityHref, entityOf, formatDurationBetween } from '../alertCatalog';
 import type { IncidentDto } from '../alertTypes';
 import { isSnoozed, severityBadgeClass, statusBadgeClass } from '../incidentUi';
+import { pluralKey } from '../plural';
 import type { IncidentGroupModel, InboxGroup } from './inboxModel';
 
 interface Props {
@@ -63,8 +64,8 @@ export default function IncidentGroups({ groups, by, collapsed, onToggle, select
               </div>
               <div className="ds-row" style={{ gap: 8, flexShrink: 0 }}>
                 <span className={severityBadgeClass(group.worstSeverity)}>{t(`severity.${group.worstSeverity}`)}</span>
-                <span className="ds-badge">{t('ux.groups.count', { count: group.incidents.length })}</span>
-                {by === 'rule' ? <span className="ds-faint" style={{ fontSize: 12 }}>{t('ux.groups.entities', { count: group.entityCount })}</span> : null}
+                <span className="ds-badge">{t(pluralKey('ux.groups.count', group.incidents.length), { count: group.incidents.length })}</span>
+                {by === 'rule' ? <span className="ds-faint" style={{ fontSize: 12 }}>{t(pluralKey('ux.groups.entities', group.entityCount), { count: group.entityCount })}</span> : null}
                 <span className="ds-faint" style={{ fontSize: 12 }}>{formatRelative(group.latestFiredAt, locale)}</span>
               </div>
             </div>

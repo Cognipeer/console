@@ -291,6 +291,17 @@ describe('IncidentDetailPage', () => {
     expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts?edit=r1"]')).not.toBeNull();
   });
 
+  it('words a single failing session in the singular', async () => {
+    detailApi({
+      ...INCIDENT,
+      context: { ...INCIDENT.context!, failingSessions: { count: 1, listPath: '/dashboard/tracing/sessions?agent=support&status=error' } },
+    });
+    mounted = await mount(createElement(IncidentDetailPage));
+    await settle(150);
+    expect(text()).toContain('View 1 failing session');
+    expect(text()).not.toContain('1 failing sessions');
+  });
+
   it('states when the new version was first seen and spells out the page labels', async () => {
     detailApi({
       ...INCIDENT,

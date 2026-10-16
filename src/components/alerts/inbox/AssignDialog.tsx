@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { Button, Group, Modal, Select, Stack, Text } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
 import type { UserDirectory } from '../useUserDirectory';
+import { pluralKey } from '../plural';
 
 interface Props {
   opened: boolean;
@@ -31,7 +32,7 @@ export default function AssignDialog({ opened, onClose, directory, count, loadin
   }, [directory, t]);
 
   return (
-    <Modal opened={opened} onClose={onClose} title={t('ux.assign.title', { count })} centered size="sm">
+    <Modal opened={opened} onClose={onClose} title={t(pluralKey('ux.assign.title', count), { count })} centered size="sm">
       <Stack gap="sm">
         <Select label={t('ux.assign.label')} data={options} value={value} onChange={setValue} searchable allowDeselect={false} comboboxProps={{ withinPortal: true }} />
         {Object.keys(directory.names).length === 0 ? (

@@ -10,6 +10,7 @@ import { ALL_CHANNEL_TYPES, type AlertChannelType, type ChannelTestResult, type 
 import { readApiError } from '../apiError';
 import { buildChannelTestBody, channelEditsSecrets, isStoredChannel, type ChannelItem } from '../channelItems';
 import ChannelsEditor from '../ChannelsEditor';
+import { pluralKey } from '../plural';
 import {
   MAX_LIBRARY_NAME,
   buildCreateLibraryBody,
@@ -45,6 +46,7 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
   }, [opened, entry?.id]);
 
   const item = libraryFormToItem(values, entry);
+  const rulesUsing = new Set((entry?.usedBy ?? []).map((use) => use.ruleId)).size;
   const issue = validateLibraryForm(values, entry);
 
   const applyItem = (next: ChannelItem) =>
@@ -154,7 +156,7 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
         ) : null}
         {entry && entry.usedBy.length > 0 ? (
           <Text size="xs" c="dimmed">
-            {t('libraryUx.editImpact', { count: new Set(entry.usedBy.map((use) => use.ruleId)).size })}
+            {t(pluralKey('libraryUx.editImpact', rulesUsing), { count: rulesUsing })}
           </Text>
         ) : null}
       </FormSection>

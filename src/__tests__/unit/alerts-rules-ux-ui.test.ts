@@ -78,42 +78,41 @@ const LIBRARY: LibraryChannelDto[] = [
   { id: 'lib2', name: 'Ops mail', kind: 'email', config: { type: 'email', recipients: ['ops@example.com'] }, usedBy: [] },
 ];
 
-function rulesApi() {
+const BACKTEST = {
+  supported: true,
+  days: 7,
+  stepMinutes: 5,
+  evaluations: 2000,
+  fires: 6,
+  firesPerEntity: [{ entityKey: 'support', fires: 6 }],
+  incidents: [],
+  suggestion: { threshold: 9, firesAtThreshold: 2 },
+};
+
+function rulesApi(overrides: { rules?: AlertRuleDto[]; stats?: Record<string, unknown>; backtest?: typeof BACKTEST } = {}) {
+  const rules = overrides.rules ?? RULES;
   api = installApiMock([
     [
       'GET',
       '/api/alerts/rules',
       () => ({
-        rules: RULES,
+        rules,
         meta: META,
         states: {},
         derived: {
           r1: { status: 'ok', muted: false, noData: false },
           r2: { status: 'ok', muted: true, noData: false },
         },
-        stats: { r1: { fired7d: 14, daily7d: [1, 2, 3, 2, 3, 2, 1] } },
+        stats: overrides.stats ?? { r1: { fired7d: 14, daily7d: [1, 2, 3, 2, 3, 2, 1] } },
         statsCapped: false,
         kpis: { total: 2, enabled: 2, firing: 0, muted: 1, noData: 0, noisy: 1 },
-        total: 2,
+        total: rules.length,
       }),
     ],
     ['GET', '/api/alerts/entities', () => ({ entities: [] })],
     ['GET', '/api/alerts/channels/library', () => ({ channels: LIBRARY })],
     ['POST', /^\/api\/alerts\/rules\/[^/]+\/mute$/, () => ({ rule: {} })],
-    [
-      'POST',
-      '/api/alerts/rules/backtest',
-      () => ({
-        supported: true,
-        days: 7,
-        stepMinutes: 5,
-        evaluations: 2000,
-        fires: 6,
-        firesPerEntity: [{ entityKey: 'support', fires: 6 }],
-        incidents: [],
-        suggestion: { threshold: 9, firesAtThreshold: 2 },
-      }),
-    ],
+    ['POST', '/api/alerts/rules/backtest', () => overrides.backtest ?? BACKTEST],
   ]);
 }
 
@@ -127,6 +126,15 @@ describe('rules list', () => {
     expect(text()).toContain('Fired · 7d');
     expect(text()).toContain('14');
     expect(text()).toContain('noisy');
+  });
+
+  it('words one firing and one rule in the singular', async () => {
+    rulesApi({ rules: [RULES[0]!], stats: { r1: { fired7d: 1, daily7d: [0, 0, 0, 0, 0, 0, 1] } } });
+    mounted = await mount(createElement(AlertsPage));
+    await settle(100);
+    expect(text()).toContain('Showing 1 of 1 rule');
+    expect(text()).not.toContain('1 rules');
+    expect(q('[title="Fired once in the last 7 days"]')).not.toBeNull();
   });
 
   it('marks a muted rule, offers Unmute and sends the unmute', async () => {
@@ -173,6 +181,21 @@ describe('rule form', () => {
   });
 });
 
+describe('rule form: backtest', () => {
+  it('words a single replayed firing in the singular', async () => {
+    nav.search = 'edit=r2';
+    rulesApi({ backtest: { ...BACKTEST, fires: 1, firesPerEntity: [{ entityKey: 'support', fires: 1 }], suggestion: { threshold: 9, firesAtThreshold: 1 } } });
+    mounted = await mount(createElement(AlertsPage));
+    await settle(200);
+    await click(buttonByText('Run backtest'));
+    await settle(50);
+    expect(text()).toContain('Would have fired once in the last 7 days');
+    expect(text()).toContain('A threshold of 9 would have fired once.');
+    expect(text()).toContain('1 time');
+    expect(text()).not.toContain('1 times');
+  });
+});
+
 describe('channel library page', () => {
   function libraryApi(role: string) {
     api = installApiMock([
@@ -189,12 +212,23 @@ describe('channel library page', () => {
     await settle(150);
     expect(text()).toContain('On-call Slack');
     expect(text()).toContain('Ops mail');
-    expect(text()).toContain('1 rules');
+    expect(text()).toContain('1 rule');
+    expect(text()).not.toContain('1 rules');
     expect(text()).toContain('Not used');
     expect(buttonByText('New channel')).toBeDefined();
     await click(buttonByText('New channel'));
     await settle(50);
     expect(text()).toContain('New shared channel');
+  });
+
+  it('says how many rules a channel in use affects, in the singular for one', async () => {
+    libraryApi('admin');
+    mounted = await mount(createElement(ChannelsLibraryView));
+    await settle(150);
+    await click(qa('td').find((cell) => cell.textContent?.includes('On-call Slack')));
+    await settle(50);
+    expect(text()).toContain('Changing this channel affects 1 rule.');
+    expect(text()).not.toContain('affects 1 rules');
   });
 
   it('takes a typed name and creates an entry (the Name field must not crash while typing)', async () => {
