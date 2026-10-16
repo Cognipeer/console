@@ -215,9 +215,11 @@ export async function updateProviderConfig(
   // The stored "last test" describes the connection as it was tested: once the connection settings or
   // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
   let connectionChanged = false;
+  let hadLastTest = false;
 
   if (payload.settings !== undefined || payload.credentials !== undefined) {
     const target = await db.findProviderById(providerId);
+    hadLastTest = Boolean(target?.lastTest);
     await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
     if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
       connectionChanged = true;
@@ -306,7 +308,7 @@ export async function updateProviderConfig(
     updates.credentialsEnc = encryptObject(merged);
   }
 
-  if (connectionChanged) {
+  if (connectionChanged && hadLastTest) {
     updates.lastTest = null;
   }
 
