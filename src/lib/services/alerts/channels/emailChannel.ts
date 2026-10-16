@@ -146,7 +146,7 @@ async function projectAdminEmails(tenantDbName: string, projectId: string, users
       const legacy = user.role === 'project_admin' && (user.projectIds ?? []).map(String).includes(projectId);
       // A tenant-level `alerts: none` hides alerts everywhere, so it takes them out of the audience too.
       const noAlerts = user.servicePermissions?.alerts === 'none';
-      return (legacy || ids?.has(id) === true) && user.role !== 'portal_user' && !noAlerts && !isUserLoginBlocked(user);
+      return (legacy || ids?.has(id) === true) && (user.role as string) !== 'portal_user' && !noAlerts && !isUserLoginBlocked(user);
     })
     .map((user) => user.email);
 }
