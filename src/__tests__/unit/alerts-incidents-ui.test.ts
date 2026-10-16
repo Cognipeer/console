@@ -23,8 +23,9 @@ import {
 
 const nav = vi.hoisted(() => ({ search: '' }));
 const push = vi.hoisted(() => vi.fn());
+const replace = vi.hoisted(() => vi.fn());
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push, replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push, replace, prefetch: vi.fn() }),
   usePathname: () => '/dashboard/alerts/incidents',
   useSearchParams: () => new URLSearchParams(nav.search),
 }));
@@ -41,7 +42,14 @@ beforeAll(() => installDomStubs());
 beforeEach(() => {
   nav.search = '';
   push.mockClear();
+  replace.mockClear();
 });
+
+/** The query of the last URL the page navigated to (the inbox keeps its filters in the URL). */
+function lastReplacedQuery(): URLSearchParams {
+  const url = String(replace.mock.calls.at(-1)?.[0] ?? '');
+  return new URLSearchParams(url.split('?')[1] ?? '');
+}
 afterEach(async () => {
   await mounted?.unmount();
   vi.unstubAllGlobals();
@@ -202,19 +210,27 @@ describe('IncidentsPage', () => {
     expect(text()).toContain('Entity: agent-i1');
     await click(q('button[aria-label="Remove the rule filter"]'));
     await settle(50);
-    const last = api.to('GET', '/api/alerts/incidents').at(-1)!;
-    expect(last.query).not.toHaveProperty('ruleId');
-    expect(last.query).toMatchObject({ entityKey: 'agent-i1' });
+    const next = lastReplacedQuery();
+    expect(next.has('ruleId')).toBe(false);
+    expect(next.get('entityKey')).toBe('agent-i1');
+    expect(next.get('severity')).toBe('critical');
   });
 
-  it('filters the loaded page with the search box', async () => {
+  it('sends the search box to the server (through the URL) after a pause', async () => {
     incidentsApi();
     mounted = await mount(createElement(IncidentsPage));
     await settle(100);
-    const input = q<HTMLInputElement>('input[placeholder="Filter this page…"]')!;
+    const input = q<HTMLInputElement>('input[data-inbox-search]')!;
     await setInput(input, 'agent-i2');
-    await settle(400);
-    expect(qa('[data-incident-row]').map((node) => (node as HTMLElement).dataset.incidentRow)).toEqual(['i2']);
+    await settle(600);
+    expect(lastReplacedQuery().get('q')).toBe('agent-i2');
+
+    // the page reads the filter back from the URL and asks the server for it
+    nav.search = 'q=agent-i2';
+    await mounted.unmount();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(api.to('GET', '/api/alerts/incidents').at(-1)!.query).toMatchObject({ q: 'agent-i2' });
   });
 
   it('renders in Turkish without a missing message', async () => {

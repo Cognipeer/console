@@ -93,7 +93,25 @@ const RULES: AlertRuleDto[] = [
 
 function rulesApi(rules: AlertRuleDto[] = RULES) {
   api = installApiMock([
-    ['GET', '/api/alerts/rules', () => ({ rules, meta: META, states: { r1: { ok: 0, pending: 0, firing: 2 } } })],
+    [
+      'GET',
+      '/api/alerts/rules',
+      (call) => {
+        // status / owner / q / sort are applied by the server; the mock honours the search so the page can be exercised
+        const needle = (call.query.q ?? '').toLowerCase();
+        const matching = needle ? rules.filter((rule) => rule.name.toLowerCase().includes(needle)) : rules;
+        return {
+          rules: matching,
+          meta: META,
+          states: { r1: { ok: 0, pending: 0, firing: 2 } },
+          derived: Object.fromEntries(rules.map((rule) => [rule._id, { status: rule.enabled ? 'ok' : 'disabled', muted: false, noData: false }])),
+          stats: { r1: { fired7d: 12, daily7d: [0, 1, 2, 3, 1, 2, 3] } },
+          statsCapped: false,
+          kpis: { total: rules.length, enabled: rules.filter((rule) => rule.enabled).length, firing: 1, muted: 0, noData: 0, noisy: 1 },
+          total: matching.length,
+        };
+      },
+    ],
     ['GET', '/api/alerts/entities', () => ({ entities: [] })],
     ['PATCH', /^\/api\/alerts\/rules\/[^/]+$/, () => ({ rule: {} })],
     ['POST', '/api/alerts/rules', () => jsonResponse({ rule: { _id: 'new' } }, 201)],
@@ -116,8 +134,8 @@ describe('AlertsPage', () => {
     expect(text()).toContain('2 firing');
     // each tile says what it counts: entity states that are firing, rules that fired
     expect(text()).toContain('Entities Firing Now');
-    expect(text()).toContain('Rules Fired (24h)');
-    expect(text()).toContain('Disabled');
+    expect(text()).toContain('Muted');
+    expect(text()).toContain('Noisy · 7d');
     expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts/incidents?ruleId=r1&status=all"]')).not.toBeNull();
   });
 
@@ -191,7 +209,7 @@ describe('AlertsPage', () => {
     rulesApi();
     mounted = await mount(createElement(AlertsPage));
     await settle(100);
-    await click(q('tbody tr button[aria-label]:not([aria-label=""])'));
+    await click(qa('tbody tr button[aria-label]:not([aria-label=""])').find((node) => !/^Mute/.test(node.getAttribute('aria-label') ?? '')));
     await settle(50);
     await click(qa('button, [role="menuitem"]').find((node) => node.textContent?.trim() === 'Duplicate'));
     await settle(100);

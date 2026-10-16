@@ -46,6 +46,8 @@ export interface ChannelsEditorProps {
   canTest?: (channel: ChannelItem) => boolean;
   maxChannels?: number;
   disabled?: boolean;
+  /** One fixed channel (the channel library form): no remove button and no "add" bar. */
+  single?: boolean;
 }
 
 type TestState = { status: 'loading' } | { status: 'done'; ok: boolean; message: string };
@@ -58,6 +60,7 @@ export default function ChannelsEditor({
   canTest,
   maxChannels = MAX_CHANNELS,
   disabled = false,
+  single = false,
 }: ChannelsEditorProps) {
   const t = useTranslations('alerts');
   const [tests, setTests] = useState<Record<string, TestState>>({});
@@ -106,7 +109,7 @@ export default function ChannelsEditor({
 
   return (
     <div className="ds-col ds-gap-sm" data-testid="channels-editor">
-      {value.length === 0 ? (
+      {value.length === 0 && !single ? (
         <Text size="sm" c="dimmed">
           {t('channels.empty')}
         </Text>
@@ -142,6 +145,7 @@ export default function ChannelsEditor({
                     {t('channels.sendTest')}
                   </Button>
                 ) : null}
+                {single ? null : (
                 <Tooltip label={t('channels.remove')} withArrow>
                   <ActionIcon
                     variant="subtle"
@@ -154,6 +158,7 @@ export default function ChannelsEditor({
                     <IconTrash size={14} stroke={1.7} />
                   </ActionIcon>
                 </Tooltip>
+                )}
               </Group>
             </Group>
 
@@ -283,7 +288,7 @@ export default function ChannelsEditor({
         );
       })}
 
-      {canAddMore ? (
+      {single ? null : canAddMore ? (
         <Group gap={6}>
           <Text size="xs" c="dimmed">
             {t('channels.add')}

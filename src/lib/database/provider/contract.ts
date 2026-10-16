@@ -30,6 +30,8 @@ import type {
   IAlertEvent,
   IAlertRule,
   IAlertState,
+  IAlertDelivery,
+  IAlertChannelLibraryEntry,
   IAlertStateFilter,
   AlertModule,
   IApiToken,
@@ -148,6 +150,8 @@ import type {
   VectorMigrationStatus,
   VectorMigrationLogStatus,
   IncidentSeverity,
+  IncidentSort,
+  IIncidentStatRow,
   IncidentStatus,
   McpServerStatus,
   MemoryItemStatus,
@@ -1100,12 +1104,39 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     data: Partial<IAlertEvent>,
   ): Promise<IAlertEvent | null>;
   countActiveAlerts(tenantId: string, projectId?: string): Promise<number>;
+  /** Minimal (ruleId, firedAt) rows of alert events fired at or after `since`, newest first (one fire = one event). Capped. */
+  listAlertFirings(
+    tenantId: string,
+    options: { projectId?: string; since: Date; limit?: number },
+  ): Promise<Array<{ ruleId: string; firedAt: Date }>>;
+
+  // ── Alert delivery log (tenant-specific) ──
+  createAlertDeliveries(rows: Array<Omit<IAlertDelivery, '_id'>>): Promise<void>;
+  /** Newest first; clamped to 1..200. */
+  listAlertDeliveries(
+    tenantId: string,
+    options: { incidentId?: string; ruleId?: string; limit?: number },
+  ): Promise<IAlertDelivery[]>;
+  /** Retention: removes rows whose attemptAt is older than `before`; returns the number removed. */
+  pruneAlertDeliveries(before: Date): Promise<number>;
 
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
   /** Keyed by the unique (tenantId, ruleId, entityKey). */
   upsertAlertState(state: Omit<IAlertState, '_id' | 'updatedAt'>): Promise<IAlertState>;
   deleteAlertStates(filter: { ruleId: string; entityKeys?: string[] }): Promise<number>;
+
+  // ── Alert channel library (tenant-wide; lazily created storage) ──
+  listAlertChannelLibrary(tenantId: string): Promise<IAlertChannelLibraryEntry[]>;
+  findAlertChannelLibraryEntry(id: string): Promise<IAlertChannelLibraryEntry | null>;
+  createAlertChannelLibraryEntry(
+    entry: Omit<IAlertChannelLibraryEntry, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAlertChannelLibraryEntry>;
+  updateAlertChannelLibraryEntry(
+    id: string,
+    data: Partial<Pick<IAlertChannelLibraryEntry, 'name' | 'config'>>,
+  ): Promise<IAlertChannelLibraryEntry | null>;
+  deleteAlertChannelLibraryEntry(id: string): Promise<boolean>;
 
   // ── Incident operations (tenant-specific) ──
   createIncident(
@@ -1127,11 +1158,33 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       severity?: IncidentSeverity;
       entityKey?: string;
       module?: AlertModule;
+      /** Only rows whose `updatedAt` is strictly after this instant (live refresh). */
+      updatedAfter?: Date;
+      /** Only rows fired at or after this instant. */
+      firedAfter?: Date;
+      /** Case/Turkish-i-insensitive substring over ruleName, entityKey and metric (literal, no wildcards). */
+      q?: string;
+      /** A user id, or null for unassigned. Undefined = no filter. */
+      assignee?: string | null;
+      /** true = snoozedUntil in the future; false = not snoozed (never snoozed or expired). */
+      snoozed?: boolean;
+      /** Row to leave out (similar incidents). */
+      excludeId?: string;
+      /** Default `-firedAt`. A leading `-` is descending; severity ranks critical > warning > info. */
+      sort?: IncidentSort;
       /** Clamped to 1..200. */
       limit?: number;
       skip?: number;
     },
   ): Promise<IIncident[]>;
+  /**
+   * The minimal fields stats need, for a project: incidents fired at/after `firedSince`
+   * and/or resolved at/after `resolvedSince` (union), newest first, at most `limit` (<= 5000).
+   */
+  listIncidentStatRows(
+    projectId: string,
+    options: { firedSince?: Date; resolvedSince?: Date; limit?: number },
+  ): Promise<IIncidentStatRow[]>;
   countIncidents(
     tenantId: string,
     options?: { projectId?: string; status?: IncidentStatus },

@@ -42,8 +42,11 @@ import {
   type ChannelTestResult,
   type PreviewTarget,
 } from './alertTypes';
-import ChannelsEditor from './ChannelsEditor';
+import ChannelsEditor, { MAX_CHANNELS } from './ChannelsEditor';
 import { buildChannelTestBody } from './channelItems';
+import LibraryChannelPicker from './channels/LibraryChannelPicker';
+import { useChannelLibrary } from './channels/useChannelLibrary';
+import BacktestPanel from './rules/BacktestPanel';
 import EntityPicker from './EntityPicker';
 import { moduleIcon } from './moduleIcons';
 import { translateServerNotes } from './incidentUi';
@@ -57,11 +60,14 @@ import {
   SLO_LATENCY_BOUNDS_MS,
   applyBaselinePreset,
   applyMetricChange,
+  applyBacktestSuggestion,
   applyModuleChange,
+  buildBacktestBody,
   buildRulePayload,
   channelsSignature,
   checkRule,
   describeRule,
+  isValidRunbookUrl,
   valuesFromRule,
   type BaselinePreset,
   type RuleFormValues,
@@ -130,7 +136,7 @@ export default function AlertRuleForm({
   useEffect(() => {
     if (!opened) return;
     const seeded = valuesFromRule(initialRef.current as Partial<AlertRuleDto> | undefined, catalogRef.current);
-    initialChannelsSig.current = mode === 'edit' ? channelsSignature(seeded.channels) : null;
+    initialChannelsSig.current = mode === 'edit' ? channelsSignature(seeded.channels, seeded.libraryRefs) : null;
     setValues(seeded);
     setShowAdvanced(false);
     setPreview(null);
@@ -138,9 +144,12 @@ export default function AlertRuleForm({
 
   const def = getDef(catalog, values.metric);
   const entityRule = isEntityMetric(def);
-  const channelsUnchanged = isEdit && initialChannelsSig.current !== null && channelsSignature(values.channels) === initialChannelsSig.current;
+  const channelsUnchanged = isEdit && initialChannelsSig.current !== null && channelsSignature(values.channels, values.libraryRefs) === initialChannelsSig.current;
   const checks = useMemo(() => checkRule(values, catalog, { channelsUnchanged }), [values, catalog, channelsUnchanged]);
   const unit = metricUnit(catalog, values.metric);
+  const runbookValid = isValidRunbookUrl(values.runbookUrl);
+  const library = useChannelLibrary({ enabled: opened, fallbackError: t('libraryUx.loadError') });
+  const backtestKey = useMemo(() => JSON.stringify(buildBacktestBody(values, { catalog, isEdit })), [values, catalog, isEdit]);
 
   const editingMetric = isEdit ? ((initialData?.metric as string | undefined) ?? null) : null;
   const modules = useMemo(() => {
@@ -215,7 +224,7 @@ export default function AlertRuleForm({
 
   // ── Submit ─────────────────────────────────────────────────────────────
   const submit = async () => {
-    if (!checks.canSave) return;
+    if (!checks.canSave || !runbookValid) return;
     setSaving(true);
     try {
       const body = buildRulePayload(values, { catalog, isEdit, channelsUnchanged });
@@ -330,6 +339,14 @@ export default function AlertRuleForm({
           )
         ) : null}
       </SummaryGroup>
+
+      <SummaryGroup title={t('rulesUx.backtest.title')}>
+        <BacktestPanel
+          requestKey={backtestKey}
+          ready={checks.metric && checks.target && checks.condition}
+          onApplyThreshold={(threshold) => setValues((current) => applyBacktestSuggestion(current, { threshold }))}
+        />
+      </SummaryGroup>
     </>
   );
 
@@ -349,7 +366,7 @@ export default function AlertRuleForm({
       primaryAction={{
         label: isEdit ? t('save') : t('create'),
         loading: saving,
-        disabled: !checks.canSave,
+        disabled: !checks.canSave || !runbookValid,
         onClick: () => void submit(),
       }}
       secondaryAction={{ label: t('cancel'), onClick: onClose }}
@@ -692,6 +709,17 @@ export default function AlertRuleForm({
             allowedTypes={meta?.channelTypes?.length ? meta.channelTypes : ALL_CHANNEL_TYPES}
             onTest={onTestChannel}
             canTest={canTestChannel}
+            maxChannels={Math.max(0, MAX_CHANNELS - values.libraryRefs.length)}
+          />
+        </FormField>
+        <FormField label={optional(t('libraryUx.fieldLabel'))} hint={t('libraryUx.fieldHint')}>
+          <LibraryChannelPicker
+            value={values.libraryRefs}
+            onChange={(libraryRefs) => patch({ libraryRefs })}
+            library={library.channels}
+            loading={library.loading}
+            error={library.error}
+            canAddMore={values.channels.length + values.libraryRefs.length < MAX_CHANNELS}
           />
         </FormField>
         <ToggleList>
@@ -749,6 +777,19 @@ export default function AlertRuleForm({
               maxLength={1000}
               value={values.description}
               onChange={(event) => patch({ description: event.currentTarget.value })}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={optional(t('rulesUx.runbookUrl'))} hint={t('rulesUx.runbookUrlHint')}>
+            <TextInput
+              aria-label={t('rulesUx.runbookUrl')}
+              placeholder="https://"
+              autoComplete="off"
+              maxLength={2048}
+              value={values.runbookUrl}
+              error={runbookValid ? undefined : t('rulesUx.runbookUrlInvalid')}
+              onChange={(event) => patch({ runbookUrl: event.currentTarget.value })}
             />
           </FormField>
         </FormRow>

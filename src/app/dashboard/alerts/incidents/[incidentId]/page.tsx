@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Badge, Button, Center, Stack, Text, Textarea, Timeline } from '@mantine/core';
@@ -53,6 +53,15 @@ import {
   type TimelineEntry,
 } from '@/components/alerts/incidentUi';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import DeliveryTimeline from '@/components/alerts/incident/DeliveryTimeline';
+import IncidentMetricChart from '@/components/alerts/incident/IncidentMetricChart';
+import MuteRuleMenu from '@/components/alerts/incident/MuteRuleMenu';
+import RunbookLink from '@/components/alerts/incident/RunbookLink';
+import SimilarIncidentsCard from '@/components/alerts/incident/SimilarIncidentsCard';
+import SnoozeMenu from '@/components/alerts/incident/SnoozeMenu';
+import { canSnooze, incidentFlags } from '@/components/alerts/incident/incidentModel';
+import { useEntityLinks } from '@/components/alerts/incident/useEntityLinks';
+import { useIncidentRule } from '@/components/alerts/incident/useIncidentRule';
 
 const STATUS_ICONS: Record<IncidentStatus, typeof IconFlame> = {
   open: IconFlame,
@@ -88,6 +97,16 @@ export default function IncidentDetailPage() {
   const [noteContent, setNoteContent] = useState('');
   const [noteLoading, setNoteLoading] = useState(false);
   const [inflight, setInflight] = useState<string | null>(null);
+
+  const { rule, setRule } = useIncidentRule(incident?.ruleId);
+  const linkEntities = useMemo(() => {
+    const list: Array<{ type: string; key: string }> = [];
+    const own = incident ? entityOf(incident) : null;
+    if (own?.type) list.push({ type: own.type, key: own.key });
+    for (const entry of incident?.context?.correlations ?? []) list.push({ type: entry.entityType, key: entry.entityKey });
+    return list;
+  }, [incident]);
+  const entityLinks = useEntityLinks(linkEntities);
 
   const controllerRef = useRef<AbortController | null>(null);
   const load = useCallback(
@@ -156,6 +175,13 @@ export default function IncidentDetailPage() {
     }
   };
 
+  const snooze = async (until: Date | null) => {
+    const updated = await patchIncident({ snoozedUntil: until ? until.toISOString() : null }, 'snooze', t('ux.snooze.failed'));
+    if (updated) {
+      notifications.show({ color: 'teal', title: t('ux.snooze.doneTitle'), message: until ? t('ux.snooze.done') : t('ux.snooze.cleared') });
+    }
+  };
+
   const assign = async (assignee: 'me' | null) => {
     const updated = await patchIncident({ assignedTo: assignee }, 'assign', t('assignError'));
     if (updated) {
@@ -203,7 +229,8 @@ export default function IncidentDetailPage() {
   const unit = metricUnit(catalog, incident.metric);
   const label = metricLabel(catalog, incident.metric, ta);
   const entity = entityOf(incident);
-  const entityLink = entity ? entityHref(entity.type, entity.key) : null;
+  const entityLink = entity ? entityHref(entity.type, entity.key, entityLinks) : null;
+  const flags = incidentFlags(incident);
   const operator = incident.metadata?.operator as string | undefined;
   const windowMinutes = (incident.context?.windowMinutes ?? (incident.metadata?.windowMinutes as number | undefined)) || undefined;
   const sampleCount = incident.metadata?.sampleCount as number | undefined;
@@ -274,6 +301,10 @@ export default function IncidentDetailPage() {
           </Button>
         );
       })}
+      {canSnooze(incident.status) || flags.snoozed ? (
+        <SnoozeMenu snoozedUntil={flags.snoozedUntil} onSnooze={snooze} loading={inflight === 'snooze'} disabled={inflight !== null && inflight !== 'snooze'} />
+      ) : null}
+      <MuteRuleMenu ruleId={incident.ruleId} rule={rule} onChanged={setRule} />
       {incident.assignedTo ? (
         <Button variant="default" size="sm" leftSection={<IconUserMinus size={13} stroke={1.7} />} loading={inflight === 'assign'} onClick={() => void assign(null)}>
           {t('unassign')}
@@ -323,6 +354,9 @@ export default function IncidentDetailPage() {
             {moduleLabel(moduleId, ta)}
           </Badge>
           {incident.autoResolved ? <span className="ds-badge ds-badge-teal">{t('autoResolved')}</span> : null}
+          {flags.snoozed ? <span className="ds-badge">{t('ux.snooze.badge')}</span> : null}
+          {rule?.mutedUntil && Date.parse(rule.mutedUntil) > Date.now() ? <span className="ds-badge">{t('ux.mute.badge')}</span> : null}
+          {flags.reopenCount > 0 ? <span className="ds-badge ds-badge-warn">{t('ux.reopened', { count: flags.reopenCount })}</span> : null}
         </>
       }
       meta={
@@ -381,6 +415,8 @@ export default function IncidentDetailPage() {
             </div>
           </DetailCard>
 
+          <IncidentMetricChart incident={incident} catalog={catalog} entity={entity} />
+
           <DetailCard title={t('contextTitle')} description={t('contextDescription')}>
             {!hasContext ? (
               <Text size="sm" c="dimmed">
@@ -438,7 +474,7 @@ export default function IncidentDetailPage() {
                         </thead>
                         <tbody>
                           {correlations.map((entry) => {
-                            const href = entityHref(entry.entityType, entry.entityKey);
+                            const href = entityHref(entry.entityType, entry.entityKey, entityLinks);
                             const entryUnit = metricUnit(catalog, entry.metric);
                             return (
                               <tr key={`${entry.entityType}:${entry.entityKey}:${entry.metric}`}>
@@ -474,6 +510,8 @@ export default function IncidentDetailPage() {
               </Stack>
             )}
           </DetailCard>
+
+          <DeliveryTimeline incidentId={incident._id} refreshKey={`${incident.status}|${incident.updatedAt ?? ''}|${incident.snoozedUntil ?? ''}`} />
 
           <DetailCard title={t('activity')}>
             <Timeline active={entries.length - 1} bulletSize={24} lineWidth={2}>
@@ -517,8 +555,11 @@ export default function IncidentDetailPage() {
               <Link href={rulePath}>{t('openRule')}</Link>
               {entityLink ? <Link href={entityLink}>{t('openEntityHealth')}</Link> : null}
               <Link href={relatedPath}>{t('relatedIncidents')}</Link>
+              <RunbookLink url={rule?.runbookUrl} />
             </Stack>
           </DetailCard>
+
+          <SimilarIncidentsCard incidentId={incident._id} relatedPath={relatedPath} />
 
           <DetailCard title={t('identifiers')}>
             <KeyValue label={t('incidentId')} value={<span className="ds-mono">{incident._id.slice(0, 12)}…</span>} />

@@ -691,7 +691,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
         p === '/dashboard/alerts' ||
         (p.startsWith('/dashboard/alerts') &&
           !p.startsWith('/dashboard/alerts/history') &&
-          !p.startsWith('/dashboard/alerts/incidents')),
+          !p.startsWith('/dashboard/alerts/incidents') &&
+          !p.startsWith('/dashboard/alerts/channels')),
     },
     {
       id: 'incidents',
@@ -706,6 +707,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/alerts/history',
       icon: IconHistory,
       matcher: (p) => p.startsWith('/dashboard/alerts/history'),
+    },
+    {
+      id: 'channels',
+      label: 'Channels',
+      href: '/dashboard/alerts/channels',
+      icon: IconWebhook,
+      matcher: (p) => p.startsWith('/dashboard/alerts/channels'),
     },
   ],
   cluster: [

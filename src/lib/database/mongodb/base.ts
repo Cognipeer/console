@@ -54,6 +54,7 @@ export const COLLECTIONS = {
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
+  alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',

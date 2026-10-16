@@ -200,6 +200,7 @@ describe('IncidentService', () => {
       await IncidentService.updateStatus('d', 'i1', 'open', 'u1');
       expect(db.updateIncident.mock.calls[0][1]).toEqual({
         status: 'open', resolvedAt: null, resolvedBy: null, closedAt: null, autoResolved: false,
+        reopenedAt: expect.any(Date), reopenCount: 1,
       });
     });
 

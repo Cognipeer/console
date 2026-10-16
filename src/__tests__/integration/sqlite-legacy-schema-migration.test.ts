@@ -327,6 +327,8 @@ describe('Legacy tenant DB schema migration', () => {
     db.close();
 
     for (const c of ['entity', 'severity', 'notifyOnResolve', 'renotifyMinutes']) expect(rules.has(c)).toBe(true);
+    // alerts inbox UX: mute, runbook and the evaluator's last-evaluation summary
+    for (const c of ['mutedUntil', 'mutedBy', 'muteReason', 'runbookUrl', 'lastEvaluation']) expect(rules.has(c)).toBe(true);
     for (const c of ['entityType', 'entityKey', 'baselineValue', 'sampleCount', 'acknowledgedBy', 'acknowledgedAt', 'kind']) expect(events.has(c)).toBe(true);
     for (const c of ['module', 'entityType', 'entityKey', 'baselineValue', 'lastValue', 'peakValue', 'autoResolved', 'acknowledgedBy', 'context']) expect(incidents.has(c)).toBe(true);
     for (const c of ['errorEvents', 'toolErrors', 'aiErrors', 'metricsOutcome']) expect(sessions.has(c)).toBe(true);
@@ -345,6 +347,7 @@ describe('Legacy tenant DB schema migration', () => {
       alertStates: has('alert_states'),
       alertStatesRule: has('idx_alert_states_rule'),
       alertStatesProjectPhase: has('idx_alert_states_project_phase_notenant'),
+      alertDeliveries: has('idx_alert_deliveries_incident_attemptAt') && has('idx_alert_deliveries_rule_attemptAt'),
     };
     db.close();
     expect(checks).toEqual({
@@ -357,6 +360,7 @@ describe('Legacy tenant DB schema migration', () => {
       alertStates: true,
       alertStatesRule: true,
       alertStatesProjectPhase: true,
+      alertDeliveries: true,
     });
   });
 

@@ -42,6 +42,8 @@ import { getMetricDef, type AlertMetricDef } from './metricCatalog';
 import { createModeGate, type ModeGate } from './modeAvailability';
 import { IncidentService, deriveRuleSeverity } from './incidentService';
 import { buildIncidentContext } from './incidentContext';
+import { resolveEntityPath } from './entityLinks';
+import { recordDeliveries, recordSuppressed } from './deliveryLog';
 import { evaluationShapeOf } from './ruleShape';
 
 const logger = createLogger('alert-evaluator');
@@ -138,7 +140,7 @@ export interface EvaluateRuleOptions {
   memo?: AggregateMemo;
 }
 
-function defaultMinSamples(mode: AlertConditionMode): number {
+export function defaultMinSamples(mode: AlertConditionMode): number {
   if (mode === 'baseline') return 20;
   if (mode === 'slo_burn') return 50;
   return 1;
@@ -154,7 +156,7 @@ function selectedKeys(rule: IAlertRule): string[] | null {
 }
 
 /** Whether a computed value can be judged at all. */
-function judgeable(def: AlertMetricDef, value: number | null, sampleCount: number, minSamples: number, mode: AlertConditionMode): boolean {
+export function judgeable(def: AlertMetricDef, value: number | null, sampleCount: number, minSamples: number, mode: AlertConditionMode): boolean {
   if (value === null) return false;
   // A count metric's sample count IS its value: a floor on it would blind baseline-drop rules for
   // 1..minSamples-1 events. The baseline judges history sufficiency itself.
@@ -584,11 +586,15 @@ function formatForNote(value: number | null, unit: string): string {
   return text;
 }
 
-function entityUrlFor(entityType: EntityMetricType | null, entityKey: string): string | undefined {
-  if (entityType === 'agent' && entityKey) {
-    return `${getConfig().app.url}/dashboard/tracing/agents/${encodeURIComponent(entityKey)}`;
-  }
-  return undefined;
+/** Absolute link to the entity's page (enterprise health page when registered, else its core page); never throws. */
+async function entityUrlFor(
+  runtime: RuleRuntime,
+  entityType: EntityMetricType | null,
+  entityKey: string,
+): Promise<string | undefined> {
+  if (!entityType || !entityKey) return undefined;
+  const path = await resolveEntityPath(runtime.db, runtime.rule.projectId, entityType, entityKey);
+  return path ? `${getConfig().app.url}${path}` : undefined;
 }
 
 interface RuleRuntime {
@@ -603,18 +609,21 @@ interface RuleRuntime {
   projectName: () => Promise<string>;
   /** Incident contexts this rule may still build in this sweep. */
   contextBudget: { left: number };
+  /** Rule mute: evaluation, states, events and incidents go on, channel notifications do not. */
+  muted: boolean;
 }
 
-function buildNotification(
+async function buildNotification(
   runtime: RuleRuntime,
   kind: AlertNotification['kind'],
   target: TargetEvaluation,
   severity: IncidentSeverity,
   firedAt: Date,
   extra: { resolvedAt?: Date | null; incidentUrl?: string; context?: IIncidentContext | null; projectName: string },
-): AlertNotification {
+): Promise<AlertNotification> {
   const { rule, def, mode, entityType } = runtime;
   const appUrl = getConfig().app.url;
+  const entityUrl = await entityUrlFor(runtime, entityType, target.entityKey);
   return {
     kind,
     rule: {
@@ -638,7 +647,7 @@ function buildNotification(
     companyName: runtime.ctx.companyName,
     dashboardUrl: `${appUrl}/dashboard/alerts/incidents`,
     ...(extra.incidentUrl ? { incidentUrl: extra.incidentUrl } : {}),
-    ...(entityUrlFor(entityType, target.entityKey) ? { entityUrl: entityUrlFor(entityType, target.entityKey) } : {}),
+    ...(entityUrl ? { entityUrl } : {}),
     ...(extra.context ? { context: extra.context } : {}),
   };
 }
@@ -700,6 +709,7 @@ async function fireTarget(runtime: RuleRuntime, target: TargetEvaluation, peakVa
     sampleCount: target.sampleCount,
     scope: rule.scope,
     ...(rule.entity ? { entity: rule.entity } : {}),
+    ...(runtime.muted ? { suppressed: 'rule_muted' } : {}),
   };
 
   const event: Omit<IAlertEvent, '_id'> = {
@@ -773,16 +783,23 @@ async function fireTarget(runtime: RuleRuntime, target: TargetEvaluation, peakVa
   }
 
   const projectName = await runtime.projectName();
-  const notification = buildNotification(runtime, 'fired', target, severity, now, {
+  const notification = await buildNotification(runtime, 'fired', target, severity, now, {
     projectName,
     context,
     incidentUrl: incidentId ? `${getConfig().app.url}/dashboard/alerts/incidents?highlight=${incidentId}` : undefined,
   });
-  const results: DispatchResult[] = await dispatchNotification(
-    notification,
-    rule.channels ?? [],
-    channelContext(runtime, projectName, incidentId ?? undefined),
-  );
+  const deliveryBase = { tenantId: ctx.tenantId, projectId: rule.projectId, ruleId: runtime.ruleId, incidentId, eventId };
+  let results: DispatchResult[] = [];
+  if (runtime.muted) {
+    await recordSuppressed(db, deliveryBase, 'fired', rule.channels ?? [], 'rule_muted');
+  } else {
+    results = await dispatchNotification(
+      notification,
+      rule.channels ?? [],
+      channelContext(runtime, projectName, incidentId ?? undefined),
+    );
+    await recordDeliveries(db, deliveryBase, 'fired', results);
+  }
   try {
     await db.updateAlertEvent(eventId, { channels: results });
   } catch (error) {
@@ -847,12 +864,18 @@ async function resolveTarget(runtime: RuleRuntime, target: TargetEvaluation, sta
 
   if (rule.notifyOnResolve !== false) {
     const projectName = await runtime.projectName();
-    const notification = buildNotification(runtime, 'resolved', target, severity, firedAt, {
+    const notification = await buildNotification(runtime, 'resolved', target, severity, firedAt, {
       projectName,
       resolvedAt,
       incidentUrl: state.incidentId ? `${getConfig().app.url}/dashboard/alerts/incidents?highlight=${state.incidentId}` : undefined,
     });
-    await dispatchNotification(notification, rule.channels ?? [], channelContext(runtime, projectName, state.incidentId ?? undefined));
+    const deliveryBase = { tenantId: ctx.tenantId, projectId: rule.projectId, ruleId: runtime.ruleId, incidentId: state.incidentId ?? null, eventId: state.eventId ?? null };
+    if (runtime.muted) {
+      await recordSuppressed(db, deliveryBase, 'resolved', rule.channels ?? [], 'rule_muted');
+    } else {
+      const results = await dispatchNotification(notification, rule.channels ?? [], channelContext(runtime, projectName, state.incidentId ?? undefined));
+      await recordDeliveries(db, deliveryBase, 'resolved', results);
+    }
   }
 
   await publishWebhookEvent({
@@ -870,32 +893,34 @@ async function resolveTarget(runtime: RuleRuntime, target: TargetEvaluation, sta
   logger.info(`RESOLVED: "${rule.name}"${target.entityKey ? ` [${target.entityKey}]` : ''} for tenant ${ctx.tenantSlug}`);
 }
 
-/** A person who acknowledged, is investigating, or already closed the incident does not want the same page again. */
-async function renotifySuppressed(db: DatabaseProvider, incidentId: string | null | undefined): Promise<boolean> {
-  if (!incidentId) return false;
-  try {
-    const incident = await db.findIncidentById(incidentId);
-    return Boolean(incident && incident.status !== 'open');
-  } catch {
-    return false;
-  }
-}
-
+/**
+ * A person who acknowledged, is investigating, or already closed the incident does not want the same page again.
+ * A snoozed incident is silenced for now: the attempt is logged as suppressed and the renotify clock moves on.
+ */
 async function renotifyTarget(runtime: RuleRuntime, target: TargetEvaluation, state: IAlertState): Promise<boolean> {
-  if (await renotifySuppressed(runtime.db, state.incidentId)) return false;
-  const projectName = await runtime.projectName();
+  const { db, rule, ctx } = runtime;
   let severity: IncidentSeverity = 'info';
+  let snoozed = false;
   if (state.incidentId) {
     try {
-      const incident = await runtime.db.findIncidentById(state.incidentId);
+      const incident = await db.findIncidentById(state.incidentId);
+      if (incident && incident.status !== 'open') return false;
       if (incident?.severity) severity = incident.severity;
-    } catch { /* keep the default */ }
+      snoozed = Boolean(incident?.snoozedUntil && new Date(incident.snoozedUntil).getTime() > runtime.now.getTime());
+    } catch { /* keep the defaults */ }
   }
-  const notification = buildNotification(runtime, 'renotify', target, severity, state.firedAt ? new Date(state.firedAt) : runtime.now, {
+  const deliveryBase = { tenantId: ctx.tenantId, projectId: rule.projectId, ruleId: runtime.ruleId, incidentId: state.incidentId ?? null, eventId: state.eventId ?? null };
+  if (runtime.muted || snoozed) {
+    await recordSuppressed(db, deliveryBase, 'renotify', rule.channels ?? [], runtime.muted ? 'rule_muted' : 'incident_snoozed');
+    return true;
+  }
+  const projectName = await runtime.projectName();
+  const notification = await buildNotification(runtime, 'renotify', target, severity, state.firedAt ? new Date(state.firedAt) : runtime.now, {
     projectName,
     incidentUrl: state.incidentId ? `${getConfig().app.url}/dashboard/alerts/incidents?highlight=${state.incidentId}` : undefined,
   });
-  await dispatchNotification(notification, runtime.rule.channels ?? [], channelContext(runtime, projectName, state.incidentId ?? undefined));
+  const results = await dispatchNotification(notification, rule.channels ?? [], channelContext(runtime, projectName, state.incidentId ?? undefined));
+  await recordDeliveries(db, deliveryBase, 'renotify', results);
   return true;
 }
 
@@ -986,6 +1011,38 @@ async function ruleChangedUnderneath(db: DatabaseProvider, rule: IAlertRule, rul
   }
 }
 
+/** The summary behind the derived "No data" state is rewritten only when it changed or went stale. */
+const LAST_EVALUATION_REFRESH_MS = 15 * MINUTE_MS;
+
+export function lastEvaluationDue(
+  previous: IAlertRule['lastEvaluation'],
+  next: { targets: number; noDataTargets: number },
+  now: Date,
+): boolean {
+  if (!previous) return true;
+  const at = new Date(previous.at).getTime();
+  if (!Number.isFinite(at)) return true;
+  return previous.targets !== next.targets
+    || previous.noDataTargets !== next.noDataTargets
+    || now.getTime() - at >= LAST_EVALUATION_REFRESH_MS;
+}
+
+async function recordLastEvaluation(
+  db: DatabaseProvider,
+  rule: IAlertRule,
+  ruleId: string,
+  targets: TargetEvaluation[],
+  now: Date,
+): Promise<void> {
+  const summary = { targets: targets.length, noDataTargets: targets.filter((target) => target.noData).length };
+  if (!lastEvaluationDue(rule.lastEvaluation, summary, now)) return;
+  try {
+    await db.updateAlertRule(ruleId, { lastEvaluation: { at: now, ...summary } });
+  } catch (error) {
+    logger.warn('Could not store the rule evaluation summary', { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 async function evaluateRule(
   ctx: EvaluationContext,
   db: DatabaseProvider,
@@ -1069,6 +1126,7 @@ async function evaluateRule(
     now,
     projectName: () => shared.projectNameFor(rule.projectId),
     contextBudget: { left: MAX_CONTEXTS_PER_RULE_SWEEP },
+    muted: Boolean(rule.mutedUntil) && new Date(rule.mutedUntil as Date).getTime() > now.getTime(),
   };
 
   const forMinutes = Math.max(0, rule.condition.forMinutes ?? 0);
@@ -1241,6 +1299,8 @@ async function evaluateRule(
   await Promise.all(Array.from({ length: Math.min(TARGET_CONCURRENCY, queue.length) }, () => worker()));
 
   if (aborted) return fired;
+
+  await recordLastEvaluation(db, rule, ruleId, queue, now);
 
   if (deferred > 0) {
     logger.warn(`Rule "${rule.name}": ${deferred} notification(s) deferred to the next tick`, { tenant: ctx.tenantSlug });
