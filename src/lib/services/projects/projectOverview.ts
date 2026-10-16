@@ -138,6 +138,8 @@ export async function loadProjectActivity(params: {
   try {
     rows = await db.listAuditLogs({
       q: `/projects/${projectId}`,
+      // failed calls never make the list: leave them out of the 200 rows read
+      outcome: 'success',
       from: new Date(Date.now() - ACTIVITY_WINDOW_MS),
       limit: 200,
     });
@@ -222,7 +224,7 @@ export async function buildProjectOverview(
 ): Promise<ProjectOverview> {
   const projectId = String(project._id);
   const [data, users, groups, policies, rules] = await Promise.all([
-    loadTenantProjectData(db, tenantId),
+    loadTenantProjectData(db, tenantId, [projectId]),
     db.listUsers({ includeExternal: true }),
     db.listGroups(tenantId),
     db.listQuotaPolicies(tenantId, projectId),

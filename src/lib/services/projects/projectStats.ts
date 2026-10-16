@@ -8,7 +8,6 @@
  */
 import type {
   DatabaseProvider,
-  IAgent,
   IApiToken,
   IGroupMember,
   IGroupProject,
@@ -45,7 +44,8 @@ export interface TenantProjectData {
   groupProjects: Pick<IGroupProject, 'groupId' | 'projectId'>[];
   groupMembers: Pick<IGroupMember, 'groupId' | 'userId'>[];
   providers: Pick<IProviderRecord, 'type' | 'projectId' | 'projectIds'>[];
-  agents: Pick<IAgent, 'projectId'>[];
+  /** Agents per project id, counted for the projects asked for only (agent documents are large). */
+  agentCounts: Record<string, number>;
   tokens: Pick<IApiToken, 'projectId'>[];
   /**
    * The workspace's own people (no external accounts), for the legacy `IUser.projectIds` memberships:
@@ -139,9 +139,9 @@ export function buildProjectStats(
     }
   }
 
-  for (const agent of data.agents) {
-    const entry = stats.get(String(agent.projectId));
-    if (entry) entry.agents += 1;
+  for (const [id, count] of Object.entries(data.agentCounts)) {
+    const entry = stats.get(id);
+    if (entry) entry.agents += count;
   }
   for (const token of data.tokens) {
     if (!token.projectId) continue;
@@ -153,21 +153,35 @@ export function buildProjectStats(
   return stats;
 }
 
-/** Loads the tenant-wide rows (a fixed number of reads) the counters are derived from. */
+/** At most this many agent counts run at once (one per project). */
+const AGENT_COUNT_CONCURRENCY = 8;
+
+async function countAgentsByProject(db: DatabaseProvider, projectIds: string[]): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (let i = 0; i < projectIds.length; i += AGENT_COUNT_CONCURRENCY) {
+    const batch = projectIds.slice(i, i + AGENT_COUNT_CONCURRENCY);
+    const values = await Promise.all(batch.map((id) => db.countAgents(id)));
+    batch.forEach((id, index) => { counts[id] = values[index]; });
+  }
+  return counts;
+}
+
+/** Loads the tenant-wide rows the counters are derived from, plus an agent count per project asked for. */
 export async function loadTenantProjectData(
   db: DatabaseProvider,
   tenantId: string,
+  projectIds: string[],
 ): Promise<TenantProjectData> {
-  const [userProjects, groupProjects, groupMembers, providers, agents, tokens, users] = await Promise.all([
+  const [userProjects, groupProjects, groupMembers, providers, agentCounts, tokens, users] = await Promise.all([
     db.listUserProjectsByTenant(tenantId),
     db.listGroupProjectsByTenant(tenantId),
     db.listGroupMembersByTenant(tenantId),
     db.listProviders(tenantId),
-    db.listAgents(),
+    countAgentsByProject(db, projectIds),
     db.listTenantApiTokens(tenantId),
     db.listUsers(),
   ]);
-  return { userProjects, groupProjects, groupMembers, providers, agents, tokens, users };
+  return { userProjects, groupProjects, groupMembers, providers, agentCounts, tokens, users };
 }
 
 export async function loadProjectStats(
@@ -177,7 +191,7 @@ export async function loadProjectStats(
 ): Promise<Map<string, ProjectStats>> {
   const ids = projects.map((p) => String(p._id));
   if (ids.length === 0) return new Map();
-  return buildProjectStats(ids, await loadTenantProjectData(db, tenantId));
+  return buildProjectStats(ids, await loadTenantProjectData(db, tenantId, ids));
 }
 
 /** The SSO/LDAP rules that hand `projectId` to a user on sign-in, one entry per rule. */

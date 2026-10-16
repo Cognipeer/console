@@ -61,6 +61,16 @@ describe('assertProviderTestEndpointsAllowed (every domain, not only inference)'
       .rejects.toBeInstanceOf(ProviderEndpointError);
   });
 
+  it('SaaS vets the hosts a connection string names in its options, which win over the authority', async () => {
+    use(saas);
+    await expect(assertProviderTestEndpointsAllowed('vector', { connectionString: 'postgres://u:p@db.example.com/db?host=169.254.169.254' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+    await expect(assertProviderTestEndpointsAllowed('vector', { connectionString: 'postgresql://u:p@/db?sslmode=require&hostaddr=10.0.0.5' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+    await expect(assertProviderTestEndpointsAllowed('vector', { connectionString: 'postgres://u:p@[::1]:5432/db' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+  });
+
   it('keeps the rules of the inference domains (instance names, URL fields)', async () => {
     use(saas);
     await expect(assertProviderTestEndpointsAllowed('model', undefined, { instanceName: 'a.evil.com/x' }))
@@ -73,5 +83,14 @@ describe('hasUnvettableEndpoint', () => {
     expect(hasUnvettableEndpoint({ uri: 'mongodb+srv://u:p@cluster0.example.net/db' })).toBe(true);
     expect(hasUnvettableEndpoint({ uri: 'mongodb://h:27017/db' }, { region: 'x' })).toBe(false);
     expect(hasUnvettableEndpoint(undefined)).toBe(false);
+  });
+
+  it('flags connection strings without a host, with a local socket, or of a scheme it does not read', () => {
+    expect(hasUnvettableEndpoint({ connectionString: 'postgres://u:p@/db' })).toBe(true);
+    expect(hasUnvettableEndpoint({ connectionString: 'postgres://u:p@db.example.com/db?host=%2Fvar%2Frun%2Fpostgresql' })).toBe(true);
+    expect(hasUnvettableEndpoint({ connectionString: 'postgres://u:p@%2Fvar%2Frun%2Fpostgresql/db' })).toBe(true);
+    expect(hasUnvettableEndpoint({ dsn: 'mysql://u:p@db.example.com:3306/db' })).toBe(true);
+    expect(hasUnvettableEndpoint({ connectionString: 'postgres://u:p@db.example.com:5432/db?sslmode=require' })).toBe(false);
+    expect(hasUnvettableEndpoint({ url: 'https://search.example.com' })).toBe(false);
   });
 });

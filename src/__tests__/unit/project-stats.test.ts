@@ -37,7 +37,7 @@ describe('buildProjectStats', () => {
       { type: 'file' as const, projectId: 'p2' },
       { type: 'embedding' as const }, // unassigned
     ],
-    agents: [{ projectId: 'p1' }, { projectId: 'p1' }, { projectId: 'p2' }],
+    agentCounts: { p1: 2, p2: 1 },
     tokens: [{ projectId: 'p1' }, { projectId: undefined }, { projectId: 'p2' }],
   };
 

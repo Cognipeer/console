@@ -288,7 +288,7 @@ export async function testProviderConnection(
   // Every outbound target goes through the guard before anything is dialled.
   await assertProviderTestEndpointsAllowed(input.type, input.credentials, settings);
   if (hasUnvettableEndpoint(input.credentials, settings)) {
-    return done({ ok: null, message: 'Connection strings of this form (SRV) cannot be tested from here.' });
+    return done({ ok: null, message: 'A connection string of this form cannot be checked, so it is not tested from here.' });
   }
 
   const httpProbe = INFERENCE_DOMAINS.has(input.type) ? httpProbeFor(input.driver, input.credentials, settings) : null;

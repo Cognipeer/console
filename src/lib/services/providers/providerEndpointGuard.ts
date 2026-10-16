@@ -83,25 +83,60 @@ const CONNECTION_SCHEMES = new Set([
   'mongodb:', 'postgres:', 'postgresql:', 'redis:', 'rediss:', 'amqp:', 'amqps:', 'grpc:', 'grpcs:',
 ]);
 
-/** Hosts a connection string (or a plain `host:port`) names. Empty when the value names none. */
-function hostsOf(value: string): string[] {
-  const trimmed = value.trim();
-  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
-  if (!scheme) return [];
-  const protocol = `${scheme[1].toLowerCase()}:`;
-  if (protocol === 'http:' || protocol === 'https:') return [];
-  if (!CONNECTION_SCHEMES.has(protocol)) return [];
-  // userinfo@host1:port,host2:port/db?options
-  let rest = trimmed.slice(scheme[0].length);
-  rest = rest.split(/[/?#]/, 1)[0];
-  rest = rest.slice(rest.lastIndexOf('@') + 1);
-  return rest.split(',').map((entry) => entry.trim().replace(/:\d+$/, '')).filter(Boolean);
+function decodeSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
-/** True when a connection string cannot be vetted (`mongodb+srv` names a DNS service record, not a host). */
+/** `host:port`, `[v6]:port` or a bare IPv6 address, without the port. */
+function bareHost(entry: string): string {
+  const host = decodeSafe(entry.trim());
+  if (host.startsWith('[')) return host.replace(/\]:\d+$/, ']');
+  if ((host.match(/:/g) ?? []).length > 1) return `[${host}]`;
+  return host.replace(/:\d+$/, '');
+}
+
+/**
+ * What a `scheme://` connection string names: the hosts to vet, and whether that list is
+ * complete. `null` for any other value (http(s) URLs are vetted as URLs).
+ */
+function scanConnectionString(value: string): { hosts: string[]; unvettable: boolean } | null {
+  const trimmed = value.trim();
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
+  if (!scheme) return null;
+  const protocol = `${scheme[1].toLowerCase()}:`;
+  if (protocol === 'http:' || protocol === 'https:') return null;
+  // `+srv` names a DNS service record, and other schemes are not read here: neither can be vetted
+  if (!CONNECTION_SCHEMES.has(protocol)) return { hosts: [], unvettable: true };
+
+  // userinfo@host1:port,host2:port/db?options
+  const rest = trimmed.slice(scheme[0].length);
+  let authority = rest.split(/[/?#]/, 1)[0];
+  authority = authority.slice(authority.lastIndexOf('@') + 1);
+  const hosts = authority.split(',').map(bareHost).filter(Boolean);
+  // drivers also take the host from the options (libpq `host` / `hostaddr`), and those win over the authority
+  const query = /\?([^#]*)/.exec(rest)?.[1] ?? '';
+  for (const pair of query.split('&')) {
+    const at = pair.indexOf('=');
+    const key = decodeSafe(at === -1 ? pair : pair.slice(0, at)).trim().toLowerCase();
+    if (at === -1 || (key !== 'host' && key !== 'hostaddr')) continue;
+    hosts.push(...decodeSafe(pair.slice(at + 1).replace(/\+/g, ' ')).split(',').map(bareHost).filter(Boolean));
+  }
+  // no host = the driver's default (localhost); a path = a local socket
+  const sockets = hosts.filter((host) => host.startsWith('/'));
+  return { hosts: hosts.filter((host) => !host.startsWith('/')), unvettable: hosts.length === 0 || sockets.length > 0 };
+}
+
+/**
+ * True when a connection string cannot be vetted: a `+srv` record, a scheme this guard does not
+ * read, no host (the driver's default) or a local socket.
+ */
 export function hasUnvettableEndpoint(...sources: Array<Record<string, unknown> | undefined>): boolean {
   return sources.some((source) =>
-    Object.values(source ?? {}).some((value) => typeof value === 'string' && /^[a-z]+\+srv:\/\//i.test(value.trim())),
+    Object.values(source ?? {}).some((value) => typeof value === 'string' && scanConnectionString(value)?.unvettable === true),
   );
 }
 
@@ -128,7 +163,7 @@ export async function assertProviderTestEndpointsAllowed(
       }
       const hosts = HOST_FIELDS.has(field) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
         ? trimmed.split(',').map((entry) => entry.trim().replace(/:\d+$/, '')).filter(Boolean)
-        : hostsOf(trimmed);
+        : scanConnectionString(trimmed)?.hosts ?? [];
       for (const host of hosts) await assertEndpoint(field, `https://${host}`, guardOptions);
     }
   }
