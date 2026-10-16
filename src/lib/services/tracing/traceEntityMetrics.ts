@@ -14,6 +14,10 @@
  *    `/end` on an abandoned session or a late error on a finished one only emits
  *    a correction row.
  *
+ * A run that pauses for a person (agent-sdk ≥ 0.14: a tool approval, a question, a client tool) reports `paused`
+ * and resumes into the same session. It is booked once, when it finishes, over the events of every part, and its
+ * latency is the agent's time: wall-clock time minus the time spent waiting on people or the calling app.
+ *
  * Booking time of events: event timestamps are client-controlled, and an ingest of old events would otherwise
  * touch up to 288 five-minute buckets per key. For externally traced runs (`source: 'tracing'`) the time an event is
  * booked at is clamped to [now - 3 h, now + 5 min]: an event between 3 h and 24 h old is booked at the now-3h bucket
@@ -44,6 +48,7 @@ import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRo
 import {
   countTraceErrors,
   isErrorTraceEvent,
+  isRunTraceEvent,
   type TraceEventLike,
 } from '@/lib/shared/traceHealth';
 
@@ -316,7 +321,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
     const aiCalls = capDistinctKeys(
       fresh.filter((event) =>
         normalized(event.type) === 'ai_call'
-        && normalized(event.status) !== 'skipped'
+        && isRunTraceEvent(event)
         && !isGatewayServedEvent(event)
         && modelNameOf(event)),
       (event) => modelNameOf(event)!,
@@ -326,7 +331,7 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
     const toolCalls = capDistinctKeys(
       fresh.filter((event) =>
         normalized(event.type) === 'tool_call'
-        && normalized(event.status) !== 'skipped'
+        && isRunTraceEvent(event)
         && eventToolName(event)),
       (event) => eventToolName(event)!,
       'tool',
@@ -393,10 +398,14 @@ export async function recordTraceEventMetrics(params: RecordTraceEventMetricsPar
 
 // ── Session outcome ─────────────────────────────────────────────────────────
 
-/** A session status that counts as a finished run (everything except in_progress / unknown / missing). */
+/**
+ * A session status that counts as a finished run: everything except in_progress, unknown, missing and paused.
+ * A `paused` run (agent-sdk ≥ 0.14) waits on a person (a tool approval, a question, a client tool) and resumes
+ * into the same session, so it is booked when it finishes, like a run in progress.
+ */
 export function isTerminalSessionStatus(status: unknown): boolean {
   const value = normalized(status);
-  return value !== '' && value !== 'in_progress' && value !== 'unknown';
+  return value !== '' && value !== 'in_progress' && value !== 'unknown' && value !== 'paused';
 }
 
 function isErrorStatus(status: string): boolean {
@@ -415,7 +424,10 @@ export interface RecordAgentSessionOutcomeParams {
   /** Outcome the caller read earlier; the stored one is re-read under a per-session lock and wins. */
   previousOutcome?: IAgentTracingSession['metricsOutcome'];
   source: TraceMetricsSource;
-  /** The session's events, for pricing its model calls. Loaded from the database when omitted. */
+  /**
+   * The session's events, for pricing its model calls and telling its waits apart. Loaded from the database when
+   * omitted, or when they do not cover the whole session (a run resumed after a pause passes only its last part).
+   */
   events?: TraceEntityEventLike[];
   pricerLoader?: TraceModelPricerLoader;
   /** Time the outcome is booked at (default: the session's end time, when recent). */
@@ -437,12 +449,74 @@ async function withOutcomeLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
+/**
+ * The session's events: the caller's when they cover the whole session (the stored `totalEvents` counts every part
+ * of a run resumed after a pause), else the stored ones. A failed read books without them (no cost, no waits).
+ */
+async function loadSessionEvents(
+  params: RecordAgentSessionOutcomeParams,
+  stored: Pick<IAgentTracingSession, 'totalEvents'> | null | undefined,
+): Promise<TraceEntityEventLike[]> {
+  if (params.events && params.events.length >= num(stored?.totalEvents)) return params.events;
+  try {
+    return await runWithTenantScope(params.tenantDbName, (db) =>
+      db.listAgentTracingEvents(params.session.sessionId, params.projectId || undefined, {
+        projection: { sections: 0, metadata: 0 },
+      }));
+  } catch (error) {
+    logger.warn('Session events unavailable for agent health metrics; booking without cost', {
+      sessionId: params.session.sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return params.events ?? [];
+  }
+}
+
+/** Event types of a person's step, in any integration's spelling (`*approval*` too). */
+const WAITING_EVENT_TYPES = new Set(['tool_approval', 'user_question', 'human_input', 'interrupt']);
+
+/**
+ * Whether an event records the run waiting on someone else: a person approving a tool or answering a question
+ * (actor scope `human`), a tool the calling app runs (`client`), or the step written when such a wait is abandoned
+ * (role `approver`). Its duration is the wait, which ends at its timestamp.
+ */
+function isWaitingEvent(event: TraceEntityEventLike): boolean {
+  const type = normalized(event.type);
+  if (WAITING_EVENT_TYPES.has(type) || type.includes('approval')) return true;
+  const actor = event.actor && typeof event.actor === 'object' ? event.actor as Record<string, unknown> : undefined;
+  const scope = normalized(actor?.scope);
+  return scope === 'human' || scope === 'client' || normalized(actor?.role) === 'approver';
+}
+
+/** Wall-clock time the run waited on others: waits that overlap (two approvals at once) count once. */
+function waitingMs(events: TraceEntityEventLike[]): number {
+  const waits: Array<[number, number]> = [];
+  for (const event of events) {
+    if (!event || !isWaitingEvent(event)) continue;
+    const ms = num(event.durationMs);
+    const end = eventTimeMs(event);
+    if (ms > 0 && end !== undefined) waits.push([end - ms, end]);
+  }
+  waits.sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let open: [number, number] | undefined;
+  for (const [start, end] of waits) {
+    if (open && start <= open[1]) {
+      open[1] = Math.max(open[1], end);
+      continue;
+    }
+    if (open) total += open[1] - open[0];
+    open = [start, end];
+  }
+  return open ? total + open[1] - open[0] : total;
+}
+
 async function priceSessionEvents(
   params: RecordAgentSessionOutcomeParams,
   events: TraceEntityEventLike[],
 ): Promise<number> {
   const aiCalls = events.filter((event) =>
-    normalized(event.type) === 'ai_call' && normalized(event.status) !== 'skipped' && modelNameOf(event));
+    normalized(event.type) === 'ai_call' && isRunTraceEvent(event) && modelNameOf(event));
   if (aiCalls.length === 0) return 0;
   try {
     const loader = params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId);
@@ -489,8 +563,6 @@ export async function recordAgentSessionOutcome(
       const previousStatus = previous ? normalized(previous.status) : '';
       if (previous && previousStatus === status) return previous;
 
-      const durationMs = num(params.session.durationMs);
-      const recordLatency = status !== 'abandoned' && durationMs > 0;
       const now = Date.now();
       const endedMs = params.session.endedAt ? new Date(params.session.endedAt).getTime() : NaN;
       const at = params.atMs
@@ -498,33 +570,21 @@ export async function recordAgentSessionOutcome(
       // A session that ended long ago is history (re-import), not current health.
       if (!previous && at === undefined && Number.isFinite(endedMs) && endedMs < now - DAY_MS) return null;
 
+      // Load and price the session's events BEFORE persisting the marker: a failed load must not leave a
+      // counted-but-unemitted session. They price the run and hold its waits, so they are needed for the first
+      // booking and for a latency not recorded yet.
+      const events = !previous || !previous.latencyRecorded ? await loadSessionEvents(params, stored) : [];
+      // The agent's time: a wait on a person or on the calling app is not latency.
+      const durationMs = num(params.session.durationMs);
+      const agentMs = durationMs - Math.min(waitingMs(events), durationMs);
+      const recordLatency = status !== 'abandoned' && agentMs > 0;
+      const costUsd = previous ? 0 : await priceSessionEvents(params, events);
+
       const next: SessionMetricsOutcome = {
         status,
         latencyRecorded: previous ? previous.latencyRecorded || recordLatency : recordLatency,
         recordedAt: new Date(now),
       };
-
-      // Load and price the session's events BEFORE persisting the marker: a failed load must not leave a
-      // counted-but-unemitted session.
-      let costUsd = 0;
-      if (!previous) {
-        let events = params.events;
-        if (!events) {
-          try {
-            events = await runWithTenantScope(params.tenantDbName, (db) =>
-              db.listAgentTracingEvents(params.session.sessionId, params.projectId || undefined, {
-                projection: { sections: 0, metadata: 0, actor: 0 },
-              }));
-          } catch (error) {
-            logger.warn('Session events unavailable for agent health metrics; booking without cost', {
-              sessionId: params.session.sessionId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            events = [];
-          }
-        }
-        costUsd = await priceSessionEvents(params, events);
-      }
 
       // Persist before emitting: a failed write must not leave a counted-but-unmarked session that the next call counts again.
       await runWithTenantScope(params.tenantDbName, (db) =>
@@ -545,7 +605,7 @@ export async function recordAgentSessionOutcome(
           ...base,
           outcome: isErrorStatus(status) ? 'error' : status === 'abandoned' ? 'abandoned' : 'ok',
           requests: 1,
-          ...(recordLatency ? { latencyMs: durationMs, latencyForce: true } : {}),
+          ...(recordLatency ? { latencyMs: agentMs, latencyForce: true } : {}),
           inputTokens: num(params.session.totalInputTokens),
           outputTokens: num(params.session.totalOutputTokens),
           costUsd,
@@ -560,7 +620,7 @@ export async function recordAgentSessionOutcome(
         requests: 0,
         errorsDelta: (isErrorStatus(status) ? 1 : 0) - (isErrorStatus(previousStatus) ? 1 : 0),
         abandoned: (status === 'abandoned' ? 1 : 0) - (previousStatus === 'abandoned' ? 1 : 0),
-        ...(!previous.latencyRecorded && recordLatency ? { latencyMs: durationMs, latencyForce: true } : {}),
+        ...(!previous.latencyRecorded && recordLatency ? { latencyMs: agentMs, latencyForce: true } : {}),
       });
       return next;
     });

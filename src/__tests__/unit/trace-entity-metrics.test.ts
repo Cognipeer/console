@@ -16,7 +16,11 @@ vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase, runWithTena
 import { AgentTracingService, type TraceModelPricerLoader } from '@/lib/services/agentTracing';
 import { matchesTracingStatus } from '@/lib/services/snapshots/snapshotService';
 import { runWithTenantScope } from '@/lib/database';
-import { recordAgentSessionOutcome, recordTraceEventMetrics } from '@/lib/services/tracing/traceEntityMetrics';
+import {
+  isTerminalSessionStatus,
+  recordAgentSessionOutcome,
+  recordTraceEventMetrics,
+} from '@/lib/services/tracing/traceEntityMetrics';
 import { resolveStatusColor, statusVariant } from '@/lib/utils/tracingUtils';
 import { createMockDb } from '../helpers/db.mock';
 
@@ -86,6 +90,21 @@ describe('recordTraceEventMetrics', () => {
     const agentRows = byType('agent');
     expect(agentRows.reduce((sum, row) => sum + Number(row.aiCalls ?? 0), 0)).toBe(1);
     expect(agentRows.reduce((sum, row) => sum + Number(row.toolCalls ?? 0), 0)).toBe(0);
+  });
+
+  it('counts a client tool once: its request waiting on the calling app is not a call', async () => {
+    await recordTraceEventMetrics({
+      ...base,
+      source: 'tracing',
+      pricerLoader,
+      events: [
+        { id: 'req', type: 'tool_call', status: 'pending', toolName: 'pick_file', actor: { scope: 'client' }, timestamp: at() },
+        { id: 'res', type: 'tool_call', status: 'success', toolName: 'pick_file', actor: { scope: 'client' }, durationMs: 5_000, timestamp: at() },
+      ],
+    });
+    expect(byType('tool')).toHaveLength(1);
+    expect(byType('tool')[0]).toMatchObject({ entityKey: 'pick_file', outcome: 'ok', latencyMs: 5_000 });
+    expect(byType('agent').reduce((sum, row) => sum + Number(row.toolCalls ?? 0), 0)).toBe(1);
   });
 
   it('hosted runs emit agent rows only', async () => {
@@ -313,6 +332,76 @@ describe('recordAgentSessionOutcome', () => {
     db.updateAgentTracingSession.mockRejectedValue(new Error('write failed'));
     expect(await recordAgentSessionOutcome(params())).toBeNull();
     expect(calls()).toHaveLength(0);
+  });
+
+  it('leaves a run waiting on a person unbooked until it finishes', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(stored({ status: 'paused' }));
+    const paused = { sessionId: 's-1', agentName: 'Pulse Main', status: 'paused', durationMs: 900 } as never;
+    expect(isTerminalSessionStatus('paused')).toBe(false);
+    expect(await recordAgentSessionOutcome(params({ session: paused }))).toBeNull();
+    expect(db.updateAgentTracingSession).not.toHaveBeenCalled();
+    expect(calls()).toHaveLength(0);
+  });
+
+  it('books a resumed run once, priced over every part and timed without its wait on a person', async () => {
+    const startMs = Date.now() - 60_000;
+    const iso = (offsetMs: number) => new Date(startMs + offsetMs).toISOString();
+    // Part 1: a model call, then an approval request and the pause. Part 2, 40 s later: the decision and the rest.
+    const part1 = [
+      { type: 'ai_call', status: 'success', model: 'gpt-4o', inputTokens: 1_000_000, durationMs: 2_000, timestamp: iso(0) },
+      { type: 'tool_approval', status: 'pending', actor: { scope: 'agent', role: 'approval_request' }, timestamp: iso(2_000) },
+    ];
+    const part2 = [
+      { type: 'tool_approval', status: 'success', actor: { scope: 'human', role: 'approver' }, durationMs: 40_000, timestamp: iso(42_000) },
+      { type: 'tool_call', status: 'success', toolName: 'search', durationMs: 1_000, timestamp: iso(42_000) },
+      { type: 'ai_call', status: 'success', model: 'gpt-4o', inputTokens: 3_000_000, durationMs: 3_000, timestamp: iso(43_000) },
+    ];
+    db.findAgentTracingSessionById.mockResolvedValue(stored({ status: 'success', totalEvents: 5 }));
+    db.listAgentTracingEvents.mockResolvedValue([...part1, ...part2] as never);
+
+    const next = await recordAgentSessionOutcome(params({
+      // The resumed invoke passes only its own part; the session totals cover both.
+      events: part2,
+      session: { sessionId: 's-1', agentName: 'Pulse Main', status: 'success', durationMs: 46_000, totalInputTokens: 4_000_000, totalOutputTokens: 0 } as never,
+    }));
+
+    expect(next).toMatchObject({ status: 'success', latencyRecorded: true });
+    expect(db.listAgentTracingEvents).toHaveBeenCalledTimes(1);
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toMatchObject({ outcome: 'ok', requests: 1, latencyMs: 6_000, inputTokens: 4_000_000, costUsd: 4 });
+  });
+
+  it('counts waits that overlap once', async () => {
+    const startMs = Date.now() - 60_000;
+    const iso = (offsetMs: number) => new Date(startMs + offsetMs).toISOString();
+    db.findAgentTracingSessionById.mockResolvedValue(stored({ status: 'success', totalEvents: 3 }));
+    // Two approvals asked together and answered 10 s and 20 s later, then a tool the calling app ran for 5 s.
+    const events = [
+      { type: 'tool_approval', status: 'success', actor: { scope: 'human' }, durationMs: 10_000, timestamp: iso(10_000) },
+      { type: 'tool_approval', status: 'success', actor: { scope: 'human' }, durationMs: 20_000, timestamp: iso(20_000) },
+      { type: 'tool_call', status: 'success', actor: { scope: 'client', role: 'tool' }, durationMs: 5_000, timestamp: iso(25_000) },
+    ];
+    await recordAgentSessionOutcome(params({
+      events,
+      session: { sessionId: 's-1', agentName: 'Pulse Main', status: 'success', durationMs: 30_000 } as never,
+    }));
+    expect(db.listAgentTracingEvents).not.toHaveBeenCalled();
+    expect(calls()[0]).toMatchObject({ requests: 1, latencyMs: 5_000 });
+  });
+
+  it('books a run that ended while waiting (expired) without a latency', async () => {
+    db.findAgentTracingSessionById.mockResolvedValue(stored({ status: 'expired', totalEvents: 1 }));
+    // The step the console writes when nobody answered: the wait covers the whole run.
+    const events = [
+      { type: 'user_question', status: 'skipped', actor: { scope: 'system', role: 'approver' }, durationMs: 12_000, timestamp: at(-1_000) },
+    ];
+    const next = await recordAgentSessionOutcome(params({
+      events,
+      session: { sessionId: 's-1', agentName: 'Pulse Main', status: 'expired', durationMs: 10_000 } as never,
+    }));
+    expect(next).toMatchObject({ status: 'expired', latencyRecorded: false });
+    expect(calls()[0]).toMatchObject({ outcome: 'ok', requests: 1 });
+    expect(calls()[0]).not.toHaveProperty('latencyMs');
   });
 
   it('pins the known limitation: tokens and cost are booked with the first outcome only', async () => {

@@ -4,6 +4,7 @@ import {
   deriveSessionStatus,
   isErrorTraceEvent,
   isExplicitClientStatus,
+  isRunTraceEvent,
   traceErrorKind,
 } from '@/lib/shared/traceHealth';
 
@@ -72,6 +73,19 @@ describe('countTraceErrors', () => {
       { type: 'agent_iteration', status: 'success' },
     ]);
     expect(counts).toEqual({ errorEvents: 3, toolErrors: 1, aiErrors: 1, toolCalls: 2, aiCalls: 2 });
+  });
+
+  it('does not count a request still waiting on a person or the calling app as a call', () => {
+    // agent-sdk ≥ 0.14 records a client tool twice: the request when the run pauses, the result when it resumes.
+    const counts = countTraceErrors([
+      { type: 'tool_call', status: 'pending', actor: { scope: 'client', name: 'pick_file' } },
+      { type: 'tool_call', status: 'error', actor: { scope: 'client', name: 'pick_file' } },
+    ]);
+    expect(counts).toEqual({ errorEvents: 1, toolErrors: 1, aiErrors: 0, toolCalls: 1, aiCalls: 0 });
+    expect(isRunTraceEvent({ status: 'pending' })).toBe(false);
+    expect(isRunTraceEvent({ status: 'skipped' })).toBe(false);
+    expect(isRunTraceEvent({ status: 'success' })).toBe(true);
+    expect(isRunTraceEvent({})).toBe(true);
   });
 
   it('handles empty input', () => {

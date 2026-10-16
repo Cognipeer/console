@@ -4,10 +4,11 @@
  * store and the entity health emitters, so one rule decides what an "error
  * event" is. Dependency-free: no `@/lib/database`, no node builtins.
  *
- * Event semantics (agent SDK): status is `success | error | skipped | retry`;
- * `skipped` (policy or cancellation) and `retry` are not errors. An event may
- * also carry an `error` object without a status. SQLite returns `{}` for an
- * empty error, so `error` is never tested for truthiness, only for content.
+ * Event semantics (agent SDK): status is `success | error | skipped | retry |
+ * pending`; `skipped` (policy or cancellation), `retry` and `pending` (a request
+ * waiting on a person or the calling app) are not errors. An event may also
+ * carry an `error` object without a status. SQLite returns `{}` for an empty
+ * error, so `error` is never tested for truthiness, only for content.
  */
 
 export interface TraceEventLike {
@@ -57,6 +58,16 @@ export function isErrorTraceEvent(event: TraceEventLike | null | undefined): boo
   return hasErrorContent(event.error);
 }
 
+/**
+ * True when the step ran: a `skipped` one never did (policy or cancellation),
+ * and a `pending` one is a request still waiting on a person or the calling
+ * app, whose answer arrives as an event of its own (agent-sdk ≥ 0.14).
+ */
+export function isRunTraceEvent(event: TraceEventLike): boolean {
+  const status = normalized(event.status);
+  return status !== 'skipped' && status !== 'pending';
+}
+
 /** Which kind of work an event represents: a tool call, an AI call (llm, summarization, reflection, embedding) or anything else. */
 export function traceErrorKind(event: TraceEventLike | null | undefined): TraceErrorKind {
   if (!event) return 'other';
@@ -68,9 +79,9 @@ export function traceErrorKind(event: TraceEventLike | null | undefined): TraceE
 }
 
 /**
- * Error and call counters for a set of events. Calls exclude `skipped` events
- * (they never ran), so `toolErrors / toolCalls` is a failure rate of executed
- * calls.
+ * Error and call counters for a set of events. Calls exclude events that did
+ * not run (`skipped`, `pending`), so `toolErrors / toolCalls` is a failure rate
+ * of executed calls.
  */
 export function countTraceErrors(events: ReadonlyArray<TraceEventLike> | null | undefined): TraceErrorCounts {
   const counts: TraceErrorCounts = { errorEvents: 0, toolErrors: 0, aiErrors: 0, toolCalls: 0, aiCalls: 0 };
@@ -78,9 +89,9 @@ export function countTraceErrors(events: ReadonlyArray<TraceEventLike> | null | 
   for (const event of events) {
     if (!event) continue;
     const kind = traceErrorKind(event);
-    const skipped = normalized(event.status) === 'skipped';
-    if (kind === 'tool' && !skipped) counts.toolCalls += 1;
-    else if (kind === 'ai' && !skipped) counts.aiCalls += 1;
+    const ran = isRunTraceEvent(event);
+    if (kind === 'tool' && ran) counts.toolCalls += 1;
+    else if (kind === 'ai' && ran) counts.aiCalls += 1;
     if (isErrorTraceEvent(event)) {
       counts.errorEvents += 1;
       if (kind === 'tool') counts.toolErrors += 1;
