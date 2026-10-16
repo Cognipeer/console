@@ -5,6 +5,7 @@
 
 import { formatMetricValue, metricUnit, operatorSymbol, type AlertCatalog, type TFn } from './alertCatalog';
 import type { AlertConditionMode, IncidentDto, IncidentSeverity, IncidentStatus } from './alertTypes';
+import { pluralKey } from './plural';
 
 export const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
 export const INCIDENT_SEVERITIES: IncidentSeverity[] = ['critical', 'warning', 'info'];
@@ -18,23 +19,50 @@ export const INCIDENT_TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
   closed: ['open'],
 };
 
-export type BulkAction = 'acknowledge' | 'resolve' | 'close';
+export type BulkAction = 'acknowledge' | 'resolve' | 'close' | 'assign' | 'snooze' | 'unsnooze' | 'reopen';
+/** The plain status-transition bulk actions (the inbox's original bulk bar). */
 export const BULK_ACTIONS: BulkAction[] = ['acknowledge', 'resolve', 'close'];
+/** Every bulk action the server accepts (`POST /alerts/incidents/bulk`). */
+export const ALL_BULK_ACTIONS: BulkAction[] = ['acknowledge', 'resolve', 'close', 'assign', 'snooze', 'unsnooze', 'reopen'];
 
-const BULK_TARGET: Record<BulkAction, IncidentStatus> = {
+const BULK_TARGET: Partial<Record<BulkAction, IncidentStatus>> = {
   acknowledge: 'acknowledged',
   resolve: 'resolved',
   close: 'closed',
 };
 
+/** Statuses bulk reopen takes (mirrors `REOPENABLE_STATUSES` in the incident service). */
+const REOPENABLE: IncidentStatus[] = ['acknowledged', 'investigating', 'resolved', 'closed'];
+/** Statuses a snooze applies to: the incident is still live (mirrors `SNOOZABLE_STATUSES`). */
+const SNOOZABLE: IncidentStatus[] = ['open', 'acknowledged', 'investigating'];
+
+/** A snooze is active while its end is in the future. */
+export function isSnoozed(incident: Pick<IncidentDto, 'snoozedUntil'>, now: number = Date.now()): boolean {
+  if (!incident.snoozedUntil) return false;
+  const until = Date.parse(incident.snoozedUntil);
+  return Number.isFinite(until) && until > now;
+}
+
 export function canTransition(from: IncidentStatus, to: IncidentStatus): boolean {
   return INCIDENT_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-/** The incidents of a selection a bulk action applies to (the rest would be refused as illegal transitions). */
-export function bulkEligible(incidents: IncidentDto[], action: BulkAction): IncidentDto[] {
-  const target = BULK_TARGET[action];
-  return incidents.filter((incident) => canTransition(incident.status, target));
+/** The incidents of a selection a bulk action applies to (the rest would be refused by the server). */
+export function bulkEligible(incidents: IncidentDto[], action: BulkAction, now: number = Date.now()): IncidentDto[] {
+  switch (action) {
+    case 'assign':
+      return incidents;
+    case 'snooze':
+      return incidents.filter((incident) => SNOOZABLE.includes(incident.status));
+    case 'unsnooze':
+      return incidents.filter((incident) => isSnoozed(incident, now));
+    case 'reopen':
+      return incidents.filter((incident) => REOPENABLE.includes(incident.status));
+    default: {
+      const target = BULK_TARGET[action] as IncidentStatus;
+      return incidents.filter((incident) => canTransition(incident.status, target));
+    }
+  }
 }
 
 export function isOpenStatus(status: IncidentStatus): boolean {
@@ -165,7 +193,7 @@ export function describeRowValue(
   const mode = rowMode(row);
   const unit = metricUnit(catalog, row.metric);
   if (mode === 'absence') {
-    return { value: t('rowValue.absenceValue', { count: formatMetricValue(row.actualValue, '', locale) }), compare: t('rowValue.absenceCompare') };
+    return { value: t(pluralKey('rowValue.absenceValue', row.actualValue), { count: formatMetricValue(row.actualValue, '', locale) }), compare: t('rowValue.absenceCompare') };
   }
   const value = formatMetricValue(row.actualValue, unit, locale);
   if (mode === 'slo_burn') return { value, compare: t('rowValue.sloCompare') };

@@ -238,10 +238,30 @@ export function entityTypeLabel(entityType: string | undefined | null, t: TFn, p
   return lookup(t, `${plural ? 'entityTypesPlural' : 'entityTypes'}.${entityType}`) ?? entityType;
 }
 
-/** Where an entity's own health page lives (only agents have one in the core build). */
-export function entityHref(entityType: string | undefined | null, entityKey: string | undefined | null): string | null {
-  if (!entityKey) return null;
+/** Key of one entity in a `links` map (`POST /alerts/entities/links`). */
+export function entityLinkKey(entityType: string, entityKey: string): string {
+  return `${entityType}:${entityKey}`;
+}
+
+/**
+ * Where an entity's own page lives. Agents and knowledge bases are addressed by
+ * key, so they always resolve; models, MCP servers and tools are addressed by
+ * record id, so they need the server-resolved `links` (entities without a
+ * console record, such as models seen only in traces, stay unlinked). A server
+ * answer wins over the built-in guess, so the enterprise health pages show up
+ * where the overlay provides them.
+ */
+export function entityHref(
+  entityType: string | undefined | null,
+  entityKey: string | undefined | null,
+  links?: Record<string, string | null> | null,
+): string | null {
+  if (!entityKey || !entityType) return null;
+  const known = links?.[entityLinkKey(entityType, entityKey)];
+  if (known) return known;
+  if (links && entityLinkKey(entityType, entityKey) in links) return null;
   if (entityType === 'agent') return `/dashboard/tracing/agents/${encodeURIComponent(entityKey)}`;
+  if (entityType === 'kb') return `/dashboard/rag/${encodeURIComponent(entityKey)}`;
   return null;
 }
 

@@ -28,10 +28,13 @@ import type {
 } from './alertTypes';
 import {
   channelsFromStored,
+  libraryRefsFromStored,
+  libraryRefToInput,
   channelsToInput,
   newChannelItem,
   validateChannels,
   type ChannelItem,
+  type LibraryRef,
 } from './channelItems';
 
 /** A NumberInput yields a number, or '' once cleared. */
@@ -113,6 +116,10 @@ export interface RuleFormValues {
   renotifyMinutes: string;
   cooldownMinutes: string;
   channels: ChannelItem[];
+  /** References to tenant channel library entries; they count as channels next to the inline ones. */
+  libraryRefs: LibraryRef[];
+  /** Optional http(s) link to the runbook of this rule. */
+  runbookUrl: string;
   enabled: boolean;
 }
 
@@ -164,6 +171,8 @@ export function defaultValues(catalog: AlertCatalog): RuleFormValues {
     renotifyMinutes: '0',
     cooldownMinutes: '60',
     channels: [newChannelItem('email')],
+    libraryRefs: [],
+    runbookUrl: '',
     enabled: true,
   };
 }
@@ -256,7 +265,10 @@ export function valuesFromRule(
 
   if (Array.isArray(rule.channels)) {
     values.channels = channelsFromStored(rule.channels);
+    values.libraryRefs = libraryRefsFromStored(rule.channels);
+    // A rule that is only library references starts with no inline channel (not the default email one).
   }
+  if (typeof rule.runbookUrl === 'string') values.runbookUrl = rule.runbookUrl;
   return values;
 }
 
@@ -291,10 +303,18 @@ export function prefillFromParams(params: PrefillParams, catalog: AlertCatalog):
 
 /**
  * Seed of the create form for a copy of a rule. A stored channel's secret cannot be read back, so only email channels
- * (plain recipients) carry over; `droppedChannels` counts the ones that did not.
+ * (plain recipients) and library references (no secret of their own) carry over; `droppedChannels` counts the ones
+ * that did not.
  */
 export function duplicateRuleSeed(rule: AlertRuleDto, name: string): { seed: Partial<AlertRuleDto>; droppedChannels: number } {
-  const channels = (rule.channels ?? []).filter((channel) => channel.type === 'email').map((channel) => ({ type: channel.type, recipients: [...(channel.recipients ?? [])] }));
+  // Email channels (plain recipients) and library references carry over; inline secrets cannot be read back.
+  const channels = (rule.channels ?? [])
+    .filter((channel) => channel.type === 'email' || (channel.type === 'library' && channel.libraryId))
+    .map((channel) =>
+      channel.type === 'library'
+        ? { type: channel.type, libraryId: channel.libraryId }
+        : { type: channel.type, recipients: [...(channel.recipients ?? [])] },
+    );
   return {
     seed: {
       name,
@@ -310,6 +330,7 @@ export function duplicateRuleSeed(rule: AlertRuleDto, name: string): { seed: Par
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
       enabled: rule.enabled,
+      runbookUrl: rule.runbookUrl,
       channels,
     },
     droppedChannels: (rule.channels ?? []).length - channels.length,
@@ -373,6 +394,11 @@ export interface PayloadOptions {
   preview?: boolean;
   /** An edit that left the channel list as it was. A stored rule with no channels (a legacy row) then saves without one. */
   channelsUnchanged?: boolean;
+}
+
+/** The form's cooldown as the server reads it (`cooldownMinutes`). */
+function cooldownMinutesOf(values: Pick<RuleFormValues, 'cooldownMinutes'>): number {
+  return Number.parseInt(values.cooldownMinutes, 10) || 0;
 }
 
 export function buildRulePayload(values: RuleFormValues, options: PayloadOptions): Record<string, unknown> {
@@ -452,9 +478,14 @@ export function buildRulePayload(values: RuleFormValues, options: PayloadOptions
   body.severity = values.severity;
   body.notifyOnResolve = values.notifyOnResolve;
   body.renotifyMinutes = Number.parseInt(values.renotifyMinutes, 10) || 0;
-  body.cooldownMinutes = Number.parseInt(values.cooldownMinutes, 10) || 0;
+  body.cooldownMinutes = cooldownMinutesOf(values);
   body.enabled = values.enabled;
-  if (!(isEdit && channelsUnchanged && values.channels.length === 0)) body.channels = channelsToInput(values.channels);
+  const runbookUrl = values.runbookUrl.trim();
+  // An edit sends '' to clear a stored runbook link.
+  if (runbookUrl || isEdit) body.runbookUrl = runbookUrl;
+  if (!(isEdit && channelsUnchanged && values.channels.length === 0 && values.libraryRefs.length === 0)) {
+    body.channels = [...channelsToInput(values.channels), ...values.libraryRefs.map(libraryRefToInput)];
+  }
   return body;
 }
 
@@ -472,8 +503,8 @@ export interface RuleChecks {
 }
 
 /** A stable fingerprint of a channel list as it would be sent, to tell whether an edit touched it. */
-export function channelsSignature(channels: ChannelItem[]): string {
-  return JSON.stringify(channelsToInput(channels));
+export function channelsSignature(channels: ChannelItem[], libraryRefs: LibraryRef[] = []): string {
+  return JSON.stringify([...channelsToInput(channels), ...libraryRefs.map(libraryRefToInput)]);
 }
 
 export function checkRule(values: RuleFormValues, catalog: AlertCatalog, options: { channelsUnchanged?: boolean } = {}): RuleChecks {
@@ -523,7 +554,9 @@ export function checkRule(values: RuleFormValues, catalog: AlertCatalog, options
   // A stored rule saved without touching its channels keeps them (a legacy row may have none: renaming it must still work).
   const channels =
     options.channelsUnchanged === true ||
-    (values.channels.length >= 1 && values.channels.length <= 10 && validateChannels(values.channels) === null);
+    (values.channels.length + values.libraryRefs.length >= 1 &&
+      values.channels.length + values.libraryRefs.length <= 10 &&
+      validateChannels(values.channels) === null);
 
   return { name, metric, target, condition, channels, conditionIssue, canSave: name && metric && target && condition && channels };
 }
@@ -585,7 +618,39 @@ export function describeRule(values: RuleFormValues, catalog: AlertCatalog, t: T
       });
   }
 
-  if (values.channels.length === 0) return sentence;
-  const channels = [...new Set(values.channels.map((channel) => t(`channelTypes.${channel.type}`)))].join(', ');
+  if (values.channels.length === 0 && values.libraryRefs.length === 0) return sentence;
+  const kinds = values.channels.map((channel) => t(`channelTypes.${channel.type}`));
+  if (values.libraryRefs.length > 0) kinds.push(t('channels.libraryKind'));
+  const channels = [...new Set(kinds)].join(', ');
   return `${sentence} ${t('summary.notify', { channels })}`;
+}
+
+// ── Backtest ────────────────────────────────────────────────────────────────
+
+/**
+ * Body of `POST /alerts/rules/backtest` for the current form (the preview shape, so it needs no name or channels).
+ * The replay also needs the cooldown (the least time between two firings of one target): the server assumes 60
+ * minutes when none is sent. The live preview does not use it, so it stays out of the preview shape.
+ */
+export function buildBacktestBody(values: RuleFormValues, options: { catalog: AlertCatalog; isEdit: boolean }, days = 7): Record<string, unknown> {
+  const rule = buildRulePayload(values, { ...options, preview: true });
+  return { rule: { ...rule, cooldownMinutes: cooldownMinutesOf(values) }, days };
+}
+
+/** "Apply" on a backtest suggestion: the threshold it proposes. Nothing is saved until the rule is. */
+export function applyBacktestSuggestion(values: RuleFormValues, suggestion: { threshold: number }): RuleFormValues {
+  return { ...values, mode: 'threshold', threshold: suggestion.threshold };
+}
+
+/** Client-side mirror of the server's runbook rule: http(s) only, no whitespace or control characters, <= 2048. */
+export function isValidRunbookUrl(value: string): boolean {
+  const url = value.trim();
+  if (!url) return true;
+  if (url.length > 2048 || /[\s\u0000-\u001f\u007f]/.test(url)) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
 }

@@ -120,6 +120,8 @@ export function channelTarget(channel: IAlertChannel): string {
       return (channel.recipients ?? []).join(', ') || '(owners and admins)';
     case 'pagerduty':
       return `pagerduty ${channel.keyHint ?? ''}`.trim();
+    case 'library':
+      return 'library channel';
     default:
       return channel.urlHint || channel.type;
   }

@@ -5,9 +5,10 @@
  */
 
 import { ObjectId } from 'mongodb';
-import type { IAlertRule, IAlertEvent, AlertEventStatus } from '../provider.interface';
+import type { Db } from 'mongodb';
+import type { IAlertRule, IAlertEvent, IAlertDelivery, AlertEventStatus } from '../provider.interface';
 import type { Constructor } from './types';
-import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 const toRule = (doc: Record<string, unknown>): IAlertRule => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertRule;
 const toEvent = (doc: Record<string, unknown>): IAlertEvent => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertEvent;
@@ -32,8 +33,33 @@ function clampSkip(value: number | undefined): number {
   return Math.floor(n);
 }
 
+const toDelivery = (doc: Record<string, unknown>): IAlertDelivery => ({ ...doc, _id: String(doc._id) }) as unknown as IAlertDelivery;
+
 export function AlertMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AlertOps extends Base {
+    private alertDeliveryIndexesReady = new Set<string>();
+
+    /**
+     * Ensured on the write path as well as in the boot manifest (which is
+     * existence-guarded). Names/keys are IDENTICAL to the manifest's.
+     */
+    private async ensureAlertDeliveryIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.alertDeliveryIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.alertDeliveries);
+      await Promise.all([
+        coll.createIndex(
+          { tenantId: 1, incidentId: 1, attemptAt: -1 },
+          { name: 'idx_alert_deliveries_incident_attemptAt' },
+        ),
+        coll.createIndex(
+          { tenantId: 1, ruleId: 1, attemptAt: -1 },
+          { name: 'idx_alert_deliveries_rule_attemptAt' },
+        ),
+      ]);
+      this.alertDeliveryIndexesReady.add(dbName);
+    }
+
     // ── Alert rule operations ────────────────────────────────────────
 
     async createAlertRule(
@@ -56,7 +82,9 @@ export function AlertMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       const filter = idFilter(id, projectId);
       if (!filter) return null;
       const db = this.getTenantDb();
-      const updateData: Record<string, unknown> = { ...data, updatedAt: new Date() };
+      // The evaluator's summary write is bookkeeping, not an edit: it must not move updatedAt.
+      const bookkeepingOnly = Object.keys(data).every((key) => key === 'lastEvaluation');
+      const updateData: Record<string, unknown> = bookkeepingOnly ? { ...data } : { ...data, updatedAt: new Date() };
       delete updateData._id;
       const result = await db
         .collection<IAlertRule>(COLLECTIONS.alertRules)
@@ -184,6 +212,66 @@ export function AlertMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return db
         .collection(COLLECTIONS.alertEvents)
         .countDocuments(filter);
+    }
+
+    async listAlertFirings(
+      tenantId: string,
+      options: { projectId?: string; since: Date; limit?: number },
+    ): Promise<Array<{ ruleId: string; firedAt: Date }>> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { tenantId, firedAt: { $gte: options.since } };
+      if (options.projectId) filter.projectId = options.projectId;
+      const limit = Math.min(Math.max(Math.floor(Number(options.limit) || 5000), 1), 20000);
+      const docs = await db
+        .collection(COLLECTIONS.alertEvents)
+        .find(filter, { projection: { ruleId: 1, firedAt: 1 } })
+        .sort({ firedAt: -1 })
+        .limit(limit)
+        .toArray();
+      return docs.map((d) => ({ ruleId: String(d.ruleId), firedAt: new Date(d.firedAt as Date) }));
+    }
+
+    // ── Alert delivery log ───────────────────────────────────────────
+
+    async createAlertDeliveries(rows: Array<Omit<IAlertDelivery, '_id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const db = this.getTenantDb();
+      await this.ensureAlertDeliveryIndexes(db).catch((error) => {
+        logger.warn('Could not ensure alert_deliveries indexes', { dbName: db.databaseName, error });
+      });
+      await db.collection(COLLECTIONS.alertDeliveries).insertMany(
+        rows.map((row) => ({
+          ...row,
+          incidentId: row.incidentId ?? null,
+          eventId: row.eventId ?? null,
+          attemptAt: new Date(row.attemptAt),
+        })),
+      );
+    }
+
+    async listAlertDeliveries(
+      tenantId: string,
+      options: { incidentId?: string; ruleId?: string; limit?: number },
+    ): Promise<IAlertDelivery[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { tenantId };
+      if (options.incidentId) filter.incidentId = options.incidentId;
+      if (options.ruleId) filter.ruleId = options.ruleId;
+      const docs = await db
+        .collection(COLLECTIONS.alertDeliveries)
+        .find(filter)
+        .sort({ attemptAt: -1 })
+        .limit(clampLimit(options.limit, 200))
+        .toArray();
+      return docs.map((d) => toDelivery(d as unknown as Record<string, unknown>));
+    }
+
+    async pruneAlertDeliveries(before: Date): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.alertDeliveries)
+        .deleteMany({ attemptAt: { $lt: before } });
+      return result.deletedCount ?? 0;
     }
   };
 }

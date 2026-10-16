@@ -32,6 +32,16 @@ export interface DispatchResult {
   target: string;
   success: boolean;
   error?: string;
+  /** Machine-readable cause of a failure that is not a delivery error (e.g. `channel_missing`). */
+  reason?: string;
+  /** Stable id of the configured channel (stamped by `dispatchNotification`). */
+  channelId?: string;
+  /** Display name of the channel when it has one (library entries). */
+  channelName?: string;
+  /** What was being notified (stamped by `dispatchNotification`). */
+  kind?: AlertNotification['kind'];
+  /** When this attempt finished (stamped by `dispatchNotification`). */
+  at?: Date;
 }
 
 /** What a channel is told about: one alert state change (fired, resolved, re-notified) or a test. */

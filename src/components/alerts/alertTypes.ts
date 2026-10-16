@@ -51,7 +51,9 @@ export interface AlertMeta {
 /** A stored channel as the API returns it: masked (hints only, never a secret). */
 export interface MaskedChannel {
   id?: string;
-  type: AlertChannelType;
+  /** `library`: a reference to a tenant channel library entry (`libraryId`), not an inline channel. */
+  type: AlertChannelType | 'library';
+  libraryId?: string;
   recipients?: string[];
   urlHint?: string;
   hasSecret?: boolean;
@@ -109,6 +111,64 @@ export interface AlertRuleDto {
   channels: MaskedChannel[];
   lastTriggeredAt?: string;
   createdAt?: string;
+  createdBy?: string;
+  runbookUrl?: string | null;
+  mutedUntil?: string | null;
+  mutedBy?: string | null;
+  muteReason?: string | null;
+  lastEvaluation?: { at: string; targets: number; noDataTargets: number } | null;
+}
+
+/** Primary status of a rule (`derived[id].status` of `GET /alerts/rules`); `muted` is a flag next to it. */
+export type RuleStatus = 'firing' | 'pending' | 'ok' | 'noData' | 'disabled';
+
+export interface RuleDerivedDto {
+  status: RuleStatus;
+  muted: boolean;
+  noData: boolean;
+}
+
+export interface RuleStatsDto {
+  fired7d: number;
+  /** Rolling 24 h buckets, oldest first. */
+  daily7d: number[];
+}
+
+export interface RuleKpisDto {
+  total: number;
+  enabled: number;
+  firing: number;
+  muted: number;
+  noData: number;
+  /** Rules fired 10+ times in 7 days; null when the stats were not requested. */
+  noisy: number | null;
+}
+
+/** `POST /alerts/rules/backtest` */
+export interface BacktestResultDto {
+  supported: boolean;
+  reason?: 'legacy_metric' | 'mode_not_replayable';
+  message?: string;
+  days: number;
+  stepMinutes: number;
+  evaluations: number;
+  fires: number;
+  firesPerEntity: Array<{ entityKey: string; fires: number }>;
+  incidents: Array<{ entityKey: string; firedAt: string; resolvedAt?: string }>;
+  suggestion?: { threshold: number; firesAtThreshold: number; note?: string };
+  notes?: string[];
+}
+
+/** One entry of the tenant channel library (`GET /alerts/channels/library`); masked, never a secret. */
+export interface LibraryChannelDto {
+  id: string;
+  name: string;
+  kind: AlertChannelType;
+  config: MaskedChannel;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  usedBy: Array<{ ruleId: string; ruleName: string; projectId?: string }>;
 }
 
 export interface StateCounts {
@@ -143,6 +203,8 @@ export interface IncidentContextDto {
 
 export interface IncidentDto {
   _id: string;
+  /** The project the incident belongs to (an owner or admin may open one outside the active project). */
+  projectId?: string;
   ruleName: string;
   ruleId: string;
   alertEventId: string;
@@ -170,8 +232,38 @@ export interface IncidentDto {
   peakValue?: number | null;
   autoResolved?: boolean;
   acknowledgedBy?: string | null;
+  /** Re-notifications are silenced until this ISO time (status unchanged). */
+  snoozedUntil?: string | null;
+  snoozedBy?: string | null;
+  reopenedAt?: string | null;
+  reopenCount?: number;
   context?: IncidentContextDto | null;
   metadata?: Record<string, unknown>;
+  updatedAt?: string | null;
+}
+
+/** `GET /alerts/incidents/stats?range=` */
+export interface IncidentStatsDto {
+  range: '24h' | '7d' | '30d';
+  open: number;
+  acknowledged: number;
+  resolvedInRange: number;
+  firedInRange: number;
+  /** MEDIAN ms fired -> acknowledged; null without a sample. */
+  mttaMs: number | null;
+  /** MEDIAN ms fired -> resolved; null without a sample. */
+  mttrMs: number | null;
+  sample: number;
+  mttaSample: number;
+  mttrSample: number;
+  capped: boolean;
+}
+
+/** `GET /alerts/incidents/:id/similar` */
+export interface SimilarIncidentsDto {
+  count30d: number;
+  medianDurationMs: number | null;
+  last: Array<{ id: string; firedAt: string; resolvedAt: string | null; status: IncidentStatus }>;
 }
 
 export type IncidentCounts = Record<IncidentStatus, number>;
