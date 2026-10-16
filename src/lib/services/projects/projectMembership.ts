@@ -6,9 +6,19 @@
  * (the database handle is already bound to that tenant, but a row of another
  * tenant must still never be touched). Problems with one entry never fail the
  * batch: the entry is skipped and a human-readable warning is returned.
+ *
+ * `removeProjectMember` removes one user from a project for the dashboard and
+ * the client API: a direct membership lives in the UserProject row and the
+ * legacy `projectIds` list, and removal clears both in one call. Access
+ * inherited through a group is managed on the group and is not touched here.
  */
 import type { DatabaseProvider, IUser, ProjectRole } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
+import { revokeUserApiTokensInProject } from '@/lib/services/users/userLifecycle';
+import { getLegacyProjectIds, isProgrammaticUser } from './projectAccess';
 import { providerProjectIds } from './projectStats';
+
+const logger = createLogger('service:projects:membership');
 
 /** Entries accepted per list in one request. */
 export const MAX_BATCH_ENTRIES = 500;
@@ -189,6 +199,7 @@ export async function applyProjectExtras(
 
 export interface BulkMembersInput {
   tenantId: string;
+  tenantDbName: string;
   actorUserId: string;
   projectId: string;
   add: RoleEntry[];
@@ -293,19 +304,19 @@ export async function applyBulkMembers(
       continue;
     }
     try {
-      if (await db.deleteUserProject(userId, projectId)) {
+      const outcome = await removeProjectMember({
+        db,
+        projectId,
+        target: user,
+        tenantDbName: input.tenantDbName,
+      });
+      if (outcome === 'removed') {
         removedIds.push(userId);
         continue;
       }
-      const legacyIds = (user.projectIds ?? []).map(String);
-      if (legacyIds.includes(projectId)) {
-        const updated = await db.updateUser(userId, {
-          projectIds: legacyIds.filter((id) => id !== projectId),
-        });
-        if (updated) {
-          removedIds.push(userId);
-          continue;
-        }
+      if (outcome === 'failed') {
+        warnings.push(`${displayName(user, userId)} could not be removed.`);
+        continue;
       }
     } catch {
       warnings.push(`${displayName(user, userId)} could not be removed.`);
@@ -323,4 +334,55 @@ export async function applyBulkMembers(
     updatedIds,
     warnings,
   };
+}
+
+export type RemoveProjectMemberResult = 'removed' | 'not_found' | 'failed';
+
+export async function removeProjectMember(params: {
+  db: DatabaseProvider;
+  tenantDbName: string;
+  target: Pick<IUser, '_id' | 'canLogin' | 'projectIds'>;
+  projectId: string;
+}): Promise<RemoveProjectMemberResult> {
+  const { db, tenantDbName, target } = params;
+  const projectId = String(params.projectId);
+  const userId = String(target._id);
+
+  const removedRow = await db.deleteUserProject(userId, projectId);
+
+  const legacyIds = getLegacyProjectIds(target.projectIds);
+  const remainingIds = legacyIds.filter((id) => id !== projectId);
+  const hadLegacyEntry = remainingIds.length !== legacyIds.length;
+  if (hadLegacyEntry) {
+    const updated = await db.updateUser(userId, { projectIds: remainingIds });
+    if (!updated) return 'failed';
+  }
+
+  if (!removedRow && !hadLegacyEntry) return 'not_found';
+
+  // A programmatic account has no session and no membership-based path back in:
+  // the tokens minted for it in this project are its access, so they go with
+  // the membership. Login-capable users keep theirs; those tokens are checked
+  // against the user's project access on every request instead.
+  if (isProgrammaticUser(target)) {
+    try {
+      const { revoked, failed } = await revokeUserApiTokensInProject(tenantDbName, userId, projectId);
+      if (revoked > 0 || failed > 0) {
+        logger.info('Revoked API tokens of a programmatic user removed from a project', {
+          failed,
+          projectId,
+          revoked,
+          userId,
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to revoke API tokens of a programmatic user removed from a project', {
+        error,
+        projectId,
+        userId,
+      });
+    }
+  }
+
+  return 'removed';
 }

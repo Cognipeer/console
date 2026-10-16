@@ -106,7 +106,8 @@ beforeEach(() => {
   resetTokenIpDenialThrottleForTests();
   h.db.findApiTokenByHash.mockResolvedValue(buildToken(RESTRICTED));
   h.db.findTenantById.mockResolvedValue({ _id: 't1', dbName: 'tenant_acme', slug: 'acme', licenseType: 'FREE' });
-  h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', tenantId: 't1' });
+  // An owner reaches every project: these tests are about the network allowlist, not project membership.
+  h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'owner', tenantId: 't1' });
   h.db.updateTokenLastUsedByHash.mockResolvedValue(undefined);
   h.db.iamDocGet.mockResolvedValue(null);
   h.db.iamDocPut.mockResolvedValue(undefined);
