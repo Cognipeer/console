@@ -84,7 +84,7 @@ A per-entity rule has a target:
 - **All entities of the type** (the default): every agent, model, knowledge base, MCP server or tool that has data is evaluated, each on its own. Entities that start reporting later are picked up automatically. A rule evaluates at most its 2,000 busiest entities.
 - **Selected entities**: 1 to 50 keys. The picker lists entities with data in the last 30 days, and you can type a key that has not reported yet.
 
-Rules on the metrics that are not per entity have no entity target. They cover the whole project, or one resource through the rule's scope.
+Rules on the metrics that are not per entity have no entity target. They cover the whole project, or one resource through the rule's scope. The Model Monitoring metrics are the exception: inference servers belong to the workspace, so a rule without a server in its scope reads every inference server of the workspace.
 
 ### Condition types
 
