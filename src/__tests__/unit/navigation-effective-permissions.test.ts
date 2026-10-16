@@ -8,7 +8,7 @@
  * follow it, and fall back to the role-based view when it is absent.
  */
 
-import { createElement, Fragment, type ReactNode } from 'react';
+import { act, createElement, Fragment, type ReactNode } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   installApiMock,
@@ -261,6 +261,27 @@ describe('the command palette follows the services the shell offers', () => {
 
     await openPalette(palette(() => true));
     expect(text()).toContain('Webhooks');
+  });
+
+  it('opens on "/" unless a page has already taken the key for its own search box', async () => {
+    installApiMock([]);
+    mounted = await mount(createElement(Fragment, null, createElement(CommandPalette, { isTenantAdmin: true })));
+    const slash = () => new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+    const press = async () => {
+      await act(async () => {
+        document.body.dispatchEvent(slash());
+      });
+      await settle(80);
+    };
+
+    const claim = (event: KeyboardEvent) => event.preventDefault();
+    window.addEventListener('keydown', claim, true);
+    await press();
+    window.removeEventListener('keydown', claim, true);
+    expect(qa('[data-cmd-index]')).toHaveLength(0);
+
+    await press();
+    expect(qa('[data-cmd-index]').length).toBeGreaterThan(10);
   });
 
   it('without a shell around it, lists every service the old way', async () => {

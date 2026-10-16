@@ -3,7 +3,7 @@
  * The incidents list (counts, filters, bulk actions, ?highlight deep link), the overview card
  * and the history page, rendered against the real alerts API shapes.
  */
-import { createElement } from 'react';
+import { act, createElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buttonByText,
@@ -232,6 +232,41 @@ describe('IncidentsPage', () => {
     mounted = await mount(createElement(IncidentsPage));
     await settle(100);
     expect(api.to('GET', '/api/alerts/incidents').at(-1)!.query).toMatchObject({ q: 'agent-i2' });
+  });
+
+  describe('the "/" key', () => {
+    const slash = () => new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+
+    it('goes to the search box before the command palette (a window listener registered earlier) can take it', async () => {
+      incidentsApi();
+      // the shell's palette listens on window in the bubble phase and is mounted before the page
+      const seenByPalette: boolean[] = [];
+      const palette = (event: KeyboardEvent) => {
+        if (event.key === '/') seenByPalette.push(event.defaultPrevented);
+      };
+      window.addEventListener('keydown', palette);
+      try {
+        mounted = await mount(createElement(IncidentsPage));
+        await settle(100);
+        await act(async () => {
+          document.body.dispatchEvent(slash());
+        });
+        expect(document.activeElement).toBe(q('input[data-inbox-search]'));
+        expect(seenByPalette).toEqual([true]);
+      } finally {
+        window.removeEventListener('keydown', palette);
+      }
+    });
+
+    it('is left to the command palette when the page has no search box to focus', async () => {
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(100);
+      q('input[data-inbox-search]')!.removeAttribute('data-inbox-search');
+      const event = slash();
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    });
   });
 
   it('keeps the unit with its number in the KPI labels and marks the tiles for level figures', async () => {

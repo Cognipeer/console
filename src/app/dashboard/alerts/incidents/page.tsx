@@ -564,10 +564,14 @@ export default function IncidentsPage() {
         case 'assignMe':
           if (targets.length) void actionsRef.current.runBulk('assign', targets, { assignedTo: 'me', clearSelection: chosen.size > 0 });
           break;
-        case 'search':
+        case 'search': {
+          // Without a search box on the page the key stays the command palette's.
+          const searchBox = document.querySelector<HTMLInputElement>('[data-inbox-search]');
+          if (!searchBox) break;
           event.preventDefault();
-          document.querySelector<HTMLInputElement>('[data-inbox-search]')?.focus();
+          searchBox.focus();
           break;
+        }
         case 'open':
           if (focus) router.push(`${INBOX_PATH}/${focus}`);
           break;
@@ -581,7 +585,17 @@ export default function IncidentsPage() {
       }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // The command palette opens on "/" too, from a listener on window that runs after this one and does not know this
+    // page. So the "/" is claimed first, in the capture phase, to reach the search box the shortcut help names. Only
+    // that key goes early: for the others, a control that handled the key itself still wins (the pass above skips it).
+    const claimSlash = (event: KeyboardEvent) => {
+      if (event.key === '/') onKey(event);
+    };
+    window.addEventListener('keydown', claimSlash, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', claimSlash, true);
+    };
   }, [router, toggleSelect]);
 
   // ── Grid ───────────────────────────────────────────────────────────────────
