@@ -184,8 +184,12 @@ export async function* crawl(
   const axiosRetryOptions = {
     isRetryable: isTransientFetchError,
     getDelayMs: resetAwareDelayMs,
+    signal: deps.signal,
   } as const;
-  const resetAwareRetryOptions = { getDelayMs: resetAwareDelayMs } as const;
+  const resetAwareRetryOptions = {
+    getDelayMs: resetAwareDelayMs,
+    signal: deps.signal,
+  } as const;
 
   // ── per-URL fetch with engine auto-selection ─────────────────────
   async function fetchOne(url: string): Promise<{

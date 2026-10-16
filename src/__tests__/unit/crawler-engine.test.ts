@@ -383,7 +383,7 @@ describe('engine/concurrency — connection reset handling', () => {
     await expect(p).resolves.toBe('ok');
   });
 
-  it('coolDownAfterReset pauses only for resets and ends early on abort', async () => {
+  it('coolDownAfterReset pauses only for resets', async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
@@ -396,13 +396,72 @@ describe('engine/concurrency — connection reset handling', () => {
 
     // other errors: no pause at all
     await expect(coolDownAfterReset(new Error('HTTP 503 for https://x/'))).resolves.toBeUndefined();
+  });
 
-    // cancelled crawl: returns immediately instead of sitting out the pause
+  it('coolDownAfterReset throws on cancel — before or during the pause', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    const before = new AbortController();
+    before.abort();
+    await expect(coolDownAfterReset(new Error('ECONNRESET'), before.signal)).rejects.toThrow(/aborted/i);
+    // even for non-reset errors: the caller must not go on to the fallback engine
+    await expect(coolDownAfterReset(new Error('HTTP 503'), before.signal)).rejects.toThrow(/aborted/i);
+
+    const during = new AbortController();
+    const pending = coolDownAfterReset(new Error('ECONNRESET'), during.signal);
+    const assertion = expect(pending).rejects.toThrow(/aborted/i);
+    await vi.advanceTimersByTimeAsync(500);
+    during.abort();
+    await assertion; // rejects immediately, not after the full ~3s
+    expect(vi.getTimerCount()).toBe(0); // the pending timer was cleared
+  });
+
+  it('retry() stops waiting the moment the crawl is cancelled', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const ctrl = new AbortController();
-    let aborted = false;
-    void coolDownAfterReset(new Error('ECONNRESET'), ctrl.signal).then(() => { aborted = true; });
+    let calls = 0;
+    const p = retry(
+      async () => {
+        calls += 1;
+        throw new Error('read ECONNRESET');
+      },
+      4,
+      { getDelayMs: resetAwareDelayMs, signal: ctrl.signal },
+    );
+    const assertion = expect(p).rejects.toThrow(/aborted/i);
+    await vi.advanceTimersByTimeAsync(2000); // attempt 2 starts, now inside the 6s backoff
+    expect(calls).toBe(2);
     ctrl.abort();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(aborted).toBe(true);
+    await assertion;
+    expect(calls).toBe(2); // no third attempt
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retry() does not start an attempt for an already-cancelled crawl', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const fn = vi.fn(async () => 'ok');
+    await expect(retry(fn, 3, { signal: ctrl.signal })).rejects.toThrow(/aborted/i);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('retry() does not back off when the attempt itself failed because of a cancel', async () => {
+    vi.useFakeTimers();
+    const ctrl = new AbortController();
+    let calls = 0;
+    const p = retry(
+      async () => {
+        calls += 1;
+        ctrl.abort();
+        throw new Error('Fetch aborted for https://x/');
+      },
+      3,
+      { signal: ctrl.signal },
+    );
+    await expect(p).rejects.toThrow(/Fetch aborted for/);
+    expect(calls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

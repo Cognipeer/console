@@ -53,9 +53,9 @@ function plan(over: Partial<CrawlPlan>): CrawlPlan {
   } as CrawlPlan;
 }
 
-async function run(p: CrawlPlan): Promise<PageResult[]> {
+async function run(p: CrawlPlan, signal?: AbortSignal): Promise<PageResult[]> {
   const pages: PageResult[] = [];
-  for await (const page of crawl(p, { logger })) pages.push(page);
+  for await (const page of crawl(p, { logger, signal })) pages.push(page);
   return pages;
 }
 
@@ -184,4 +184,46 @@ describe('engine — connection reset on the first engine', () => {
     expect(pages[0].type).toBe('html');
     vi.useRealTimers();
   });
+
+  it('cancelling during the cool-down never starts the browser', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    axiosFetch.mockRejectedValue(new Error('Axios error for https://example.com/: read ECONNRESET'));
+    pwFetch.mockResolvedValue(html(REAL_PAGE));
+    const ctrl = new AbortController();
+
+    const pending = run(
+      plan({ engine: 'auto', seeds: ['https://example.com/'], http: { retries: 3 } as never }),
+      ctrl.signal,
+    );
+    await vi.advanceTimersByTimeAsync(8000); // axios attempts 1-3 done, now in the ~3s cool-down
+    expect(axiosFetch).toHaveBeenCalledTimes(3);
+    ctrl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+
+    expect(pwFetch).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('cancelling during an axios backoff stops further attempts immediately', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    axiosFetch.mockRejectedValue(new Error('Axios error for https://example.com/: read ECONNRESET'));
+    const ctrl = new AbortController();
+
+    const pending = run(
+      plan({ engine: 'axios', seeds: ['https://example.com/'], http: { retries: 4 } as never }),
+      ctrl.signal,
+    );
+    await vi.advanceTimersByTimeAsync(2000); // attempt 2 started; inside the 6s backoff
+    expect(axiosFetch).toHaveBeenCalledTimes(2);
+    ctrl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+
+    expect(axiosFetch).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
 });
+

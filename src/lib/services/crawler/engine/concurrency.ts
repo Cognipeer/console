@@ -41,6 +41,32 @@ export interface RetryOptions {
    * `initialDelayMs * (attempt + 1)`.
    */
   getDelayMs?: (err: unknown, attempt: number) => number;
+  /**
+   * Crawl-cancel signal. Checked before every attempt and before scheduling a
+   * wait, and a pending wait ends the moment it aborts — so a cancel never
+   * sits out a multi-second backoff or fires another attempt.
+   */
+  signal?: AbortSignal;
+}
+
+function abortError(): Error {
+  return new Error('Fetch aborted');
+}
+
+/** Resolves after `ms`; rejects immediately (and clears its timer) on abort. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export async function retry<T>(
@@ -48,17 +74,21 @@ export async function retry<T>(
   attempts: number,
   options: RetryOptions = {},
 ): Promise<T> {
-  const { initialDelayMs = 1000, isRetryable, getDelayMs } = options;
+  const { initialDelayMs = 1000, isRetryable, getDelayMs, signal } = options;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) throw abortError();
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
+      // A cancelled crawl is not a transient failure: surface the error now
+      // instead of backing off and trying again.
+      if (signal?.aborted) throw err;
       if (isRetryable && !isRetryable(err)) throw err;
       if (i < attempts - 1) {
         const delay = getDelayMs ? getDelayMs(err, i) : initialDelayMs * (i + 1);
-        await new Promise<void>((r) => setTimeout(r, delay));
+        await abortableSleep(delay, signal);
       }
     }
   }
@@ -147,18 +177,12 @@ export function resetAwareDelayMs(err: unknown, attempt: number): number {
 
 /**
  * After an engine fails with a connection reset, wait briefly before trying
- * the other engine on the same host. No-op for any other error. Returns early
- * when the crawl is cancelled.
+ * the other engine on the same host. No pause for any other error. Throws as
+ * soon as the crawl is cancelled (before or during the pause), so the caller
+ * never goes on to start the fallback engine for a cancelled crawl.
  */
 export async function coolDownAfterReset(err: unknown, signal?: AbortSignal): Promise<void> {
-  if (!isConnectionResetError(err) || signal?.aborted) return;
-  await new Promise<void>((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', done);
-      resolve();
-    };
-    const timer = setTimeout(done, jitter(RESET_COOLDOWN_MS));
-    signal?.addEventListener('abort', done, { once: true });
-  });
+  if (signal?.aborted) throw abortError();
+  if (!isConnectionResetError(err)) return;
+  await abortableSleep(jitter(RESET_COOLDOWN_MS), signal);
 }

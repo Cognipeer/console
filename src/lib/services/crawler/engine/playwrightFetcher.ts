@@ -181,8 +181,10 @@ export class PlaywrightSession {
   }
 
   async fetch(url: string, signal?: AbortSignal): Promise<PlaywrightFetchResult> {
+    if (signal?.aborted) throw new Error(`Fetch aborted for ${url}`);
     await this.ensure();
     if (!this.context) throw new Error('Playwright context not initialized');
+    // Cancelled while the browser was starting up.
     if (signal?.aborted) throw new Error(`Fetch aborted for ${url}`);
     const timeout = this.http.timeoutMs ?? 30_000;
     const page = await this.context.newPage();
