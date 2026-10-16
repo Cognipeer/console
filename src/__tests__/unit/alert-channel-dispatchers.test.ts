@@ -177,7 +177,9 @@ describe('email dispatcher', () => {
     });
     const email = (await channels()).email!;
     const [result] = await dispatchNotification(lt, [email], ctx);
-    expect(result).toEqual({ type: 'email', target: 'ops@acme.test', success: true });
+    expect(result).toMatchObject({ type: 'email', target: 'ops@acme.test', success: true });
+    // dispatchNotification stamps the delivery-log fields on every result
+    expect(result).toEqual(expect.objectContaining({ kind: expect.any(String), at: expect.any(Date) }));
     expect(h.sendEmail).toHaveBeenCalledWith('ops@acme.test', 'alert-fired', expect.objectContaining({ operator: '<', windowMinutes: 15 }));
   });
 
@@ -255,7 +257,7 @@ describe('webhook dispatcher', () => {
   it('posts a signed JSON body with the alert type and notification data', async () => {
     const webhook = (await channels()).webhook!;
     const [result] = await dispatchNotification(notification(), [webhook], ctx);
-    expect(result).toEqual({ type: 'webhook', target: 'https://hooks.example.com/…/eive', success: true });
+    expect(result).toMatchObject({ type: 'webhook', target: 'https://hooks.example.com/…/eive', success: true });
 
     const [url, init, options] = h.safeFetch.mock.calls[0]!;
     expect(url).toBe(HOOK_URL);
@@ -300,7 +302,7 @@ describe('slack dispatcher', () => {
   it('posts the Block Kit payload', async () => {
     const slack = (await channels()).slack!;
     const [result] = await dispatchNotification(notification(), [slack], ctx);
-    expect(result).toEqual({ type: 'slack', target: 'https://hooks.slack.com/…/oken', success: true });
+    expect(result).toMatchObject({ type: 'slack', target: 'https://hooks.slack.com/…/oken', success: true });
     const [url, init, options] = h.safeFetch.mock.calls[0]!;
     expect(url).toBe(SLACK_URL);
     expect(options).toMatchObject({ followRedirects: false });
@@ -346,7 +348,7 @@ describe('teams dispatcher', () => {
   it('posts an Adaptive Card 1.4 message', async () => {
     const teams = (await channels()).teams!;
     const [result] = await dispatchNotification(notification(), [teams], ctx);
-    expect(result).toEqual({ type: 'teams', target: 'https://example.webhook.office.com/…/dddd', success: true });
+    expect(result).toMatchObject({ type: 'teams', target: 'https://example.webhook.office.com/…/dddd', success: true });
     const [url, init] = h.safeFetch.mock.calls[0]!;
     expect(url).toBe(TEAMS_URL);
     const body = JSON.parse(init.body as string);
@@ -400,7 +402,7 @@ describe('pagerduty dispatcher', () => {
     h.safeFetch.mockResolvedValue(response(202, '{"status":"success"}'));
     const pagerduty = (await channels()).pagerduty!;
     const [result] = await dispatchNotification(notification(), [pagerduty], ctx);
-    expect(result).toEqual({ type: 'pagerduty', target: `pagerduty …${ROUTING_KEY.slice(-4)}`, success: true });
+    expect(result).toMatchObject({ type: 'pagerduty', target: `pagerduty …${ROUTING_KEY.slice(-4)}`, success: true });
     expect(h.safeFetch).toHaveBeenCalledTimes(1);
     expect(h.safeFetch.mock.calls[0]![0]).toBe(EVENTS);
     const body = JSON.parse(h.safeFetch.mock.calls[0]![1].body as string);

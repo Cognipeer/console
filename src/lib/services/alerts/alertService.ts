@@ -10,6 +10,7 @@
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import type {
   AlertChannelInput,
   AlertConditionMode,
@@ -25,8 +26,12 @@ import type {
   IAlertEvent,
   IAlertRule,
   IAlertRuleEntityScope,
+  IAlertRuleTemplateRef,
   IAlertSloConfig,
   IAlertState,
+  IAlertDelivery,
+  IIncident,
+  IncidentStatus,
 } from '@/lib/database';
 import { ENTITY_LATENCY_BUCKET_UPPER_MS } from '@/lib/database/provider/types.base';
 import { listActiveEntityKeys } from '@/lib/services/entityMetrics/entityHealthService';
@@ -36,9 +41,20 @@ import { createModeGate, getModeAvailability } from './modeAvailability';
 import { IncidentService } from './incidentService';
 import { evaluationShapeOf } from './ruleShape';
 import { evaluateRuleTargets } from './alertEvaluator';
+import {
+  applyRuleListQuery,
+  buildNoiseStats,
+  buildRuleKpis,
+  deriveRule,
+  type RuleDerived,
+  type RuleListKpis,
+  type RuleListQuery,
+  type RuleNoiseStats,
+} from './ruleInsights';
 import { maskChannels, sealChannels } from './channels/channelSecrets';
 import { assertPublicChannelUrl, ChannelUrlError, isValidPagerDutyRoutingKey, MAX_CHANNEL_URL_LENGTH } from './channels/channelUrl';
 import { dispatchNotification } from './channels';
+import { MAX_TEST_EMAIL_RECIPIENTS } from './channels/emailChannel';
 import type { AlertNotification, DispatchResult } from './channels';
 
 export { AlertApiError } from './alertApiError';
@@ -100,6 +116,8 @@ export interface CreateAlertRuleInput {
   severity?: AlertRuleSeverity | null;
   notifyOnResolve?: boolean;
   renotifyMinutes?: number | null;
+  /** http(s) runbook link; null or '' clears. */
+  runbookUrl?: string | null;
   /** Plaintext on write; omit a channel's secret fields to keep the stored ones for that channel id. */
   channels?: AlertChannelInput[] | IAlertChannel[];
   enabled?: boolean;
@@ -121,6 +139,8 @@ export interface ValidatedRule {
   severity: AlertRuleSeverity;
   notifyOnResolve: boolean;
   renotifyMinutes: number;
+  /** null = none. */
+  runbookUrl: string | null;
   enabled: boolean;
   /** Normalised channel input; undefined = keep the stored channels (update only). */
   channels?: AlertChannelInput[];
@@ -321,10 +341,16 @@ function optionalSecret(value: unknown, field: string, maxLength = MAX_SECRET_LE
 }
 
 /** Structural checks of one channel (no network). A secret omitted for a stored channel id is kept. */
-function normalizeChannelInput(raw: unknown, index: number, existing: IAlertRule | null | undefined): AlertChannelInput {
+export function normalizeChannelInput(raw: unknown, index: number, existing: IAlertRule | null | undefined): AlertChannelInput {
   if (!isRecord(raw)) throw bad('invalid_channel', `channels[${index}] must be an object`);
-  const type = oneOf(raw.type, `channels[${index}].type`, ALERT_CHANNEL_TYPES);
   const id = typeof raw.id === 'string' && CHANNEL_ID_PATTERN.test(raw.id) ? raw.id : undefined;
+  if (raw.type === 'library') {
+    // a reference to a tenant library entry: no secrets, resolved at dispatch time
+    const libraryId = typeof raw.libraryId === 'string' ? raw.libraryId.trim() : '';
+    if (!libraryId || libraryId.length > 64) throw bad('invalid_channel', `channels[${index}].libraryId is required`);
+    return { ...(id ? { id } : {}), type: 'library', libraryId };
+  }
+  const type = oneOf(raw.type, `channels[${index}].type`, ALERT_CHANNEL_TYPES);
   const stored = storedChannelOfId(existing, id, type);
 
   switch (type) {
@@ -341,7 +367,10 @@ function normalizeChannelInput(raw: unknown, index: number, existing: IAlertRule
         }
         if (!recipients.includes(email)) recipients.push(email);
       }
-      return { ...(id ? { id } : {}), type, recipients };
+      if (raw.audience !== undefined && raw.audience !== null && raw.audience !== 'project_admins') {
+        throw bad('invalid_channel', `channels[${index}].audience must be "project_admins"`);
+      }
+      return { ...(id ? { id } : {}), type, recipients, ...(raw.audience === 'project_admins' ? { audience: 'project_admins' as const } : {}) };
     }
     case 'webhook': {
       const url = optionalSecret(raw.url, `channels[${index}].url`, MAX_CHANNEL_URL_LENGTH)?.trim();
@@ -403,8 +432,35 @@ function existingToInput(existing: IAlertRule): CreateAlertRuleInput {
     severity: existing.severity ?? null,
     notifyOnResolve: existing.notifyOnResolve,
     renotifyMinutes: existing.renotifyMinutes ?? null,
+    runbookUrl: existing.runbookUrl ?? null,
     enabled: existing.enabled,
   };
+}
+
+export const MAX_RUNBOOK_URL_LENGTH = 2048;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f\s]/;
+
+/** A runbook is only ever a link a person clicks: http(s), no whitespace or control characters. Empty clears. */
+export function normalizeRunbookUrl(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw bad('invalid_runbook_url', 'runbookUrl must be a string');
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > MAX_RUNBOOK_URL_LENGTH) {
+    throw bad('invalid_runbook_url', `runbookUrl must be at most ${MAX_RUNBOOK_URL_LENGTH} characters`);
+  }
+  if (CONTROL_CHARS.test(trimmed)) throw bad('invalid_runbook_url', 'runbookUrl must not contain spaces or control characters');
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw bad('invalid_runbook_url', 'runbookUrl must be a valid http(s) URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw bad('invalid_runbook_url', 'runbookUrl must start with http:// or https://');
+  }
+  if (!parsed.hostname) throw bad('invalid_runbook_url', 'runbookUrl must be a valid http(s) URL');
+  return trimmed;
 }
 
 /**
@@ -503,6 +559,8 @@ export function validateRuleInput(input: unknown, options: ValidateRuleOptions):
     ? 'auto'
     : oneOf(merged.severity, 'severity', VALID_SEVERITIES);
 
+  const runbookUrl = normalizeRunbookUrl(merged.runbookUrl);
+
   if (merged.notifyOnResolve !== undefined && typeof merged.notifyOnResolve !== 'boolean') {
     throw bad('invalid_value', 'notifyOnResolve must be a boolean');
   }
@@ -529,6 +587,7 @@ export function validateRuleInput(input: unknown, options: ValidateRuleOptions):
     severity,
     notifyOnResolve: merged.notifyOnResolve === undefined ? true : (merged.notifyOnResolve as boolean),
     renotifyMinutes,
+    runbookUrl,
     enabled: merged.enabled === undefined ? true : (merged.enabled as boolean),
     ...(channels ? { channels } : {}),
   };
@@ -555,13 +614,20 @@ function maskRule<T extends IAlertRule | null>(rule: T): T {
   return { ...rule, channels: maskChannels(rule.channels) };
 }
 
-/** Most addresses one unsaved email channel is tested against. */
-const MAX_TEST_EMAIL_RECIPIENTS = 5;
-
 export interface RuleScopeOptions {
   /** When set, a rule of another project reads as missing. */
   projectId?: string;
 }
+
+export interface CreateRuleOptions {
+  /** Marks the rule as added from a rule template (server-side callers only, never the request body). */
+  template?: IAlertRuleTemplateRef;
+}
+
+/** Statuses a person still has to act on; a deleted project's incidents in them are closed. */
+const ACTIONABLE_INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating'];
+/** Upper bound on the incidents closed for one deleted project (pages of 200). */
+const MAX_PROJECT_INCIDENTS_CLOSED = 5_000;
 
 export interface RulePreviewTarget {
   entityKey: string;
@@ -581,6 +647,7 @@ export class AlertService {
     projectId: string,
     userId: string,
     input: CreateAlertRuleInput,
+    options: CreateRuleOptions = {},
   ): Promise<IAlertRule> {
     const rule = validateRuleInput(input, { mode: 'create' });
     await assertModeAvailable(tenantId, rule.condition);
@@ -605,6 +672,8 @@ export class AlertService {
       severity: rule.severity,
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
+      ...(rule.runbookUrl ? { runbookUrl: rule.runbookUrl } : {}),
+      ...(options.template ? { template: { key: options.template.key, version: options.template.version } } : {}),
       channels,
       createdBy: userId,
     });
@@ -643,10 +712,14 @@ export class AlertService {
       severity: rule.severity,
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
+      // `null` clears the runbook (see updateAlertRule in both providers).
+      runbookUrl: rule.runbookUrl,
       enabled: rule.enabled,
     };
     if (rule.channels) patch.channels = await sealChannels(rule.channels, existing.channels ?? []);
     if (updatedBy) patch.updatedBy = updatedBy;
+    // Retargeted to another metric or module: it no longer is that template's rule (`null` clears it in both providers).
+    if (existing.template && (rule.metric !== existing.metric || rule.module !== existing.module)) patch.template = null;
 
     const updated = await db.updateAlertRule(ruleId, patch, options.projectId);
     if (!updated) return null;
@@ -670,6 +743,51 @@ export class AlertService {
       : await db.deleteAlertRule(ruleId, options.projectId);
     if (deleted) await AlertService.retireStates(tenantDbName, ruleId, 'Rule deleted', { keepCooldown: true });
     return deleted;
+  }
+
+  /**
+   * A project is being deleted: its rules go (so nothing evaluates or notifies
+   * for it any more) and the incidents someone still had to act on are closed
+   * with a note. Alert history, closed incidents and delivery logs stay.
+   */
+  static async removeProjectAlerts(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+  ): Promise<{ rulesDeleted: number; incidentsClosed: number }> {
+    const db = await getTenantDatabase(tenantDbName);
+    let rulesDeleted = 0;
+    for (const rule of await db.listAlertRules(tenantId, { projectId })) {
+      if (await AlertService.deleteRule(tenantDbName, String(rule._id), { projectId })) rulesDeleted += 1;
+    }
+
+    let incidentsClosed = 0;
+    for (const status of ACTIONABLE_INCIDENT_STATUSES) {
+      // Closing moves an incident out of this status, so the first page is read again until it is empty.
+      while (incidentsClosed < MAX_PROJECT_INCIDENTS_CLOSED) {
+        const page = await IncidentService.listIncidents(tenantDbName, tenantId, { projectId, status, limit: 200 });
+        if (page.length === 0) break;
+        let progressed = false;
+        for (const incident of page) {
+          const id = String(incident._id);
+          let closed: IIncident | null = null;
+          try {
+            closed = await IncidentService.updateStatus(tenantDbName, id, 'closed', 'system', { projectId });
+          } catch (error) {
+            // Closed or resolved by someone in the meantime: nothing left to do for this one.
+            if (!(error instanceof AlertApiError && error.code === 'invalid_transition')) throw error;
+          }
+          if (!closed) continue;
+          progressed = true;
+          incidentsClosed += 1;
+          try {
+            await IncidentService.addSystemNote(tenantDbName, id, 'Closed: the project was deleted');
+          } catch { /* the note is informational */ }
+        }
+        if (!progressed) break;
+      }
+    }
+    return { rulesDeleted, incidentsClosed };
   }
 
   static async getRule(
@@ -707,6 +825,107 @@ export class AlertService {
       : await db.updateAlertRule(ruleId, { enabled, updatedBy: userId }, options.projectId);
     if (updated && !enabled) await AlertService.retireStates(tenantDbName, ruleId, 'Rule disabled');
     return maskRule(updated);
+  }
+
+  /** Longest a rule can be muted in one go. */
+  static readonly MAX_MUTE_MS = 30 * 86_400_000;
+
+  /**
+   * Mute a rule until `until` (ISO, at most 30 days ahead) or unmute it (`until: null`).
+   * Evaluation, states, events and incidents continue; only channel notifications are skipped.
+   */
+  static async muteRule(
+    tenantDbName: string,
+    ruleId: string,
+    input: { until: unknown; reason?: unknown },
+    userId: string,
+    options: RuleScopeOptions = {},
+  ): Promise<IAlertRule | null> {
+    let patch: Partial<IAlertRule>;
+    if (input.until === null) {
+      patch = { mutedUntil: null, mutedBy: null, muteReason: null };
+    } else {
+      if (typeof input.until !== 'string' || !input.until.trim()) {
+        throw bad('invalid_until', 'until must be an ISO date-time or null');
+      }
+      const until = new Date(input.until);
+      const nowMs = Date.now();
+      if (Number.isNaN(until.getTime())) throw bad('invalid_until', 'until must be an ISO date-time or null');
+      if (until.getTime() <= nowMs) throw bad('invalid_until', 'until must be in the future');
+      if (until.getTime() > nowMs + AlertService.MAX_MUTE_MS + 60_000) {
+        throw bad('invalid_until', 'A rule can be muted for at most 30 days');
+      }
+      let reason: string | null = null;
+      if (input.reason !== undefined && input.reason !== null) {
+        if (typeof input.reason !== 'string') throw bad('invalid_reason', 'reason must be a string');
+        if (input.reason.trim().length > 500) throw bad('invalid_reason', 'reason must be at most 500 characters');
+        reason = input.reason.trim() || null;
+      }
+      patch = { mutedUntil: until, mutedBy: userId, muteReason: reason };
+    }
+    const db = await getTenantDatabase(tenantDbName);
+    const updated = options.projectId === undefined
+      ? await db.updateAlertRule(ruleId, { ...patch, updatedBy: userId })
+      : await db.updateAlertRule(ruleId, { ...patch, updatedBy: userId }, options.projectId);
+    return maskRule(updated);
+  }
+
+  /**
+   * The rules list as the UI consumes it: server-side filters and sort, derived
+   * display state, optional 7-day noise statistics and the list KPIs (computed
+   * over the project's whole rule set, before the filters).
+   */
+  static async listRulesView(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string | undefined,
+    options: RuleListQuery & { includeStats?: boolean } = {},
+  ): Promise<{
+    rules: IAlertRule[];
+    states: Record<string, { ok: number; pending: number; firing: number }>;
+    derived: Record<string, RuleDerived>;
+    stats: Record<string, RuleNoiseStats> | null;
+    statsCapped: boolean;
+    kpis: RuleListKpis;
+    total: number;
+  }> {
+    const db = await getTenantDatabase(tenantDbName);
+    const all = (await db.listAlertRules(tenantId, { projectId })).map((rule) => maskRule(rule));
+    const now = new Date();
+    const states = await AlertService.stateCounts(tenantDbName, all.map((rule) => String(rule._id)));
+
+    const derived: Record<string, RuleDerived> = {};
+    for (const rule of all) derived[String(rule._id)] = deriveRule(rule, states[String(rule._id)], now);
+
+    const wantStats = options.includeStats === true || options.sort === '-fired7d';
+    let stats: Record<string, RuleNoiseStats> | null = null;
+    let statsCapped = false;
+    if (wantStats && all.length > 0) {
+      const limit = 5000;
+      const firings = await db.listAlertFirings(tenantId, {
+        projectId,
+        since: new Date(now.getTime() - 7 * 86_400_000),
+        limit,
+      });
+      statsCapped = firings.length >= limit;
+      stats = buildNoiseStats(firings, now);
+    } else if (wantStats) {
+      stats = {};
+    }
+
+    const rules = applyRuleListQuery(all, options, derived, stats);
+    return { rules, states, derived, stats, statsCapped, kpis: buildRuleKpis(all, derived, stats), total: rules.length };
+  }
+
+  /** The delivery log of one incident (newest first, at most 200). */
+  static async listIncidentDeliveries(
+    tenantDbName: string,
+    tenantId: string,
+    incidentId: string,
+    limit = 200,
+  ): Promise<IAlertDelivery[]> {
+    const db = await getTenantDatabase(tenantDbName);
+    return db.listAlertDeliveries(tenantId, { incidentId, limit });
   }
 
   /** Forget a rule's states; incidents that were open stay open and get a note saying why nothing will resolve them. */
@@ -864,36 +1083,57 @@ export class AlertService {
   static async testChannel(
     tenantDbName: string,
     session: { tenantId: string; tenantSlug: string },
-    scope: { projectId: string; projectName: string; ruleScopeProjectId?: string },
-    body: { channel?: unknown; ruleId?: unknown; channelId?: unknown },
+    scope: { projectId: string; projectName: string; ruleScopeProjectId?: string; canTestLibrary?: boolean },
+    body: { channel?: unknown; ruleId?: unknown; channelId?: unknown; libraryChannelId?: unknown },
   ): Promise<DispatchResult> {
+    const libraryTestForbidden = () =>
+      new AlertApiError(403, 'forbidden', 'Only workspace owners and admins can test a shared library channel');
     let stored: IAlertChannel;
     let ruleName = 'Channel test';
     let ruleId = 'test';
     let ruleDef = getMetricDef('agent_error_rate');
     let alertModule: AlertModule = 'agents';
     let metric: AlertMetric = 'agent_error_rate';
+    // The project the notification is about: the caller's, or the stored rule's own.
+    let notifyProjectId = scope.projectId;
+    let notifyProjectName = scope.projectName;
 
     if (body.channel !== undefined) {
       const input = normalizeChannelInput(body.channel, 0, null);
+      // a library reference sends on the shared entry, same as testing it by id
+      if (input.type === 'library' && !scope.canTestLibrary) throw libraryTestForbidden();
       if (input.type === 'email' && (input.recipients?.length ?? 0) > MAX_TEST_EMAIL_RECIPIENTS) {
         // An unsaved channel is mailed as typed; a long list would make the test a mass mailer.
         throw bad('too_many_recipients', `Send the test to at most ${MAX_TEST_EMAIL_RECIPIENTS} addresses (save the channel to test a longer list)`);
       }
       await verifyChannelDestinations([input]);
       [stored] = await sealChannels([input], []);
+    } else if (typeof body.libraryChannelId === 'string') {
+      if (!scope.canTestLibrary) throw libraryTestForbidden();
+      const entry = await (await getTenantDatabase(tenantDbName)).findAlertChannelLibraryEntry(body.libraryChannelId);
+      if (!entry || entry.tenantId !== session.tenantId) throw new AlertApiError(404, 'channel_not_found', 'Channel not found');
+      stored = entry.config;
     } else if (typeof body.ruleId === 'string' && typeof body.channelId === 'string') {
       const db = await getTenantDatabase(tenantDbName);
       const rule = await db.findAlertRuleById(body.ruleId, scope.ruleScopeProjectId);
       if (!rule) throw new AlertApiError(404, 'rule_not_found', 'Rule not found');
       const found = (rule.channels ?? []).find((channel) => channel.id === body.channelId);
       if (!found) throw new AlertApiError(404, 'channel_not_found', 'Channel not found');
+      if (found.type === 'library' && !scope.canTestLibrary) throw libraryTestForbidden();
       stored = found;
       ruleName = rule.name;
       ruleId = String(rule._id);
       ruleDef = getMetricDef(rule.metric);
       alertModule = rule.module;
       metric = rule.metric;
+      // A `project_admins` channel mails the admins of the rule's project, not those of the caller's active project.
+      notifyProjectId = rule.projectId;
+      if (rule.projectId !== scope.projectId) {
+        try {
+          const project = await db.findProjectById(rule.projectId);
+          if (project?.name) notifyProjectName = project.name;
+        } catch { /* the caller's project name is a fine fallback */ }
+      }
     } else {
       throw bad('invalid_body', 'Send either { channel } or { ruleId, channelId }');
     }
@@ -922,7 +1162,7 @@ export class AlertService {
       value: null,
       severity: 'info',
       firedAt: now,
-      projectName: scope.projectName,
+      projectName: notifyProjectName,
       companyName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     };
@@ -932,7 +1172,8 @@ export class AlertService {
       tenantId: session.tenantId,
       tenantSlug: session.tenantSlug,
       companyName,
-      projectName: scope.projectName,
+      projectId: notifyProjectId,
+      projectName: notifyProjectName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     });
     if (results.length === 0) return { type: stored.type, target: stored.type, success: false, error: 'No delivery attempted' };
@@ -999,6 +1240,24 @@ export class AlertService {
   ): Promise<number> {
     const db = await getTenantDatabase(tenantDbName);
     return db.countActiveAlerts(tenantId, projectId);
+  }
+}
+
+const cleanupLog = createLogger('alerts:project-cleanup');
+
+/**
+ * After a project is deleted: its alert rules stop evaluating and its open
+ * incidents are closed. Best effort: the project is already gone, so a failure
+ * is only logged.
+ */
+export async function removeDeletedProjectAlerts(tenantDbName: string, tenantId: string, projectId: string): Promise<void> {
+  try {
+    await AlertService.removeProjectAlerts(tenantDbName, tenantId, projectId);
+  } catch (error) {
+    cleanupLog.error('Removing the alerts of a deleted project failed', {
+      projectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

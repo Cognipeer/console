@@ -38,6 +38,11 @@ describe('index manifest: entity health collections', () => {
     expect(nameOf('incidents', 'idx_incidents_alertEventId')?.key).toEqual({ alertEventId: 1 });
   });
 
+  it('alert_deliveries is indexed for the incident timeline and the rule history', () => {
+    expect(nameOf('alert_deliveries', 'idx_alert_deliveries_incident_attemptAt')?.key).toEqual({ tenantId: 1, incidentId: 1, attemptAt: -1 });
+    expect(nameOf('alert_deliveries', 'idx_alert_deliveries_rule_attemptAt')?.key).toEqual({ tenantId: 1, ruleId: 1, attemptAt: -1 });
+  });
+
   it('the mixins that ensure these indexes on first write use the same names as the manifest', () => {
     // The manifest is existence-guarded, so each mixin creates its own indexes on
     // the write path; a name/key mismatch would throw when both run.
@@ -45,6 +50,7 @@ describe('index manifest: entity health collections', () => {
       entity_metrics: mixinSource('entity-metrics.mixin.ts'),
       alert_states: mixinSource('alert-state.mixin.ts'),
       incidents: mixinSource('incident.mixin.ts'),
+      alert_deliveries: mixinSource('alert.mixin.ts'),
     };
     for (const [collection, source] of Object.entries(sources)) {
       for (const index of TENANT_DB_INDEXES[collection]) {

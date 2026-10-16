@@ -4,7 +4,7 @@
  * Includes alert rules and alert events (history).
  */
 
-import type { IAlertRule, IAlertEvent, AlertEventStatus } from '../provider.interface';
+import type { IAlertRule, IAlertEvent, IAlertDelivery, AlertEventStatus } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -36,11 +36,13 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         (id, tenantId, projectId, name, description, module, enabled, metric,
          condition, windowMinutes, cooldownMinutes, scope, entity, severity,
          notifyOnResolve, renotifyMinutes, channels,
-         lastTriggeredAt, createdBy, updatedBy, createdAt, updatedAt)
+         lastTriggeredAt, mutedUntil, mutedBy, muteReason, runbookUrl, lastEvaluation, template,
+         createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @description, @module, @enabled, @metric,
          @condition, @windowMinutes, @cooldownMinutes, @scope, @entity, @severity,
          @notifyOnResolve, @renotifyMinutes, @channels,
-         @lastTriggeredAt, @createdBy, @updatedBy, @createdAt, @updatedAt)
+         @lastTriggeredAt, @mutedUntil, @mutedBy, @muteReason, @runbookUrl, @lastEvaluation, @template,
+         @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: rule.tenantId,
@@ -60,6 +62,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         renotifyMinutes: rule.renotifyMinutes ?? null,
         channels: this.toJson(rule.channels),
         lastTriggeredAt: rule.lastTriggeredAt ? rule.lastTriggeredAt.toISOString() : null,
+        mutedUntil: rule.mutedUntil ? new Date(rule.mutedUntil).toISOString() : null,
+        mutedBy: rule.mutedBy ?? null,
+        muteReason: rule.muteReason ?? null,
+        runbookUrl: rule.runbookUrl ?? null,
+        lastEvaluation: rule.lastEvaluation ? this.toJson(rule.lastEvaluation) : null,
+        template: rule.template ? this.toJson(rule.template) : null,
         createdBy: rule.createdBy,
         updatedBy: rule.updatedBy ?? null,
         createdAt: now,
@@ -76,8 +84,10 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
     ): Promise<IAlertRule | null> {
       const db = this.getTenantDb();
       const now = this.now();
-      const sets: string[] = ['updatedAt = @updatedAt'];
-      const params: Record<string, unknown> = { id, updatedAt: now };
+      // The evaluator's summary write is bookkeeping, not an edit: it must not move updatedAt.
+      const bookkeepingOnly = Object.keys(data).every((key) => key === 'lastEvaluation');
+      const sets: string[] = bookkeepingOnly ? [] : ['updatedAt = @updatedAt'];
+      const params: Record<string, unknown> = bookkeepingOnly ? { id } : { id, updatedAt: now };
 
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
@@ -95,11 +105,19 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.renotifyMinutes !== undefined) { sets.push('renotifyMinutes = @renotifyMinutes'); params.renotifyMinutes = data.renotifyMinutes ?? null; }
       if (data.channels !== undefined) { sets.push('channels = @channels'); params.channels = this.toJson(data.channels); }
       if (data.lastTriggeredAt !== undefined) { sets.push('lastTriggeredAt = @lastTriggeredAt'); params.lastTriggeredAt = data.lastTriggeredAt instanceof Date ? data.lastTriggeredAt.toISOString() : data.lastTriggeredAt; }
+      // `null` clears the mute / runbook / evaluation summary.
+      if (data.mutedUntil !== undefined) { sets.push('mutedUntil = @mutedUntil'); params.mutedUntil = data.mutedUntil ? new Date(data.mutedUntil).toISOString() : null; }
+      if (data.mutedBy !== undefined) { sets.push('mutedBy = @mutedBy'); params.mutedBy = data.mutedBy ?? null; }
+      if (data.muteReason !== undefined) { sets.push('muteReason = @muteReason'); params.muteReason = data.muteReason ?? null; }
+      if (data.runbookUrl !== undefined) { sets.push('runbookUrl = @runbookUrl'); params.runbookUrl = data.runbookUrl ?? null; }
+      if (data.lastEvaluation !== undefined) { sets.push('lastEvaluation = @lastEvaluation'); params.lastEvaluation = data.lastEvaluation ? this.toJson(data.lastEvaluation) : null; }
+      if (data.template !== undefined) { sets.push('template = @template'); params.template = data.template ? this.toJson(data.template) : null; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
       let where = 'id = @id';
       if (projectId !== undefined) { where += ' AND projectId = @scopeProjectId'; params.scopeProjectId = projectId; }
+      if (sets.length === 0) return this.findAlertRuleById(id, projectId);
       const result = db.prepare(`UPDATE ${TABLES.alertRules} SET ${sets.join(', ')} WHERE ${where}`).run(params);
       if (result.changes === 0) return null;
       return this.findAlertRuleById(id, projectId);
@@ -257,7 +275,111 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return (row.cnt as number) || 0;
     }
 
+    async listAlertFirings(
+      tenantId: string,
+      options: { projectId?: string; since: Date; limit?: number },
+    ): Promise<Array<{ ruleId: string; firedAt: Date }>> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['tenantId = @tenantId', 'firedAt >= @since'];
+      const params: Record<string, unknown> = {
+        tenantId,
+        since: options.since.toISOString(),
+        limit: Math.min(Math.max(Math.floor(Number(options.limit) || 5000), 1), 20000),
+      };
+      if (options.projectId) { clauses.push('projectId = @projectId'); params.projectId = options.projectId; }
+      const rows = db.prepare(
+        `SELECT ruleId, firedAt FROM ${TABLES.alertEvents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT @limit`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => ({ ruleId: r.ruleId as string, firedAt: this.toDate(r.firedAt) ?? new Date() }));
+    }
+
+    // ── Alert delivery log ───────────────────────────────────────────
+
+    async createAlertDeliveries(rows: Array<Omit<IAlertDelivery, '_id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const db = this.getTenantDb();
+      const insert = db.prepare(`
+        INSERT INTO ${TABLES.alertDeliveries}
+        (id, tenantId, projectId, ruleId, incidentId, eventId, channelId, channelKind, channelName,
+         "trigger", status, reason, error, attemptAt)
+        VALUES (@id, @tenantId, @projectId, @ruleId, @incidentId, @eventId, @channelId, @channelKind, @channelName,
+         @trigger, @status, @reason, @error, @attemptAt)
+      `);
+      const write = db.transaction((batch: Array<Omit<IAlertDelivery, '_id'>>) => {
+        for (const row of batch) {
+          insert.run({
+            id: this.newId(),
+            tenantId: row.tenantId,
+            projectId: row.projectId,
+            ruleId: row.ruleId,
+            incidentId: row.incidentId ?? null,
+            eventId: row.eventId ?? null,
+            channelId: row.channelId,
+            channelKind: row.channelKind,
+            channelName: row.channelName ?? null,
+            trigger: row.trigger,
+            status: row.status,
+            reason: row.reason ?? null,
+            error: row.error ?? null,
+            attemptAt: new Date(row.attemptAt).toISOString(),
+          });
+        }
+      });
+      write(rows);
+    }
+
+    async listAlertDeliveries(
+      tenantId: string,
+      options: { incidentId?: string; ruleId?: string; limit?: number },
+    ): Promise<IAlertDelivery[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = ['tenantId = @tenantId'];
+      const params: Record<string, unknown> = { tenantId, limit: clampLimit(options.limit, 200) };
+      if (options.incidentId) { clauses.push('incidentId = @incidentId'); params.incidentId = options.incidentId; }
+      if (options.ruleId) { clauses.push('ruleId = @ruleId'); params.ruleId = options.ruleId; }
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.alertDeliveries} WHERE ${clauses.join(' AND ')} ORDER BY attemptAt DESC LIMIT @limit`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => ({
+        _id: r.id as string,
+        tenantId: r.tenantId as string,
+        projectId: r.projectId as string,
+        ruleId: r.ruleId as string,
+        incidentId: (r.incidentId as string | null) ?? null,
+        eventId: (r.eventId as string | null) ?? null,
+        channelId: r.channelId as string,
+        channelKind: r.channelKind as string,
+        channelName: (r.channelName as string | null) ?? null,
+        trigger: r.trigger as IAlertDelivery['trigger'],
+        status: r.status as IAlertDelivery['status'],
+        reason: (r.reason as string | null) ?? null,
+        error: (r.error as string | null) ?? null,
+        attemptAt: this.toDate(r.attemptAt) ?? new Date(),
+      }));
+    }
+
+    async pruneAlertDeliveries(before: Date): Promise<number> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.alertDeliveries} WHERE attemptAt < @before`)
+        .run({ before: before.toISOString() }).changes;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────
+
+    protected mapLastEvaluation(raw: unknown): NonNullable<IAlertRule['lastEvaluation']> {
+      const parsed = this.parseJson<{ at?: string; targets?: number; noDataTargets?: number }>(raw, {});
+      return {
+        at: this.toDate(parsed.at) ?? new Date(0),
+        targets: Number(parsed.targets) || 0,
+        noDataTargets: Number(parsed.noDataTargets) || 0,
+      };
+    }
+
+    protected mapTemplateRef(raw: unknown): IAlertRule['template'] {
+      const parsed = this.parseJson<Record<string, unknown> | null>(raw, null);
+      if (!parsed || typeof parsed.key !== 'string') return null;
+      return { key: parsed.key, version: Number(parsed.version) || 1 };
+    }
 
     protected mapRuleRow(r: SqliteRow): IAlertRule {
       return {
@@ -279,6 +401,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(r.renotifyMinutes !== null && r.renotifyMinutes !== undefined ? { renotifyMinutes: r.renotifyMinutes as number } : {}),
         channels: this.parseJson(r.channels, []),
         lastTriggeredAt: r.lastTriggeredAt ? this.toDate(r.lastTriggeredAt) : undefined,
+        ...(r.mutedUntil ? { mutedUntil: this.toDate(r.mutedUntil) } : {}),
+        ...(r.mutedBy ? { mutedBy: r.mutedBy as string } : {}),
+        ...(r.muteReason ? { muteReason: r.muteReason as string } : {}),
+        ...(r.runbookUrl ? { runbookUrl: r.runbookUrl as string } : {}),
+        ...(r.lastEvaluation ? { lastEvaluation: this.mapLastEvaluation(r.lastEvaluation) } : {}),
+        ...(r.template ? { template: this.mapTemplateRef(r.template) } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

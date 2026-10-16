@@ -17,6 +17,8 @@ export interface ChannelItem {
   type: AlertChannelType;
   /** email */
   recipients: string[];
+  /** email: also mail the project's admins. */
+  audience?: 'project_admins';
   /** Masked hints of a stored channel. */
   urlHint?: string;
   keyHint?: string;
@@ -48,14 +50,38 @@ export function newChannelItem(type: AlertChannelType): ChannelItem {
   return { key: nextKey(), type, recipients: [] };
 }
 
-/** Stored (masked) channels → editor items. */
+/** A reference to a tenant channel library entry (`{ id?, type: 'library', libraryId }`). */
+export interface LibraryRef {
+  /** The rule-local channel id (kept on an edit so delivery history stays attached). */
+  id?: string;
+  libraryId: string;
+}
+
+function isInlineChannel(channel: MaskedChannel): channel is MaskedChannel & { type: AlertChannelType } {
+  return channel.type !== 'library';
+}
+
+/** The library references among a rule's stored channels. */
+export function libraryRefsFromStored(stored: MaskedChannel[] | null | undefined): LibraryRef[] {
+  if (!Array.isArray(stored)) return [];
+  return stored
+    .filter((channel) => channel.type === 'library' && typeof channel.libraryId === 'string' && channel.libraryId)
+    .map((channel) => ({ ...(channel.id ? { id: channel.id } : {}), libraryId: channel.libraryId as string }));
+}
+
+export function libraryRefToInput(ref: LibraryRef): Record<string, unknown> {
+  return { ...(ref.id ? { id: ref.id } : {}), type: 'library', libraryId: ref.libraryId };
+}
+
+/** Stored (masked) channels → editor items (library references are handled by `libraryRefsFromStored`). */
 export function channelsFromStored(stored: MaskedChannel[] | null | undefined): ChannelItem[] {
   if (!Array.isArray(stored)) return [];
-  return stored.map((channel) => ({
+  return stored.filter(isInlineChannel).map((channel) => ({
     key: nextKey(),
     id: channel.id,
     type: channel.type,
     recipients: [...(channel.recipients ?? [])],
+    ...(channel.audience === 'project_admins' ? { audience: 'project_admins' as const } : {}),
     urlHint: channel.urlHint,
     keyHint: channel.keyHint,
     hasSecret: channel.hasSecret,
@@ -122,7 +148,12 @@ export function channelToInput(item: ChannelItem): Record<string, unknown> {
   const base = item.id ? { id: item.id } : {};
   switch (item.type) {
     case 'email':
-      return { ...base, type: 'email', recipients: item.recipients.map((recipient) => recipient.trim()).filter(Boolean) };
+      return {
+        ...base,
+        type: 'email',
+        recipients: item.recipients.map((recipient) => recipient.trim()).filter(Boolean),
+        ...(item.audience === 'project_admins' ? { audience: 'project_admins' } : {}),
+      };
     case 'webhook': {
       const url = item.url?.trim();
       const secret = item.secret?.trim();

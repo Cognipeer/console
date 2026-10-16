@@ -3,7 +3,7 @@
  * The incidents list (counts, filters, bulk actions, ?highlight deep link), the overview card
  * and the history page, rendered against the real alerts API shapes.
  */
-import { createElement } from 'react';
+import { act, createElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buttonByText,
@@ -23,8 +23,9 @@ import {
 
 const nav = vi.hoisted(() => ({ search: '' }));
 const push = vi.hoisted(() => vi.fn());
+const replace = vi.hoisted(() => vi.fn());
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push, replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push, replace, prefetch: vi.fn() }),
   usePathname: () => '/dashboard/alerts/incidents',
   useSearchParams: () => new URLSearchParams(nav.search),
 }));
@@ -32,6 +33,7 @@ vi.mock('next/navigation', () => ({
 import IncidentsPage from '@/app/dashboard/alerts/incidents/page';
 import AlertHistoryPage from '@/app/dashboard/alerts/history/page';
 import ActiveIncidentsCard from '@/components/alerts/ActiveIncidentsCard';
+import AssignDialog from '@/components/alerts/inbox/AssignDialog';
 import type { AlertEventDto, IncidentDto, IncidentStatus } from '@/components/alerts/alertTypes';
 
 let mounted: Mounted;
@@ -41,7 +43,14 @@ beforeAll(() => installDomStubs());
 beforeEach(() => {
   nav.search = '';
   push.mockClear();
+  replace.mockClear();
 });
+
+/** The query of the last URL the page navigated to (the inbox keeps its filters in the URL). */
+function lastReplacedQuery(): URLSearchParams {
+  const url = String(replace.mock.calls.at(-1)?.[0] ?? '');
+  return new URLSearchParams(url.split('?')[1] ?? '');
+}
 afterEach(async () => {
   await mounted?.unmount();
   vi.unstubAllGlobals();
@@ -202,19 +211,188 @@ describe('IncidentsPage', () => {
     expect(text()).toContain('Entity: agent-i1');
     await click(q('button[aria-label="Remove the rule filter"]'));
     await settle(50);
-    const last = api.to('GET', '/api/alerts/incidents').at(-1)!;
-    expect(last.query).not.toHaveProperty('ruleId');
-    expect(last.query).toMatchObject({ entityKey: 'agent-i1' });
+    const next = lastReplacedQuery();
+    expect(next.has('ruleId')).toBe(false);
+    expect(next.get('entityKey')).toBe('agent-i1');
+    expect(next.get('severity')).toBe('critical');
   });
 
-  it('filters the loaded page with the search box', async () => {
+  it('sends the search box to the server (through the URL) after a pause', async () => {
     incidentsApi();
     mounted = await mount(createElement(IncidentsPage));
     await settle(100);
-    const input = q<HTMLInputElement>('input[placeholder="Filter this page…"]')!;
+    const input = q<HTMLInputElement>('input[data-inbox-search]')!;
     await setInput(input, 'agent-i2');
-    await settle(400);
-    expect(qa('[data-incident-row]').map((node) => (node as HTMLElement).dataset.incidentRow)).toEqual(['i2']);
+    await settle(600);
+    expect(lastReplacedQuery().get('q')).toBe('agent-i2');
+
+    // the page reads the filter back from the URL and asks the server for it
+    nav.search = 'q=agent-i2';
+    await mounted.unmount();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(api.to('GET', '/api/alerts/incidents').at(-1)!.query).toMatchObject({ q: 'agent-i2' });
+  });
+
+  describe('the "/" key', () => {
+    const slash = () => new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+
+    it('goes to the search box before the command palette (a window listener registered earlier) can take it', async () => {
+      incidentsApi();
+      // the shell's palette listens on window in the bubble phase and is mounted before the page
+      const seenByPalette: boolean[] = [];
+      const palette = (event: KeyboardEvent) => {
+        if (event.key === '/') seenByPalette.push(event.defaultPrevented);
+      };
+      window.addEventListener('keydown', palette);
+      try {
+        mounted = await mount(createElement(IncidentsPage));
+        await settle(100);
+        await act(async () => {
+          document.body.dispatchEvent(slash());
+        });
+        expect(document.activeElement).toBe(q('input[data-inbox-search]'));
+        expect(seenByPalette).toEqual([true]);
+      } finally {
+        window.removeEventListener('keydown', palette);
+      }
+    });
+
+    it('is left to the command palette when the page has no search box to focus', async () => {
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(100);
+      q('input[data-inbox-search]')!.removeAttribute('data-inbox-search');
+      const event = slash();
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    });
+  });
+
+  it('keeps the unit with its number in the KPI labels and marks the tiles for level figures', async () => {
+    incidentsApi();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('Fired · Last 24\u00a0h');
+    expect(text()).toContain('Resolved · Last 24\u00a0h');
+    expect(q('.inbox-kpis')?.querySelectorAll('.ds-stat')).toHaveLength(6);
+  });
+
+  describe('the preview pane', () => {
+    /** Every ResizeObserver reports this width, which is what the page measures itself with. */
+    function pageWidth(width: number) {
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          constructor(private callback: (entries: unknown[]) => void) {}
+          observe() {
+            this.callback([{ contentRect: { x: 0, y: 0, width, height: 400, top: 0, left: 0, bottom: 400, right: width }, borderBoxSize: [{ inlineSize: width, blockSize: 400 }] }]);
+          }
+          unobserve() {}
+          disconnect() {}
+        },
+      );
+    }
+    const headers = () => qa('thead th').map((cell) => cell.textContent?.trim());
+    const openPreview = async () => {
+      // a click on a plain cell (the name is a link to the detail page) opens the preview
+      const row = qa('tbody tr')[0]!;
+      await click([...row.querySelectorAll('td')].find((cell) => cell.textContent?.includes('Warning')));
+      await settle(60);
+    };
+
+    it('sits beside the list on a wide page and leaves out the columns it repeats', async () => {
+      pageWidth(1400);
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(150);
+      expect(headers()).toEqual(expect.arrayContaining(['Assignee', 'Duration']));
+      await openPreview();
+      const pane = q('aside[aria-label="Incident preview"]')!;
+      expect(pane).not.toBeNull();
+      expect(pane.parentElement!.style.gridTemplateColumns).toContain('360px');
+      expect(headers()).not.toContain('Assignee');
+      expect(headers()).not.toContain('Duration');
+      expect(headers()).toEqual(expect.arrayContaining(['Incident', 'Severity', 'Value']));
+    });
+
+    it('goes below the list when the page is narrow, with every column kept', async () => {
+      pageWidth(900);
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(150);
+      await openPreview();
+      const pane = q('aside[aria-label="Incident preview"]')!;
+      expect(pane).not.toBeNull();
+      expect(pane.parentElement!.style.gridTemplateColumns).toBe('');
+      expect(headers()).toEqual(expect.arrayContaining(['Assignee', 'Duration']));
+    });
+  });
+
+  it('says nothing matches (and offers to clear the filters) when a search leaves the list empty', async () => {
+    nav.search = 'status=open&q=zzz&severity=critical&sort=-severity';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('No incidents match these filters');
+    expect(text()).not.toContain('When alert rules are triggered');
+    await click(buttonByText('Clear filters'));
+    await settle(50);
+    const next = lastReplacedQuery();
+    expect(next.has('q')).toBe(false);
+    expect(next.has('severity')).toBe(false);
+    // the tab and the sort survive
+    expect(next.get('status')).toBe('open');
+    expect(next.get('sort')).toBe('-severity');
+  });
+
+  it('says so in the grouped view too, and keeps the first-run message when nothing is filtered', async () => {
+    nav.search = 'group=rule&assignee=me';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('No incidents match these filters');
+    expect(buttonByText('Clear filters')).toBeDefined();
+    await mounted.unmount();
+
+    nav.search = '';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('When alert rules are triggered');
+    expect(buttonByText('Clear filters')).toBeUndefined();
+  });
+
+  it('words one incident and one entity in the singular in the grouped view', async () => {
+    nav.search = 'group=rule';
+    incidentsApi([ROWS[0]!]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('1 incident');
+    expect(text()).toContain('1 entity');
+    expect(text()).not.toContain('1 incidents');
+    expect(text()).not.toContain('1 entities');
+  });
+
+  it('asks about a single incident in the singular before resolving it', async () => {
+    incidentsApi();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    await click(rowCheckboxes()[0]);
+    await click(qa('button').find((button) => button.textContent === 'Resolve'));
+    await settle(50);
+    expect(text()).toContain('Mark this incident as resolved?');
+    expect(text()).not.toContain('Mark 1 incidents');
+  });
+
+  it('renders the empty filtered state in Turkish', async () => {
+    nav.search = 'q=zzz';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage), 'tr');
+    await settle(100);
+    expect(text()).toContain('Bu filtrelerle eşleşen olay yok');
+    expect(buttonByText('Filtreleri temizle')).toBeDefined();
+    expect(text()).not.toMatch(/(alerts|incidents)\.[a-zA-Z]/);
   });
 
   it('renders in Turkish without a missing message', async () => {
@@ -224,6 +402,23 @@ describe('IncidentsPage', () => {
     expect(text()).toContain('Olaylar');
     expect(text()).toContain('Ajan Hata Oranı');
     expect(text()).not.toMatch(/(alerts|incidents)\.[a-zA-Z]/);
+  });
+});
+
+describe('AssignDialog', () => {
+  const directory = { meId: 'u1', meName: 'Ada', names: { u1: 'Ada', u2: 'Bob' } };
+  const open = (count: number) => createElement(AssignDialog, { opened: true, count, directory, onClose: vi.fn(), onConfirm: vi.fn() });
+
+  it('titles the dialog for one incident or for several', async () => {
+    mounted = await mount(open(1));
+    await settle(50);
+    expect(text()).toContain('Assign incident');
+    expect(text()).not.toContain('Assign 1 incident');
+    await mounted.unmount();
+    mounted = await mount(open(3));
+    await settle(50);
+    expect(text()).toContain('Assign 3 incidents');
+    expect(text()).not.toContain('incident(s)');
   });
 });
 

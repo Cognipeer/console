@@ -11,14 +11,14 @@
 
 import { randomBytes } from 'node:crypto';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import type { AlertChannelInput, IAlertChannel } from '@/lib/database';
+import type { AlertChannelInput, AlertEmailAudience, IAlertChannel } from '@/lib/database';
 
 const CHANNEL_ID_PATTERN = /^ch_[0-9a-f]{12}$/;
 const HINT_TAIL = 4;
 
 /** A channel with its credentials in the clear. Internal: never return it from an API. */
 export type UnsealedAlertChannel =
-  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'email'; recipients: string[]; audience?: AlertEmailAudience }
   | { id?: string; type: 'webhook'; url: string; secret?: string }
   | { id?: string; type: 'slack'; url: string }
   | { id?: string; type: 'teams'; url: string }
@@ -52,11 +52,16 @@ function trimmed(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/** The audience an email channel adds to its listed recipients; anything unknown is dropped. */
+function emailAudience(channel: { audience?: unknown }): { audience?: AlertEmailAudience } {
+  return channel.audience === 'project_admins' ? { audience: 'project_admins' } : {};
+}
+
 /** Plaintext of a stored channel. Throws when it cannot be decrypted (key rotated away, corrupted payload). */
 export function unsealChannel(channel: IAlertChannel): UnsealedAlertChannel {
   switch (channel.type) {
     case 'email':
-      return { id: channel.id, type: 'email', recipients: [...(channel.recipients ?? [])] };
+      return { id: channel.id, type: 'email', recipients: [...(channel.recipients ?? [])], ...emailAudience(channel) };
     case 'webhook': {
       const sealed = decryptObject<{ url: string; secret?: string }>(channel.sealed);
       return { id: channel.id, type: 'webhook', url: sealed.url, ...(sealed.secret ? { secret: sealed.secret } : {}) };
@@ -124,7 +129,7 @@ export async function sealChannels(
     switch (withId.type) {
       case 'email': {
         const recipients = (Array.isArray(withId.recipients) ? withId.recipients : []).map(trimmed).filter(Boolean);
-        out.push({ id, type: 'email', recipients });
+        out.push({ id, type: 'email', recipients, ...emailAudience(withId) });
         break;
       }
       case 'webhook': {
@@ -156,6 +161,13 @@ export async function sealChannels(
         out.push({ id, type: 'pagerduty', keyHint: keyHint(routingKey), sealed: encryptObject({ routingKey }) });
         break;
       }
+      case 'library': {
+        // A reference carries no secret: the entry is resolved (and unsealed) at dispatch time.
+        const libraryId = trimmed(withId.libraryId);
+        if (!libraryId) throw new Error('A library channel needs a libraryId');
+        out.push({ id, type: 'library', libraryId });
+        break;
+      }
       default:
         throw new Error(`Unsupported channel type "${(channel as { type?: string }).type}"`);
     }
@@ -178,7 +190,7 @@ export function maskChannels(stored: IAlertChannel[] | null | undefined): IAlert
     const id = channel.id ? { id: channel.id } : {};
     switch (channel.type) {
       case 'email':
-        out.push({ ...id, type: 'email', recipients: [...(channel.recipients ?? [])] });
+        out.push({ ...id, type: 'email', recipients: [...(channel.recipients ?? [])], ...emailAudience(channel) });
         break;
       case 'webhook':
         out.push({ ...id, type: 'webhook', urlHint: channel.urlHint, hasSecret: Boolean(channel.hasSecret) } as IAlertChannel);
@@ -189,6 +201,9 @@ export function maskChannels(stored: IAlertChannel[] | null | undefined): IAlert
         break;
       case 'pagerduty':
         out.push({ ...id, type: 'pagerduty', keyHint: channel.keyHint } as IAlertChannel);
+        break;
+      case 'library':
+        out.push({ ...id, type: 'library', libraryId: channel.libraryId });
         break;
       default:
         // A type registered by another module (or a damaged row): keep the

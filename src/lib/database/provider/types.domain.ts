@@ -1998,9 +1998,16 @@ export interface IAlertRuleEntityScope {
 
 export type AlertRuleSeverity = 'auto' | IncidentSeverity;
 
+/**
+ * Who an email channel mails besides its listed recipients, resolved at send
+ * time from the rule's project: `project_admins` = the project's admins (direct
+ * memberships, admin group grants, legacy project admins).
+ */
+export type AlertEmailAudience = 'project_admins';
+
 /** Stored channel shape. Every channel has a stable id ('ch_' + 12 hex), created server-side if missing. */
 export type IAlertChannel =
-  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'email'; recipients: string[]; audience?: AlertEmailAudience }
   /** sealed = encryptObject({ url, secret? }) */
   | { id?: string; type: 'webhook'; urlHint: string; hasSecret: boolean; sealed: string }
   /** sealed = encryptObject({ url }) */
@@ -2008,15 +2015,34 @@ export type IAlertChannel =
   /** sealed = encryptObject({ url }) */
   | { id?: string; type: 'teams'; urlHint: string; sealed: string }
   /** sealed = encryptObject({ routingKey }) */
-  | { id?: string; type: 'pagerduty'; keyHint: string; sealed: string };
+  | { id?: string; type: 'pagerduty'; keyHint: string; sealed: string }
+  /** Reference to a tenant channel library entry; resolved at dispatch time. */
+  | { id?: string; type: 'library'; libraryId: string };
 
 /** Input accepted by the API (plaintext only on write; omit secret fields to keep the stored ones for that channel id). */
 export type AlertChannelInput =
-  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'email'; recipients: string[]; audience?: AlertEmailAudience }
   | { id?: string; type: 'webhook'; url?: string; secret?: string }
   | { id?: string; type: 'slack'; url?: string }
   | { id?: string; type: 'teams'; url?: string }
-  | { id?: string; type: 'pagerduty'; routingKey?: string };
+  | { id?: string; type: 'pagerduty'; routingKey?: string }
+  | { id?: string; type: 'library'; libraryId: string };
+
+/** A concrete (non-reference) channel: what a library entry stores. */
+export type IAlertDeliverableChannel = Exclude<IAlertChannel, { type: 'library' }>;
+export type AlertDeliverableChannelInput = Exclude<AlertChannelInput, { type: 'library' }>;
+
+/** Tenant-level reusable channel (collection `alert_channel_library`); `config` holds sealed secrets. */
+export interface IAlertChannelLibraryEntry {
+  _id?: string;
+  tenantId: string;
+  name: string;
+  kind: IAlertDeliverableChannel['type'];
+  config: IAlertDeliverableChannel;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
 
 export type AlertStatePhase = 'ok' | 'pending' | 'firing';
 
@@ -2084,10 +2110,54 @@ export interface IAlertRule {
   renotifyMinutes?: number;
   channels: IAlertChannel[];
   lastTriggeredAt?: Date;
+  /** Notifications are suppressed (and recorded as `suppressed` deliveries) until this instant; evaluation continues. */
+  mutedUntil?: Date | null;
+  mutedBy?: string | null;
+  muteReason?: string | null;
+  /** http(s) link to the team's runbook; shown on the rule's incidents. Not part of the evaluation shape. */
+  runbookUrl?: string | null;
+  /** Last evaluation summary (throttled writes) behind the derived "No data" state. */
+  lastEvaluation?: IAlertRuleLastEvaluation | null;
+  /** Set on rules added from a rule template: which template, at which version. Server-owned; cleared when the rule's metric or module changes. */
+  template?: IAlertRuleTemplateRef | null;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IAlertRuleTemplateRef {
+  key: string;
+  version: number;
+}
+
+export interface IAlertRuleLastEvaluation {
+  at: Date;
+  targets: number;
+  noDataTargets: number;
+}
+
+export type AlertDeliveryTrigger = 'fire' | 'resolve' | 'renotify' | 'test';
+export type AlertDeliveryStatus = 'sent' | 'failed' | 'suppressed';
+
+/** One notification attempt on one channel (kept ~30 days). */
+export interface IAlertDelivery {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  ruleId: string;
+  incidentId?: string | null;
+  eventId?: string | null;
+  channelId: string;
+  channelKind: string;
+  channelName?: string | null;
+  trigger: AlertDeliveryTrigger;
+  status: AlertDeliveryStatus;
+  /** `rule_muted` / `incident_snoozed` for suppressed rows, `channel_missing` for a failed delivery to a deleted library channel. */
+  reason?: string | null;
+  /** Already scrubbed by the channel; at most 500 characters. */
+  error?: string | null;
+  attemptAt: Date;
 }
 
 export interface IAlertEvent {
@@ -3407,6 +3477,20 @@ export interface IAgentConversationState {
 export type IncidentStatus = 'open' | 'acknowledged' | 'investigating' | 'resolved' | 'closed';
 export type IncidentSeverity = 'critical' | 'warning' | 'info';
 
+export type IncidentSort = 'firedAt' | '-firedAt' | 'updatedAt' | '-updatedAt' | 'severity' | '-severity';
+
+/** The minimal incident fields incident stats are computed from. */
+export interface IIncidentStatRow {
+  _id: string;
+  status: IncidentStatus;
+  firedAt: Date;
+  acknowledgedAt?: Date | null;
+  resolvedAt?: Date | null;
+  closedAt?: Date | null;
+  reopenedAt?: Date | null;
+  autoResolved?: boolean;
+}
+
 export interface IIncidentNote {
   userId: string;
   userName: string;
@@ -3441,6 +3525,12 @@ export interface IIncident {
   peakValue?: number | null;
   autoResolved?: boolean;
   acknowledgedBy?: string;
+  /** Re-notifications are silenced until this time (status unchanged); expires by comparison, null clears. */
+  snoozedUntil?: Date | null;
+  snoozedBy?: string | null;
+  /** Set when an incident is reopened; `reopenCount` counts the reopenings. */
+  reopenedAt?: Date | null;
+  reopenCount?: number;
   context?: IIncidentContext;
   metadata?: Record<string, unknown>;
   createdAt?: Date;

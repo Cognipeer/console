@@ -379,7 +379,8 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
         setOpen((v) => !v);
         return;
       }
-      if (e.key === '/' && !open) {
+      // A page that has taken the "/" for its own search box (it prevents the default first) keeps it.
+      if (e.key === '/' && !open && !e.defaultPrevented) {
         const target = e.target as HTMLElement | null;
         const tag = target?.tagName?.toLowerCase();
         const editable = target?.isContentEditable;

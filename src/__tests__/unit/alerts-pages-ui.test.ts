@@ -33,6 +33,7 @@ vi.mock('next/navigation', () => ({
 
 import AlertsPage from '@/app/dashboard/alerts/page';
 import IncidentDetailPage from '@/app/dashboard/alerts/incidents/[incidentId]/page';
+import DeliveryTimeline from '@/components/alerts/incident/DeliveryTimeline';
 import { ALERT_METRIC_CATALOG } from '@/lib/services/alerts/metricCatalog';
 import type { AlertMeta, AlertRuleDto, IncidentDto } from '@/components/alerts/alertTypes';
 
@@ -93,7 +94,25 @@ const RULES: AlertRuleDto[] = [
 
 function rulesApi(rules: AlertRuleDto[] = RULES) {
   api = installApiMock([
-    ['GET', '/api/alerts/rules', () => ({ rules, meta: META, states: { r1: { ok: 0, pending: 0, firing: 2 } } })],
+    [
+      'GET',
+      '/api/alerts/rules',
+      (call) => {
+        // status / owner / q / sort are applied by the server; the mock honours the search so the page can be exercised
+        const needle = (call.query.q ?? '').toLowerCase();
+        const matching = needle ? rules.filter((rule) => rule.name.toLowerCase().includes(needle)) : rules;
+        return {
+          rules: matching,
+          meta: META,
+          states: { r1: { ok: 0, pending: 0, firing: 2 } },
+          derived: Object.fromEntries(rules.map((rule) => [rule._id, { status: rule.enabled ? 'ok' : 'disabled', muted: false, noData: false }])),
+          stats: { r1: { fired7d: 12, daily7d: [0, 1, 2, 3, 1, 2, 3] } },
+          statsCapped: false,
+          kpis: { total: rules.length, enabled: rules.filter((rule) => rule.enabled).length, firing: 1, muted: 0, noData: 0, noisy: 1 },
+          total: matching.length,
+        };
+      },
+    ],
     ['GET', '/api/alerts/entities', () => ({ entities: [] })],
     ['PATCH', /^\/api\/alerts\/rules\/[^/]+$/, () => ({ rule: {} })],
     ['POST', '/api/alerts/rules', () => jsonResponse({ rule: { _id: 'new' } }, 201)],
@@ -116,8 +135,8 @@ describe('AlertsPage', () => {
     expect(text()).toContain('2 firing');
     // each tile says what it counts: entity states that are firing, rules that fired
     expect(text()).toContain('Entities Firing Now');
-    expect(text()).toContain('Rules Fired (24h)');
-    expect(text()).toContain('Disabled');
+    expect(text()).toContain('Muted');
+    expect(text()).toContain('Noisy · 7d');
     expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts/incidents?ruleId=r1&status=all"]')).not.toBeNull();
   });
 
@@ -139,7 +158,7 @@ describe('AlertsPage', () => {
     rulesApi();
     mounted = await mount(createElement(AlertsPage));
     await settle(100);
-    await setInput(q<HTMLInputElement>('input[placeholder="Search rules, metrics, targets…"]')!, 'pii');
+    await setInput(q<HTMLInputElement>('input[placeholder="Search by name, description or metric ID…"]')!, 'pii');
     await settle(400);
     expect(text()).toContain('PII guard');
     expect(text()).not.toContain('Support errors');
@@ -191,7 +210,7 @@ describe('AlertsPage', () => {
     rulesApi();
     mounted = await mount(createElement(AlertsPage));
     await settle(100);
-    await click(q('tbody tr button[aria-label]:not([aria-label=""])'));
+    await click(qa('tbody tr button[aria-label]:not([aria-label=""])').find((node) => !/^Mute/.test(node.getAttribute('aria-label') ?? '')));
     await settle(50);
     await click(qa('button, [role="menuitem"]').find((node) => node.textContent?.trim() === 'Duplicate'));
     await settle(100);
@@ -250,6 +269,85 @@ function detailApi(incident: IncidentDto = INCIDENT) {
   ]);
 }
 
+describe('DeliveryTimeline', () => {
+  it('names a shared channel with its kind, and an unnamed one by its kind alone', async () => {
+    api = installApiMock([
+      [
+        'GET',
+        '/api/alerts/incidents/i1/deliveries',
+        () => ({
+          deliveries: [
+            { _id: 'd1', channelId: 'ch_a', channelKind: 'email', channelName: null, trigger: 'fire', status: 'failed', error: 'SMTP is down', attemptAt: '2026-10-15T10:00:00.000Z' },
+            { _id: 'd2', channelId: 'lib1', channelKind: 'slack', channelName: 'On-call Slack', trigger: 'fire', status: 'sent', attemptAt: '2026-10-15T10:00:05.000Z' },
+          ],
+        }),
+      ],
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('On-call Slack · Slack');
+    expect(text()).toContain('SMTP is down');
+    expect(text()).not.toContain('Email · Email');
+  });
+
+  const deliveriesApi = (deliveries: unknown[]) => {
+    api = installApiMock([['GET', '/api/alerts/incidents/i1/deliveries', () => ({ deliveries })]]);
+  };
+
+  it('words a deleted shared channel in plain language, whether the code arrived as the reason or as the error', async () => {
+    deliveriesApi([
+      // written by the recorder now: the code is the reason
+      { _id: 'd1', channelId: 'ch_a', channelKind: 'library', channelName: null, trigger: 'fire', status: 'failed', reason: 'channel_missing', error: 'channel_missing', attemptAt: '2026-10-15T10:00:00.000Z' },
+      // older rows: reason null, the code stored as the error text
+      { _id: 'd2', channelId: 'ch_b', channelKind: 'library', channelName: null, trigger: 'fire', status: 'failed', reason: null, error: 'channel_missing', attemptAt: '2026-10-15T10:00:01.000Z' },
+      { _id: 'd3', channelId: 'ch_c', channelKind: 'email', channelName: null, trigger: 'fire', status: 'failed', reason: null, error: 'SMTP is down', attemptAt: '2026-10-15T10:00:02.000Z' },
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    expect(text().match(/The library channel no longer exists\./g)).toHaveLength(2);
+    expect(text()).not.toContain('channel_missing');
+    // any other failure keeps its own text
+    expect(text()).toContain('SMTP is down');
+  });
+
+  it('heads a shared channel by its name, or as a "Shared channel" - never as the raw "library" kind', async () => {
+    deliveriesApi([
+      // a rule muted while its shared channel was already deleted: only the reference is known
+      { _id: 'd1', channelId: 'ch_lib', channelKind: 'library', channelName: null, trigger: 'fire', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:00.000Z' },
+      // held back under a live entry: the recorder knows its name and real kind
+      { _id: 'd2', channelId: 'ch_slack', channelKind: 'slack', channelName: 'On-call Slack', trigger: 'fire', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:01.000Z' },
+      // an older group whose newest row only says "library" but whose earlier row resolved it
+      { _id: 'd3', channelId: 'ch_ops', channelKind: 'library', channelName: null, trigger: 'renotify', status: 'suppressed', reason: 'rule_muted', attemptAt: '2026-10-15T10:00:03.000Z' },
+      { _id: 'd4', channelId: 'ch_ops', channelKind: 'teams', channelName: 'Ops Teams', trigger: 'fire', status: 'sent', attemptAt: '2026-10-15T10:00:02.000Z' },
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    const content = text();
+    expect(content).toContain('Shared channel');
+    expect(content).toContain('On-call Slack · Slack');
+    expect(content).toContain('Ops Teams · Teams');
+    expect(content).not.toMatch(/library/i);
+    expect(content).toContain('The rule was muted.');
+  });
+
+  it('does not claim nothing was attempted when the log is simply empty', async () => {
+    deliveriesApi([]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', firedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('No notification attempts were recorded for this incident.');
+    expect(text()).not.toContain('was attempted');
+    expect(text()).not.toContain('kept for');
+  });
+
+  it('says the history is kept for 30 days when the incident is older than that', async () => {
+    deliveriesApi([]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', firedAt: new Date(Date.now() - 45 * 86_400_000).toISOString(), refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('Delivery history is kept for 30 days');
+    expect(text()).not.toContain('No notification attempts were recorded');
+  });
+});
+
 describe('IncidentDetailPage', () => {
   it('shows the detection facts, the context and the activity timeline', async () => {
     detailApi();
@@ -271,6 +369,17 @@ describe('IncidentDetailPage', () => {
     expect(q<HTMLAnchorElement>('a[href="/dashboard/tracing/sessions?agent=support&status=error"]')).not.toBeNull();
     // the rule opens in the rules page through the edit deep link
     expect(q<HTMLAnchorElement>('a[href="/dashboard/alerts?edit=r1"]')).not.toBeNull();
+  });
+
+  it('words a single failing session in the singular', async () => {
+    detailApi({
+      ...INCIDENT,
+      context: { ...INCIDENT.context!, failingSessions: { count: 1, listPath: '/dashboard/tracing/sessions?agent=support&status=error' } },
+    });
+    mounted = await mount(createElement(IncidentDetailPage));
+    await settle(150);
+    expect(text()).toContain('View 1 failing session');
+    expect(text()).not.toContain('1 failing sessions');
   });
 
   it('states when the new version was first seen and spells out the page labels', async () => {

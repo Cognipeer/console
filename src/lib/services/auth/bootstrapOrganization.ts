@@ -16,6 +16,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
+import { defaultAlertRulesOnCreate, seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import { BCRYPT_ROUNDS, validatePassword } from './passwordPolicy';
 
 const logger = createLogger('bootstrap-org');
@@ -80,7 +81,11 @@ export async function ensureBootstrapOrganization(): Promise<void> {
   const userIdStr =
     typeof user._id === 'string' ? user._id : user._id!.toString();
 
-  await ensureDefaultProject(dbName, tenantIdStr, userIdStr);
+  const defaultProject = await ensureDefaultProject(dbName, tenantIdStr, userIdStr);
+  // A new workspace starts with the default alert rules on its default project (best effort).
+  if (defaultProject?._id && defaultAlertRulesOnCreate()) {
+    await seedDefaultAlertRules(dbName, tenantIdStr, String(defaultProject._id), userIdStr);
+  }
   await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
   await db.registerUserInDirectory({
     email,

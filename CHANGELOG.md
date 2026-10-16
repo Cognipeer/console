@@ -211,3 +211,37 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   already ongoing at the upgrade does not re-fire inside the old cooldown; incidents the previous engine had opened
   stay open until you close them. Per-entity rules judge whole 5-minute buckets that are at least one flush interval
   old, so an alert fires about 0.5 to 6.5 minutes after the data arrived, plus the hold time.
+- **Incident inbox.** **Incidents** has a summary (open and acknowledged incidents, incidents fired and resolved, and the
+  median times to acknowledge and to resolve over 24 hours, 7 or 30 days), search over rule, entity and metric, assignee
+  and snooze filters, sorting, grouping by rule or entity, built-in and saved views, a preview beside the list, keyboard
+  shortcuts and live updates. Bulk actions add **Reopen**, **Assign…** and **Snooze…**. **Snooze** holds back the
+  reminders of one incident for up to 30 days. The incident page lists every notification attempt per channel (kept 30
+  days), the same rule's incidents on the same entity in the last 30 days, the rule's runbook, and how often the incident
+  was reopened. Entities link to their console pages for every entity type that has one.
+- **Rule insights.** The rule list counts each rule's fires over 7 days with a sparkline, marks noisy rules (10 or more
+  fires), shows rules without data, and can be searched, filtered by status and owner, and sorted. A rule can be
+  **muted** for up to 30 days: it keeps evaluating and opening incidents, but its channels are not notified (webhook
+  subscriptions still are). **Backtest** replays a threshold or absence rule on a per-entity metric over the last 7 days
+  and suggests a threshold when it would have been noisy. A rule can link a **runbook**.
+- **Shared channels.** **Alerts & Incidents → Channels** keeps notification channels once for the whole workspace. Rules
+  reference them, so a changed destination applies to every rule that uses it. Owners and admins manage and test them.
+- New API: `POST /api/alerts/rules/:ruleId/mute`, `POST /api/alerts/rules/backtest`, `POST /api/alerts/entities/links`,
+  the channel library under `/api/alerts/channels/library`, `GET /api/alerts/incidents/stats`,
+  `GET /api/alerts/incidents/:incidentId/deliveries` and `GET /api/alerts/incidents/:incidentId/similar`. The rule list
+  takes filters, a sort and `include=stats`; the incident list takes `q`, `assignee`, `snoozed`, `updatedAfter` and
+  `sort` and returns `serverTime`; incidents can be snoozed (`snoozedUntil`), and bulk updates can reopen, assign,
+  snooze and unsnooze. See [Alerts API](docs/api/alerts.md) and [Incidents API](docs/api/incidents.md).
+- **Alert rule templates.** **Alerts → Templates** is a catalog of 26 recommended rules in six categories (errors,
+  latency, traffic, cost, quality, safety): pick the ones a project needs, or customise one in the rule form first.
+  Five of them are the **default set**: error-rate rules that watch every agent, model, knowledge base, MCP server and
+  tool of a project (above 20%, or 30% for MCP servers and tools, over 30 minutes with at least 20 requests and a
+  10-minute hold). A new project gets the default set enabled unless its creator opts out (`defaultAlertRules: false`),
+  and a new workspace gets it on its Default Project; `ALERT_DEFAULT_RULES_ON_CREATE=false` turns that default off. The
+  baseline and error-budget templates need Enterprise. New API: `GET`/`POST /api/alerts/templates`, `templateKey` on
+  `POST /api/alerts/rules`; the client API adds the default set to a project it creates only with
+  `defaultAlertRules: true`. Rules added from a template carry a `template` mark.
+- **Project admins as recipients.** An email channel can set `audience: "project_admins"`: each notification then also
+  goes to the admins of the rule's project, looked up when it is sent. With no project admin it falls back to the
+  workspace owners and admins. The default rules use it.
+- **Deleting a project** now deletes its alert rules, so they no longer evaluate and notify under "Unknown Project", and
+  closes its open incidents. Its alert history is kept.

@@ -654,6 +654,15 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
   font-weight: 500;
   color: var(--ds-text-muted);
 }
+/* Incident inbox KPIs: a label can wrap to a second line, so both lines are reserved and the figures line up across the tiles. */
+.inbox-kpis .ds-stat-label {
+  align-items: flex-start;
+  min-height: 2.8em;
+  line-height: 1.4;
+}
+.inbox-kpis .ds-stat-label::before {
+  margin-top: 0.4em;
+}
 .ds-stat-delta {
   display: inline-flex;
   align-items: center;

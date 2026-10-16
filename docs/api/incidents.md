@@ -3,7 +3,7 @@
 Incidents are automatically created when alert rules fire: one per rule and entity (agent, model, knowledge base, MCP server or tool). They track the lifecycle of an alert from detection through resolution, and an alert that recovers resolves its incident by itself. Incidents are managed through the dashboard API (not the client API). Rules, channels and alert history are in the [Alerts API](./alerts); how alerts fire and resolve is in [Monitoring](/guide/monitoring#from-breach-to-incident).
 
 ::: info
-These endpoints are dashboard APIs, authenticated via JWT session (not API tokens). They are used by the Cognipeer Console UI. Reading needs **Read** on the Alerts & Incidents service (`alerts`); every change needs **Write**. The list and the bulk update work inside the active project. By id, a member reaches only incidents of the active project (another project's answers `404`); workspace owners and admins can open an incident of any project by id.
+These endpoints are dashboard APIs, authenticated via JWT session (not API tokens). They are used by the Cognipeer Console UI. Reading needs **Read** on the Alerts & Incidents service (`alerts`); every change needs **Write**. The list, the stats and the bulk update work inside the active project. By id, a member reaches only incidents of the active project (another project's answers `404`); workspace owners and admins can open an incident of any project by id.
 :::
 
 ## List Incidents
@@ -21,10 +21,17 @@ GET /api/alerts/incidents
 | `module` | string | No | Filter by the module of the rule: `agents`, `models`, `rag`, `mcp`, `tools`, `inference`, `guardrails`, `analysis`, `evaluation`, `redteam`, `ai-app-gateway` |
 | `ruleId` | string | No | Filter by alert rule ID |
 | `entityKey` | string | No | Filter by entity: the agent name, model key, tool key, MCP server key or knowledge base key |
+| `q` | string | No | Case-insensitive substring of the rule name, the entity key or the metric. `I`, `İ`, `ı` and `i` match each other |
+| `assignee` | string | No | `me` for the caller, `unassigned` for nobody, or a user id |
+| `snoozed` | string | No | `true`: only incidents snoozed right now. `false`: only the others |
+| `updatedAfter` | string | No | ISO 8601: only incidents changed after this time (for polling, below) |
+| `sort` | string | No | `-firedAt` (default, newest first), `firedAt`, `-updatedAt`, `updatedAt`, `-severity` (critical first) or `severity` (info first). Within a severity, newest first |
 | `limit` | number | No | Page size (default: 50, max: 100) |
-| `skip` | number | No | Pagination offset (default: 0) |
+| `skip` | number | No | Pagination offset (default: 0, at most 100,000; a larger value counts as 100,000) |
 
-A value outside the allowed list answers `400` with `code: "invalid_filter"`. Incidents are ordered newest first.
+A value outside the allowed list, or an `updatedAfter` that is not a date, answers `400` with `code: "invalid_filter"`.
+
+To keep a list current without reloading it, pass the `serverTime` of the previous response as `updatedAfter` and merge the incidents you get by `_id`. `serverTime` is taken before the read, so a change made during the read shows up again on the next poll rather than being missed.
 
 ### Response
 
@@ -64,7 +71,8 @@ A value outside the allowed list answers `400` with `code: "invalid_filter"`. In
   "total": 12,
   "hasMore": false,
   "openCount": 3,
-  "counts": { "open": 3, "acknowledged": 4, "investigating": 1, "resolved": 3, "closed": 1 }
+  "counts": { "open": 3, "acknowledged": 4, "investigating": 1, "resolved": 3, "closed": 1 },
+  "serverTime": "2026-10-15T10:00:00.000Z"
 }
 ```
 
@@ -72,8 +80,9 @@ A value outside the allowed list answers `400` with `code: "invalid_filter"`. In
 |-------|-------------|
 | `counts` | Incidents of the project per status. Every status is present, and the filters above do not change it |
 | `openCount` | `counts.open` |
-| `total` | The number of incidents for the `status` filter (all statuses without it). With any of the `severity`, `module`, `ruleId` or `entityKey` filters it is the number of incidents up to the end of this page, plus one when `hasMore` is `true` |
+| `total` | The number of incidents for the `status` filter (all statuses without it). With any other filter (`severity`, `module`, `ruleId`, `entityKey`, `q`, `assignee`, `snoozed` or `updatedAfter`) it is the number of incidents up to the end of this page, plus one when `hasMore` is `true` |
 | `hasMore` | Whether another page exists. Use it to paginate |
+| `serverTime` | When the list was read, for the next `updatedAfter` |
 
 ## The incident object
 
@@ -92,6 +101,8 @@ A value outside the allowed list answers `400` with `code: "invalid_filter"`. In
 | `assignedToName`, `acknowledgedByName`, `resolvedByName` | Display names of those users, or `null` (for `system` and for users that no longer exist). Emails are never returned |
 | `autoResolved` | `true` when the alert recovered by itself and resolved the incident. Reopening an incident clears it |
 | `firedAt`, `acknowledgedAt`, `resolvedAt`, `closedAt` | Lifecycle timestamps |
+| `snoozedUntil`, `snoozedBy` | Set while the incident is [snoozed](#snooze), `null` or absent otherwise. A `snoozedUntil` in the past means the snooze has run out |
+| `reopenedAt`, `reopenCount` | When the incident was last reopened, and how many times it was |
 | `notes` | Notes and system notes, oldest first |
 | `context` | What was gathered when the alert fired (below). Absent when nothing could be gathered |
 
@@ -201,7 +212,7 @@ GET /api/alerts/incidents/:incidentId
 PATCH /api/alerts/incidents/:incidentId
 ```
 
-Change the status, the assignee, or both in one call. At least one of `status` and `assignedTo` is required. The status is applied first.
+Change the status, the assignee, the snooze, or several of them in one call. At least one of `status`, `assignedTo` and `snoozedUntil` is required. The whole change is checked before anything is written: the status move, the assignee, and the snooze against the status the incident will have afterwards. If any part fails, nothing changes; a `snoozedUntil` sent together with `resolved` or `closed`, for example, answers `409` (`invalid_transition`). The changes are then applied in that order.
 
 ### Request
 
@@ -215,9 +226,16 @@ Change the status, the assignee, or both in one call. At least one of `status` a
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | string | The new status (below). The move must be allowed from the current status |
-| `assignedTo` | string or `null` | A user id, `"me"` for the caller, or `null` to unassign |
+| `assignedTo` | string or `null` | The id of a user of the workspace, `"me"` for the caller, or `null` to unassign. An id that is not a user of the workspace answers `400` with `invalid_assignee` |
+| `snoozedUntil` | string or `null` | Snooze the incident until this time (ISO 8601), or `null` to end a snooze (see [Snooze](#snooze)) |
 
 Returns `{ "incident": { ... } }` with the display names filled in.
+
+### Snooze
+
+A snooze silences the reminders of an incident (the rule's **Remind every**) until `snoozedUntil`, without changing its status. Each reminder skipped meanwhile is recorded as a `suppressed` delivery with the reason `incident_snoozed`, and the snooze ends by itself at that time. The notification of a recovery is not affected.
+
+Only an `open`, `acknowledged` or `investigating` incident can be snoozed (`409`, `invalid_transition` otherwise), for at most 30 days, and the time must be in the future (`400`, `invalid_snooze`). Ending a snooze is always allowed. Resolving or closing an incident ends its snooze. Since reminders are only sent while an incident is `open`, a snooze makes a difference to notifications only there.
 
 ### Valid Statuses
 
@@ -242,7 +260,7 @@ Returns `{ "incident": { ... } }` with the display names filled in.
 Any other move answers `409` with `code: "invalid_transition"`, including setting the status it already has.
 
 There is no `statusHistory` array. Transitions are tracked via the timestamp
-fields `acknowledgedAt`, `resolvedAt`, `closedAt`, the actors `acknowledgedBy` and `resolvedBy`, and the notes. Reopening clears `resolvedAt`, `resolvedBy`, `closedAt` and `autoResolved`.
+fields `acknowledgedAt`, `resolvedAt`, `closedAt`, `reopenedAt`, the actors `acknowledgedBy` and `resolvedBy`, and the notes. Reopening clears `resolvedAt`, `resolvedBy`, `closedAt` and `autoResolved`, sets `reopenedAt` and adds one to `reopenCount`. The bulk `reopen` action also reopens an `acknowledged` or `investigating` incident.
 
 An incident that is still `open`, `acknowledged` or `investigating` is resolved automatically (`autoResolved: true`, `resolvedBy: "system"`, with a system note) after the alert has been clear for two evaluation windows. An incident that a person already resolved or closed is left as it is.
 
@@ -266,7 +284,16 @@ Applies one action to up to 100 incidents of the active project.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `ids` | string[] | Yes | 1 to 100 incident ids (duplicates are ignored) |
-| `action` | string | Yes | `acknowledge`, `resolve` or `close` (the statuses `acknowledged`, `resolved` and `closed`, under the same workflow rules) |
+| `action` | string | Yes | The action, below |
+| `assignedTo` | string or `null` | For `assign` | A user id of the workspace, `"me"` for the caller, or `null` to unassign |
+| `until` | string | For `snooze` | When the snooze ends (ISO 8601), in the future and at most 30 days ahead |
+
+| `action` | Effect |
+|----------|--------|
+| `acknowledge`, `resolve`, `close` | The statuses `acknowledged`, `resolved` and `closed`, under the same workflow rules as [Update Incident](#update-incident) |
+| `reopen` | Back to `open` from `acknowledged`, `investigating`, `resolved` or `closed` |
+| `assign` | Sets the assignee. An id that is not a user of the workspace refuses the whole request (`400`, `invalid_assignee`) |
+| `snooze`, `unsnooze` | Starts or ends a [snooze](#snooze) |
 
 ### Response
 
@@ -275,11 +302,107 @@ Applies one action to up to 100 incidents of the active project.
   "updated": 1,
   "failed": [
     { "id": "665f1c1a8b1d4c0012ab34d0", "error": "Cannot transition from \"closed\" to \"acknowledged\". Allowed: open" }
+  ],
+  "results": [
+    { "id": "665f1c1a8b1d4c0012ab34ce", "ok": true },
+    { "id": "665f1c1a8b1d4c0012ab34d0", "ok": false, "error": "Cannot transition from \"closed\" to \"acknowledged\". Allowed: open" }
   ]
 }
 ```
 
-Each incident is handled on its own: an unknown id or a move that is not allowed lands in `failed` and the others are still updated.
+Each incident is handled on its own: an unknown id or a move that is not allowed lands in `failed` and the others are still updated. `results` has one entry per distinct id.
+
+## Incident Stats
+
+```
+GET /api/alerts/incidents/stats
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `range` | string | No | `24h` (default), `7d` or `30d` |
+
+```json
+{
+  "open": 3,
+  "acknowledged": 4,
+  "firedInRange": 9,
+  "resolvedInRange": 7,
+  "mttaMs": 420000,
+  "mttrMs": 1860000,
+  "sample": 11,
+  "mttaSample": 6,
+  "mttrSample": 7,
+  "capped": false,
+  "range": "24h"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `open`, `acknowledged` | Incidents of the project in that status now |
+| `firedInRange`, `resolvedInRange` | Incidents that fired, and incidents resolved, within the range |
+| `mttaMs` | Median time from firing to acknowledgement, over the incidents acknowledged within the range (an acknowledgement from before a reopening does not count). `null` without any |
+| `mttrMs` | Median time from firing to resolution, over the incidents resolved within the range. `null` without any |
+| `sample`, `mttaSample`, `mttrSample` | Incidents read, and how many of them each median is based on |
+| `capped` | `true` when 5,000 or more incidents fired or were resolved within the range: the numbers then cover the 5,000 that fired last |
+
+## Incident Deliveries
+
+```
+GET /api/alerts/incidents/:incidentId/deliveries
+```
+
+Every notification attempt for the incident, one row per channel and attempt, newest first (at most 200). Rows are kept for 30 days.
+
+```json
+{
+  "deliveries": [
+    {
+      "ruleId": "665f1c0e8b1d4c0012ab34cd",
+      "incidentId": "665f1c1a8b1d4c0012ab34ce",
+      "eventId": "665f1c1a8b1d4c0012ab34cf",
+      "channelId": "ch_3f9a1c2b7d4e",
+      "channelKind": "slack",
+      "channelName": "On-call Slack",
+      "trigger": "fire",
+      "status": "sent",
+      "reason": null,
+      "error": null,
+      "attemptAt": "2026-10-15T09:42:12.000Z"
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `trigger` | `fire`, `resolve` or `renotify` (a reminder) |
+| `status` | `sent`, `failed` or `suppressed` |
+| `reason` | Why a `suppressed` row was not sent (`rule_muted` or `incident_snoozed`), or the cause of a `failed` row that has one: `channel_missing` when the library channel no longer exists. Otherwise `null` |
+| `error` | The delivery error of a `failed` row, at most 500 characters (`channel_missing` for a library channel that no longer exists) |
+| `channelKind` | `email`, `webhook`, `slack`, `teams` or `pagerduty`; `library` for a library channel that no longer exists |
+| `channelName` | The name of the [library channel](./alerts#channel-library) the row went through, else `null` (also when that channel no longer exists) |
+
+## Similar Incidents
+
+```
+GET /api/alerts/incidents/:incidentId/similar
+```
+
+The other incidents of the same rule and entity in the last 30 days.
+
+```json
+{
+  "count30d": 4,
+  "medianDurationMs": 1500000,
+  "last": [
+    { "id": "665f0a118b1d4c0012ab3301", "firedAt": "2026-10-13T14:02:00.000Z", "resolvedAt": "2026-10-13T14:27:00.000Z", "status": "resolved" }
+  ]
+}
+```
+
+`medianDurationMs` is the median time from firing to resolution of those that were resolved (`null` without any), and `last` lists the five newest. At most 200 incidents are read, so `count30d` stops at 200.
 
 ## Add Note
 
@@ -305,6 +428,8 @@ POST /api/alerts/incidents/:incidentId/notes
 
 Returns the updated incident with the new note appended.
 
+An incident takes at most 100 notes from people; past that the answer is `409` with `code: "too_many_notes"`. The notes the console adds itself (an automatic resolve, a rule change) are always added. Each person can add 30 notes per minute; beyond that the answer is `429` (`rate_limited`) with a `Retry-After` header.
+
 ## Severity Levels
 
 Severity comes from the rule. A rule set to `info`, `warning` or `critical` gives every incident that severity. A rule with severity `auto` (the default) derives it when the alert fires:
@@ -322,9 +447,10 @@ Errors are `{ "error": "<message>" }`; the ones that carry a `code` also have `c
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing or invalid status, `assignedTo`, filter (`invalid_filter`), `ids` (`invalid_ids`), `action` (`invalid_action`) or note content, or a body that is not a JSON object (`invalid_body`) |
+| 400 | Missing or invalid status, `assignedTo` (`invalid_assignee`), filter (`invalid_filter`), `ids` (`invalid_ids`), `action` (`invalid_action`), snooze time (`invalid_snooze`) or note content, or a body that is not a JSON object (`invalid_body`) |
 | 401 | Not authenticated |
 | 403 | The caller lacks the `alerts` permission |
 | 404 | Incident not found |
-| 409 | The status change is not allowed from the current status (`invalid_transition`) |
+| 409 | The status change, reopening or snooze is not allowed from the current status (`invalid_transition`), or the incident already has 100 notes from people (`too_many_notes`) |
+| 429 | Too many notes from one person (`rate_limited`, with a `Retry-After` header) |
 | 500 | Internal server error |

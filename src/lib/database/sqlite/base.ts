@@ -66,6 +66,7 @@ export const TABLES = {
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
+  alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
@@ -979,6 +980,12 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.alertRules, 'severity', 'severity TEXT');
     this.ensureTableColumn(db, TABLES.alertRules, 'notifyOnResolve', 'notifyOnResolve INTEGER');
     this.ensureTableColumn(db, TABLES.alertRules, 'renotifyMinutes', 'renotifyMinutes INTEGER');
+    this.ensureTableColumn(db, TABLES.alertRules, 'mutedUntil', 'mutedUntil TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'mutedBy', 'mutedBy TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'muteReason', 'muteReason TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'runbookUrl', 'runbookUrl TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'lastEvaluation', 'lastEvaluation TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'template', 'template TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'entityType', 'entityType TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'entityKey', 'entityKey TEXT');
     this.ensureTableColumn(db, TABLES.alertEvents, 'baselineValue', 'baselineValue REAL');
@@ -995,6 +1002,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.incidents, 'autoResolved', 'autoResolved INTEGER');
     this.ensureTableColumn(db, TABLES.incidents, 'acknowledgedBy', 'acknowledgedBy TEXT');
     this.ensureTableColumn(db, TABLES.incidents, 'context', 'context TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'snoozedUntil', 'snoozedUntil TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'snoozedBy', 'snoozedBy TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'reopenedAt', 'reopenedAt TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'reopenCount', 'reopenCount INTEGER');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
@@ -1189,6 +1200,10 @@ export class SQLiteProviderBase {
         ON ${TABLES.alertEvents}(ruleId, firedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_alert_events_project_firedAt
         ON ${TABLES.alertEvents}(projectId, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_alert_deliveries_incident_attemptAt
+        ON ${TABLES.alertDeliveries}(tenantId, incidentId, attemptAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_alert_deliveries_rule_attemptAt
+        ON ${TABLES.alertDeliveries}(tenantId, ruleId, attemptAt DESC);
       CREATE INDEX IF NOT EXISTS idx_incidents_project_status_firedAt
         ON ${TABLES.incidents}(projectId, status, firedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_incidents_rule_entity
@@ -1197,6 +1212,8 @@ export class SQLiteProviderBase {
         ON ${TABLES.incidents}(projectId, entityKey, firedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_incidents_alertEventId
         ON ${TABLES.incidents}(alertEventId);
+      CREATE INDEX IF NOT EXISTS idx_incidents_tenant_project_updatedAt
+        ON ${TABLES.incidents}(tenantId, projectId, updatedAt);
     `);
 
     // Attribution index — must be created here (after applyTenantMigrations)

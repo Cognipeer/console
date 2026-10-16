@@ -3,7 +3,7 @@
  * answer (400 validation, 402 enterprise-only mode, 404 not found, 409 conflict, 429 throttled)
  * instead of letting a caller mistake surface as a 500.
  */
-export type AlertApiErrorStatus = 400 | 402 | 404 | 409 | 429;
+export type AlertApiErrorStatus = 400 | 402 | 403 | 404 | 409 | 429;
 
 export class AlertApiError extends Error {
   readonly status: AlertApiErrorStatus;
