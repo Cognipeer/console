@@ -1409,6 +1409,7 @@ export const en = {
       admin: 'Admin',
       project_admin: 'Project admin',
       user: 'User',
+      portal_user: 'Portal user',
     },
     statuses: {
       active: 'Active',
@@ -3135,6 +3136,7 @@ export const en = {
       admin: 'Admin',
       project_admin: 'Legacy Project Admin',
       user: 'User',
+      portal_user: 'Portal user',
     },
     columns: {
       member: 'Member',
@@ -7068,6 +7070,16 @@ export const en = {
       noData: 'No activity in this period.',
     },
     runtime: {
+      chooser: {
+        title: 'Your portals',
+        subtitle: 'Choose a portal to continue.',
+        loading: 'Looking for your portals…',
+        open: 'Open',
+        emptyTitle: 'No portal for you yet',
+        emptyText: 'No portal has been shared with your account. Ask your administrator to add you to one.',
+        errorTitle: 'Portals could not be loaded',
+        retry: 'Try again',
+      },
       defaultDisclaimer: 'AI can make mistakes. Check important information.',
       signOut: 'Sign out',
       otherAccount: 'Sign in with another account',

@@ -53,7 +53,8 @@ beforeEach(() => {
   h.db.findApiTokenByHash.mockResolvedValue(tokenWith());
   h.db.findTenantById.mockResolvedValue(tenant);
   h.db.updateTokenLastUsedByHash.mockResolvedValue(undefined);
-  h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', tenantId: 't1' });
+  // An owner reaches every project: these tests are about the network allowlist, not project membership.
+  h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'owner', tenantId: 't1' });
   h.ensureDefaultProject.mockResolvedValue({ _id: 'p-default' });
 });
 

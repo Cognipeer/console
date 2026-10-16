@@ -179,7 +179,7 @@ describe('what the first paint assumes before the server answers', () => {
   it('owners and admins may manage people and tokens; nobody else', () => {
     for (const role of ['owner', 'admin']) {
       expect(guessCapabilities(role)).toMatchObject({ peopleManage: true, grantAdmin: true, tokensManageOthers: true });
-      expect(guessCapabilities(role).assignableRoles).toEqual(['admin', 'project_admin', 'user']);
+      expect(guessCapabilities(role).assignableRoles).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
     }
     for (const role of ['project_admin', 'user', undefined]) {
       expect(guessCapabilities(role)).toMatchObject({ peopleManage: false, grantAdmin: false, tokensManageOthers: false, assignableRoles: [] });

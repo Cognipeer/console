@@ -1,5 +1,5 @@
 /**
- * setUserStatus / listener seam / revokeUserApiTokens / cleanupDeletedUser.
+ * setUserStatus / listener seam / revokeUserApiTokens(+InProject) / cleanupDeletedUser.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -42,6 +42,7 @@ import {
   notifyUserStatusChanged,
   onUserStatusChanged,
   revokeUserApiTokens,
+  revokeUserApiTokensInProject,
   setUserStatus,
 } from '@/lib/services/users/userLifecycle';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
@@ -325,6 +326,42 @@ describe('revokeUserApiTokens', () => {
   it('a user with no tokens is a no-op', async () => {
     h.db.listApiTokens.mockResolvedValue([]);
     await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 0, failed: 0, revokedIds: [] });
+  });
+});
+
+describe('revokeUserApiTokensInProject', () => {
+  it('deletes only the tokens bound to the project and evicts their auth-cache entries', async () => {
+    h.db.listApiTokens.mockResolvedValue([
+      { _id: 'a', tokenHash: 'hash-a', projectId: 'p1' },
+      { _id: 'b', tokenHash: 'hash-b', projectId: 'p2' },
+      { _id: 'c', tokenHash: 'hash-c', projectId: 'p1' },
+      { _id: 'd', tokenHash: 'hash-d' },
+    ]);
+    h.db.deleteApiToken.mockResolvedValue(true);
+
+    await expect(revokeUserApiTokensInProject('tenant_acme', 'u2', 'p1')).resolves.toMatchObject({ revoked: 2, failed: 0 });
+    expect(h.db.deleteApiToken).toHaveBeenCalledTimes(2);
+    expect(h.db.deleteApiToken).toHaveBeenCalledWith('a', 'u2');
+    expect(h.db.deleteApiToken).toHaveBeenCalledWith('c', 'u2');
+    expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-a');
+    expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-c');
+    expect(h.invalidateApiTokenAuthCache).not.toHaveBeenCalledWith('hash-b');
+    expect(h.invalidateApiTokenAuthCache).not.toHaveBeenCalledWith('hash-d');
+  });
+
+  it('reports a failed delete and keeps going', async () => {
+    h.db.listApiTokens.mockResolvedValue([
+      { _id: 'a', tokenHash: 'hash-a', projectId: 'p1' },
+      { _id: 'b', tokenHash: 'hash-b', projectId: 'p1' },
+    ]);
+    h.db.deleteApiToken.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(true);
+    await expect(revokeUserApiTokensInProject('tenant_acme', 'u2', 'p1')).resolves.toMatchObject({ revoked: 1, failed: 1 });
+  });
+
+  it('is a no-op when the user has no token in the project', async () => {
+    h.db.listApiTokens.mockResolvedValue([{ _id: 'b', tokenHash: 'hash-b', projectId: 'p2' }]);
+    await expect(revokeUserApiTokensInProject('tenant_acme', 'u2', 'p1')).resolves.toMatchObject({ revoked: 0, failed: 0 });
+    expect(h.db.deleteApiToken).not.toHaveBeenCalled();
   });
 });
 

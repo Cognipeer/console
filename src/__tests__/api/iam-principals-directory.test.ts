@@ -434,7 +434,7 @@ describeForEachProvider('IAM directory API', (getDb) => {
       });
       expect(res.body.allowedActions.delete).toEqual({ allowed: false, reason: 'directory_managed' });
       expect(res.body.allowedActions.changeRole).toEqual({ allowed: true });
-      expect(res.body.assignableRoles).toEqual(['admin', 'project_admin', 'user']);
+      expect(res.body.assignableRoles).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
       expect(res.body.groups).toEqual([{ id: W.groups.eng, name: 'Engineering', source: 'local', tenantRole: 'user', removable: true }]);
       expect(res.body.projects.map((p: any) => [p.name, p.via, p.removable])).toEqual([['Project Two', 'group', false]]);
     });
@@ -730,7 +730,7 @@ describeForEachProvider('IAM directory API', (getDb) => {
         expect(res.body).toEqual({
           me: { userId: String(W.users[who]._id), role: who },
           policies: { manage: true },
-          people: { manage: true, grantAdmin: true, assignableRoles: ['admin', 'project_admin', 'user'] },
+          people: { manage: true, grantAdmin: true, assignableRoles: ['admin', 'project_admin', 'user', 'portal_user'] },
           tokens: { manageOthers: true },
         });
       }

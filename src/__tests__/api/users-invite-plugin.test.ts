@@ -123,6 +123,15 @@ describe('POST /api/users/invite', () => {
     expect((await invite(person, ['admin-1', 'admin'])).statusCode).toBe(201);
   });
 
+  it('invites a portal user with no service permission and no project, whatever the request asks for', async () => {
+    const res = await invite({ ...person, role: 'portal_user', projectId: 'proj-9', servicePermissions: { agents: 'write' } });
+    expect(res.statusCode).toBe(201);
+    const created = db.createUser.mock.calls[0][0] as { role: string; servicePermissions: unknown; projectIds?: unknown };
+    expect(created.role).toBe('portal_user');
+    expect(created.servicePermissions).toEqual({});
+    expect(created.projectIds).toBeUndefined();
+  });
+
   it('lets an owner or admin give the admin role, never the owner role', async () => {
     expect((await invite({ ...person, role: 'admin' }, ['admin-1', 'admin'])).statusCode).toBe(201);
     expect((await invite({ ...person, role: 'owner' })).statusCode).toBe(400);

@@ -22,9 +22,9 @@ import {
 } from '@/lib/iam/identity';
 
 describe('roles', () => {
-  it('knows the four tenant roles and never lets the owner role be assigned', () => {
-    expect([...TENANT_ROLES]).toEqual(['owner', 'admin', 'project_admin', 'user']);
-    expect([...ASSIGNABLE_ROLES]).toEqual(['admin', 'project_admin', 'user']);
+  it('knows the five tenant roles and never lets the owner role be assigned', () => {
+    expect([...TENANT_ROLES]).toEqual(['owner', 'admin', 'project_admin', 'user', 'portal_user']);
+    expect([...ASSIGNABLE_ROLES]).toEqual(['admin', 'project_admin', 'user', 'portal_user']);
     expect(isAssignableRole('owner')).toBe(false);
     for (const role of ASSIGNABLE_ROLES) expect(isAssignableRole(role)).toBe(true);
     for (const bad of ['', 'root', 'Admin', null, undefined, 3, {}]) {
@@ -34,12 +34,18 @@ describe('roles', () => {
   });
 
   it('orders roles owner > admin > project_admin > user, and anything else below them all', () => {
-    expect(ROLE_RANK).toEqual({ owner: 3, admin: 2, project_admin: 1, user: 0 });
+    expect(ROLE_RANK).toEqual({ owner: 3, admin: 2, project_admin: 1, user: 0, portal_user: 0 });
     expect(roleRank('owner')).toBeGreaterThan(roleRank('admin'));
     expect(roleRank('admin')).toBeGreaterThan(roleRank('project_admin'));
     expect(roleRank('project_admin')).toBeGreaterThan(roleRank('user'));
     expect(roleRank('user')).toBeGreaterThan(roleRank('nope'));
     expect(roleRank(undefined)).toBe(-1);
+  });
+
+  it('treats portal_user as an assignable role that outranks nobody', () => {
+    expect(isTenantRole('portal_user')).toBe(true);
+    expect(isAssignableRole('portal_user')).toBe(true);
+    expect(roleRank('portal_user')).toBeLessThanOrEqual(roleRank('user'));
   });
 });
 

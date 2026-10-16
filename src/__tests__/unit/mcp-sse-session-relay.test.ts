@@ -7,10 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setRelayTransportForTests, type RelayTransport } from '@/lib/core/cluster/streamRelay';
 import {
   createSseSession,
+  deliverSseResponse,
   getRemoteSseSession,
+  getRemoteSseSessionFor,
   getSseSession,
   removeSseSession,
-  sendSseResponse,
 } from '@/lib/services/mcp/sseSessionManager';
 
 function fakeRedis(): RelayTransport & { kv: Map<string, string> } {
@@ -57,7 +58,15 @@ describe('MCP SSE session relay', () => {
     createSseSession('s1', session);
     await tick();
 
-    expect(await getRemoteSseSession('s1')).toEqual({ serverKey: 'srv', tenantId: 't1' });
+    expect(await getRemoteSseSession('s1')).toEqual({ serverKey: 'srv', tenantId: 't1', projectId: undefined, principal: 'public' });
+
+    // The cross-node lookup also checks the binding the stream was opened under.
+    const binding = { tenantId: 't1', serverKey: 'srv', principal: 'public' };
+    expect(await getRemoteSseSessionFor('s1', binding)).toBeDefined();
+    expect(await getRemoteSseSessionFor('s1', { ...binding, principal: 'token:abc' })).toBeUndefined();
+    expect(await getRemoteSseSessionFor('s1', { ...binding, tenantId: 't2' })).toBeUndefined();
+    expect(await getRemoteSseSessionFor('s1', { ...binding, serverKey: 'other' })).toBeUndefined();
+    expect(await getRemoteSseSessionFor('s1', { ...binding, projectId: 'p1' })).toBeUndefined();
 
     // Simulate "another node": it does not hold the session locally.
     const local = getSseSession('s1');
@@ -75,7 +84,7 @@ describe('MCP SSE session relay', () => {
     const { session, chunks } = makeSession();
     createSseSession('s2', session);
     await tick();
-    await sendSseResponse('s2', { id: 2 });
+    await deliverSseResponse('s2', { id: 2 });
     expect(chunks.join('')).toContain('"id":2');
     expect(publish).not.toHaveBeenCalled();
     removeSseSession('s2');
@@ -85,7 +94,7 @@ describe('MCP SSE session relay', () => {
     const redis = fakeRedis();
     const publish = vi.spyOn(redis, 'publish');
     setRelayTransportForTests(redis);
-    await sendSseResponse('elsewhere', { id: 3 });
+    await deliverSseResponse('elsewhere', { id: 3 });
     expect(publish).toHaveBeenCalledWith('mcp:sse:down:elsewhere', JSON.stringify({ id: 3 }));
   });
 
@@ -108,10 +117,18 @@ describe('MCP SSE session relay', () => {
     setRelayTransportForTests(redis);
     const { session, chunks } = makeSession();
     createSseSession('s4', session);
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(chunks.join('')).toContain(': ping');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(chunks.join('')).toContain(': keepalive');
     expect(setKey.mock.calls.length).toBeGreaterThanOrEqual(2);
     removeSseSession('s4');
+  });
+
+  it('does not match a record that carries no principal', async () => {
+    const redis = fakeRedis();
+    setRelayTransportForTests(redis);
+    redis.kv.set('mcp:sse:session:legacy', JSON.stringify({ serverKey: 'srv', tenantId: 't1' }));
+    expect(await getRemoteSseSession('legacy')).toBeDefined();
+    expect(await getRemoteSseSessionFor('legacy', { tenantId: 't1', serverKey: 'srv', principal: 'public' })).toBeUndefined();
   });
 
   it('has no remote lookup without Redis', async () => {
@@ -120,7 +137,7 @@ describe('MCP SSE session relay', () => {
     const { session } = makeSession();
     createSseSession('s5', session);
     expect(getSseSession('s5')).toBeDefined();
-    await expect(sendSseResponse('nobody', {})).resolves.toBeUndefined();
+    await expect(deliverSseResponse('nobody', {})).resolves.toBeUndefined();
     removeSseSession('s5');
   });
 });

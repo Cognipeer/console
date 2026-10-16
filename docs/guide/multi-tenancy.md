@@ -80,6 +80,8 @@ People are managed in one place, the **Principals** tab of the **IAM center**: i
 
 A member's role, their own service permissions, the grants of their groups, the permissions set on them inside a project and the scope of their API tokens together decide what they can do; [Authorization](/guide/authorization) explains how they combine.
 
+Removing a member from a project (`DELETE /api/projects/{id}/members`, or the client API equivalent) clears the membership completely, both the project membership record and the legacy project list on the user, in a single call. API tokens that user holds for the project stop working on the next request; see [Project Access](/guide/authentication#project-access).
+
 ## Database Abstraction
 
 All database access goes through the abstraction layer — never import MongoDB directly:

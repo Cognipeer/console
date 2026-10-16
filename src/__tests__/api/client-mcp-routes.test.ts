@@ -1,0 +1,230 @@
+/**
+ * The token-authenticated MCP routes (/api/client/v1/mcp/...): what a message
+ * body may be, how a rejected call is reported next to a failed one, and that a
+ * token caller still sees the detail of a failure — with secret values masked.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
+
+vi.mock('@/lib/services/apiTokenAuth', () => {
+  class ApiTokenAuthError extends Error {
+    status: number;
+    constructor(message: string, status = 401) {
+      super(message);
+      this.name = 'ApiTokenAuthError';
+      this.status = status;
+    }
+  }
+  return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
+});
+
+vi.mock('@/lib/database', async (importActual) => ({
+  ...(await importActual<typeof import('@/lib/database')>()),
+  getDatabase: vi.fn(),
+}));
+
+vi.mock('@/lib/services/mcp', async (importActual) => ({
+  ...(await importActual<typeof import('@/lib/services/mcp')>()),
+  getMcpServerByKey: vi.fn(),
+  executeMcpTool: vi.fn(),
+  logMcpRequest: vi.fn(),
+}));
+
+import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
+import { getDatabase, type IMcpServer } from '@/lib/database';
+import { getConfigSource, setConfigSource } from '@/lib/core/config';
+import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpToolInputError, McpUpstreamError } from '@/lib/services/mcp';
+import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
+import { clientMcpConsoleApiPlugin } from '@/server/api/plugins/client-mcp-console';
+import { createMockDb } from '../helpers/db.mock';
+import { buildMcpTestApp } from '../helpers/mcp-http';
+
+const originalSource = getConfigSource();
+const SECRET = 'sk-live-0123456789abcdef';
+
+const plugins: FastifyPluginAsync = async (app) => {
+  await app.register(clientMcpConsoleApiPlugin);
+  await app.register(clientMcpApiPlugin);
+};
+
+function server(): IMcpServer {
+  return {
+    _id: 'srv-1',
+    tenantId: 'tenant-1',
+    projectId: 'proj-1',
+    key: 'crm',
+    name: 'CRM',
+    status: 'active',
+    sourceType: 'stdio',
+    stdioConfig: { runtime: 'npx', packageName: 'crm-mcp', executionMode: 'subprocess', env: { CRM_API_KEY: SECRET } },
+    exposure: { protocols: ['streamable-http', 'sse'], accessMode: 'token' },
+    tools: [{ name: 'lookup', description: 'Look up', inputSchema: { type: 'object', properties: {} } }],
+  } as unknown as IMcpServer;
+}
+
+interface Rpc {
+  error?: { code: number; message: string };
+  result?: { isError?: boolean; content?: Array<{ text: string }> };
+}
+
+describe('token MCP routes', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    setConfigSource({ name: 'test', get: () => undefined });
+    const db = createMockDb();
+    vi.mocked(getDatabase).mockResolvedValue(db as never);
+    vi.mocked(requireApiTokenFromHeader).mockResolvedValue({
+      token: 'raw',
+      tokenRecord: { _id: 'tok-1', userId: 'user-1', servicePermissions: null },
+      tenant: { licenseType: 'ENTERPRISE' },
+      tenantId: 'tenant-1',
+      tenantSlug: 'acme',
+      tenantDbName: 'tenant_acme',
+      projectId: 'proj-1',
+      user: { _id: 'user-1', role: 'owner', tenantId: 'tenant-1' },
+    } as never);
+    vi.mocked(getMcpServerByKey).mockResolvedValue(server());
+    vi.mocked(executeMcpTool).mockResolvedValue({ result: { found: 1 }, latencyMs: 4 });
+    app = await buildMcpTestApp(plugins);
+  });
+
+  afterEach(async () => {
+    await app.close();
+    setConfigSource(originalSource);
+  });
+
+  const headers = { authorization: 'Bearer raw', 'content-type': 'application/json' };
+  const post = (url: string, payload: unknown) =>
+    app.inject({ method: 'POST', url, headers, payload: typeof payload === 'string' ? payload : JSON.stringify(payload) });
+  const callTool = (name = 'lookup') => ({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: {} } });
+
+  describe.each([
+    ['an ordinary server', '/api/client/v1/mcp/crm/message'],
+    ['the console server', '/api/client/v1/mcp/console/message'],
+  ])('the message endpoint of %s', (_label, url) => {
+    it.each([
+      ['null', 'null'],
+      ['an array', '[]'],
+      ['a number', '5'],
+      ['a string', '"hello"'],
+    ])('answers a body that is %s with 400 and -32600, not 500', async (_name, body) => {
+      const response = await post(url, body);
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toEqual({ code: -32600, message: 'Invalid Request' });
+    });
+
+    it('answers text that is not JSON with 400 and -32700', async () => {
+      const response = await post(url, '{');
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error.code).toBe(-32700);
+    });
+
+    it('answers a request without a usable method with 400 and -32600', async () => {
+      for (const body of [{ jsonrpc: '2.0', id: 1 }, { jsonrpc: '2.0', id: 1, method: { a: 1 } }]) {
+        const response = await post(url, body);
+        expect(response.statusCode).toBe(400);
+        expect(JSON.parse(response.body).error.code).toBe(-32600);
+      }
+    });
+
+    it('answers a message that names an unknown session with 404, not with an inline result', async () => {
+      const response = await post(`${url}?sessionId=00000000-0000-4000-8000-000000000001`, { jsonrpc: '2.0', id: 1, method: 'ping' });
+      expect(response.statusCode).toBe(404);
+      expect(JSON.parse(response.body).error).toEqual({ code: -32001, message: 'Session not found' });
+    });
+
+    it('does not echo a long method name back', async () => {
+      const response = await post(url, { jsonrpc: '2.0', id: 1, method: 'm'.repeat(5000) });
+      expect(JSON.parse(response.body).error.message.length).toBeLessThan(200);
+    });
+  });
+
+  describe('the REST execute endpoints', () => {
+    it.each([
+      ['an ordinary server', '/api/client/v1/mcp/crm/execute'],
+      ['the console server', '/api/client/v1/mcp/console/execute'],
+    ])('answer a body that is not a JSON object on %s with 400', async (_label, url) => {
+      for (const body of ['null', '[]', '7', '"x"', '{', '']) {
+        const response = await post(url, body);
+        expect(response.statusCode, body).toBe(400);
+        expect(JSON.parse(response.body).error, body).toBe('A JSON object body is required');
+      }
+    });
+
+    it('report a rejected call as a bad request and a failed one as a bad gateway', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+      const rejected = await post('/api/client/v1/mcp/crm/execute', { tool: 'nope', arguments: {} });
+      expect(rejected.statusCode).toBe(400);
+      expect(JSON.parse(rejected.body)).toEqual({ error: 'Unknown tool' });
+
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpUpstreamError('Upstream API error (500): crm is down', 500));
+      const failed = await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: {} });
+      expect(failed.statusCode).toBe(502);
+      expect(JSON.parse(failed.body)).toEqual({ error: 'Upstream API error (500): crm is down' });
+    });
+
+    it('keep the server-wide body limit, which the public endpoints\' smaller one does not apply to', async () => {
+      const response = await post('/api/client/v1/mcp/crm/execute', {
+        tool: 'lookup',
+        arguments: { text: 'x'.repeat(2 * 1024 * 1024) },
+      });
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('still answer a successful call', async () => {
+      const response = await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: { id: 1 } });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body).result).toEqual({ found: 1 });
+    });
+  });
+
+  describe('a failed call, as the token caller sees it', () => {
+    it('keeps the detail of the failure', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(
+        new McpUpstreamError('Upstream API error (404): {"detail":"customer 42 not found"}', 404),
+      );
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const body = JSON.parse(response.body) as Rpc;
+      expect(body.result?.isError).toBe(true);
+      expect(body.result?.content?.[0].text).toBe('Upstream API error (404): {"detail":"customer 42 not found"}');
+    });
+
+    it('masks the values the server holds, even in an error that did not pass through an executor', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error(`login rejected for key ${SECRET}`));
+      const rpc = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body) as Rpc;
+      expect(rpc.result?.content?.[0].text).toBe('login rejected for key [REDACTED]');
+
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error(`login rejected for key ${SECRET}`));
+      const rest = await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup' });
+      expect(JSON.parse(rest.body).error).toBe('login rejected for key [REDACTED]');
+    });
+
+    it('bounds the message to MCP_ERROR_MESSAGE_MAX_CHARS', async () => {
+      setConfigSource({ name: 'test', get: (key) => (key === 'MCP_ERROR_MESSAGE_MAX_CHARS' ? '300' : undefined) });
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error(`${SECRET} ${'z'.repeat(5000)}`));
+      const rpc = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body) as Rpc;
+      const text = rpc.result?.content?.[0].text ?? '';
+      expect(text.length).toBeLessThanOrEqual(300);
+      expect(text).not.toContain(SECRET);
+    });
+
+    it('reports a rejected call as invalid params (-32602), not as a failed one', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+      const response = await post('/api/client/v1/mcp/crm/message', callTool('nope'));
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Rpc & { id: number };
+      expect(body.error).toEqual({ code: -32602, message: 'Unknown tool' });
+      expect(body.id).toBe(9);
+    });
+
+    it('logs the failure with its full text', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom: details'));
+      await post('/api/client/v1/mcp/crm/message', callTool());
+      const [, entry] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(entry).toMatchObject({ status: 'error', errorMessage: 'boom: details', callerType: 'api' });
+    });
+  });
+});

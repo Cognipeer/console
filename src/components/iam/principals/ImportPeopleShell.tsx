@@ -16,7 +16,7 @@ interface ImportPeopleShellProps {
   onImported: (summary: ImportSummary) => void;
 }
 
-const ROLE_ORDER = ['user', 'project_admin', 'admin'] as const;
+const ROLE_ORDER = ['user', 'project_admin', 'admin', 'portal_user'] as const;
 type RoleValue = (typeof ROLE_ORDER)[number];
 
 /** Rows of the CSV the file will be read from (the first line may be a header). */

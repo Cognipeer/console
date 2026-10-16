@@ -88,6 +88,13 @@ owned by the given user on first boot and public signup stays off.
 |----------|-------------|---------|
 | `RATE_LIMIT_PROVIDER` | Provider: `mongodb`, `memory`, `redis`. `memory` and `redis` require the same `CACHE_PROVIDER`. | `mongodb` |
 | `RATE_LIMIT_SYNC_INTERVAL_MS` | Sync interval for distributed counters | `5000` |
+| `RATE_LIMIT_MAX_TRACKED_KEYS` | Counters the in-process limiter (login and other auth endpoints, public MCP endpoints) keeps at once. When it is full, counters whose window has ended are dropped, then the ones counted least recently. A whole number from `1`; any other value (`0`, a negative or non-numeric one, `1e5`, `100,000`) uses the default. | `100000` |
+
+Sign-in, registration, password reset and session issuance are limited per client
+address (`request.ip`, which follows `TRUSTED_PROXIES`). A forwarded value that is
+not an IP address, such as an empty or unusually long one, is limited together
+with every other such value instead of getting a counter of its own. A trailing
+port (`203.0.113.9:51234`, `[2001:db8::1]:443`) is ignored.
 
 ### Browser Runtime
 
@@ -112,6 +119,84 @@ redirect hop.
 Self-hosted deployments that legitimately call in-network services (e.g. a
 vLLM server on a private IP) should list those hosts in
 `OUTBOUND_HTTP_ALLOWED_HOSTS` rather than disabling the guard globally.
+
+### MCP Gateway
+
+Limits on the MCP gateway: what a failed tool call and a server's request log
+keep, the pool of stdio subprocesses, the SSE transport, and the public
+(unauthenticated) endpoints. Secret values the server holds (its upstream
+credential, stdio environment values, runtime headers) are masked as
+`[REDACTED]` in the error text before it is cut to length or stored.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_ERROR_MESSAGE_MAX_CHARS` | Longest error message a failed tool call hands back to its caller (minimum `256`). | `8192` |
+| `MCP_LAST_ERROR_MAX_CHARS` | Longest `lastError` message stored on an MCP server record (minimum `64`). | `2048` |
+| `MCP_LAST_ERROR_THROTTLE_MS` | An identical `lastError` is not written again within this window. `0` writes every time. | `60000` |
+| `MCP_LOG_TOOL_NAME_MAX_CHARS` | Longest tool name stored in an MCP request-log row (minimum `16`). | `200` |
+| `MCP_LOG_USER_AGENT_MAX_CHARS` | Longest caller user-agent stored with an MCP request-log row (minimum `16`). | `300` |
+| `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
+| `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
+| `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |
+
+#### SSE streams
+
+The legacy SSE transport keeps one open stream per client (`GET …/sse`), fed by
+`POST …/message?sessionId=…`. A session belongs to the caller that opened it:
+a message naming a session that does not exist, or that another token (or the
+public endpoint) opened, is answered `404`. A stream over a limit is answered
+`429` or `503` with a `Retry-After` header and a JSON body. `0` turns a limit
+off.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_SSE_MAX_SESSIONS` | Open streams per process. Streams on public endpoints stop at 75% of it, so API-token callers keep room. | `2000` |
+| `MCP_SSE_MAX_SESSIONS_PER_IP` | Open streams one client address may hold on the public endpoints. | `50` |
+| `MCP_SSE_IDLE_TIMEOUT_MS` | A stream that has received no message for this long is closed. The keep-alive comments the gateway sends do not count. | `1800000` |
+| `MCP_SSE_MAX_BUFFERED_BYTES` | A stream whose unsent output (a client that stopped reading) exceeds this is closed. | `8388608` |
+| `MCP_SSE_KEEPALIVE_MS` | Interval of the comment frame that keeps a quiet stream open through proxies. | `25000` |
+
+The `endpoint` event carries the path of the message URL
+(`/api/…/message?sessionId=…`), never an absolute URL. MCP clients resolve it
+against the URL they opened the stream on, so it does not depend on `APP_URL`
+or on the request's `Host` and `X-Forwarded-*` headers, and a client may reach
+the gateway under any hostname.
+
+With several replicas and a Redis relay, a message for a stream on a public
+endpoint may reach a different replica than the one holding the stream: the
+response is relayed to that replica, provided the stream was opened on the same
+endpoint by an anonymous caller. Streams opened with an API token stay on the
+replica that holds them, so route their `POST …/message` calls to the same
+replica (session affinity) or use the streamable HTTP transport instead.
+
+#### Public endpoints
+
+Servers whose access mode is `public` answer at `/api/public/mcp/…` without a
+token. Those routes accept JSON bodies only (`415` otherwise), answer a request
+over its rate with `429` and a `Retry-After`, and report a failed tool call
+without the upstream's text: *Tool execution failed* or *Upstream request
+failed (status N)*, followed by the id of the request-log row that holds the
+detail. Invalid arguments and unknown tool names are reported as such
+(JSON-RPC `-32602`). Calls are also logged with the caller's address and user
+agent, and with smaller payloads than token calls.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | Requests per client address and endpoint per minute (and ten times that per address across all public endpoints). `0` turns these limits off. | `300` |
+| `MCP_PUBLIC_ENDPOINT_RATE_LIMIT_PER_MINUTE` | Requests per endpoint per minute from all callers together, whatever address they appear to come from. Unset, it is twenty times `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE`. `0` turns it off. | `6000` |
+| `MCP_PUBLIC_BODY_LIMIT_BYTES` | Largest request body a public POST may carry (minimum `1024`). | `1048576` |
+| `MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT` | Tool calls one tenant may have running at once through its public endpoints; a call over it gets `503`. `0` turns the cap off. | `100` |
+| `MCP_PUBLIC_LOG_PAYLOAD_LIMIT_BYTES` | Largest request or response payload a public call stores in the request log (minimum `256`). | `16384` |
+
+The client address is the one Fastify resolves; when the gateway runs behind a
+reverse proxy, list the proxy in `TRUSTED_PROXIES` so the address cannot be
+supplied by the caller. The per-endpoint rate
+(`MCP_PUBLIC_ENDPOINT_RATE_LIMIT_PER_MINUTE`) does not depend on the address. An
+endpoint used by many people behind one corporate gateway may need
+`MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` raised, since everyone behind an address
+shares that address's rate. The counters are kept under the server's stored ids
+and per process; with `RATE_LIMIT_PROVIDER=redis` the per-endpoint limits are
+shared by all replicas.
 
 ### Cluster & Queue
 

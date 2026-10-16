@@ -82,4 +82,18 @@ describe('issueSessionForAuthenticatedUser — session-issuance rate limit', () 
 
     expect(checkRateLimit).toHaveBeenCalledWith(`session:${request.ip}`, SESSION_ISSUANCE_RATE_LIMIT);
   });
+
+  it('keys a client address that is not an IP address under one shared bucket', async () => {
+    vi.mocked(checkRateLimit).mockReturnValue({
+      allowed: false,
+      remaining: 0,
+      resetAt: new Date(Date.now() + 60_000),
+      retryAfterSeconds: 60,
+    });
+    const odd = { ip: 'x'.repeat(12_000), cookies: {} } as unknown as FastifyRequest;
+
+    await issueSessionForAuthenticatedUser(untouchableDb, tenant, user, odd, mockReply());
+
+    expect(checkRateLimit).toHaveBeenCalledWith('session:invalid', SESSION_ISSUANCE_RATE_LIMIT);
+  });
 });

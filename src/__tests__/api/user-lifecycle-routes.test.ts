@@ -358,6 +358,14 @@ describe('user lifecycle routes (/api/users)', () => {
       expect(db.updateUser).toHaveBeenLastCalledWith('member-1', { servicePermissions: { agents: 'write' } });
     });
 
+    it('refuses to give a portal user a service permission: the role holds none', async () => {
+      USERS['portal-1'] = { _id: 'portal-1', role: 'portal_user', tenantId: TENANT, email: 'p@acme.test', name: 'Portal' };
+      const res = await patchPermissions('portal-1', '{"servicePermissions":{"agents":"write"}}');
+      delete USERS['portal-1'];
+      expect(res.statusCode).toBe(400);
+      expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
     it('audits what was granted by service, and never touches the owner', async () => {
       await patchPermissions('member-1', '{"servicePermissions":{"rag":"read","agents":"write"}}');
       await vi.waitFor(() => expect(h.recordAuditLog).toHaveBeenCalledTimes(1));

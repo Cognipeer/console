@@ -32,7 +32,7 @@ interface ChangeRoleShellProps {
   onSaved: () => void;
 }
 
-const ROLE_ORDER = ['admin', 'project_admin', 'user'] as const;
+const ROLE_ORDER = ['admin', 'project_admin', 'user', 'portal_user'] as const;
 
 /** Services whose level the draft raises or lowers, from the preview's `changes`. */
 export function splitChanges(preview: AccessPreview | null): {

@@ -6,6 +6,11 @@
  * the `Authorization: Bearer <token>` header (same as other /client/v1
  * endpoints), so no per-server configuration is needed.
  *
+ * The `mcp` permission opens this endpoint; each tool additionally needs the
+ * permission on the console service whose data it returns (see
+ * `ConsoleToolDefinition.service`). A token that lacks it does not see the tool
+ * in the tool list and cannot call it.
+ *
  * Endpoints:
  *   GET  /api/client/v1/mcp/console/execute        — list available tools
  *   POST /api/client/v1/mcp/console/execute        — execute a tool (REST)
@@ -13,28 +18,29 @@
  *   POST /api/client/v1/mcp/console/message        — JSON-RPC message endpoint
  */
 
-import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { getRequiredPermissionLevel, type PermissionService } from '@/lib/security/rbac';
 import {
+  consoleToolServices,
   getConsoleTool,
   listConsoleToolDescriptors,
   type ConsoleToolContext,
 } from '@/lib/services/mcp/builtin/consoleTools';
+import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import {
-  createSseSession,
-  encodeSseEndpointEvent,
-  getSseSession,
-  removeSseSession,
-  sendSseResponse,
-} from '@/lib/services/mcp/sseSessionManager';
-import {
+  RbacAuthorizationError,
   getApiTokenContextForRequest,
-  readJsonBody,
+  serviceActionAllowedForRequest,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import {
+  lookupMessageSession,
+  readJsonObjectBody,
+  readJsonRpcRequest,
+  sendSessionNotFound,
+  startMcpSseResponse,
+} from '../mcpTransport';
 
 const logger = createLogger('api:client-mcp-console');
 
@@ -58,14 +64,46 @@ function jsonRpcError(id: string | number | null, code: number, message: string)
   };
 }
 
+class ConsoleToolForbiddenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConsoleToolForbiddenError';
+  }
+}
+
+/**
+ * Which console services the caller may use: what the policy engine answers for
+ * a read of the matching /api/client/v1/<service> routes — the token owner's
+ * grants, capped by the token's own scope (an unscoped token inherits the
+ * owner's), narrowed by its project, and subject to custom policies. Asked once
+ * per request; when the engine cannot decide it throws the 503 the route gate
+ * would have sent, which the request wrapper answers.
+ */
+async function consoleServiceAccess(request: FastifyRequest): Promise<(service: PermissionService) => boolean> {
+  const allowed = new Set<PermissionService>();
+  for (const service of consoleToolServices()) {
+    const level = getRequiredPermissionLevel('GET', service);
+    if (level === 'none' || await serviceActionAllowedForRequest(request, service, level)) {
+      allowed.add(service);
+    }
+  }
+  return (service) => allowed.has(service);
+}
+
 async function runTool(
   toolName: string,
   args: Record<string, unknown>,
   ctx: ConsoleToolContext,
+  isServiceAllowed: (service: PermissionService) => boolean,
 ) {
   const tool = getConsoleTool(toolName);
   if (!tool) {
     throw new Error(`Unknown tool: ${toolName}`);
+  }
+  if (!isServiceAllowed(tool.service)) {
+    throw new ConsoleToolForbiddenError(
+      `Forbidden: ${tool.service} requires ${getRequiredPermissionLevel('GET', tool.service)} permission`,
+    );
   }
   return tool.handler(args, ctx);
 }
@@ -74,8 +112,9 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   // ── REST: list tools ───────────────────────────────────────────────
   app.get('/client/v1/mcp/console/execute', withClientApiRequestContext(async (request, reply) => {
     try {
-      // Auth happens in the wrapper; we just confirm token is valid.
+      // Auth happens in the wrapper; the token decides which tools are listed.
       await getApiTokenContextForRequest(request);
+      const isServiceAllowed = await consoleServiceAccess(request);
       return reply.code(200).send({
         server: {
           key: SERVER_KEY,
@@ -83,9 +122,10 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
           version: SERVER_INFO.version,
           builtin: true,
         },
-        tools: listConsoleToolDescriptors(),
+        tools: listConsoleToolDescriptors(isServiceAllowed),
       });
     } catch (error) {
+      if (error instanceof RbacAuthorizationError) throw error;
       logger.error('Console MCP list tools error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -97,7 +137,10 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/mcp/console/execute', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
+      if (!body) {
+        return reply.code(400).send({ error: 'A JSON object body is required' });
+      }
 
       if (typeof body.tool !== 'string' || body.tool.trim() === '') {
         return reply.code(400).send({ error: '"tool" is required' });
@@ -107,12 +150,13 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
         ? body.arguments as Record<string, unknown>
         : {};
 
+      const isServiceAllowed = await consoleServiceAccess(request);
       const startedAt = Date.now();
       try {
         const result = await runTool(body.tool, args, {
           tenantDbName: ctx.tenantDbName,
           projectId: ctx.projectId,
-        });
+        }, isServiceAllowed);
         return reply.code(200).send({
           metadata: {
             latencyMs: Date.now() - startedAt,
@@ -124,9 +168,13 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Tool execution failed';
         logger.warn('Console MCP tool error', { tool: body.tool, error: message });
+        if (error instanceof ConsoleToolForbiddenError) {
+          return reply.code(403).send({ error: message });
+        }
         return reply.code(400).send({ error: message });
       }
     } catch (error) {
+      if (error instanceof RbacAuthorizationError) throw error;
       logger.error('Console MCP execute error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -138,29 +186,31 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/mcp/console/message', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const query = (request.query ?? {}) as { sessionId?: string };
-      const sessionId = query.sessionId;
-      const session = sessionId ? getSseSession(sessionId) : null;
+      // A message that names an SSE session is delivered into that stream —
+      // only when this token opened it.
+      const lookup = lookupMessageSession(request, {
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        serverKey: SERVER_KEY,
+        principal: tokenSsePrincipal(ctx.tokenRecord._id?.toString()),
+      });
+      if (lookup.kind === 'unknown') return sendSessionNotFound(reply);
+      const session = lookup.kind === 'session' ? lookup.session : null;
+      const sessionId = lookup.kind === 'session' ? lookup.sessionId : undefined;
 
-      let body: {
-        id?: string | number | null;
-        jsonrpc?: string;
-        method?: string;
-        params?: Record<string, unknown>;
-      };
-      try {
-        body = readJsonBody(request);
-      } catch {
-        const errorPayload = jsonRpcError(null, -32700, 'Parse error');
+      const parsed = readJsonRpcRequest(request);
+      if (!parsed.ok) {
+        const errorPayload = jsonRpcError(null, parsed.code, parsed.message);
         if (session && sessionId) {
           sendSseResponse(sessionId, errorPayload);
           return reply.code(202).send();
         }
         return reply.code(400).send(errorPayload);
       }
+      const body = parsed.body;
 
       const { id = null, method } = body;
-      if (!method) {
+      if (typeof method !== 'string' || method === '') {
         const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
         if (session && sessionId) {
           sendSseResponse(sessionId, errorPayload);
@@ -195,7 +245,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (method === 'tools/list') {
         return respond(jsonRpcOk(id, {
-          tools: listConsoleToolDescriptors(),
+          tools: listConsoleToolDescriptors(await consoleServiceAccess(request)),
         }));
       }
 
@@ -209,11 +259,12 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
           return respond(jsonRpcError(id, -32602, 'Invalid params: "name" is required'));
         }
 
+        const isServiceAllowed = await consoleServiceAccess(request);
         try {
           const result = await runTool(toolName, args, {
             tenantDbName: ctx.tenantDbName,
             projectId: ctx.projectId,
-          });
+          }, isServiceAllowed);
           return respond(jsonRpcOk(id, {
             content: [
               {
@@ -232,64 +283,36 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+      return respond(jsonRpcError(id, -32601, `Method not found: ${method.slice(0, 100)}`));
     } catch (error) {
+      if (error instanceof RbacAuthorizationError) throw error;
       logger.error('Console MCP message handler error', { error });
       return reply.code(500).send(jsonRpcError(null, -32603, 'Internal error'));
     }
   }));
 
   // ── SSE transport ──────────────────────────────────────────────────
-  app.get('/client/v1/mcp/console/sse', withClientApiRequestContext(async (request, reply) => {
+  // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
+  // session) it would never read.
+  app.get('/client/v1/mcp/console/sse', { exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const sessionId = randomUUID();
-      const forwardedProto = request.headers['x-forwarded-proto'];
-      const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
-        ? forwardedProto
-        : 'http';
-      const host = typeof request.headers.host === 'string' && request.headers.host.length > 0
-        ? request.headers.host
-        : 'localhost';
-      const messageEndpoint = `${protocol}://${host}/api/client/v1/mcp/console/message?sessionId=${sessionId}`;
-
-      const stream = new ReadableStream<Uint8Array>({
-        cancel() {
-          logger.info('Console MCP SSE session closed', { sessionId });
-          removeSseSession(sessionId);
+      const tokenId = ctx.tokenRecord._id?.toString();
+      return startMcpSseResponse(request, reply, {
+        messagePath: '/api/client/v1/mcp/console/message',
+        session: {
+          principal: tokenSsePrincipal(tokenId),
+          projectId: ctx.projectId,
+          serverKey: SERVER_KEY,
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          tokenId,
         },
-        start(controller) {
-          createSseSession(sessionId, {
-            controller,
-            projectId: ctx.projectId,
-            serverKey: SERVER_KEY,
-            tenantDbName: ctx.tenantDbName,
-            tenantId: ctx.tenantId,
-            tokenId: ctx.tokenRecord._id?.toString(),
-          });
-
-          controller.enqueue(encodeSseEndpointEvent(messageEndpoint));
-        },
+        logFields: { tenantId: ctx.tenantId },
       });
-
-      logger.info('Console MCP SSE session opened', {
-        sessionId,
-        tenantId: ctx.tenantId,
-      });
-
-      reply.raw.setHeader('Content-Type', 'text/event-stream');
-      reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-      reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Mcp-Session-Id', sessionId);
-
-      return reply.send(
-        Readable.fromWeb(stream as unknown as NodeReadableStream<Uint8Array>),
-      );
     } catch (error) {
       logger.error('Console MCP SSE error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return reply.code(500).send({ error: 'Internal error' });
     }
   }));
 };

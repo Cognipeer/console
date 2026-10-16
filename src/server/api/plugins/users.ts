@@ -503,6 +503,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const verdict = checkPermissionsEdit({ id: session.userId, role: session.userRole }, targetOf(target));
       if (!verdict.ok) return refuse(reply, verdict);
+      if (target.role === 'portal_user') {
+        return fail(reply, 400, 'invalid_body', 'A portal user holds no service permission. Change their role first.');
+      }
 
       // Clamped to the granting admin's own effective permission, same as
       // POST /users/invite — an admin can never grant a target user a
@@ -707,8 +710,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.csv !== 'string' || !body.csv.trim()) {
         return reply.code(400).send({ error: 'Paste or upload a CSV first' });
       }
-      const role = typeof body.role === 'string' && ['user', 'admin', 'project_admin'].includes(body.role)
-        ? body.role as 'user' | 'admin' | 'project_admin'
+      const role = typeof body.role === 'string' && ['user', 'admin', 'project_admin', 'portal_user'].includes(body.role)
+        ? body.role as 'user' | 'admin' | 'project_admin' | 'portal_user'
         : 'user';
 
       // Throws CsvImportError(400, { maxRows }) past the cap — handled below.
@@ -848,9 +851,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Invalid email format', code: 'invalid_body' });
       }
 
-      if (!['user', 'admin', 'project_admin'].includes(body.role)) {
+      if (!['user', 'admin', 'project_admin', 'portal_user'].includes(body.role)) {
         return reply.code(400).send({
-          error: 'Invalid role. Must be user, project_admin, or admin',
+          error: 'Invalid role. Must be user, project_admin, portal_user, or admin',
           code: 'invalid_role',
         });
       }
@@ -935,11 +938,14 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       // Clamped to the inviting admin's own effective permission — an admin
       // can never grant a new user a higher service permission than they
       // themselves hold (same rule as token minting in tokens.ts).
-      const servicePermissions = (await resolveRequestedTokenScope(
-        db,
-        session.userId,
-        body.servicePermissions,
-      )) ?? {};
+      // A portal user holds no service permission, whatever the request carries.
+      const servicePermissions = body.role === 'portal_user'
+        ? {}
+        : (await resolveRequestedTokenScope(
+          db,
+          session.userId,
+          body.servicePermissions,
+        )) ?? {};
 
       const user = await db.createUser({
         canLogin,
@@ -952,7 +958,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         name: body.name,
         password: hashedPassword,
         projectIds: initialProjectIds,
-        role: body.role as 'user' | 'admin' | 'project_admin',
+        role: body.role as 'user' | 'admin' | 'project_admin' | 'portal_user',
         servicePermissions,
         tenantId: session.tenantId,
       });

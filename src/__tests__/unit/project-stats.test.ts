@@ -197,7 +197,7 @@ describe('applyBulkMembers (fake db)', () => {
   it('adds, changes roles (taking ownership of directory rows) and removes in one call', async () => {
     const { db, upserts, rows } = makeDb();
     const result = await applyBulkMembers(db, {
-      tenantId: 't', actorUserId: 'actor', projectId: 'p',
+      tenantDbName: 'tdb', tenantId: 't', actorUserId: 'actor', projectId: 'p',
       add: [{ id: 'u1', role: 'member' }],
       setRole: [{ id: 'u2', role: 'project_admin' }],
       remove: [],
@@ -208,7 +208,7 @@ describe('applyBulkMembers (fake db)', () => {
     expect(rows.has('u2')).toBe(true);
 
     const removed = await applyBulkMembers(db, {
-      tenantId: 't', actorUserId: 'actor', projectId: 'p', add: [], setRole: [], remove: ['u2'],
+      tenantDbName: 'tdb', tenantId: 't', actorUserId: 'actor', projectId: 'p', add: [], setRole: [], remove: ['u2'],
     });
     expect(removed).toMatchObject({ removed: 1, removedIds: ['u2'] });
   });
@@ -216,7 +216,7 @@ describe('applyBulkMembers (fake db)', () => {
   it('warns instead of failing for admins, external, foreign, unknown and already-member users', async () => {
     const { db, upserts } = makeDb();
     const result = await applyBulkMembers(db, {
-      tenantId: 't', actorUserId: 'actor', projectId: 'p',
+      tenantDbName: 'tdb', tenantId: 't', actorUserId: 'actor', projectId: 'p',
       add: [
         { id: 'adm', role: 'member' },
         { id: 'ext', role: 'member' },
@@ -241,7 +241,7 @@ describe('applyBulkMembers (fake db)', () => {
       },
     } as never;
     const result = await applyBulkMembers(flaky, {
-      tenantId: 't', actorUserId: 'actor', projectId: 'p',
+      tenantDbName: 'tdb', tenantId: 't', actorUserId: 'actor', projectId: 'p',
       add: [{ id: 'u1', role: 'member' }],
       setRole: [{ id: 'u2', role: 'project_admin' }],
       remove: [],

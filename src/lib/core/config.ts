@@ -167,6 +167,13 @@ export interface AppConfig {
   rateLimit: {
     provider: 'mongodb' | 'memory' | 'redis';
     syncIntervalMs: number;
+    /**
+     * Distinct counters the in-process limiter (auth endpoints, public MCP
+     * endpoints) keeps at once. Past it, counters whose window has ended are
+     * dropped, then the ones counted least recently. A whole number from 1; any
+     * other value takes the default.
+     */
+    maxTrackedKeys: number;
   };
 
   quota: {
@@ -406,6 +413,66 @@ export interface AppConfig {
     /** Delivery rows older than this are deleted by the reconciler's retention pass. */
     deliveryRetentionDays: number;
   };
+
+  /**
+   * MCP gateway bounds (docs/guide/configuration.md, "MCP Gateway"): how much a
+   * failed tool call and an MCP server's request log keep, how many SSE streams
+   * the process holds, and what the public (unauthenticated) endpoints accept.
+   * Each is clamped to a floor that keeps it usable; where a limit can be
+   * switched off, `0` does it.
+   */
+  mcp: {
+    /** Longest error message (chars) a failed tool call hands back to its caller. Min 256. */
+    errorMessageMaxChars: number;
+    /** Longest `lastError.message` (chars) stored on an MCP server record. Min 64. */
+    lastErrorMaxChars: number;
+    /** An identical `lastError` is not written again within this window (ms); 0 = write every time. */
+    lastErrorThrottleMs: number;
+    /** Longest tool name (chars) stored in an MCP request-log row. Min 16. */
+    logToolNameMaxChars: number;
+    /** Longest caller user-agent (chars) stored with an MCP request-log row. Min 16. */
+    logUserAgentMaxChars: number;
+
+    /** The SSE transport: `GET .../sse` opens a stream, `POST .../message?sessionId=` feeds it. */
+    sse: {
+      /** Open streams per process; 0 = no cap. Public streams stop at 75% of it so token callers keep room. */
+      maxSessions: number;
+      /** Open streams one client address may hold on the public endpoints; 0 = no cap. */
+      maxSessionsPerIp: number;
+      /** A stream that has received no message for this long (ms) is closed; 0 = never. */
+      idleTimeoutMs: number;
+      /** A stream whose unsent backlog exceeds this many bytes is closed; 0 = unbounded. */
+      maxBufferedBytes: number;
+      /** Interval (ms) of the comment frame that keeps an idle stream alive; 0 = none. */
+      keepaliveMs: number;
+    };
+
+    /** Stdio (npx/uvx) servers run as subprocesses of this process, from one pool shared by all tenants. */
+    stdio: {
+      /** Subprocesses running at once, all tenants together. */
+      maxConcurrent: number;
+      /** Subprocesses one tenant may run at once; 0 = only `maxConcurrent` limits. Default: half the pool, at least 1. */
+      maxConcurrentPerTenant: number;
+    };
+
+    /** `/api/public/mcp/...`, the endpoints of servers whose access mode is `public`. */
+    public: {
+      /** Requests per client address and endpoint per minute; 0 = no limit. */
+      rateLimitPerMinute: number;
+      /**
+       * Requests per endpoint per minute from all callers together, whatever
+       * address they appear to come from; 0 = no limit. Default: twenty times
+       * `rateLimitPerMinute`.
+       */
+      endpointRateLimitPerMinute: number;
+      /** Largest request body (bytes) a public POST may carry. Min 1024. */
+      bodyLimitBytes: number;
+      /** Tool calls one tenant may have running at once across its public endpoints; 0 = no limit. */
+      maxInflightPerTenant: number;
+      /** Largest request/response payload (bytes) a public call stores in the request log. Min 256. */
+      logPayloadLimitBytes: number;
+    };
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -430,6 +497,38 @@ function boundedAgentRunConfig(source: ConfigSource) {
   };
 }
 
+/**
+ * The stdio subprocess pool and one tenant's share of it. The share defaults to
+ * half the pool (at least 1) so that one tenant cannot hold every slot; an unset,
+ * negative or unreadable value takes the default, and 0 leaves the pool as the
+ * only limit.
+ */
+function stdioPoolConfig(source: ConfigSource) {
+  const maxConcurrent = Math.max(int(source, 'MCP_STDIO_MAX_CONCURRENT', 8), 0);
+  const share = int(source, 'MCP_STDIO_MAX_CONCURRENT_PER_TENANT', -1);
+  return {
+    maxConcurrent,
+    maxConcurrentPerTenant: share >= 0 ? share : Math.max(Math.floor(maxConcurrent / 2), 1),
+  };
+}
+
+/** The endpoint-wide request rate defaults to this many times the per-address one. */
+const ENDPOINT_RATE_FACTOR = 20;
+
+/**
+ * The public MCP endpoints' request rates. The rate for an endpoint as a whole
+ * defaults to twenty times the per-address one; an unset or negative value takes
+ * that default, and 0 turns the endpoint-wide rate off on its own.
+ */
+function publicRateConfig(source: ConfigSource) {
+  const rateLimitPerMinute = Math.max(int(source, 'MCP_PUBLIC_RATE_LIMIT_PER_MINUTE', 300), 0);
+  const endpointRate = int(source, 'MCP_PUBLIC_ENDPOINT_RATE_LIMIT_PER_MINUTE', -1);
+  return {
+    rateLimitPerMinute,
+    endpointRateLimitPerMinute: endpointRate >= 0 ? endpointRate : rateLimitPerMinute * ENDPOINT_RATE_FACTOR,
+  };
+}
+
 function str(source: ConfigSource, key: string, fallback: string): string {
   return source.get(key) ?? fallback;
 }
@@ -439,6 +538,18 @@ function int(source: ConfigSource, key: string, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const parsed = parseInt(raw, 10);
   return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+/**
+ * A plain positive integer (digits only). Anything else, including zero, '1e5'
+ * or '100,000', is treated as unset and falls back; `int` would read the last
+ * two as 1 and 100.
+ */
+function positiveInt(source: ConfigSource, key: string, fallback: number): number {
+  const raw = source.get(key)?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 ? value : fallback;
 }
 
 function bool(source: ConfigSource, key: string, fallback: boolean): boolean {
@@ -624,6 +735,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     rateLimit: {
       provider: oneOf(source, 'RATE_LIMIT_PROVIDER', ['mongodb', 'memory', 'redis'], 'mongodb'),
       syncIntervalMs: int(source, 'RATE_LIMIT_SYNC_INTERVAL_MS', 5000),
+      maxTrackedKeys: positiveInt(source, 'RATE_LIMIT_MAX_TRACKED_KEYS', 100_000),
     },
 
     quota: {
@@ -759,6 +871,28 @@ function buildConfig(source: ConfigSource): AppConfig {
       retryScheduleSeconds: webhookRetrySchedule(source),
       autoDisableHours: Math.max(int(source, 'WEBHOOK_AUTO_DISABLE_HOURS', 72), 1),
       deliveryRetentionDays: Math.max(int(source, 'WEBHOOK_DELIVERY_RETENTION_DAYS', 30), 1),
+    },
+
+    mcp: {
+      errorMessageMaxChars: Math.max(int(source, 'MCP_ERROR_MESSAGE_MAX_CHARS', 8 * 1024), 256),
+      lastErrorMaxChars: Math.max(int(source, 'MCP_LAST_ERROR_MAX_CHARS', 2 * 1024), 64),
+      lastErrorThrottleMs: Math.max(int(source, 'MCP_LAST_ERROR_THROTTLE_MS', 60_000), 0),
+      logToolNameMaxChars: Math.max(int(source, 'MCP_LOG_TOOL_NAME_MAX_CHARS', 200), 16),
+      logUserAgentMaxChars: Math.max(int(source, 'MCP_LOG_USER_AGENT_MAX_CHARS', 300), 16),
+      sse: {
+        maxSessions: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS', 2000), 0),
+        maxSessionsPerIp: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS_PER_IP', 50), 0),
+        idleTimeoutMs: Math.max(int(source, 'MCP_SSE_IDLE_TIMEOUT_MS', 30 * 60 * 1000), 0),
+        maxBufferedBytes: Math.max(int(source, 'MCP_SSE_MAX_BUFFERED_BYTES', 8 * 1024 * 1024), 0),
+        keepaliveMs: Math.max(int(source, 'MCP_SSE_KEEPALIVE_MS', 25_000), 0),
+      },
+      stdio: stdioPoolConfig(source),
+      public: {
+        ...publicRateConfig(source),
+        bodyLimitBytes: Math.max(int(source, 'MCP_PUBLIC_BODY_LIMIT_BYTES', 1024 * 1024), 1024),
+        maxInflightPerTenant: Math.max(int(source, 'MCP_PUBLIC_MAX_INFLIGHT_PER_TENANT', 100), 0),
+        logPayloadLimitBytes: Math.max(int(source, 'MCP_PUBLIC_LOG_PAYLOAD_LIMIT_BYTES', 16 * 1024), 256),
+      },
     },
   };
 }

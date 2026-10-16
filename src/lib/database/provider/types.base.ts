@@ -142,7 +142,7 @@ export interface IUser {
    * Tenant-wide role.
    * project_admin is kept for backward compat — new code uses IUserProject.role for project-level roles.
    */
-  role: 'owner' | 'admin' | 'project_admin' | 'user';
+  role: 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
   /** @deprecated Use IUserProject records for project access control. */
   projectIds?: string[];
   /** Tenant-level service permission overrides (admin use only). */
