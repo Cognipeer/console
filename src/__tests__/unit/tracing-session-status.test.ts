@@ -29,8 +29,8 @@ describe('tracing status vocabulary', () => {
     expect(normalizeTracingStatus('canceled')).toBe('cancelled');
   });
 
-  it('offers success, error, in_progress and abandoned to the filters', () => {
-    expect([...TRACING_STATUS_FILTER_VALUES]).toEqual(['success', 'error', 'in_progress', 'abandoned']);
+  it('offers success, error, in_progress, paused, cancelled and abandoned to the filters', () => {
+    expect([...TRACING_STATUS_FILTER_VALUES]).toEqual(['success', 'error', 'in_progress', 'paused', 'cancelled', 'abandoned']);
     expect(isTracingStatusFilterValue('abandoned')).toBe(true);
     expect(isTracingStatusFilterValue('running')).toBe(false);
     expect(isTracingStatusFilterValue(null)).toBe(false);
