@@ -141,7 +141,7 @@ function ProjectDetail({ projectId }: { projectId: string }) {
       onTabChange={changeTab}
     >
       {activeTab === 'overview' ? <OverviewTab projectId={projectId} /> : null}
-      {activeTab === 'members' ? <MembersTab projectId={projectId} /> : null}
+      {activeTab === 'members' ? <MembersTab projectId={projectId} projectName={project?.name} /> : null}
       {activeTab === 'providers' ? (
         ready ? (
           <ProjectProvidersManager projectId={projectId} />

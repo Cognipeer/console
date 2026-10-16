@@ -33,9 +33,48 @@ interface AddProjectMembersShellProps {
 }
 
 const SEARCH_LIMIT = 25;
+/** The project's own candidate search answers from two letters on. */
+const MIN_CANDIDATE_QUERY = 2;
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/**
+ * The people a project admin may add. Admins of a single project cannot read the workspace's IAM directory, so
+ * they search the project's own candidate list instead (owners, admins and people already in the project left
+ * out). Owners and admins search the directory, which also shows who is locked and why.
+ */
+async function fetchCandidates(projectId: string, query: string, signal: AbortSignal): Promise<PrincipalSummary[]> {
+  if (query.length < MIN_CANDIDATE_QUERY) return [];
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/member-candidates?q=${encodeURIComponent(query)}`, {
+    cache: 'no-store',
+    signal,
+  });
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = body && typeof body === 'object' ? (body as { error?: unknown }).error : null;
+    throw new Error(typeof message === 'string' ? message : '');
+  }
+  const users = body && typeof body === 'object' ? (body as { users?: unknown }).users : null;
+  if (!Array.isArray(users)) return [];
+  return users.flatMap((raw): PrincipalSummary[] => {
+    const user = raw as { _id?: unknown; email?: unknown; name?: unknown };
+    if (typeof user._id !== 'string') return [];
+    const email = typeof user.email === 'string' ? user.email : '';
+    const name = typeof user.name === 'string' ? user.name : '';
+    return [{
+      type: 'user',
+      id: user._id,
+      label: name || email || user._id,
+      sublabel: email || null,
+      email,
+      role: null,
+      status: null,
+      memberCount: null,
+      policyCount: 0,
+    }];
+  });
 }
 
 /** Add people and groups to a project in one go, with a role per row. */
@@ -54,6 +93,7 @@ export default function AddProjectMembersShell({
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PrincipalSummary[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedEntry[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,21 +105,40 @@ export default function AddProjectMembersShell({
     setQuery('');
     setPicked([]);
     setError(null);
+    setSearchError(null);
     setSaving(false);
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
+    if (type === 'user' && !canAddGroups && query.trim().length < MIN_CANDIDATE_QUERY) {
+      // Too short for the project's candidate search: nothing to ask, so no wait and no "Loading".
+      seq.current += 1;
+      setResults([]);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
     const controller = new AbortController();
     const mine = ++seq.current;
     setSearching(true);
     const handle = setTimeout(() => {
-      fetchPrincipals({ type, q: query.trim(), limit: SEARCH_LIMIT }, controller.signal)
-        .then((page) => {
-          if (mine === seq.current && !controller.signal.aborted) setResults(page.items);
+      // `canAddGroups` is true for owners and admins, the people who can read the IAM directory.
+      const load =
+        type === 'user' && !canAddGroups
+          ? fetchCandidates(projectId, query.trim(), controller.signal)
+          : fetchPrincipals({ type, q: query.trim(), limit: SEARCH_LIMIT }, controller.signal).then((page) => page.items);
+      load
+        .then((items) => {
+          if (mine === seq.current && !controller.signal.aborted) {
+            setResults(items);
+            setSearchError(null);
+          }
         })
         .catch((err: unknown) => {
-          if (!isAbortError(err) && mine === seq.current) setResults([]);
+          if (isAbortError(err) || mine !== seq.current) return;
+          setResults([]);
+          setSearchError(errorText(err, t('errors.search')));
         })
         .finally(() => {
           if (mine === seq.current) setSearching(false);
@@ -89,9 +148,10 @@ export default function AddProjectMembersShell({
       clearTimeout(handle);
       controller.abort();
     };
-  }, [open, type, query]);
+  }, [open, type, query, canAddGroups, projectId, t]);
 
   const counts = useMemo(() => countByType(picked), [picked]);
+  const needsMoreLetters = type === 'user' && !canAddGroups && query.trim().length < MIN_CANDIDATE_QUERY;
   const roleOptions = [
     { value: 'member', label: t('roles.member') },
     { value: 'project_admin', label: t('roles.project_admin') },
@@ -213,8 +273,8 @@ export default function AddProjectMembersShell({
         </div>
         <div className="ds-card" style={{ padding: 4, maxHeight: 320, overflowY: 'auto' }}>
           {results.length === 0 ? (
-            <Text size="sm" c="dimmed" p="sm">
-              {searching ? tCommon('loading') : t('find.nothing')}
+            <Text size="sm" c={searchError && !searching ? 'red' : 'dimmed'} p="sm" data-testid="find-empty">
+              {searching ? tCommon('loading') : (searchError ?? (needsMoreLetters ? t('find.minChars') : t('find.nothing')))}
             </Text>
           ) : (
             results.map((principal) => {
@@ -225,12 +285,15 @@ export default function AddProjectMembersShell({
                 <div
                   key={key}
                   className="ds-row-between"
-                  style={{ padding: '6px 8px', gap: 12, opacity: reason ? 0.6 : 1 }}
+                  style={{ padding: '6px 8px', gap: 12 }}
+                  data-testid={reason ? 'locked-person' : undefined}
                 >
                   <Checkbox
                     size="xs"
                     checked={checked}
                     disabled={reason !== null}
+                    // A disabled label is almost the colour of the page in this theme: keep the name readable.
+                    styles={reason ? { label: { color: 'var(--ds-text-muted)', opacity: 1 } } : undefined}
                     onChange={() =>
                       setPicked((prev) =>
                         togglePick(prev, {
@@ -254,7 +317,7 @@ export default function AddProjectMembersShell({
                     }
                   />
                   {reason ? (
-                    <Badge size="xs" variant="light" color="gray">
+                    <Badge size="xs" variant="default" tt="none">
                       {reasonText(reason)}
                     </Badge>
                   ) : null}

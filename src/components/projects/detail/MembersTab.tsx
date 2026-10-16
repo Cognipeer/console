@@ -61,7 +61,7 @@ function messageOf(body: unknown, fallback: string): string {
  * chips by source, bulk role change and removal, "Add people" in one full-screen
  * form, and the owners and admins whose access is implicit in a collapsed section.
  */
-export default function MembersTab({ projectId }: { projectId: string }) {
+export default function MembersTab({ projectId, projectName }: { projectId: string; projectName?: string }) {
   const t = useTranslations('projectTabs.members');
   const tm = useTranslations('projectMembers');
   const root = useTranslations();
@@ -281,7 +281,7 @@ export default function MembersTab({ projectId }: { projectId: string }) {
       render: (row) => {
         const source = rowSource(row);
         return (
-          <Badge size="sm" variant="light" color={source === 'direct' ? 'gray' : source === 'group' ? 'grape' : 'teal'}>
+          <Badge size="sm" variant={source === 'direct' ? 'default' : 'light'} color={source === 'group' ? 'grape' : 'teal'}>
             {t(`source.${source}`)}
           </Badge>
         );
@@ -295,7 +295,7 @@ export default function MembersTab({ projectId }: { projectId: string }) {
         if (row.kind === 'group') {
           return (
             <Tooltip label={t('group.roleManaged')}>
-              <Badge size="sm" variant="light" color={row.group.role === 'project_admin' ? 'teal' : 'gray'}>
+              <Badge size="sm" variant={row.group.role === 'project_admin' ? 'light' : 'default'} color="teal">
                 {tm(`roles.${row.group.role}`)}
               </Badge>
             </Tooltip>
@@ -313,7 +313,7 @@ export default function MembersTab({ projectId }: { projectId: string }) {
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <Badge size="sm" variant="light" color={member.projectRole === 'project_admin' ? 'teal' : 'gray'}>
+          <Badge size="sm" variant={member.projectRole === 'project_admin' ? 'light' : 'default'} color="teal">
             {tm(`roles.${member.projectRole}`)}
           </Badge>
         );
@@ -484,7 +484,7 @@ export default function MembersTab({ projectId }: { projectId: string }) {
           <span className="ds-row" style={{ gap: 8, fontSize: 13, fontWeight: 600 }}>
             {adminsOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
             {t('admins.title')}
-            <Badge size="xs" variant="light" color="gray">{data.tenantAdmins.length}</Badge>
+            <Badge size="xs" variant="default">{data.tenantAdmins.length}</Badge>
           </span>
         </button>
         <Collapse in={adminsOpen}>
@@ -519,6 +519,7 @@ export default function MembersTab({ projectId }: { projectId: string }) {
       <AddProjectMembersShell
         open={addOpen}
         projectId={projectId}
+        projectName={projectName}
         existing={existing}
         canAddGroups={caps.isTenantAdmin}
         onClose={() => setAddOpen(false)}

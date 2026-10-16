@@ -160,6 +160,7 @@ export const projectTabsEn = {
       searchPeople: 'Search people by name or email',
       searchGroups: 'Search groups',
       nothing: 'No match.',
+      minChars: 'Type at least 2 letters to search.',
       members: '{count} people',
     },
     locked: {
@@ -181,6 +182,6 @@ export const projectTabsEn = {
       project_admin: 'Project admin',
     },
     done: '{count} added to the project.',
-    errors: { title: 'Some entries were not added', save: 'Could not add to the project.' },
+    errors: { title: 'Some entries were not added', save: 'Could not add to the project.', search: 'The search failed. Try again.' },
   },
 };

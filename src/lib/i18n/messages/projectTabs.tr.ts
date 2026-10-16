@@ -160,6 +160,7 @@ export const projectTabsTr = {
       searchPeople: 'Kişileri ad veya e-posta ile ara',
       searchGroups: 'Grup ara',
       nothing: 'Eşleşme yok.',
+      minChars: 'Aramak için en az 2 harf yazın.',
       members: '{count} kişi',
     },
     locked: {
@@ -181,6 +182,6 @@ export const projectTabsTr = {
       project_admin: 'Proje yöneticisi',
     },
     done: '{count} kayıt projeye eklendi.',
-    errors: { title: 'Bazı kayıtlar eklenemedi', save: 'Projeye eklenemedi.' },
+    errors: { title: 'Bazı kayıtlar eklenemedi', save: 'Projeye eklenemedi.', search: 'Arama başarısız oldu. Tekrar deneyin.' },
   },
 };
