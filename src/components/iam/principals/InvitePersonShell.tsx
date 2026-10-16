@@ -180,8 +180,8 @@ export default function InvitePersonShell({
         primaryAction={{ label: t('invite.done'), color: 'teal', onClick: close }}
         secondaryAction={{ label: t('common.close'), onClick: close }}
       >
-        <FormSection number={1} title={title} description={description} done>
-          <Alert icon={<IconAlertCircle size={16} />} title={title} color={emailSent ? 'teal' : 'orange'}>
+        <FormSection number={1} title={title} done>
+          <Alert icon={<IconAlertCircle size={16} />} color={emailSent ? 'teal' : 'orange'}>
             {description}
           </Alert>
         </FormSection>
@@ -229,8 +229,8 @@ export default function InvitePersonShell({
         }
         primaryAction={{ label: t('invite.password.done'), color: 'teal', onClick: close }}
       >
-        <FormSection number={1} title={t('invite.password.warningTitle')} description={t('invite.password.warning')} done>
-          <Alert icon={<IconAlertCircle size={16} />} title={t('invite.password.warningTitle')} color="orange">
+        <FormSection number={1} title={t('invite.password.warningTitle')} done>
+          <Alert icon={<IconAlertCircle size={16} />} color="orange">
             {t('invite.password.warning')}
           </Alert>
         </FormSection>

@@ -190,7 +190,7 @@ export default function ExternalPersonShell({ open, kind, onKind, onCreated, onC
           </FormField>
         </FormRow>
         {noIssuers ? (
-          <Alert color="orange" variant="light" data-testid="no-issuers">
+          <Alert color="orange" variant="light" mb="md" data-testid="no-issuers">
             {t('external.noIssuersHelp')}
           </Alert>
         ) : null}
