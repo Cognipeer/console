@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /** Rules list (noise, mute, server-side query), the rule form's library channels and backtest, and the channel library page. */
-import { createElement } from 'react';
+import { StrictMode, act, createElement } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buttonByText,
@@ -11,6 +11,7 @@ import {
   mount,
   q,
   qa,
+  setInput,
   settle,
   text,
   type ApiMock,
@@ -194,6 +195,30 @@ describe('channel library page', () => {
     await click(buttonByText('New channel'));
     await settle(50);
     expect(text()).toContain('New shared channel');
+  });
+
+  it('takes a typed name and creates an entry (the Name field must not crash while typing)', async () => {
+    libraryApi('admin');
+    // StrictMode re-runs state updaters during render, after the event is released: a handler that reads
+    // event.currentTarget inside setState(updater) throws there (it did in the real app, in dev).
+    mounted = await mount(createElement(StrictMode, null, createElement(ChannelsLibraryView)));
+    await settle(150);
+    await click(buttonByText('New channel'));
+    await settle(50);
+    const nameInput = () => q<HTMLInputElement>('.form-overlay input[aria-label="Name"]')!;
+    await setInput(nameInput(), 'Ops mail 2');
+    await settle(20);
+    expect(nameInput().value).toBe('Ops mail 2');
+    const recipients = q<HTMLInputElement>('.form-overlay input[placeholder="Type an address and press Enter"]')!;
+    await setInput(recipients, 'ops2@example.com');
+    await act(async () => {
+      recipients.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await settle(20);
+    await click(buttonByText('Create', q('.form-overlay')!));
+    await settle(80);
+    const post = api.to('POST', '/api/alerts/channels/library')[0]!;
+    expect(post.body).toEqual({ name: 'Ops mail 2', kind: 'email', config: { recipients: ['ops2@example.com'] } });
   });
 
   it('is read-only for a member', async () => {

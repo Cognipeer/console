@@ -124,7 +124,12 @@ export default function LibraryChannelForm({ opened, onClose, onSaved, entry }: 
               maxLength={MAX_LIBRARY_NAME}
               value={values.name}
               error={values.name.length > 0 && (issue?.code === 'nameRequired' || issue?.code === 'nameTooLong') ? issueText() : undefined}
-              onChange={(event) => setValues((current) => ({ ...current, name: event.currentTarget.value }))}
+              onChange={(event) => {
+                // Read the value now: a functional state updater runs after the event has been
+                // released, when currentTarget is already null.
+                const name = event.currentTarget.value;
+                setValues((current) => ({ ...current, name }));
+              }}
             />
           </FormField>
           <FormField label={t('libraryUx.kind')} hint={isEdit ? t('libraryUx.kindFixed') : undefined}>
