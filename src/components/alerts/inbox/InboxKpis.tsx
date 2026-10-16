@@ -13,11 +13,15 @@ interface Props {
   failed: boolean;
 }
 
+/** Keeps the unit with its number when a tile label wraps ("Last 24 h" breaks before "24", never between "24" and "h"). */
+const bindUnit = (label: string) => label.replace(/\s+(\S+)$/, '\u00a0$1');
+
 /** Open / acknowledged now, and for the chosen range what was fired and resolved plus the median time to acknowledge and resolve. */
 export default function InboxKpis({ range, onRangeChange, stats, failed }: Props) {
   const t = useTranslations('incidents');
   const dash = '—';
   const count = (value: number | undefined) => (stats ? String(value ?? 0) : dash);
+  const rangeLabel = bindUnit(t(`ux.kpi.ranges.${range}`));
   return (
     <div style={{ marginBottom: 12 }}>
       <div className="ds-row-between" style={{ marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
@@ -32,11 +36,11 @@ export default function InboxKpis({ range, onRangeChange, stats, failed }: Props
           data={STATS_RANGES.map((value) => ({ value, label: t(`ux.kpi.ranges.${value}`) }))}
         />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+      <div className="inbox-kpis" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
         <StatTile label={t('ux.kpi.open')} value={count(stats?.open)} />
         <StatTile label={t('ux.kpi.acknowledged')} value={count(stats?.acknowledged)} />
-        <StatTile label={t('ux.kpi.fired', { range: t(`ux.kpi.ranges.${range}`) })} value={count(stats?.firedInRange)} />
-        <StatTile label={t('ux.kpi.resolved', { range: t(`ux.kpi.ranges.${range}`) })} value={count(stats?.resolvedInRange)} />
+        <StatTile label={t('ux.kpi.fired', { range: rangeLabel })} value={count(stats?.firedInRange)} />
+        <StatTile label={t('ux.kpi.resolved', { range: rangeLabel })} value={count(stats?.resolvedInRange)} />
         <StatTile label={t('ux.kpi.mtta')} value={stats ? formatDurationMs(stats.mttaMs) : dash} delta={stats && stats.mttaMs != null ? t('ux.kpi.median', { count: stats.mttaSample }) : undefined} />
         <StatTile label={t('ux.kpi.mttr')} value={stats ? formatDurationMs(stats.mttrMs) : dash} delta={stats && stats.mttrMs != null ? t('ux.kpi.median', { count: stats.mttrSample }) : undefined} />
       </div>

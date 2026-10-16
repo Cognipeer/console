@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Badge, Button, CloseButton, Group, Switch, Text } from '@mantine/core';
-import { useMediaQuery } from '@mantine/hooks';
+import { useElementSize } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
@@ -67,8 +67,11 @@ import {
   FILTER_RESET,
   INBOX_GROUPS,
   INBOX_SORTS,
+  PREVIEW_PANE_WIDTH,
+  SIDE_PREVIEW_MIN_WIDTH,
   activeView,
   changedIds,
+  columnsBesidePreview,
   filtersToQuery,
   groupIncidents,
   hasActiveFilters,
@@ -127,7 +130,9 @@ export default function IncidentsPage() {
   const searchParams = useSearchParams();
   const { meta, catalog } = useAlertMeta();
   const directory = useUserDirectory();
-  const wide = useMediaQuery('(min-width: 1180px)');
+  // The preview sits beside the list when the page itself has room for both.
+  const { ref: layoutRef, width: layoutWidth } = useElementSize<HTMLDivElement>();
+  const wide = layoutWidth >= SIDE_PREVIEW_MIN_WIDTH;
 
   const urlKey = searchParams?.toString() ?? '';
   const highlightId = searchParams?.get('highlight') ?? null;
@@ -668,11 +673,11 @@ export default function IncidentsPage() {
         const text = describeRowValue(incident, catalog, ta, locale);
         return (
           <div>
-            <Text size="sm" fw={600}>
+            <Text size="sm" fw={600} style={{ whiteSpace: 'nowrap' }}>
               {text.value}
             </Text>
             {text.compare ? (
-              <Text size="xs" c="dimmed">
+              <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
                 {text.compare}
               </Text>
             ) : null}
@@ -684,7 +689,7 @@ export default function IncidentsPage() {
       key: 'fired',
       label: t('columns.fired'),
       render: (incident) => (
-        <Text size="xs" title={formatDateTime(incident.firedAt, locale)}>
+        <Text size="xs" title={formatDateTime(incident.firedAt, locale)} style={{ whiteSpace: 'nowrap' }}>
           {formatRelative(incident.firedAt, locale)}
         </Text>
       ),
@@ -884,6 +889,8 @@ export default function IncidentsPage() {
     />
   ) : null;
 
+  const sideBySide = Boolean(preview && wide);
+
   const pager = (
     <div className="ds-row-between" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
       <Text size="xs" c="dimmed">
@@ -954,13 +961,13 @@ export default function IncidentsPage() {
       <TabsBar items={tabs} activeId={filters.status} onChange={(id) => patchFilters({ status: id as StatusTab })} />
       {filterBar}
 
-      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: preview && wide ? 'minmax(0, 1fr) 360px' : 'minmax(0, 1fr)', alignItems: 'start' }}>
+      <div ref={layoutRef} style={{ display: 'grid', gap: 12, gridTemplateColumns: sideBySide ? `minmax(0, 1fr) ${PREVIEW_PANE_WIDTH}px` : 'minmax(0, 1fr)', alignItems: 'start' }}>
         <div style={{ minWidth: 0 }}>
           {groupBy === 'none' ? (
             <DataGrid<IncidentDto>
               records={records}
               rowKey={(incident) => incident._id}
-              columns={columns}
+              columns={columnsBesidePreview(columns, sideBySide)}
               loading={loading}
               refreshing={refreshing || busy}
               toolbarRight={liveControls}
@@ -1054,9 +1061,9 @@ export default function IncidentsPage() {
             </>
           )}
         </div>
-        {preview && wide ? preview : null}
+        {sideBySide ? preview : null}
       </div>
-      {preview && !wide ? <div style={{ marginTop: 12 }}>{preview}</div> : null}
+      {preview && !sideBySide ? <div style={{ marginTop: 12 }}>{preview}</div> : null}
 
       <SnoozeDialog
         opened={snoozeRows !== null}

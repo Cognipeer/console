@@ -234,6 +234,66 @@ describe('IncidentsPage', () => {
     expect(api.to('GET', '/api/alerts/incidents').at(-1)!.query).toMatchObject({ q: 'agent-i2' });
   });
 
+  it('keeps the unit with its number in the KPI labels and marks the tiles for level figures', async () => {
+    incidentsApi();
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('Fired · Last 24\u00a0h');
+    expect(text()).toContain('Resolved · Last 24\u00a0h');
+    expect(q('.inbox-kpis')?.querySelectorAll('.ds-stat')).toHaveLength(6);
+  });
+
+  describe('the preview pane', () => {
+    /** Every ResizeObserver reports this width, which is what the page measures itself with. */
+    function pageWidth(width: number) {
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          constructor(private callback: (entries: unknown[]) => void) {}
+          observe() {
+            this.callback([{ contentRect: { x: 0, y: 0, width, height: 400, top: 0, left: 0, bottom: 400, right: width }, borderBoxSize: [{ inlineSize: width, blockSize: 400 }] }]);
+          }
+          unobserve() {}
+          disconnect() {}
+        },
+      );
+    }
+    const headers = () => qa('thead th').map((cell) => cell.textContent?.trim());
+    const openPreview = async () => {
+      // a click on a plain cell (the name is a link to the detail page) opens the preview
+      const row = qa('tbody tr')[0]!;
+      await click([...row.querySelectorAll('td')].find((cell) => cell.textContent?.includes('Warning')));
+      await settle(60);
+    };
+
+    it('sits beside the list on a wide page and leaves out the columns it repeats', async () => {
+      pageWidth(1400);
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(150);
+      expect(headers()).toEqual(expect.arrayContaining(['Assignee', 'Duration']));
+      await openPreview();
+      const pane = q('aside[aria-label="Incident preview"]')!;
+      expect(pane).not.toBeNull();
+      expect(pane.parentElement!.style.gridTemplateColumns).toContain('360px');
+      expect(headers()).not.toContain('Assignee');
+      expect(headers()).not.toContain('Duration');
+      expect(headers()).toEqual(expect.arrayContaining(['Incident', 'Severity', 'Value']));
+    });
+
+    it('goes below the list when the page is narrow, with every column kept', async () => {
+      pageWidth(900);
+      incidentsApi();
+      mounted = await mount(createElement(IncidentsPage));
+      await settle(150);
+      await openPreview();
+      const pane = q('aside[aria-label="Incident preview"]')!;
+      expect(pane).not.toBeNull();
+      expect(pane.parentElement!.style.gridTemplateColumns).toBe('');
+      expect(headers()).toEqual(expect.arrayContaining(['Assignee', 'Duration']));
+    });
+  });
+
   it('says nothing matches (and offers to clear the filters) when a search leaves the list empty', async () => {
     nav.search = 'status=open&q=zzz&severity=critical&sort=-severity';
     incidentsApi([]);

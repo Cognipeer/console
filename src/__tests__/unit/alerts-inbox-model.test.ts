@@ -3,9 +3,12 @@ import {
   BUILTIN_VIEWS,
   DEFAULT_FILTERS,
   FILTER_RESET,
+  PREVIEW_HIDDEN_COLUMNS,
+  SIDE_PREVIEW_MIN_WIDTH,
   activeView,
   changedIds,
   checkUntil,
+  columnsBesidePreview,
   filtersToQuery,
   formatDurationMs,
   groupIncidents,
@@ -96,6 +99,23 @@ describe('inbox filters in the URL', () => {
     expect(activeView(filters, BUILTIN_VIEWS)?.id).toBe('snoozed');
     expect(sameView(filters, DEFAULT_FILTERS)).toBe(false);
     expect(activeView({ ...DEFAULT_FILTERS, q: 'x' }, BUILTIN_VIEWS)).toBeNull();
+  });
+});
+
+describe('the preview beside the list', () => {
+  const columns = ['incident', 'entity', 'severity', 'status', 'assignee', 'value', 'fired', 'duration'].map((key) => ({ key }));
+
+  it('drops the columns the preview pane repeats, only while it sits beside the list', () => {
+    expect(columnsBesidePreview(columns, false)).toBe(columns);
+    const beside = columnsBesidePreview(columns, true).map((column) => column.key);
+    expect(beside).toEqual(['incident', 'entity', 'severity', 'status', 'value', 'fired']);
+    for (const key of PREVIEW_HIDDEN_COLUMNS) expect(beside).not.toContain(key);
+  });
+
+  it('needs room for a readable list next to the 360 px pane', () => {
+    // a 1440 px laptop screen leaves about 1090 px beside the sidebar; a 1366 px one about 1010 px
+    expect(SIDE_PREVIEW_MIN_WIDTH).toBeLessThanOrEqual(1090);
+    expect(SIDE_PREVIEW_MIN_WIDTH).toBeGreaterThan(1010);
   });
 });
 

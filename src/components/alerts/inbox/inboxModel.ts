@@ -52,6 +52,17 @@ export function hasActiveFilters(filters: InboxFilters): boolean {
   return (Object.keys(FILTER_RESET) as Array<keyof typeof FILTER_RESET>).some((key) => (key === 'q' ? filters.q.trim() !== '' : filters[key] !== FILTER_RESET[key]));
 }
 
+/** The incident preview sits beside the list only when the page has room for both; its pane is this wide. */
+export const PREVIEW_PANE_WIDTH = 360;
+/** Page width (not window width: the sidebar takes a third of a laptop screen) from which the preview may sit beside the list. */
+export const SIDE_PREVIEW_MIN_WIDTH = 1080;
+/** Columns the preview pane already shows, left out of the list while the pane sits beside it. */
+export const PREVIEW_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(['assignee', 'duration']);
+
+export function columnsBesidePreview<T extends { key: string }>(columns: T[], sideBySide: boolean): T[] {
+  return sideBySide ? columns.filter((column) => !PREVIEW_HIDDEN_COLUMNS.has(column.key)) : columns;
+}
+
 /** The keys that make up a view (grouping is presentation, not a filter). */
 const VIEW_KEYS = ['status', 'severity', 'module', 'ruleId', 'entityKey', 'q', 'assignee', 'sort', 'snoozed'] as const;
 
