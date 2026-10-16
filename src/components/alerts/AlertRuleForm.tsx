@@ -373,16 +373,18 @@ export default function AlertRuleForm({
     >
       {/* 1 · module & metric */}
       <FormSection number={1} title={t('form.sectionMetric')} description={t('form.sectionMetricDescription')} done={checks.metric}>
-        <FormField label={t('form.module')} required>
-          <ChipPicker<string>
-            options={modules.map((module) => {
-              const ModuleIcon = moduleIcon(module);
-              return { value: module, label: moduleLabel(module, t), icon: <ModuleIcon size={14} stroke={1.7} /> };
-            })}
-            value={values.module}
-            onChange={(next) => setValues((current) => applyModuleChange(current, next as string, catalog))}
-          />
-        </FormField>
+        <FormRow cols={1}>
+          <FormField label={t('form.module')} required>
+            <ChipPicker<string>
+              options={modules.map((module) => {
+                const ModuleIcon = moduleIcon(module);
+                return { value: module, label: moduleLabel(module, t), icon: <ModuleIcon size={14} stroke={1.7} /> };
+              })}
+              value={values.module}
+              onChange={(next) => setValues((current) => applyModuleChange(current, next as string, catalog))}
+            />
+          </FormField>
+        </FormRow>
         <FormRow cols={1}>
           <FormField label={t('form.metric')} required>
             <Select
@@ -455,43 +457,45 @@ export default function AlertRuleForm({
 
       {/* 3 · condition */}
       <FormSection number={3} title={t('form.sectionCondition')} description={t('form.sectionConditionDescription')} done={checks.condition}>
-        <FormField label={t('form.conditionMode')} required>
-          <div className="form-chips" role="group" aria-label={t('form.conditionMode')}>
-            {supportedModes.map((candidate) => {
-              const available = modeAvailable(candidate);
-              return (
-                <button
-                  key={candidate}
-                  type="button"
-                  className={`form-chip ${values.mode === candidate ? 'selected' : ''}`}
-                  aria-pressed={values.mode === candidate}
-                  disabled={!available && values.mode !== candidate}
-                  title={available ? t(`modeHint.${candidate}`) : t('form.modeNeedsEnterprise')}
-                  onClick={() => patch({ mode: candidate })}
-                >
-                  {t(`mode.${candidate}`)}
-                  {!available ? <span className="ds-badge ds-badge-info">{t('form.badgeEnterprise')}</span> : null}
-                </button>
-              );
-            })}
-          </div>
-          <div className="form-field-hint">{t(`modeHint.${values.mode}`)}</div>
-          {blockedModes.length > 0 ? (
-            <Text size="xs" c="dimmed" data-testid="mode-upsell">
-              {t(blockedReason === 'license_required' ? 'form.modeUpsellLicense' : 'form.modeUpsellBuild')}
-            </Text>
-          ) : null}
-          {metaUnknown ? (
-            <Text size="xs" c="orange" data-testid="mode-unknown">
-              {t('form.modeAvailabilityUnknown')}
-            </Text>
-          ) : null}
-          {!modeAvailable(values.mode) ? (
-            <Text size="xs" c="orange" role="alert">
-              {t('form.modeUnavailableSelected')}
-            </Text>
-          ) : null}
-        </FormField>
+        <FormRow cols={1}>
+          <FormField label={t('form.conditionMode')} required>
+            <div className="form-chips" role="group" aria-label={t('form.conditionMode')}>
+              {supportedModes.map((candidate) => {
+                const available = modeAvailable(candidate);
+                return (
+                  <button
+                    key={candidate}
+                    type="button"
+                    className={`form-chip ${values.mode === candidate ? 'selected' : ''}`}
+                    aria-pressed={values.mode === candidate}
+                    disabled={!available && values.mode !== candidate}
+                    title={available ? t(`modeHint.${candidate}`) : t('form.modeNeedsEnterprise')}
+                    onClick={() => patch({ mode: candidate })}
+                  >
+                    {t(`mode.${candidate}`)}
+                    {!available ? <span className="ds-badge ds-badge-info">{t('form.badgeEnterprise')}</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="form-field-hint">{t(`modeHint.${values.mode}`)}</div>
+            {blockedModes.length > 0 ? (
+              <Text size="xs" c="dimmed" data-testid="mode-upsell">
+                {t(blockedReason === 'license_required' ? 'form.modeUpsellLicense' : 'form.modeUpsellBuild')}
+              </Text>
+            ) : null}
+            {metaUnknown ? (
+              <Text size="xs" c="orange" data-testid="mode-unknown">
+                {t('form.modeAvailabilityUnknown')}
+              </Text>
+            ) : null}
+            {!modeAvailable(values.mode) ? (
+              <Text size="xs" c="orange" role="alert">
+                {t('form.modeUnavailableSelected')}
+              </Text>
+            ) : null}
+          </FormField>
+        </FormRow>
 
         {values.mode === 'threshold' ? (
           <FormRow cols={2}>
@@ -519,32 +523,37 @@ export default function AlertRuleForm({
 
         {values.mode === 'baseline' ? (
           <>
-            <FormField label={t('form.sensitivity')} hint={t('form.sensitivityHint')}>
-              <ChipPicker<string>
-                options={[
-                  { value: 'sensitive', label: t('baseline.sensitive') },
-                  { value: 'balanced', label: t('baseline.balanced') },
-                  { value: 'calm', label: t('baseline.calm') },
-                  ...(values.baselinePreset === 'custom' ? [{ value: 'custom', label: t('baseline.custom') }] : []),
-                ]}
-                value={values.baselinePreset}
-                onChange={(next) => setValues((current) => applyBaselinePreset(current, next as BaselinePreset))}
-              />
-              <div className="form-field-hint">
-                {values.baselinePreset !== 'custom'
-                  ? t('baseline.presetSummary', {
-                      ratio: BASELINE_PRESETS[values.baselinePreset].minRatio,
-                      z: BASELINE_PRESETS[values.baselinePreset].minZ,
-                      days: BASELINE_PRESETS[values.baselinePreset].lookbackDays,
-                    })
-                  : t('baseline.customSummary')}
-              </div>
-            </FormField>
+            <FormRow cols={1}>
+              <FormField label={t('form.sensitivity')} hint={t('form.sensitivityHint')}>
+                <ChipPicker<string>
+                  options={[
+                    { value: 'sensitive', label: t('baseline.sensitive') },
+                    { value: 'balanced', label: t('baseline.balanced') },
+                    { value: 'calm', label: t('baseline.calm') },
+                    ...(values.baselinePreset === 'custom' ? [{ value: 'custom', label: t('baseline.custom') }] : []),
+                  ]}
+                  value={values.baselinePreset}
+                  onChange={(next) => setValues((current) => applyBaselinePreset(current, next as BaselinePreset))}
+                />
+                <div className="form-field-hint">
+                  {values.baselinePreset !== 'custom'
+                    ? t('baseline.presetSummary', {
+                        ratio: BASELINE_PRESETS[values.baselinePreset].minRatio,
+                        z: BASELINE_PRESETS[values.baselinePreset].minZ,
+                        days: BASELINE_PRESETS[values.baselinePreset].lookbackDays,
+                      })
+                    : t('baseline.customSummary')}
+                </div>
+              </FormField>
+            </FormRow>
             <div>
               <Button
                 variant="subtle"
                 size="compact-xs"
                 color="gray"
+                // The form is portaled out of the app shell, where the design system's subtle-button colour does not
+                // apply and Mantine's own gray is the near-invisible border tone.
+                style={{ color: 'var(--ds-text-muted)' }}
                 leftSection={showAdvanced ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
                 aria-expanded={showAdvanced}
                 onClick={() => setShowAdvanced((open) => !open)}
@@ -695,41 +704,49 @@ export default function AlertRuleForm({
 
       {/* 4 · severity & notifications */}
       <FormSection number={4} title={t('form.sectionNotify')} description={t('form.sectionNotifyDescription')} done={checks.channels}>
-        <FormField label={t('form.severity')} hint={t('form.severityHint')}>
-          <ChipPicker<string>
-            options={SEVERITIES.map((severity) => ({ value: severity, label: t(`severity.${severity}`) }))}
-            value={values.severity}
-            onChange={(next) => patch({ severity: next as AlertRuleSeverity })}
-          />
-        </FormField>
-        <FormField label={t('form.channels')} hint={t('form.channelsHint')}>
-          <ChannelsEditor
-            value={values.channels}
-            onChange={(channels) => patch({ channels })}
-            allowedTypes={meta?.channelTypes?.length ? meta.channelTypes : ALL_CHANNEL_TYPES}
-            onTest={onTestChannel}
-            canTest={canTestChannel}
-            maxChannels={Math.max(0, MAX_CHANNELS - values.libraryRefs.length)}
-          />
-        </FormField>
-        <FormField label={optional(t('libraryUx.fieldLabel'))} hint={t('libraryUx.fieldHint')}>
-          <LibraryChannelPicker
-            value={values.libraryRefs}
-            onChange={(libraryRefs) => patch({ libraryRefs })}
-            library={library.channels}
-            loading={library.loading}
-            error={library.error}
-            canAddMore={values.channels.length + values.libraryRefs.length < MAX_CHANNELS}
-          />
-        </FormField>
-        <ToggleList>
-          <ToggleRow
-            label={t('form.notifyOnResolve')}
-            description={t('form.notifyOnResolveDescription')}
-            checked={values.notifyOnResolve}
-            onChange={(next) => patch({ notifyOnResolve: next })}
-          />
-        </ToggleList>
+        <FormRow cols={1}>
+          <FormField label={t('form.severity')} hint={t('form.severityHint')}>
+            <ChipPicker<string>
+              options={SEVERITIES.map((severity) => ({ value: severity, label: t(`severity.${severity}`) }))}
+              value={values.severity}
+              onChange={(next) => patch({ severity: next as AlertRuleSeverity })}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={t('form.channels')} hint={t('form.channelsHint')}>
+            <ChannelsEditor
+              value={values.channels}
+              onChange={(channels) => patch({ channels })}
+              allowedTypes={meta?.channelTypes?.length ? meta.channelTypes : ALL_CHANNEL_TYPES}
+              onTest={onTestChannel}
+              canTest={canTestChannel}
+              maxChannels={Math.max(0, MAX_CHANNELS - values.libraryRefs.length)}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={optional(t('libraryUx.fieldLabel'))} hint={t('libraryUx.fieldHint')}>
+            <LibraryChannelPicker
+              value={values.libraryRefs}
+              onChange={(libraryRefs) => patch({ libraryRefs })}
+              library={library.channels}
+              loading={library.loading}
+              error={library.error}
+              canAddMore={values.channels.length + values.libraryRefs.length < MAX_CHANNELS}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <ToggleList>
+            <ToggleRow
+              label={t('form.notifyOnResolve')}
+              description={t('form.notifyOnResolveDescription')}
+              checked={values.notifyOnResolve}
+              onChange={(next) => patch({ notifyOnResolve: next })}
+            />
+          </ToggleList>
+        </FormRow>
         <FormRow cols={2}>
           <FormField label={t('form.renotify')} hint={t('form.renotifyHint')}>
             <Select

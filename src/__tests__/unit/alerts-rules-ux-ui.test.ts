@@ -181,6 +181,23 @@ describe('rule form', () => {
   });
 });
 
+describe('rule form: layout', () => {
+  it('puts every stacked field in a form row, whose bottom margin is what spaces the fields', async () => {
+    nav.search = 'edit=r2';
+    rulesApi();
+    mounted = await mount(createElement(AlertsPage));
+    await settle(200);
+    const overlay = q('.form-overlay')!;
+    expect(overlay).not.toBeNull();
+    const fields = qa('.form-field', overlay);
+    expect(fields.length).toBeGreaterThan(8);
+    expect(fields.filter((field) => !field.closest('.form-row'))).toHaveLength(0);
+    // the "notify when resolved" switch sits in a row too, so it is not glued to the field above and below
+    const notify = qa('.form-toggle-list', overlay).find((list) => list.textContent?.includes('Notify when resolved'));
+    expect(notify?.parentElement?.classList.contains('form-row')).toBe(true);
+  });
+});
+
 describe('rule form: backtest', () => {
   it('words a single replayed firing in the singular', async () => {
     nav.search = 'edit=r2';
