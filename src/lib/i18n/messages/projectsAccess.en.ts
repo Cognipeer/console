@@ -119,6 +119,10 @@ export const projectsAccessEn = {
         modelProviderWarn: 'No model provider yet: agents and models in this project will not work until you assign one.',
         projectAdmin: 'A project admin is set',
         projectAdminWarn: 'No project admin yet: only workspace owners and admins will manage this project.',
+        defaultAlerts: 'Default alert rules',
+        defaultAlertsTitle: 'Add the default alert rules',
+        defaultAlertsHint: '5 rules watch the error rates of agents, models, knowledge bases, MCP servers and tools. Notifications go to the project admins. More templates in Alerts → Templates.',
+        defaultAlertsNoAdmin: 'No project admin selected: these notifications will go to the workspace owners and admins.',
       },
       summary: {
         title: 'Summary',

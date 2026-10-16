@@ -14,6 +14,7 @@ import type {
   IUserProject,
 } from '@/lib/database';
 import { listDirectoryProjectRules } from '@/enterprise/external-auth';
+import { defaultSetProgress } from '@/lib/services/alerts/alertTemplates';
 import { isGroupDirectoryManaged } from '@/lib/iam/identity';
 import {
   computeReadiness,
@@ -215,6 +216,8 @@ export interface ProjectOverview {
     groups: Array<{ groupId: string; name: string; role: string; source?: string }>;
   };
   activity: ProjectActivityEntry[];
+  /** The default alert rules the project has; null when that could not be read. */
+  defaultAlerts: { done: number; total: number } | null;
 }
 
 export async function buildProjectOverview(
@@ -294,6 +297,8 @@ export async function buildProjectOverview(
     users: userIndex,
   });
 
+  const defaultAlerts = await db.listAlertRules(tenantId, { projectId }).then(defaultSetProgress, () => null);
+
   return {
     project,
     stats,
@@ -309,5 +314,6 @@ export async function buildProjectOverview(
       })),
     },
     activity,
+    defaultAlerts,
   };
 }

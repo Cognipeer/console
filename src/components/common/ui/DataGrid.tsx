@@ -63,6 +63,8 @@ export interface DataGridEmpty {
     icon?: ReactNode;
     onClick: () => void;
   };
+  /** Rendered under the primary action (secondary buttons, a note). */
+  extra?: ReactNode;
 }
 
 export interface DataGridBulkAction<T> {
@@ -558,6 +560,7 @@ function EmptyView({ empty }: { empty?: DataGridEmpty }) {
           {empty.primaryAction.label}
         </Button>
       ) : null}
+      {empty.extra}
     </div>
   );
 }

@@ -20,6 +20,8 @@ export interface OverviewStats {
   tokens: number;
 }
 
+export type OverviewDefaultAlerts = { done: number; total: number } | null;
+
 export interface OverviewReadiness {
   hasModelProvider: boolean;
   missingDomains: string[];
@@ -74,6 +76,8 @@ export interface ProjectOverviewData {
   rules: OverviewRule[];
   groups: OverviewGroup[];
   activity: OverviewActivity[];
+  /** The default alert rules the project has (null: unknown). */
+  defaultAlerts: { done: number; total: number } | null;
 }
 
 const EMPTY_STATS: OverviewStats = {
@@ -133,6 +137,10 @@ export function parseOverview(raw: unknown): ProjectOverviewData | null {
       createdAt: parseDate(project.createdAt),
     },
     stats: r.stats ? parseStats(r.stats) : { ...EMPTY_STATS },
+    defaultAlerts: (() => {
+      const raw = asRecord(r.defaultAlerts);
+      return typeof raw.done === 'number' && typeof raw.total === 'number' ? { done: raw.done, total: raw.total } : null;
+    })(),
     readiness: {
       hasModelProvider: readiness.hasModelProvider === true,
       missingDomains: strings(readiness.missingDomains),
@@ -192,16 +200,18 @@ export function parseOverview(raw: unknown): ProjectOverviewData | null {
 
 // ── readiness ─────────────────────────────────────────────────────────────
 
-export type ReadinessFix = 'providers' | 'members' | 'limits';
+export type ReadinessFix = 'providers' | 'members' | 'limits' | 'alerts';
 
 export interface ReadinessItem {
-  /** `model`, `domain:<domain>`, `admin` or `limits`. */
+  /** `model`, `domain:<domain>`, `admin`, `limits` or `alerts`. */
   id: string;
   ok: boolean;
   /** The provider domain the row is about (`model`, `embedding`, ...). */
   domain?: string;
-  /** How many providers of that domain the project has. */
+  /** How many providers of that domain the project has (for `alerts`: the default rules it has). */
   count?: number;
+  /** For `alerts`: how many default rules there are. */
+  total?: number;
   /** The one-click fix offered while the row is not ok. */
   fix?: ReadinessFix;
 }
@@ -211,7 +221,11 @@ export interface ReadinessItem {
  * (the ones the project has, then the ones the workspace uses and it lacks),
  * a project admin, and a limit.
  */
-export function buildReadinessItems(readiness: OverviewReadiness, stats: OverviewStats): ReadinessItem[] {
+export function buildReadinessItems(
+  readiness: OverviewReadiness,
+  stats: OverviewStats,
+  defaultAlerts: OverviewDefaultAlerts = null,
+): ReadinessItem[] {
   const items: ReadinessItem[] = [
     {
       id: 'model',
@@ -235,6 +249,16 @@ export function buildReadinessItems(readiness: OverviewReadiness, stats: Overvie
 
   items.push({ id: 'admin', ok: readiness.hasProjectAdmin, ...(readiness.hasProjectAdmin ? {} : { fix: 'members' as const }) });
   items.push({ id: 'limits', ok: readiness.hasLimits, ...(readiness.hasLimits ? {} : { fix: 'limits' as const }) });
+  if (defaultAlerts && defaultAlerts.total > 0) {
+    const complete = defaultAlerts.done >= defaultAlerts.total;
+    items.push({
+      id: 'alerts',
+      ok: complete,
+      count: defaultAlerts.done,
+      total: defaultAlerts.total,
+      ...(complete ? {} : { fix: 'alerts' as const }),
+    });
+  }
   return items;
 }
 
@@ -255,6 +279,9 @@ export function readinessFixHref(fix: ReadinessFix, projectId: string): string {
       return projectTabHref(projectId, 'members');
     case 'limits':
       return newLimitHref({ projectId });
+    case 'alerts':
+      // The project page makes this project the active one, which the alert templates work on.
+      return '/dashboard/alerts/templates?show=default';
   }
 }
 
