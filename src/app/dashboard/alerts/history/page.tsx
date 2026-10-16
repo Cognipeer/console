@@ -1,292 +1,298 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Group,
-  Loader,
-  Paper,
-  Select,
-  Stack,
-  Text,
-  ThemeIcon,
-  Tooltip,
-} from '@mantine/core';
-import { notifications } from '@mantine/notifications';
-import {
-  IconArrowLeft,
-  IconBell,
-  IconBellCheck,
-  IconCheck,
-} from '@tabler/icons-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { Badge, Button, Group, Text } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
+import { IconArrowLeft, IconBellCheck, IconCheck } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import { useTranslations } from '@/lib/i18n';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
+import LoadError from '@/components/alerts/LoadError';
+import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import { entityHref, entityOf, entityTypeLabel, metricLabel } from '@/components/alerts/alertCatalog';
+import { useAlertMeta } from '@/components/alerts/useAlertMeta';
+import { userLabel, useUserDirectory } from '@/components/alerts/useUserDirectory';
+import { describeRowValue } from '@/components/alerts/incidentUi';
+import type { AlertEventDto } from '@/components/alerts/alertTypes';
+import { useLocale, useTranslations } from '@/lib/i18n';
 
-interface AlertEvent {
-  _id: string;
-  ruleName: string;
-  metric: string;
-  threshold: number;
-  actualValue: number;
-  status: 'fired' | 'resolved' | 'acknowledged';
-  firedAt: string;
-  resolvedAt?: string;
-  channels: Array<{ type: string; target: string; success: boolean; error?: string }>;
-  metadata?: Record<string, unknown>;
-}
+const PAGE_SIZE_OPTIONS = [25, 50];
 
-const METRIC_LABELS: Record<string, string> = {
-  error_rate: 'Error Rate',
-  avg_latency_ms: 'Avg Latency',
-  p95_latency_ms: 'P95 Latency',
-  total_cost: 'Total Cost',
-  total_requests: 'Total Requests',
-  gpu_cache_usage: 'GPU Cache',
-  request_queue_depth: 'Queue Depth',
-  guardrail_fail_rate: 'Fail Rate',
-  guardrail_avg_latency_ms: 'Avg Latency',
-  guardrail_total_evaluations: 'Total Evals',
-  rag_avg_latency_ms: 'Avg Latency',
-  rag_total_queries: 'Total Queries',
-  rag_failed_documents: 'Failed Docs',
-  mcp_error_rate: 'Error Rate',
-  mcp_avg_latency_ms: 'Avg Latency',
-  mcp_total_requests: 'Total Requests',
-  evaluation_pass_rate: 'Pass Rate',
-  evaluation_avg_score: 'Avg Score',
-  analysis_pass_rate: 'Pass Rate',
-  analysis_avg_judge_score: 'Avg Judge Score',
-  analysis_avg_accuracy: 'Avg Accuracy',
-  redteam_attack_success_rate: 'Attack Success Rate',
-  redteam_resilience_score: 'Resilience Score',
-};
-
-const METRIC_UNITS: Record<string, string> = {
-  error_rate: '%',
-  avg_latency_ms: 'ms',
-  p95_latency_ms: 'ms',
-  total_cost: 'USD',
-  total_requests: '',
-  gpu_cache_usage: '%',
-  request_queue_depth: '',
-  guardrail_fail_rate: '%',
-  guardrail_avg_latency_ms: 'ms',
-  guardrail_total_evaluations: '',
-  rag_avg_latency_ms: 'ms',
-  rag_total_queries: '',
-  rag_failed_documents: '',
-  mcp_error_rate: '%',
-  mcp_avg_latency_ms: 'ms',
-  mcp_total_requests: '',
-  evaluation_pass_rate: '%',
-  evaluation_avg_score: '%',
-  analysis_pass_rate: '%',
-  analysis_avg_judge_score: '%',
-  analysis_avg_accuracy: '%',
-  redteam_attack_success_rate: '%',
-  redteam_resilience_score: '%',
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  fired: 'red',
-  resolved: 'green',
-  acknowledged: 'blue',
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  fired: 'Fired',
-  resolved: 'Resolved',
-  acknowledged: 'Acknowledged',
+const STATUS_CLASSES: Record<AlertEventDto['status'], string> = {
+  fired: 'ds-badge ds-badge-err',
+  acknowledged: 'ds-badge ds-badge-info',
+  resolved: 'ds-badge ds-badge-ok',
 };
 
 export default function AlertHistoryPage() {
-  const [events, setEvents] = useState<AlertEvent[]>([]);
-  const [activeCount, setActiveCount] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const t = useTranslations('alerts');
+  const ti = useTranslations('incidents');
+  const locale = useLocale();
+  const { catalog } = useAlertMeta();
+  const directory = useUserDirectory();
 
-  const fetchEvents = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (statusFilter) params.set('status', statusFilter);
-      params.set('limit', '100');
-      const res = await fetch(`/api/alerts/history?${params.toString()}`);
-      if (!res.ok) throw new Error('Failed to fetch alert history');
-      const data = await res.json();
-      setEvents(data.events || []);
-      setActiveCount(data.activeCount || 0);
-    } catch (err) {
-      notifications.show({
-        title: t('error'),
-        message: err instanceof Error ? err.message : 'Failed to load alert history',
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [statusFilter, t]);
+  const [events, setEvents] = useState<AlertEventDto[]>([]);
+  const [activeCount, setActiveCount] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]!);
+
+  const controllerRef = useRef<AbortController | null>(null);
+  const load = useCallback(
+    async (silent = false) => {
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      if (silent) setRefreshing(true);
+      else setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (statusFilter) params.set('status', statusFilter);
+        // One extra row tells whether another page exists.
+        params.set('limit', String(pageSize + 1));
+        params.set('skip', String((page - 1) * pageSize));
+        const res = await fetch(`/api/alerts/history?${params.toString()}`, { signal: controller.signal });
+        if (!res.ok) throw new Error(await readApiError(res, t('loadHistoryError')));
+        const data = (await res.json()) as { events?: AlertEventDto[]; activeCount?: number };
+        const rows = data.events ?? [];
+        setHasMore(rows.length > pageSize);
+        setEvents(rows.slice(0, pageSize));
+        setActiveCount(data.activeCount ?? 0);
+        setLoadError(null);
+      } catch (error) {
+        if (isAbortError(error) || controller.signal.aborted) return;
+        setLoadError(error instanceof Error ? error.message : t('loadHistoryError'));
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    },
+    [statusFilter, page, pageSize, t],
+  );
 
   useEffect(() => {
-    fetchEvents();
-  }, [fetchEvents]);
+    void load();
+    return () => controllerRef.current?.abort();
+  }, [load]);
 
-  const handleAcknowledge = async (eventId: string) => {
+  const acknowledge = async (event: AlertEventDto) => {
     try {
-      const res = await fetch(`/api/alerts/history/${eventId}/acknowledge`, {
-        method: 'PATCH',
-      });
-      if (!res.ok) throw new Error('Failed to acknowledge alert');
-      setEvents((prev) =>
-        prev.map((e) => (e._id === eventId ? { ...e, status: 'acknowledged' as const } : e)),
-      );
-      setActiveCount((prev) => Math.max(0, prev - 1));
-      notifications.show({
-        title: t('acknowledged'),
-        message: t('acknowledgedMessage'),
-        color: 'teal',
-      });
-    } catch {
-      notifications.show({
-        title: t('error'),
-        message: t('acknowledgeError'),
-        color: 'red',
-      });
+      const res = await fetch(`/api/alerts/history/${event._id}/acknowledge`, { method: 'PATCH' });
+      if (!res.ok) throw new Error(await readApiError(res, t('acknowledgeError')));
+      notifications.show({ title: t('acknowledged'), message: t('acknowledgedMessage'), color: 'teal' });
+      void load(true);
+    } catch (error) {
+      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('acknowledgeError'), color: 'red' });
     }
   };
 
-  if (loading) {
-    return (
-      <Stack align="center" justify="center" h={400}>
-        <Loader size="lg" />
-      </Stack>
-    );
-  }
+  const needle = search.trim().toLowerCase();
+  const rows = needle
+    ? events.filter((event) => [event.ruleName, event.metric, metricLabel(catalog, event.metric, t), entityOf(event)?.key ?? ''].join(' ').toLowerCase().includes(needle))
+    : events;
+
+  const columns: DataGridColumn<AlertEventDto>[] = [
+    {
+      key: 'status',
+      label: t('columns.kind'),
+      render: (event) => <span className={STATUS_CLASSES[event.status] ?? 'ds-badge'}>{t(`eventStatus.${event.status}`)}</span>,
+    },
+    {
+      key: 'rule',
+      label: t('columns.rule'),
+      render: (event) => (
+        <div style={{ minWidth: 0 }}>
+          <Text size="sm" fw={600} lineClamp={1}>
+            {event.ruleName}
+          </Text>
+          <Text size="xs" c="dimmed" lineClamp={1}>
+            {metricLabel(catalog, event.metric, t)}
+          </Text>
+        </div>
+      ),
+    },
+    {
+      key: 'entity',
+      label: t('columns.entity'),
+      render: (event) => {
+        const entity = entityOf(event);
+        if (!entity) return <Text size="xs" c="dimmed">—</Text>;
+        const href = entityHref(entity.type, entity.key);
+        const chip = (
+          <span className="ds-badge" title={entityTypeLabel(entity.type, t)}>
+            <span className="ds-mono" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {entity.key}
+            </span>
+          </span>
+        );
+        return href ? (
+          <Link href={href} style={{ textDecoration: 'none' }}>
+            {chip}
+          </Link>
+        ) : (
+          chip
+        );
+      },
+    },
+    {
+      key: 'value',
+      label: t('columns.value'),
+      render: (event) => {
+        const text = describeRowValue(event, catalog, t, locale);
+        return (
+          <div>
+            <Text size="sm" fw={600}>
+              {text.value}
+            </Text>
+            {text.compare ? (
+              <Text size="xs" c="dimmed">
+                {text.compare}
+              </Text>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'fired',
+      label: t('columns.firedAt'),
+      render: (event) => (
+        <Text size="xs" title={formatDateTime(event.firedAt, locale)}>
+          {formatRelative(event.firedAt, locale)}
+        </Text>
+      ),
+    },
+    {
+      key: 'resolved',
+      label: t('columns.resolvedAt'),
+      render: (event) =>
+        event.resolvedAt ? (
+          <Text size="xs" title={formatDateTime(event.resolvedAt, locale)}>
+            {formatRelative(event.resolvedAt, locale)}
+          </Text>
+        ) : (
+          <Text size="xs" c="dimmed">
+            —
+          </Text>
+        ),
+    },
+    {
+      key: 'acknowledged',
+      label: t('columns.acknowledgedBy'),
+      render: (event) =>
+        event.acknowledgedAt ? (
+          <div>
+            <Text size="xs" lineClamp={1}>
+              {userLabel(event.acknowledgedBy, directory, { you: ti('you'), system: ti('system') })}
+            </Text>
+            <Text size="xs" c="dimmed" title={formatDateTime(event.acknowledgedAt, locale)}>
+              {formatRelative(event.acknowledgedAt, locale)}
+            </Text>
+          </div>
+        ) : (
+          <Text size="xs" c="dimmed">
+            —
+          </Text>
+        ),
+    },
+    {
+      key: 'notifications',
+      label: t('columns.notifications'),
+      render: (event) => {
+        const total = event.channels?.length ?? 0;
+        if (total === 0) return <Text size="xs" c="dimmed">—</Text>;
+        const sent = event.channels.filter((channel) => channel.success).length;
+        const failures = event.channels.filter((channel) => !channel.success && channel.error).map((channel) => `${channel.type}: ${channel.error}`);
+        return (
+          <Text size="xs" c={sent === total ? undefined : 'orange'} title={failures.join('\n') || undefined}>
+            {t('history.notificationsSent', { sent, total })}
+          </Text>
+        );
+      },
+    },
+  ];
 
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Alert History"
+        eyebrow={t('historyEyebrow')}
         title={t('historyTitle')}
         subtitle={t('historySubtitle')}
         actions={
           <Group gap="xs">
-            {activeCount > 0 && (
+            {activeCount > 0 ? (
               <Badge color="red" variant="filled" size="lg">
                 {activeCount} {t('activeAlerts')}
               </Badge>
-            )}
-            <Button
-              component={Link}
-              href="/dashboard/alerts"
-              variant="light"
-              size="xs"
-              leftSection={<IconArrowLeft size={14} />}
-            >
+            ) : null}
+            <Button component={Link} href="/dashboard/alerts" variant="light" size="xs" leftSection={<IconArrowLeft size={14} />}>
               {t('backToRules')}
             </Button>
           </Group>
         }
       />
 
-      {/* Filters */}
-      <Group>
-        <Select
-          size="xs"
-          placeholder={t('filterByStatus')}
-          data={[
-            { value: 'fired', label: 'Fired' },
-            { value: 'acknowledged', label: 'Acknowledged' },
-            { value: 'resolved', label: 'Resolved' },
-          ]}
-          value={statusFilter}
-          onChange={setStatusFilter}
-          clearable
-          w={200}
-        />
-      </Group>
+      {loadError ? (
+        <div style={{ marginBottom: 12 }}>
+          <LoadError message={loadError} onRetry={() => void load(events.length > 0)} />
+        </div>
+      ) : null}
 
-      {/* Events List */}
-      {events.length === 0 ? (
-        <Paper p="xl" radius="md" withBorder>
-          <Stack align="center" gap="md" py="xl">
-            <ThemeIcon size={60} radius="xl" variant="light" color="green">
-              <IconBellCheck size={28} />
-            </ThemeIcon>
-            <Text size="lg" fw={600}>{t('noEvents')}</Text>
-            <Text size="sm" c="dimmed" ta="center" maw={400}>
-              {t('noEventsDescription')}
-            </Text>
-          </Stack>
-        </Paper>
-      ) : (
-        <Stack gap="sm">
-          {events.map((event) => (
-            <Paper key={event._id} p="md" radius="md" withBorder>
-              <Group justify="space-between" wrap="nowrap">
-                <Group gap="md" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                  <ThemeIcon
-                    size={36}
-                    radius="md"
-                    variant="light"
-                    color={STATUS_COLORS[event.status] ?? 'gray'}
-                  >
-                    <IconBell size={18} />
-                  </ThemeIcon>
-                  <div style={{ minWidth: 0 }}>
-                    <Group gap="xs" wrap="nowrap">
-                      <Text fw={600} size="sm" lineClamp={1}>
-                        {event.ruleName}
-                      </Text>
-                      <Badge
-                        size="xs"
-                        variant="light"
-                        color={STATUS_COLORS[event.status] ?? 'gray'}
-                      >
-                        {STATUS_LABELS[event.status] ?? event.status}
-                      </Badge>
-                    </Group>
-                    <Text size="xs" c="dimmed" mt={2}>
-                      {METRIC_LABELS[event.metric] ?? event.metric}:{' '}
-                      <Text span fw={600} c="orange">
-                        {Number(event.actualValue).toFixed(2)}
-                        {METRIC_UNITS[event.metric] ?? ''}
-                      </Text>
-                      {' '}(threshold: {event.threshold}
-                      {METRIC_UNITS[event.metric] ?? ''})
-                    </Text>
-                    <Text size="xs" c="dimmed" mt={2}>
-                      {new Date(event.firedAt).toLocaleString()}
-                      {event.channels.length > 0 && (
-                        <Text span ml="xs">
-                          · {event.channels.filter((c) => c.success).length}/{event.channels.length} notifications sent
-                        </Text>
-                      )}
-                    </Text>
-                  </div>
-                </Group>
-                <Group gap="xs" wrap="nowrap">
-                  {event.status === 'fired' && (
-                    <Tooltip label={t('acknowledge')}>
-                      <ActionIcon
-                        variant="light"
-                        color="blue"
-                        size="sm"
-                        onClick={() => handleAcknowledge(event._id)}
-                      >
-                        <IconCheck size={14} />
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                </Group>
-              </Group>
-            </Paper>
-          ))}
-        </Stack>
-      )}
+      <DataGrid<AlertEventDto>
+        records={rows}
+        rowKey={(event) => event._id}
+        columns={columns}
+        loading={loading}
+        refreshing={refreshing}
+        onRefresh={() => void load(true)}
+        search={{ value: search, onChange: setSearch, placeholder: t('searchHistoryPlaceholder') }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: (value) => {
+              setStatusFilter(value);
+              setPage(1);
+            },
+            options: [
+              { value: '', label: t('filters.allStatuses') },
+              { value: 'fired', label: t('eventStatus.fired') },
+              { value: 'acknowledged', label: t('eventStatus.acknowledged') },
+              { value: 'resolved', label: t('eventStatus.resolved') },
+            ],
+            ariaLabel: t('filterByStatus'),
+            width: 160,
+          },
+        ]}
+        rowActions={(event) => [
+          {
+            id: 'acknowledge',
+            label: t('acknowledge'),
+            icon: <IconCheck size={14} />,
+            hidden: event.status !== 'fired',
+            onClick: () => void acknowledge(event),
+          },
+        ]}
+        empty={{ icon: <IconBellCheck size={28} />, title: t('noEvents'), description: t('noEventsDescription') }}
+        pagination={{
+          page,
+          onPageChange: setPage,
+          pageSize,
+          onPageSizeChange: (size) => {
+            setPageSize(size);
+            setPage(1);
+          },
+          pageSizeOptions: PAGE_SIZE_OPTIONS,
+          hasMore,
+        }}
+      />
     </PageContainer>
   );
 }

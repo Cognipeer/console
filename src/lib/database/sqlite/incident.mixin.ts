@@ -4,9 +4,23 @@
  * Incidents are created when alerts fire and track resolution lifecycle.
  */
 
-import type { IIncident, IncidentStatus, IncidentSeverity } from '../provider.interface';
+import type { IIncident, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+
+const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
+
+function clampLimit(value: number | undefined, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.floor(n), 1), 200);
+}
+
+function clampSkip(value: number | undefined): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
 
 export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class IncidentOps extends Base {
@@ -22,10 +36,14 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         (id, tenantId, projectId, alertEventId, ruleId, ruleName, metric,
          threshold, actualValue, severity, status, assignedTo, notes,
          firedAt, acknowledgedAt, resolvedAt, closedAt, resolvedBy,
+         module, entityType, entityKey, baselineValue, lastValue, peakValue,
+         autoResolved, acknowledgedBy, context,
          metadata, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @alertEventId, @ruleId, @ruleName, @metric,
          @threshold, @actualValue, @severity, @status, @assignedTo, @notes,
          @firedAt, @acknowledgedAt, @resolvedAt, @closedAt, @resolvedBy,
+         @module, @entityType, @entityKey, @baselineValue, @lastValue, @peakValue,
+         @autoResolved, @acknowledgedBy, @context,
          @metadata, @createdAt, @updatedAt)
       `).run({
         id,
@@ -52,6 +70,15 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           ? (incident.closedAt instanceof Date ? incident.closedAt.toISOString() : incident.closedAt)
           : null,
         resolvedBy: incident.resolvedBy ?? null,
+        module: incident.module ?? null,
+        entityType: incident.entityType ?? null,
+        entityKey: incident.entityKey ?? null,
+        baselineValue: incident.baselineValue ?? null,
+        lastValue: incident.lastValue ?? null,
+        peakValue: incident.peakValue ?? null,
+        autoResolved: incident.autoResolved === undefined ? null : this.toBoolInt(incident.autoResolved),
+        acknowledgedBy: incident.acknowledgedBy ?? null,
+        context: incident.context ? this.toJson(incident.context) : null,
         metadata: this.toJson(incident.metadata ?? {}),
         createdAt: now,
         updatedAt: now,
@@ -63,6 +90,7 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
     async updateIncident(
       id: string,
       data: Partial<Omit<IIncident, 'tenantId' | 'alertEventId' | 'ruleId'>>,
+      projectId?: string,
     ): Promise<IIncident | null> {
       const db = this.getTenantDb();
       const now = this.now();
@@ -88,14 +116,30 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.resolvedBy !== undefined) { sets.push('resolvedBy = @resolvedBy'); params.resolvedBy = data.resolvedBy; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
       if (data.ruleName !== undefined) { sets.push('ruleName = @ruleName'); params.ruleName = data.ruleName; }
+      if (data.actualValue !== undefined) { sets.push('actualValue = @actualValue'); params.actualValue = data.actualValue; }
+      if (data.module !== undefined) { sets.push('module = @module'); params.module = data.module ?? null; }
+      if (data.entityType !== undefined) { sets.push('entityType = @entityType'); params.entityType = data.entityType ?? null; }
+      if (data.entityKey !== undefined) { sets.push('entityKey = @entityKey'); params.entityKey = data.entityKey ?? null; }
+      if (data.baselineValue !== undefined) { sets.push('baselineValue = @baselineValue'); params.baselineValue = data.baselineValue ?? null; }
+      if (data.lastValue !== undefined) { sets.push('lastValue = @lastValue'); params.lastValue = data.lastValue ?? null; }
+      if (data.peakValue !== undefined) { sets.push('peakValue = @peakValue'); params.peakValue = data.peakValue ?? null; }
+      if (data.autoResolved !== undefined) { sets.push('autoResolved = @autoResolved'); params.autoResolved = data.autoResolved === null ? null : this.toBoolInt(data.autoResolved); }
+      if (data.acknowledgedBy !== undefined) { sets.push('acknowledgedBy = @acknowledgedBy'); params.acknowledgedBy = data.acknowledgedBy ?? null; }
+      if (data.context !== undefined) { sets.push('context = @context'); params.context = data.context ? this.toJson(data.context) : null; }
 
-      db.prepare(`UPDATE ${TABLES.incidents} SET ${sets.join(', ')} WHERE id = @id`).run(params);
-      return this.findIncidentById(id);
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @scopeProjectId'; params.scopeProjectId = projectId; }
+      const result = db.prepare(`UPDATE ${TABLES.incidents} SET ${sets.join(', ')} WHERE ${where}`).run(params);
+      if (result.changes === 0) return null;
+      return this.findIncidentById(id, projectId);
     }
 
-    async findIncidentById(id: string): Promise<IIncident | null> {
+    async findIncidentById(id: string, projectId?: string): Promise<IIncident | null> {
       const db = this.getTenantDb();
-      const row = db.prepare(`SELECT * FROM ${TABLES.incidents} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      const params: Record<string, unknown> = { id };
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+      const row = db.prepare(`SELECT * FROM ${TABLES.incidents} WHERE ${where}`).get(params) as SqliteRow | undefined;
       return row ? this.mapIncidentRow(row) : null;
     }
 
@@ -114,6 +158,8 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         ruleId?: string;
         status?: IncidentStatus;
         severity?: IncidentSeverity;
+        entityKey?: string;
+        module?: AlertModule;
         limit?: number;
         skip?: number;
       },
@@ -125,11 +171,13 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (options?.ruleId) { clauses.push('ruleId = @ruleId'); params.ruleId = options.ruleId; }
       if (options?.status) { clauses.push('status = @status'); params.status = options.status; }
       if (options?.severity) { clauses.push('severity = @severity'); params.severity = options.severity; }
+      if (options?.entityKey) { clauses.push('entityKey = @entityKey'); params.entityKey = options.entityKey; }
+      if (options?.module) { clauses.push('module = @module'); params.module = options.module; }
 
-      const limit = options?.limit ?? 50;
-      const skip = options?.skip ?? 0;
+      params.limit = clampLimit(options?.limit, 50);
+      params.skip = clampSkip(options?.skip);
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.incidents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT ${limit} OFFSET ${skip}`,
+        `SELECT * FROM ${TABLES.incidents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT @limit OFFSET @skip`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapIncidentRow(r));
     }
@@ -147,6 +195,19 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         `SELECT COUNT(*) as cnt FROM ${TABLES.incidents} WHERE ${clauses.join(' AND ')}`,
       ).get(params) as SqliteRow;
       return (row.cnt as number) || 0;
+    }
+
+    async countIncidentsByStatus(projectId: string): Promise<Record<IncidentStatus, number>> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT status, COUNT(*) as cnt FROM ${TABLES.incidents} WHERE projectId = @projectId GROUP BY status`,
+      ).all({ projectId }) as SqliteRow[];
+      const counts = Object.fromEntries(INCIDENT_STATUSES.map((st) => [st, 0])) as Record<IncidentStatus, number>;
+      for (const row of rows) {
+        const status = row.status as IncidentStatus;
+        if (status in counts) counts[status] = (row.cnt as number) || 0;
+      }
+      return counts;
     }
 
     protected mapIncidentRow(r: SqliteRow): IIncident {
@@ -169,6 +230,15 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         resolvedAt: r.resolvedAt ? this.toDate(r.resolvedAt) : undefined,
         closedAt: r.closedAt ? this.toDate(r.closedAt) : undefined,
         resolvedBy: r.resolvedBy as string | undefined,
+        ...(r.module ? { module: r.module as IIncident['module'] } : {}),
+        ...(r.entityType ? { entityType: r.entityType as IIncident['entityType'] } : {}),
+        ...(r.entityKey !== null && r.entityKey !== undefined ? { entityKey: r.entityKey as string } : {}),
+        ...(r.baselineValue !== null && r.baselineValue !== undefined ? { baselineValue: r.baselineValue as number } : {}),
+        ...(r.lastValue !== null && r.lastValue !== undefined ? { lastValue: r.lastValue as number } : {}),
+        ...(r.peakValue !== null && r.peakValue !== undefined ? { peakValue: r.peakValue as number } : {}),
+        ...(r.autoResolved !== null && r.autoResolved !== undefined ? { autoResolved: this.fromBoolInt(r.autoResolved) } : {}),
+        ...(r.acknowledgedBy ? { acknowledgedBy: r.acknowledgedBy as string } : {}),
+        ...(r.context ? { context: this.parseJson(r.context, undefined) } : {}),
         metadata: this.parseJson(r.metadata, {}),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),

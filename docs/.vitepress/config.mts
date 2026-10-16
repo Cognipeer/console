@@ -243,6 +243,7 @@ export default defineConfig({
             { text: 'Memory', link: '/api/memory' },
             { text: 'Config', link: '/api/config' },
             { text: 'Cluster', link: '/api/cluster' },
+            { text: 'Alerts', link: '/api/alerts' },
             { text: 'Incidents', link: '/api/incidents' },
             { text: 'Health', link: '/api/health' },
           ],

@@ -40,6 +40,7 @@ export const TABLES = {
   models: 'models',
   modelUsageLogs: 'model_usage_logs',
   usageDaily: 'usage_daily',
+  entityMetrics: 'entity_metrics',
   externalModelPricing: 'external_model_pricing',
   vectorIndexes: 'vector_indexes',
   vectorQueryLogs: 'vector_query_logs',
@@ -65,6 +66,7 @@ export const TABLES = {
   piiPolicies: 'pii_policies',
   alertRules: 'alert_rules',
   alertEvents: 'alert_events',
+  alertStates: 'alert_states',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',
@@ -965,6 +967,34 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentTracingEvents, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'totalReasoningTokens', 'totalReasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.agentTracingSessions, 'truncatedEvents', 'truncatedEvents INTEGER DEFAULT 0');
+
+    // Entity health: per-session error counters + what was already counted in
+    // entity_metrics (idempotency), and alert rule/event/incident v2 fields.
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'errorEvents', 'errorEvents INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'toolErrors', 'toolErrors INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'aiErrors', 'aiErrors INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'metricsOutcome', 'metricsOutcome TEXT');
+    this.ensureTableColumn(db, TABLES.agentTracingSessions, 'statusExplicit', 'statusExplicit INTEGER DEFAULT 0');
+    this.ensureTableColumn(db, TABLES.alertRules, 'entity', 'entity TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'severity', 'severity TEXT');
+    this.ensureTableColumn(db, TABLES.alertRules, 'notifyOnResolve', 'notifyOnResolve INTEGER');
+    this.ensureTableColumn(db, TABLES.alertRules, 'renotifyMinutes', 'renotifyMinutes INTEGER');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'entityType', 'entityType TEXT');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'entityKey', 'entityKey TEXT');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'baselineValue', 'baselineValue REAL');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'sampleCount', 'sampleCount INTEGER');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'acknowledgedBy', 'acknowledgedBy TEXT');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'acknowledgedAt', 'acknowledgedAt TEXT');
+    this.ensureTableColumn(db, TABLES.alertEvents, 'kind', 'kind TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'module', 'module TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'entityType', 'entityType TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'entityKey', 'entityKey TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'baselineValue', 'baselineValue REAL');
+    this.ensureTableColumn(db, TABLES.incidents, 'lastValue', 'lastValue REAL');
+    this.ensureTableColumn(db, TABLES.incidents, 'peakValue', 'peakValue REAL');
+    this.ensureTableColumn(db, TABLES.incidents, 'autoResolved', 'autoResolved INTEGER');
+    this.ensureTableColumn(db, TABLES.incidents, 'acknowledgedBy', 'acknowledgedBy TEXT');
+    this.ensureTableColumn(db, TABLES.incidents, 'context', 'context TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
@@ -1147,6 +1177,26 @@ export class SQLiteProviderBase {
         ON ${TABLES.agentTracingSessions}(projectId, status, startedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_agent_startedAt
         ON ${TABLES.agentTracingSessions}(projectId, agentName, startedAt DESC);
+    `);
+
+    // Stale-session finalizer scan (status 'in_progress' and updatedAt older
+    // than a cutoff, tenant-wide) and the alert/incident lookups. Created here
+    // because the filtered columns may have been added by ensureTableColumn.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tracing_sessions_status_updatedAt
+        ON ${TABLES.agentTracingSessions}(status, updatedAt);
+      CREATE INDEX IF NOT EXISTS idx_alert_events_rule_firedAt
+        ON ${TABLES.alertEvents}(ruleId, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_alert_events_project_firedAt
+        ON ${TABLES.alertEvents}(projectId, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_incidents_project_status_firedAt
+        ON ${TABLES.incidents}(projectId, status, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_incidents_rule_entity
+        ON ${TABLES.incidents}(ruleId, entityKey);
+      CREATE INDEX IF NOT EXISTS idx_incidents_project_entity_firedAt
+        ON ${TABLES.incidents}(projectId, entityKey, firedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_incidents_alertEventId
+        ON ${TABLES.incidents}(alertEventId);
     `);
 
     // Attribution index — must be created here (after applyTenantMigrations)

@@ -8,6 +8,18 @@ import type { IAlertRule, IAlertEvent, AlertEventStatus } from '../provider.inte
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
+function clampLimit(value: number | undefined, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.floor(n), 1), 200);
+}
+
+function clampSkip(value: number | undefined): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
 export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class AlertOps extends Base {
     // ── Alert rule operations ────────────────────────────────────────
@@ -22,10 +34,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       db.prepare(`
         INSERT INTO ${TABLES.alertRules}
         (id, tenantId, projectId, name, description, module, enabled, metric,
-         condition, windowMinutes, cooldownMinutes, scope, channels,
+         condition, windowMinutes, cooldownMinutes, scope, entity, severity,
+         notifyOnResolve, renotifyMinutes, channels,
          lastTriggeredAt, createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @description, @module, @enabled, @metric,
-         @condition, @windowMinutes, @cooldownMinutes, @scope, @channels,
+         @condition, @windowMinutes, @cooldownMinutes, @scope, @entity, @severity,
+         @notifyOnResolve, @renotifyMinutes, @channels,
          @lastTriggeredAt, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -40,6 +54,10 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         windowMinutes: rule.windowMinutes,
         cooldownMinutes: rule.cooldownMinutes,
         scope: this.toJson(rule.scope ?? {}),
+        entity: rule.entity ? this.toJson(rule.entity) : null,
+        severity: rule.severity ?? null,
+        notifyOnResolve: rule.notifyOnResolve === undefined ? null : this.toBoolInt(rule.notifyOnResolve),
+        renotifyMinutes: rule.renotifyMinutes ?? null,
         channels: this.toJson(rule.channels),
         lastTriggeredAt: rule.lastTriggeredAt ? rule.lastTriggeredAt.toISOString() : null,
         createdBy: rule.createdBy,
@@ -54,6 +72,7 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
     async updateAlertRule(
       id: string,
       data: Partial<Omit<IAlertRule, 'tenantId' | 'createdBy'>>,
+      projectId?: string,
     ): Promise<IAlertRule | null> {
       const db = this.getTenantDb();
       const now = this.now();
@@ -69,23 +88,37 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.windowMinutes !== undefined) { sets.push('windowMinutes = @windowMinutes'); params.windowMinutes = data.windowMinutes; }
       if (data.cooldownMinutes !== undefined) { sets.push('cooldownMinutes = @cooldownMinutes'); params.cooldownMinutes = data.cooldownMinutes; }
       if (data.scope !== undefined) { sets.push('scope = @scope'); params.scope = this.toJson(data.scope); }
+      // `null` clears an optional v2 field (JSON.stringify would store 'null').
+      if (data.entity !== undefined) { sets.push('entity = @entity'); params.entity = data.entity ? this.toJson(data.entity) : null; }
+      if (data.severity !== undefined) { sets.push('severity = @severity'); params.severity = data.severity ?? null; }
+      if (data.notifyOnResolve !== undefined) { sets.push('notifyOnResolve = @notifyOnResolve'); params.notifyOnResolve = data.notifyOnResolve === null ? null : this.toBoolInt(data.notifyOnResolve); }
+      if (data.renotifyMinutes !== undefined) { sets.push('renotifyMinutes = @renotifyMinutes'); params.renotifyMinutes = data.renotifyMinutes ?? null; }
       if (data.channels !== undefined) { sets.push('channels = @channels'); params.channels = this.toJson(data.channels); }
       if (data.lastTriggeredAt !== undefined) { sets.push('lastTriggeredAt = @lastTriggeredAt'); params.lastTriggeredAt = data.lastTriggeredAt instanceof Date ? data.lastTriggeredAt.toISOString() : data.lastTriggeredAt; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
-      db.prepare(`UPDATE ${TABLES.alertRules} SET ${sets.join(', ')} WHERE id = @id`).run(params);
-      return this.findAlertRuleById(id);
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @scopeProjectId'; params.scopeProjectId = projectId; }
+      const result = db.prepare(`UPDATE ${TABLES.alertRules} SET ${sets.join(', ')} WHERE ${where}`).run(params);
+      if (result.changes === 0) return null;
+      return this.findAlertRuleById(id, projectId);
     }
 
-    async deleteAlertRule(id: string): Promise<boolean> {
+    async deleteAlertRule(id: string, projectId?: string): Promise<boolean> {
       const db = this.getTenantDb();
-      return db.prepare(`DELETE FROM ${TABLES.alertRules} WHERE id = @id`).run({ id }).changes === 1;
+      const params: Record<string, unknown> = { id };
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+      return db.prepare(`DELETE FROM ${TABLES.alertRules} WHERE ${where}`).run(params).changes === 1;
     }
 
-    async findAlertRuleById(id: string): Promise<IAlertRule | null> {
+    async findAlertRuleById(id: string, projectId?: string): Promise<IAlertRule | null> {
       const db = this.getTenantDb();
-      const row = db.prepare(`SELECT * FROM ${TABLES.alertRules} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      const params: Record<string, unknown> = { id };
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+      const row = db.prepare(`SELECT * FROM ${TABLES.alertRules} WHERE ${where}`).get(params) as SqliteRow | undefined;
       return row ? this.mapRuleRow(row) : null;
     }
 
@@ -115,9 +148,11 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       db.prepare(`
         INSERT INTO ${TABLES.alertEvents}
         (id, tenantId, projectId, ruleId, ruleName, metric, threshold, actualValue,
-         status, channels, firedAt, resolvedAt, metadata)
+         status, channels, firedAt, resolvedAt, entityType, entityKey, baselineValue,
+         sampleCount, acknowledgedBy, acknowledgedAt, kind, metadata)
         VALUES (@id, @tenantId, @projectId, @ruleId, @ruleName, @metric, @threshold, @actualValue,
-         @status, @channels, @firedAt, @resolvedAt, @metadata)
+         @status, @channels, @firedAt, @resolvedAt, @entityType, @entityKey, @baselineValue,
+         @sampleCount, @acknowledgedBy, @acknowledgedAt, @kind, @metadata)
       `).run({
         id,
         tenantId: event.tenantId,
@@ -131,6 +166,13 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         channels: this.toJson(event.channels),
         firedAt: event.firedAt instanceof Date ? event.firedAt.toISOString() : event.firedAt,
         resolvedAt: event.resolvedAt ? (event.resolvedAt instanceof Date ? event.resolvedAt.toISOString() : event.resolvedAt) : null,
+        entityType: event.entityType ?? null,
+        entityKey: event.entityKey ?? null,
+        baselineValue: event.baselineValue ?? null,
+        sampleCount: event.sampleCount ?? null,
+        acknowledgedBy: event.acknowledgedBy ?? null,
+        acknowledgedAt: event.acknowledgedAt ? (event.acknowledgedAt instanceof Date ? event.acknowledgedAt.toISOString() : event.acknowledgedAt) : null,
+        kind: event.kind ?? null,
         metadata: this.toJson(event.metadata ?? {}),
       });
 
@@ -154,10 +196,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (options?.ruleId) { clauses.push('ruleId = @ruleId'); params.ruleId = options.ruleId; }
       if (options?.status) { clauses.push('status = @status'); params.status = options.status; }
 
-      const limit = options?.limit ?? 50;
-      const skip = options?.skip ?? 0;
+      const limit = clampLimit(options?.limit, 50);
+      const skip = clampSkip(options?.skip);
+      params.limit = limit;
+      params.skip = skip;
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.alertEvents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT ${limit} OFFSET ${skip}`,
+        `SELECT * FROM ${TABLES.alertEvents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT @limit OFFSET @skip`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapEventRow(r));
     }
@@ -169,14 +213,37 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const db = this.getTenantDb();
       const sets: string[] = [];
       const params: Record<string, unknown> = { id };
+      const iso = (v: unknown) => (v instanceof Date ? v.toISOString() : v ?? null);
 
+      if (data.ruleName !== undefined) { sets.push('ruleName = @ruleName'); params.ruleName = data.ruleName; }
+      if (data.threshold !== undefined) { sets.push('threshold = @threshold'); params.threshold = data.threshold; }
+      if (data.actualValue !== undefined) { sets.push('actualValue = @actualValue'); params.actualValue = data.actualValue; }
       if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status; }
-      if (data.resolvedAt !== undefined) { sets.push('resolvedAt = @resolvedAt'); params.resolvedAt = data.resolvedAt instanceof Date ? data.resolvedAt.toISOString() : data.resolvedAt; }
+      if (data.channels !== undefined) { sets.push('channels = @channels'); params.channels = this.toJson(data.channels); }
+      if (data.firedAt !== undefined) { sets.push('firedAt = @firedAt'); params.firedAt = iso(data.firedAt); }
+      if (data.resolvedAt !== undefined) { sets.push('resolvedAt = @resolvedAt'); params.resolvedAt = iso(data.resolvedAt); }
+      if (data.entityType !== undefined) { sets.push('entityType = @entityType'); params.entityType = data.entityType ?? null; }
+      if (data.entityKey !== undefined) { sets.push('entityKey = @entityKey'); params.entityKey = data.entityKey ?? null; }
+      if (data.baselineValue !== undefined) { sets.push('baselineValue = @baselineValue'); params.baselineValue = data.baselineValue ?? null; }
+      if (data.sampleCount !== undefined) { sets.push('sampleCount = @sampleCount'); params.sampleCount = data.sampleCount ?? null; }
+      if (data.acknowledgedBy !== undefined) { sets.push('acknowledgedBy = @acknowledgedBy'); params.acknowledgedBy = data.acknowledgedBy ?? null; }
+      if (data.acknowledgedAt !== undefined) { sets.push('acknowledgedAt = @acknowledgedAt'); params.acknowledgedAt = iso(data.acknowledgedAt); }
+      if (data.kind !== undefined) { sets.push('kind = @kind'); params.kind = data.kind ?? null; }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
 
       if (sets.length === 0) return this.findAlertEventById(id);
-      db.prepare(`UPDATE ${TABLES.alertEvents} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      const result = db.prepare(`UPDATE ${TABLES.alertEvents} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      if (result.changes === 0) return null;
       return this.findAlertEventById(id);
+    }
+
+    async findAlertEventById(id: string, projectId?: string): Promise<IAlertEvent | null> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = { id };
+      let where = 'id = @id';
+      if (projectId !== undefined) { where += ' AND projectId = @projectId'; params.projectId = projectId; }
+      const row = db.prepare(`SELECT * FROM ${TABLES.alertEvents} WHERE ${where}`).get(params) as SqliteRow | undefined;
+      return row ? this.mapEventRow(row) : null;
     }
 
     async countActiveAlerts(tenantId: string, projectId?: string): Promise<number> {
@@ -192,12 +259,6 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     // ── Helpers ──────────────────────────────────────────────────────
 
-    protected async findAlertEventById(id: string): Promise<IAlertEvent | null> {
-      const db = this.getTenantDb();
-      const row = db.prepare(`SELECT * FROM ${TABLES.alertEvents} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
-      return row ? this.mapEventRow(row) : null;
-    }
-
     protected mapRuleRow(r: SqliteRow): IAlertRule {
       return {
         _id: r.id as string,
@@ -212,6 +273,10 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         windowMinutes: r.windowMinutes as number,
         cooldownMinutes: r.cooldownMinutes as number,
         scope: this.parseJson(r.scope, {}),
+        ...(r.entity ? { entity: this.parseJson(r.entity, undefined) } : {}),
+        ...(r.severity ? { severity: r.severity as IAlertRule['severity'] } : {}),
+        ...(r.notifyOnResolve !== null && r.notifyOnResolve !== undefined ? { notifyOnResolve: this.fromBoolInt(r.notifyOnResolve) } : {}),
+        ...(r.renotifyMinutes !== null && r.renotifyMinutes !== undefined ? { renotifyMinutes: r.renotifyMinutes as number } : {}),
         channels: this.parseJson(r.channels, []),
         lastTriggeredAt: r.lastTriggeredAt ? this.toDate(r.lastTriggeredAt) : undefined,
         createdBy: r.createdBy as string,
@@ -235,6 +300,13 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         channels: this.parseJson(r.channels, []),
         firedAt: this.toDate(r.firedAt) ?? new Date(),
         resolvedAt: r.resolvedAt ? this.toDate(r.resolvedAt) : undefined,
+        ...(r.entityType ? { entityType: r.entityType as IAlertEvent['entityType'] } : {}),
+        ...(r.entityKey !== null && r.entityKey !== undefined ? { entityKey: r.entityKey as string } : {}),
+        ...(r.baselineValue !== null && r.baselineValue !== undefined ? { baselineValue: r.baselineValue as number } : {}),
+        ...(r.sampleCount !== null && r.sampleCount !== undefined ? { sampleCount: r.sampleCount as number } : {}),
+        ...(r.acknowledgedBy ? { acknowledgedBy: r.acknowledgedBy as string } : {}),
+        ...(r.acknowledgedAt ? { acknowledgedAt: this.toDate(r.acknowledgedAt) } : {}),
+        ...(r.kind ? { kind: r.kind as IAlertEvent['kind'] } : {}),
         metadata: this.parseJson(r.metadata, {}),
       };
     }

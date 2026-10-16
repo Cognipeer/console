@@ -319,6 +319,19 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   /** Count of events whose `finishReason` is a truncation reason (see
    *  `isTruncatedFinishReason`), e.g. the model hit its token limit. */
   truncatedEvents?: number;
+  /** Counts of error events (see `lib/shared/traceHealth`); top-level, never inside `summary`. */
+  errorEvents?: number;
+  toolErrors?: number;
+  aiErrors?: number;
+  /** What was already counted in entity_metrics for this session (idempotency). */
+  metricsOutcome?: { status: string; latencyRecorded: boolean; recordedAt: Date } | null;
+  /**
+   * The client supplied this session's end status (see `isExplicitClientStatus`).
+   * A late error event only flips a session whose status was DERIVED to 'error';
+   * an explicit status (e.g. a recovered run the client calls 'success') stays,
+   * so the outcome does not depend on whether /events or /end arrives first.
+   */
+  statusExplicit?: boolean;
   totalBytesIn?: number;
   totalBytesOut?: number;
   totalRequestBytes?: number;
@@ -347,6 +360,10 @@ export interface AgentTracingSessionEventDelta {
   eventType?: string;
   modelsUsed?: string[];
   toolsUsed?: string[];
+  /** Error-event counters for this event; a late error flips a finished session with a derived (not client-supplied) status to 'error'. */
+  errorEvents?: number;
+  toolErrors?: number;
+  aiErrors?: number;
 }
 
 export interface IAgentTracingSessionSummaryAggregate {
@@ -1210,6 +1227,79 @@ export interface IUsageDailyIncrement {
   latencyMsSum?: number;
   latencyCount?: number;
   units?: Record<string, number>;
+}
+
+export type EntityMetricType = 'agent' | 'model' | 'tool' | 'mcp' | 'kb';
+/** 'tracing' = external SDK/OTLP traces; 'hosted' = console-hosted agent runs (internal sink);
+ *  'gateway' = model gateway (logModelUsage); 'service' = rag / mcp / tools services. */
+export type EntityMetricSource = 'tracing' | 'hosted' | 'gateway' | 'service';
+export const ENTITY_METRIC_BUCKET_MS = 300_000;
+/** Upper bounds (inclusive, ms) of latency histogram buckets lat0..lat13; lat14 = overflow (> 600000). */
+export const ENTITY_LATENCY_BUCKET_UPPER_MS = [100, 250, 500, 1000, 2000, 3000, 5000, 10000, 20000, 30000, 60000, 120000, 300000, 600000] as const;
+export const ENTITY_LATENCY_BUCKET_FIELDS = ['lat0', 'lat1', 'lat2', 'lat3', 'lat4', 'lat5', 'lat6', 'lat7', 'lat8', 'lat9', 'lat10', 'lat11', 'lat12', 'lat13', 'lat14'] as const;
+export const ENTITY_METRIC_COUNTER_FIELDS = [
+  'requests', 'errors', 'cancelled', 'latencyMsSum', 'latencyCount',
+  ...ENTITY_LATENCY_BUCKET_FIELDS,
+  'inputTokens', 'outputTokens', 'costUsd',
+  'errorEvents', 'toolCalls', 'toolErrors', 'aiCalls', 'aiErrors', 'abandoned', 'emptyResults',
+] as const;
+export type EntityMetricCounterField = (typeof ENTITY_METRIC_COUNTER_FIELDS)[number];
+export type EntityMetricCounters = Record<EntityMetricCounterField, number> & { latencyMsMax: number };
+
+/** Additive increment for one entity_metrics row (all counters default 0). */
+export interface IEntityMetricIncrement extends Partial<EntityMetricCounters> {
+  tenantId: string;
+  /** '' sentinel, never null. */
+  projectId: string;
+  entityType: EntityMetricType;
+  /** Trimmed, max 200 chars. */
+  entityKey: string;
+  source: EntityMetricSource;
+  /** Epoch ms floored to ENTITY_METRIC_BUCKET_MS. */
+  bucketMs: number;
+  /** Stored as the row's `expiresAt` on insert only (TTL). */
+  expiresAtMs?: number;
+}
+
+export interface IEntityMetricRow extends EntityMetricCounters {
+  _id?: string;
+  tenantId: string;
+  projectId: string;
+  entityType: EntityMetricType;
+  entityKey: string;
+  source: EntityMetricSource;
+  bucketMs: number;
+  bucketStart: Date;
+  expiresAt?: Date;
+  updatedAt?: Date;
+}
+
+export type EntityMetricsGroupField = 'entityType' | 'entityKey' | 'source' | 'projectId';
+
+export interface EntityMetricsAggregateQuery {
+  tenantId: string;
+  /** Omit = tenant-wide (prometheus/admin only). */
+  projectId?: string;
+  entityType?: EntityMetricType;
+  /** At most 500. */
+  entityKeys?: string[];
+  sources?: EntityMetricSource[];
+  /** Required, half-open [fromMs, toMs) on bucketMs. */
+  fromMs: number;
+  toMs: number;
+  groupBy: EntityMetricsGroupField[];
+  /** Optional extra time grouping; multiple of 300000. Result `bucketMs` = floor(bucketMs/size)*size. */
+  bucketMs?: number;
+  /** Default 10000, max 50000; sort: bucketMs asc then requests desc. */
+  limit?: number;
+}
+
+export interface IEntityMetricAggregate extends EntityMetricCounters {
+  entityType?: EntityMetricType;
+  entityKey?: string;
+  source?: EntityMetricSource;
+  projectId?: string;
+  bucketMs?: number;
 }
 
 export interface IModelUsageAggregate {

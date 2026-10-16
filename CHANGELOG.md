@@ -158,3 +158,56 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Pickers and lists in the IAM center search Turkish names the way people type them: `istanbul` finds `İstanbul`,
   and the Turkish letters I, İ, ı and i match each other. The page language follows the locale.
 - Portal pages stay readable on dark portal themes.
+
+### Entity health and alerting
+
+- Agents, models, tools, MCP servers and knowledge bases now write **5-minute health rollups** (`entity_metrics`, kept
+  for `ENTITY_METRICS_RETENTION_DAYS`, 45 days by default; every node buffers increments and flushes them every
+  `ENTITY_METRICS_FLUSH_MS`, 30 seconds). They feed the new agent health views, the alert engine and the Prometheus
+  export. New settings: `ENTITY_METRICS_FLUSH_MS`, `ENTITY_METRICS_RETENTION_DAYS`, `ENTITY_METRICS_MAX_BUFFERED_ROWS`,
+  `ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT`, `TRACING_STALE_SESSION_MINUTES`, `TRACING_FINALIZER_INTERVAL_MS` and
+  `ALERT_CHANNEL_TIMEOUT_MS` (see [Configuration](docs/guide/configuration.md#entity-health-alerting)).
+- **Agent health.** **Agents** lists every agent with sessions, error rate, p95 duration, tool errors and cost against
+  the period before, and an alert badge (Firing, Pending, OK, **No alert rule**, Unknown). An agent opens a health panel
+  with charts, version and incident markers and a link to its failing sessions. New API:
+  `GET /api/tracing/agents/health` and `GET /api/tracing/agents/:agentName/health`.
+- **Per-entity alert rules.** Alert rules cover agents, models, knowledge bases, MCP servers and tools (the Agents and
+  Tools modules are new). One rule watches all entities of a type or selected ones, and each entity has its own state,
+  incident and notifications. 26 new metrics, for example `agent_error_rate`, `agent_p95_duration_ms`,
+  `model_p95_latency_ms`, `kb_empty_result_rate`, `tool_error_rate`. Condition types: threshold and absence ("stopped
+  sending traffic") in every edition; baseline and SLO burn are Enterprise (`402` without the licence). A rule can hold
+  a condition for a number of minutes, has a cooldown and optional reminders, resolves on its own after two clean
+  evaluation windows, and derives its severity from the breach. **Preview now** shows what a rule would do without
+  sending anything.
+- **Channels.** Email, webhook (signed with `x-cognipeer-signature`), Slack, Microsoft Teams and PagerDuty (Events API
+  v2, deduplicated per rule and entity, resolved on recovery). Webhook and chat URLs, signing secrets and PagerDuty keys
+  are stored encrypted and shown masked; webhook, Slack and Teams URLs must be `https` and public. **Send test** is
+  limited to 5 per minute per user and 20 per minute per project.
+- **Incidents** show a count per status, filter by severity, module, rule and entity, can be assigned and updated in bulk
+  (up to 100), name the people involved, and carry a context captured when the alert fired: the agent version that
+  changed, the most common errors, a link to the failing sessions and, with Enterprise, related models and tools that
+  also deviated. New API reference: [Alerts API](docs/api/alerts.md).
+- **Webhook subscriptions** can subscribe to `alert.fired` and `alert.resolved`.
+- **Session status** is now decided the same way on every ingest path. A status the client sends is final (a late error
+  event no longer flips it, though it still counts as an error event); when none is sent it is derived from the error
+  events. A batch without `status` used to be stored as `unknown` and a stream `/end` without `status` as `success`;
+  both are now `error` when an event failed and `success` otherwise. **OTLP** sessions stay `in_progress` until the
+  request carrying the root span arrives (they used to be `success` or `error` from their first batch), and a session
+  whose root span never arrives is closed after 10 minutes without activity. A session that never reports an end is
+  marked **`abandoned`** after `TRACING_STALE_SESSION_MINUTES` (6 hours); an abandoned session is not an error. Starting
+  a stream session again resets an earlier explicit status.
+- Health counters of externally traced agents are booked at the event time clamped into 3 hours before to 5 minutes after
+  the arrival; events older than 24 hours are not counted. A session is counted once, when it reaches a final status.
+  A run that pauses for a person or for the calling app (`paused`) is counted when it finishes or is closed, with the
+  tokens and cost of all of its parts and a duration that leaves out the waiting.
+- **Prometheus** (`GET /api/metrics`): `console_tracing_input_tokens_total` and `console_tracing_output_tokens_total` are
+  renamed `console_tracing_input_tokens_24h` and `console_tracing_output_tokens_24h` (they are 24-hour gauges, not
+  counters); `console_tracing_sessions_total` has the statuses `success`, `error` and `abandoned` and counts the sessions
+  that finished in the last 24 hours; `console_tracing_agents_total` counts the agents active in the last 24 hours;
+  `console_entity_requests_24h` and `console_entity_errors_24h` are new. Update dashboards that use the old names.
+- Existing alert rules keep working: the module-wide metrics they use (`error_rate`, `avg_latency_ms`, `mcp_error_rate`,
+  `rag_total_queries`, the `aegis_*` guardrail metrics and the others) stay evaluable with their scope and their email
+  channel, and are no longer offered for new rules. Every rule now has a per-entity state, so a breach that was
+  already ongoing at the upgrade does not re-fire inside the old cooldown; incidents the previous engine had opened
+  stay open until you close them. Per-entity rules judge whole 5-minute buckets that are at least one flush interval
+  old, so an alert fires about 0.5 to 6.5 minutes after the data arrived, plus the hold time.

@@ -17,6 +17,7 @@ import {
   redactPiiFromLogPayload,
   redactPiiFromLogString,
 } from '@/lib/services/logPiiRedaction';
+import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
 import { recordRoutedUsage } from './dynamicRoutingState';
 
@@ -204,6 +205,23 @@ export async function logModelUsage(
     units,
     attribution: payload.attribution,
     ...(payload.agentKey ? { agentKey: payload.agentKey } : {}),
+  });
+
+  // Health rollup: one observation per logged call. Cache hits carry a tiny
+  // latency that would skew the histogram, so they count as requests only.
+  recordEntityMetric({
+    tenantDbName,
+    tenantId: model.tenantId,
+    projectId: model.projectId,
+    entityType: 'model',
+    entityKey: model.key,
+    source: 'gateway',
+    outcome:
+      payload.status === 'success' ? 'ok' : payload.status === 'cancelled' ? 'cancelled' : 'error',
+    latencyMs: payload.cacheHit ? null : payload.latencyMs,
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    costUsd: pricingSnapshot.totalCost,
   });
 
   // Secret scrub first (known key names / outbound secret values), then a

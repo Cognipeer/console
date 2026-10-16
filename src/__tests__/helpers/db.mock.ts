@@ -214,7 +214,6 @@ function buildPrimers(): Record<string, Mock> {
     // Paginated list endpoints — many APIs return { items, total }
     listFileRecords: vi.fn().mockResolvedValue({ records: [], total: 0 }),
     listGuardrailEvaluations: vi.fn().mockResolvedValue({ evaluations: [], total: 0 }),
-    listAlertEvents: vi.fn().mockResolvedValue({ events: [], total: 0 }),
     listMemoryEntries: vi.fn().mockResolvedValue({ entries: [], total: 0 }),
 
     // Counters
@@ -223,6 +222,19 @@ function buildPrimers(): Record<string, Mock> {
     countActiveAlerts: vi.fn().mockResolvedValue(0),
     cleanupAgentTracingRetention: vi.fn().mockResolvedValue({ sessionsDeleted: 0, eventsDeleted: 0 }),
     agentTracingAgentExists: vi.fn().mockResolvedValue(false),
+
+    // Entity health rollup, alert state and stale-session finalizer
+    // (`list*` / `find*` already default to [] / null; these have shaped returns).
+    aggregateEntityMetrics: vi.fn().mockResolvedValue([]),
+    purgeEntityMetrics: vi.fn().mockResolvedValue(0),
+    abandonAgentTracingSession: vi.fn().mockResolvedValue(null),
+    countIncidentsByStatus: vi.fn().mockResolvedValue({
+      open: 0,
+      acknowledged: 0,
+      investigating: 0,
+      resolved: 0,
+      closed: 0,
+    }),
 
     // Semantic cache config
     getSemanticCacheConfig: vi.fn().mockResolvedValue(null),

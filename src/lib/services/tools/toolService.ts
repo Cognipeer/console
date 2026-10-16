@@ -19,6 +19,7 @@ import {
 } from '@/lib/services/logRedaction';
 import { getDatabase } from '@/lib/database';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import type { RuntimeAuthLogInfo } from '@/lib/services/runtimeContext';
 import type { ITool, IToolAction, IToolAuthConfig } from '@/lib/database';
 import { mergeAuthConfigUpdate, openAuthConfig, sealAuthConfig } from './secretVault';
@@ -715,6 +716,19 @@ export async function logToolRequest(
     service: 'tools',
     refKey: toolKey,
     status,
+    latencyMs,
+  });
+  // Health rollup. Failed calls are logged with latency 0 by the callers; the
+  // rollup only records latency for successful calls, so that 0 never lands in
+  // the histogram.
+  recordEntityMetric({
+    tenantDbName,
+    tenantId,
+    projectId,
+    entityType: 'tool',
+    entityKey: toolKey,
+    source: 'service',
+    outcome: status === 'success' ? 'ok' : 'error',
     latencyMs,
   });
   try {

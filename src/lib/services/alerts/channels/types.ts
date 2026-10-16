@@ -5,7 +5,16 @@
  * contract so the evaluator can dispatch alerts polymorphically.
  */
 
-import type { IAlertEvent, IAlertChannel } from '@/lib/database';
+import type {
+  AlertConditionMode,
+  AlertConditionOperator,
+  AlertMetric,
+  AlertModule,
+  EntityMetricType,
+  IAlertChannel,
+  IIncidentContext,
+  IncidentSeverity,
+} from '@/lib/database';
 
 export interface AlertContext {
   tenantDbName: string;
@@ -25,11 +34,49 @@ export interface DispatchResult {
   error?: string;
 }
 
+/** What a channel is told about: one alert state change (fired, resolved, re-notified) or a test. */
+export interface AlertNotification {
+  kind: 'fired' | 'resolved' | 'renotify' | 'test';
+  rule: {
+    id: string;
+    name: string;
+    module: AlertModule;
+    metric: AlertMetric;
+    metricLabel: string;
+    unit: string;
+    mode: AlertConditionMode;
+    windowMinutes: number;
+    operator?: AlertConditionOperator;
+    threshold?: number;
+  };
+  entity?: { type: EntityMetricType; key: string } | null;
+  value: number | null;
+  baseline?: number | null;
+  severity: IncidentSeverity;
+  firedAt: Date;
+  resolvedAt?: Date | null;
+  projectName: string;
+  companyName: string;
+  incidentUrl?: string;
+  dashboardUrl: string;
+  entityUrl?: string;
+  context?: IIncidentContext | null;
+}
+
+/** Channel-neutral message (digests and other non-alert notices) rendered by each channel in its own format. */
+export interface ChannelMessage {
+  title: string;
+  summary: string;
+  severity?: IncidentSeverity | 'ok';
+  fields: Array<{ label: string; value: string }>;
+  url?: string;
+  urlLabel?: string;
+  footer?: string;
+}
+
 export interface IAlertDispatcher {
-  readonly type: string;
-  dispatch(
-    event: Omit<IAlertEvent, '_id'>,
-    channel: IAlertChannel,
-    context: AlertContext,
-  ): Promise<DispatchResult[]>;
+  readonly type: IAlertChannel['type'];
+  dispatch(notification: AlertNotification, channel: IAlertChannel, context: AlertContext): Promise<DispatchResult[]>;
+  /** Optional: deliver a generic message (digests). */
+  sendMessage?(message: ChannelMessage, channel: IAlertChannel, context: AlertContext): Promise<DispatchResult[]>;
 }

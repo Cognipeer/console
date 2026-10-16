@@ -14,7 +14,19 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
-import { AgentTracingService, recordTracingSessionCreated, recordTraceModelUsage } from '@/lib/services/agentTracing';
+import {
+  AgentTracingService,
+  createTraceModelPricerLoader,
+  recordTracingSessionCreated,
+  recordTraceModelUsage,
+} from '@/lib/services/agentTracing';
+import {
+  buildEventFingerprint,
+  isTerminalSessionStatus,
+  recordAgentSessionOutcome,
+  recordTraceEventMetrics,
+  toIso,
+} from '@/lib/services/tracing/traceEntityMetrics';
 import { offsetPageOf, pageOfVisibleRows, refuseTracingThread, sendClientListUnavailable, sendClientSessionRefusal } from './agent-session-access';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
@@ -28,6 +40,7 @@ import {
   TOOL_DEFINITIONS_SECTION_KIND,
 } from '@/lib/services/tracingToolDefinitions';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { countTraceErrors, deriveSessionStatus, isErrorTraceEvent, isExplicitClientStatus } from '@/lib/shared/traceHealth';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -168,42 +181,14 @@ type TracingStreamEndPayload = {
   summary?: TracingSummaryPayload;
 };
 
-function toIso(value: unknown): string | undefined {
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
-}
-
-function buildEventFingerprint(event: {
-  id?: string;
-  label?: string;
-  sequence?: number;
-  spanId?: string;
-  timestamp?: unknown;
-  traceId?: string;
-  type?: string;
-}) {
-  if (event.spanId) {
-    return `span:${event.spanId}`;
-  }
-  if (event.id) {
-    return `id:${event.id}`;
-  }
-
-  return [
-    event.traceId || 'no-trace',
-    event.type || 'no-type',
-    event.label || 'no-label',
-    String(event.sequence ?? -1),
-    toIso(event.timestamp) || 'no-ts',
-  ].join('|');
+/** Message of a failed event: its own error text, else its label. */
+function eventErrorMessage(event: Pick<IAgentTracingEvent, 'error' | 'label'>): string {
+  if (typeof event.error === 'string' && event.error) return event.error;
+  const nested = event.error && typeof event.error === 'object'
+    ? (event.error as Record<string, unknown>).message
+    : undefined;
+  if (typeof nested === 'string' && nested) return nested;
+  return typeof event.label === 'string' ? event.label : 'Event error';
 }
 
 function aggregateEvents(events: IAgentTracingEvent[]) {
@@ -243,19 +228,21 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalReasoningTokens += typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
     if (isTruncatedFinishReason(event.finishReason)) truncatedEvents += 1;
 
-    if (event.status === 'error') {
+    if (isErrorTraceEvent(event)) {
       errors.push({
         eventId: typeof event.id === 'string' ? event.id : undefined,
-        message: typeof event.error === 'string'
-          ? event.error
-          : (typeof event.label === 'string' ? event.label : 'Event error'),
+        message: eventErrorMessage(event),
         timestamp: toIso(event.timestamp),
         type: typeof event.type === 'string' ? event.type : undefined,
       });
     }
   }
 
+  const errorCounts = countTraceErrors(events);
+
   return {
+    aiErrors: errorCounts.aiErrors,
+    errorEvents: errorCounts.errorEvents,
     errors,
     eventCounts,
     modelsUsed: [...modelsUsed],
@@ -268,8 +255,14 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalInputTokens,
     totalOutputTokens,
     totalReasoningTokens,
+    toolErrors: errorCounts.toolErrors,
     truncatedEvents,
   };
+}
+
+/** Errors on a session payload that did not come from the SDK's tracing sink (sink failures are not run failures). */
+function countNonSinkErrors(errors: ReadonlyArray<Record<string, unknown>> | undefined): number {
+  return (errors ?? []).filter((error) => error?.type !== 'sink').length;
 }
 
 function getTracingQuotaContext(
@@ -695,15 +688,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           eventsBySession.set(event.sessionId, current);
         }
 
+        const endedSessionIds = new Set(mapped.endedSessionIds);
         for (const session of mapped.sessions) {
           const existing = await backgroundDb.findAgentTracingSessionById(
             session.sessionId,
             ctx.projectId,
           );
           const incomingEvents = eventsBySession.get(session.sessionId) || [];
+          // Only identity fields are needed to dedupe, so the heavy payloads stay in the database (MongoDB honors the projection).
           const existingEvents = await backgroundDb.listAgentTracingEvents(
             session.sessionId,
             ctx.projectId,
+            { projection: { sections: 0, metadata: 0, actor: 0 } },
           );
           const seen = new Set(existingEvents.map((event) =>
             buildEventFingerprint({
@@ -737,8 +733,34 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             insertedEvents.push(event);
           }
 
-          const allEvents = await backgroundDb.listAgentTracingEvents(session.sessionId, ctx.projectId);
+          const allEvents = await backgroundDb.listAgentTracingEvents(
+            session.sessionId,
+            ctx.projectId,
+            { projection: { sections: 0, metadata: 0 } },
+          );
           const stats = aggregateEvents(allEvents);
+          // Root-span exceptions (the mapper's eventId 'session') belong to the session, not to any event; keep the ones from earlier batches too.
+          const rootErrors = [
+            ...(session.errors ?? []),
+            ...(existing?.errors ?? []),
+          ].filter((error) => error?.eventId === 'session');
+          const sessionErrors = dedupeErrors([...stats.errors, ...rootErrors]);
+          const rootEnded = endedSessionIds.has(session.sessionId);
+          const alreadyTerminal = isTerminalSessionStatus(existing?.status);
+          const finished = rootEnded || alreadyTerminal;
+          const sawError = stats.errorEvents > 0 || rootErrors.length > 0 || (rootEnded && session.status === 'error');
+          // OTLP has no end signal: the root span only arrives once the run is over. Until then (and while no
+          // earlier terminal status exists) the session stays in progress, errors included (they are counted per
+          // event and in `errorEvents`); the finalizer closes it after a quiet window as success or error from
+          // what was received. An error on a run that already finished flips it to error.
+          const status = sawError && finished
+            ? 'error'
+            : deriveSessionStatus({
+              clientStatus: rootEnded ? undefined : existing?.status,
+              errorEvents: 0,
+              nonSinkErrors: 0,
+              ended: finished,
+            });
           const nextStartedAt = existing?.startedAt && session.startedAt
             ? new Date(Math.min(existing.startedAt.getTime(), session.startedAt.getTime()))
             : (existing?.startedAt || session.startedAt);
@@ -764,16 +786,17 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             durationMs,
             endedAt: nextEndedAt,
             error: undefined,
-            errors: stats.errors,
+            errorEvents: stats.errorEvents,
+            errors: sessionErrors,
             eventCounts: stats.eventCounts,
             modelsUsed: stats.modelsUsed,
+            aiErrors: stats.aiErrors,
             rootSpanId: existing?.rootSpanId || session.rootSpanId,
             source: existing?.source || session.source || 'otlp',
             startedAt: nextStartedAt,
-            status: stats.errors.length > 0
-              ? 'error'
-              : (existing?.status || session.status || 'success'),
+            status,
             summary,
+            toolErrors: stats.toolErrors,
             toolsUsed: stats.toolsUsed,
             totalBytesIn: stats.totalBytesIn,
             totalBytesOut: stats.totalBytesOut,
@@ -809,6 +832,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           }
 
           // Fingerprint-deduped, so each event is costed exactly once.
+          const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
           await recordTraceModelUsage({
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
@@ -816,7 +840,31 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             agentName: mergedSession.agentName,
             metadata: mergedSession.metadata,
             events: insertedEvents,
+            pricerLoader,
           });
+          await recordTraceEventMetrics({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            agentName: mergedSession.agentName,
+            events: insertedEvents,
+            source: 'tracing',
+            pricerLoader,
+          });
+          // The root span's arrival (or the finalizer's quiet-window close) ends an OTLP run, so only a run that
+          // is finished, counted already, or terminal before this batch (legacy rows with no marker) is booked.
+          if (isTerminalSessionStatus(status) && (rootEnded || existing?.metricsOutcome || alreadyTerminal)) {
+            await recordAgentSessionOutcome({
+              tenantDbName: ctx.tenantDbName,
+              tenantId: ctx.tenantId,
+              projectId: ctx.projectId,
+              session: mergedSession,
+              previousOutcome: existing?.metricsOutcome,
+              source: 'tracing',
+              events: allEvents,
+              pricerLoader,
+            });
+          }
         }
       });
 
@@ -902,6 +950,18 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         modelsUsed.add(payload.agent.model);
       }
 
+      // Health counters come from the events themselves; the client's status stays authoritative when it sends one
+      // (a recovered session it calls `success` is a success), and only an absent status is derived. A batch post is
+      // the finished session unless the client says it is still running.
+      const batchErrorCounts = countTraceErrors(events);
+      const batchErrors = toErrorList(payload.errors);
+      const batchStatus = deriveSessionStatus({
+        clientStatus: payload.status,
+        errorEvents: batchErrorCounts.errorEvents,
+        nonSinkErrors: countNonSinkErrors(batchErrors),
+        ended: String(payload.status ?? '').trim().toLowerCase() !== 'in_progress',
+      });
+
       const sessionSummary = getSummaryRecord(payload.summary);
       const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
         agent: payload.agent || {},
@@ -909,9 +969,11 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         agentName: payload.agent?.name ?? undefined,
         agentVersion: payload.agent?.version ?? undefined,
         config: payload.config || {},
-        durationMs: payload.durationMs ?? undefined,
+        durationMs: payload.durationMs
+          ?? (durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : undefined),
         endedAt: payload.endedAt ? new Date(payload.endedAt) : undefined,
-        errors: toErrorList(payload.errors),
+        errorEvents: batchErrorCounts.errorEvents,
+        errors: batchErrors,
         eventCounts: getSummaryEventCounts(payload.summary),
         metadata: sanitizeTracingMetadata(payload.metadata),
         modelsUsed: Array.from(modelsUsed),
@@ -920,12 +982,16 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         sessionId,
         source: 'custom' as const,
         startedAt: payload.startedAt ? new Date(payload.startedAt) : new Date(),
-        status: payload.status || 'unknown',
+        status: batchStatus,
+        // A status the client supplied is never overridden by a late error event (only a derived one is).
+        statusExplicit: isExplicitClientStatus(payload.status),
         summary: sessionSummary,
         tenantId: ctx.tenantId,
         threadId: typeof payload.threadId === 'string' && payload.threadId.trim()
           ? payload.threadId.trim()
           : undefined,
+        aiErrors: batchErrorCounts.aiErrors,
+        toolErrors: batchErrorCounts.toolErrors,
         toolsUsed: Array.from(toolsUsed),
         totalBytesIn: getSummaryNumber(payload.summary, 'totalBytesIn'),
         totalBytesOut: getSummaryNumber(payload.summary, 'totalBytesOut'),
@@ -1087,6 +1153,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           createdEvents.push(eventDoc);
         }
 
+        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
         await recordTraceModelUsage({
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -1095,7 +1162,30 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           metadata: sessionDoc.metadata,
           events: createdEvents,
           previousEvents,
+          pricerLoader,
         });
+        await recordTraceEventMetrics({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentName: sessionDoc.agentName,
+          events: createdEvents,
+          previousEvents,
+          source: 'tracing',
+          pricerLoader,
+        });
+        if (isTerminalSessionStatus(sessionDoc.status)) {
+          await recordAgentSessionOutcome({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            session: sessionDoc,
+            previousOutcome: existing?.metricsOutcome,
+            source: 'tracing',
+            events: createdEvents,
+            pricerLoader,
+          });
+        }
       });
 
       return reply.code(200).send({
@@ -1178,6 +1268,10 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           totalInputTokens: 0,
           totalOutputTokens: 0,
         },
+        // Error counters start at zero for a NEW session only: a re-started id (`reopenDoc` below) keeps what its earlier legs counted.
+        errorEvents: 0,
+        toolErrors: 0,
+        aiErrors: 0,
         tenantId: ctx.tenantId,
         threadId: typeof payload.threadId === 'string' && payload.threadId.trim()
           ? payload.threadId.trim()
@@ -1215,6 +1309,8 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         endedAt: undefined,
         modelsUsed: mergeUnique(existing?.modelsUsed, sessionDoc.modelsUsed),
         status: 'in_progress',
+        // The run is open again: an earlier leg's client end status no longer describes it.
+        statusExplicit: false,
         ...(sessionDoc.threadId ? { threadId: sessionDoc.threadId } : {}),
         ...(sessionDoc.traceId ? { traceId: sessionDoc.traceId } : {}),
         ...(sessionDoc.rootSpanId ? { rootSpanId: sessionDoc.rootSpanId } : {}),
@@ -1356,6 +1452,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
 
         await backgroundDb.createAgentTracingEvent(eventDoc);
 
+        const pricerLoader = createTraceModelPricerLoader(ctx.tenantDbName, ctx.projectId);
         await recordTraceModelUsage({
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -1363,19 +1460,53 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
           agentName: session.agentName,
           metadata: session.metadata,
           events: [eventDoc],
+          pricerLoader,
+        });
+        await recordTraceEventMetrics({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentName: session.agentName,
+          events: [eventDoc],
+          source: 'tracing',
+          pricerLoader,
         });
 
+        const errorCounts = countTraceErrors([eventDoc]);
         await backgroundDb.applyAgentTracingSessionEvent(sessionId, {
+          aiErrors: errorCounts.aiErrors,
           cachedInputTokens,
           durationMs: event.durationMs ?? undefined,
+          errorEvents: errorCounts.errorEvents,
           eventType: event.type ?? undefined,
           finishReason: diagnostics.finishReason,
           inputTokens,
           modelsUsed: models,
           outputTokens,
           reasoningTokens: diagnostics.reasoningTokens,
+          toolErrors: errorCounts.toolErrors,
           toolsUsed: collectEventToolNames(event),
         }, ctx.projectId);
+
+        // An error that lands after the session finished flips it to 'error' in the database; book the
+        // difference. No `metricsOutcome` precondition: /end may still be pricing the session (it has not
+        // persisted its marker yet), and the SDK does not wait for /events. The outcome bookkeeping runs
+        // under a per-session lock, re-reads the stored status and marker, and is idempotent, so this call
+        // either waits for /end's booking and corrects it, or books the (already flipped) status itself.
+        if (errorCounts.errorEvents > 0) {
+          const after = await backgroundDb.findAgentTracingSessionById(sessionId, ctx.projectId);
+          if (after && isTerminalSessionStatus(after.status)) {
+            await recordAgentSessionOutcome({
+              tenantDbName: ctx.tenantDbName,
+              tenantId: ctx.tenantId,
+              projectId: ctx.projectId,
+              session: after,
+              previousOutcome: after.metricsOutcome,
+              source: 'tracing',
+              pricerLoader,
+            });
+          }
+        }
       });
 
       return reply.code(200).send({
@@ -1417,68 +1548,96 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const endedAt = payload.endedAt ? new Date(payload.endedAt) : new Date();
-      const status = payload.status || 'success';
       const sessionStartedAt = session.startedAt
         ? new Date(session.startedAt).getTime()
         : endedAt.getTime();
       const durationMs = payload.durationMs ?? (endedAt.getTime() - sessionStartedAt);
-      const existingSummary = getSummaryRecord(session.summary);
-      const payloadSummary = getSummaryRecord(payload.summary);
-      const payloadEventCounts = getSummaryEventCounts(payload.summary);
-      const existingEventCounts = getSummaryEventCounts(session.summary);
-      const mergedSummary: Record<string, unknown> = {
-        ...existingSummary,
-        ...payloadSummary,
-        eventCounts: Object.keys(payloadEventCounts).length > 0
-          ? payloadEventCounts
-          : (Object.keys(existingEventCounts).length > 0
-            ? existingEventCounts
-            : (session.eventCounts || {})),
-        // `end` used to let the payload win outright. A session that spans several
-        // SDK legs sends one `end` per leg carrying only that leg's summary, so the
-        // last leg's numbers replaced the run's. Take the larger of what the session
-        // already accumulated (from `/events`) and what this leg reports: totals can
-        // only ever grow, which also makes a retried `end` idempotent.
-        totalBytesIn: maxTotal(payload.summary, session.summary, session.totalBytesIn, 'totalBytesIn'),
-        totalBytesOut: maxTotal(payload.summary, session.summary, session.totalBytesOut, 'totalBytesOut'),
-        totalCachedInputTokens: maxTotal(
-          payload.summary,
-          session.summary,
-          session.totalCachedInputTokens,
-          'totalCachedInputTokens',
-        ),
-        // Monotonic like the token totals: one `end` per leg means the payload
-        // only ever describes that leg's wall clock, so letting it win shrank a
-        // multi-leg run's duration to its last leg.
-        totalDurationMs: Math.max(
-          maxTotal(payload.summary, session.summary, undefined, 'totalDurationMs'),
-          durationMs,
-        ),
-        totalInputTokens: maxTotal(payload.summary, session.summary, session.totalInputTokens, 'totalInputTokens'),
-        totalOutputTokens: maxTotal(payload.summary, session.summary, session.totalOutputTokens, 'totalOutputTokens'),
+      // Built from a session snapshot: once for the reply, and again from a fresh read inside the background write,
+      // so events persisted since the request (the SDK does not wait for `/events` before `/end`) are not overwritten.
+      const mergeEnd = (source: IAgentTracingSession) => {
+        const existingSummary = getSummaryRecord(source.summary);
+        const payloadSummary = getSummaryRecord(payload.summary);
+        const payloadEventCounts = getSummaryEventCounts(payload.summary);
+        const existingEventCounts = getSummaryEventCounts(source.summary);
+        const mergedSummary: Record<string, unknown> = {
+          ...existingSummary,
+          ...payloadSummary,
+          eventCounts: Object.keys(payloadEventCounts).length > 0
+            ? payloadEventCounts
+            : (Object.keys(existingEventCounts).length > 0
+              ? existingEventCounts
+              : (source.eventCounts || {})),
+          // `end` used to let the payload win outright. A session that spans several
+          // SDK legs sends one `end` per leg carrying only that leg's summary, so the
+          // last leg's numbers replaced the run's. Take the larger of what the session
+          // already accumulated (from `/events`) and what this leg reports: totals can
+          // only ever grow, which also makes a retried `end` idempotent.
+          totalBytesIn: maxTotal(payload.summary, source.summary, source.totalBytesIn, 'totalBytesIn'),
+          totalBytesOut: maxTotal(payload.summary, source.summary, source.totalBytesOut, 'totalBytesOut'),
+          totalCachedInputTokens: maxTotal(
+            payload.summary,
+            source.summary,
+            source.totalCachedInputTokens,
+            'totalCachedInputTokens',
+          ),
+          // Monotonic like the token totals: one `end` per leg means the payload
+          // only ever describes that leg's wall clock, so letting it win shrank a
+          // multi-leg run's duration to its last leg.
+          totalDurationMs: Math.max(
+            maxTotal(payload.summary, source.summary, undefined, 'totalDurationMs'),
+            durationMs,
+          ),
+          totalInputTokens: maxTotal(payload.summary, source.summary, source.totalInputTokens, 'totalInputTokens'),
+          totalOutputTokens: maxTotal(payload.summary, source.summary, source.totalOutputTokens, 'totalOutputTokens'),
+        };
+        // A retried `end` resends the same errors. Appending blindly meant each
+        // retry grew the list, so deduplicate on the serialized entry.
+        const mergedErrors = dedupeErrors([
+          ...(source.errors || []),
+          ...toErrorList(payload.errors),
+        ]);
+        // The client's status wins when it sends one; otherwise the session's own error counters decide.
+        const status = deriveSessionStatus({
+          clientStatus: payload.status,
+          errorEvents: source.errorEvents ?? 0,
+          nonSinkErrors: countNonSinkErrors(mergedErrors),
+          ended: true,
+        });
+        // Remembered with the status: a late error event flips a derived status but never a client-supplied one.
+        const statusExplicit = isExplicitClientStatus(payload.status);
+        return { mergedSummary, mergedErrors, status, statusExplicit };
       };
-      // A retried `end` resends the same errors. Appending blindly meant each
-      // retry grew the list, so deduplicate on the serialized entry.
-      const mergedErrors = dedupeErrors([
-        ...(session.errors || []),
-        ...toErrorList(payload.errors),
-      ]);
+      const { status } = mergeEnd(session);
 
       fireAndForget('client-tracing-stream-end', async () => {
         const backgroundDb = await getDatabase();
         await backgroundDb.switchToTenant(ctx.tenantDbName);
-        await backgroundDb.updateAgentTracingSession(sessionId, {
+        const fresh = (await backgroundDb.findAgentTracingSessionById(sessionId, ctx.projectId)) ?? session;
+        const merged = mergeEnd(fresh);
+        const updated = await backgroundDb.updateAgentTracingSession(sessionId, {
           durationMs,
           endedAt,
-          errors: mergedErrors,
-          status,
-          summary: mergedSummary,
-          totalBytesIn: getSummaryNumber(mergedSummary, 'totalBytesIn'),
-          totalBytesOut: getSummaryNumber(mergedSummary, 'totalBytesOut'),
-          totalCachedInputTokens: getSummaryNumber(mergedSummary, 'totalCachedInputTokens'),
-          totalInputTokens: getSummaryNumber(mergedSummary, 'totalInputTokens'),
-          totalOutputTokens: getSummaryNumber(mergedSummary, 'totalOutputTokens'),
+          errors: merged.mergedErrors,
+          status: merged.status,
+          statusExplicit: merged.statusExplicit,
+          summary: merged.mergedSummary,
+          totalBytesIn: getSummaryNumber(merged.mergedSummary, 'totalBytesIn'),
+          totalBytesOut: getSummaryNumber(merged.mergedSummary, 'totalBytesOut'),
+          totalCachedInputTokens: getSummaryNumber(merged.mergedSummary, 'totalCachedInputTokens'),
+          totalInputTokens: getSummaryNumber(merged.mergedSummary, 'totalInputTokens'),
+          totalOutputTokens: getSummaryNumber(merged.mergedSummary, 'totalOutputTokens'),
         }, ctx.projectId);
+
+        if (updated && isTerminalSessionStatus(updated.status)) {
+          await recordAgentSessionOutcome({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            session: updated,
+            previousOutcome: fresh.metricsOutcome,
+            source: 'tracing',
+          });
+        }
       });
 
       return reply.code(200).send({

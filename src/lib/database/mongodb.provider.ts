@@ -48,6 +48,8 @@ import { OcrJobMixin } from './mongodb/ocr-jobs.mixin';
 import { WebhookMixin } from './mongodb/webhook.mixin';
 import { BatchJobMixin } from './mongodb/batch.mixin';
 import { UsageRollupMixin } from './mongodb/usage.mixin';
+import { EntityMetricsMixin } from './mongodb/entity-metrics.mixin';
+import { AlertStateMixin } from './mongodb/alert-state.mixin';
 import { ExternalModelPricingMixin } from './mongodb/external-model-pricing.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
@@ -91,7 +93,9 @@ const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.
-const ClusterBase = ClusterMixin(PricingBase);
+// Entity health rollup + alert evaluation state (split steps keep the nesting shallow).
+const HealthBase = EntityMetricsMixin(AlertStateMixin(PricingBase));
+const ClusterBase = ClusterMixin(HealthBase);
 
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);

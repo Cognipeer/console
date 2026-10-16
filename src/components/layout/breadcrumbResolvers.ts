@@ -230,11 +230,6 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     pickLabel: (b) => wrappedName(b, 'migration'),
     excludeValues: ['new'],
   }),
-  createStandardResolver({
-    path: ['tracing', 'agents'],
-    buildUrl: (name) => `/api/tracing/agents/${encodeURIComponent(name)}/overview`,
-    pickLabel: (b) => wrappedName(b, 'agent', 'label', 'name', 'key'),
-  }),
 ];
 
 /* ----- Custom resolvers --------------------------------------------------- */
@@ -377,6 +372,59 @@ const tracingThreadResolver: BreadcrumbResolver = {
 };
 
 /**
+ * Tracing agents: `/dashboard/tracing/agents/:name`.
+ * The segment is the agent's name (that is what the overview's label always
+ * was), so the label is the decoded segment itself - no request, which used to
+ * read the agent's whole history only to learn it.
+ */
+const tracingAgentResolver: BreadcrumbResolver = {
+  id: 'custom:tracing-agent',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'agents'
+    ) return [];
+    const raw = segments[3];
+    if (!raw) return [];
+    let name = raw;
+    try {
+      name = decodeURIComponent(raw);
+    } catch {
+      // A name with a stray `%` stays as it is.
+    }
+    return [{ index: 3, label: name }];
+  },
+};
+
+/**
+ * Entity health detail: `/dashboard/tracing/health/:type/:entityKey`. The entity key is shown exactly as
+ * it is (decoded once, never title-cased): `gpt-4o` stays `gpt-4o`. The type segment is translated by
+ * `SEGMENT_KEYS`.
+ */
+const entityHealthKeyResolver: BreadcrumbResolver = {
+  id: 'custom:entity-health-key',
+  async resolve(ctx) {
+    const { segments } = ctx;
+    if (
+      segments[0] !== 'dashboard'
+      || segments[1] !== 'tracing'
+      || segments[2] !== 'health'
+    ) return [];
+    const raw = segments[4];
+    if (!raw) return [];
+    let key = raw;
+    try {
+      key = decodeURIComponent(raw);
+    } catch {
+      // A key with a stray `%` stays as it is.
+    }
+    return [{ index: 4, label: key }];
+  },
+};
+
+/**
  * IAM center pages: `/dashboard/iam/principals/:type/:id` (a person, group or token) and
  * `/dashboard/iam/policies/:id`. The IAM trail (iamBreadcrumbs.ts) puts the name at the
  * last segment: index 4 for a principal, 3 for a policy.
@@ -415,6 +463,8 @@ const iamResolver: BreadcrumbResolver = {
 
 const CUSTOM_RESOLVERS: BreadcrumbResolver[] = [
   projectsResolver,
+  tracingAgentResolver,
+  entityHealthKeyResolver,
   vectorIndexResolver,
   tracingSessionResolver,
   tracingThreadResolver,

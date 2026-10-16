@@ -300,6 +300,10 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // which `enforceSessionRbac` treats as "not a gated surface".
   { prefix: '/api/skills', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
+  // NOTE (entity health): '/api/entity-health' is deliberately NOT mapped. The scoreboard covers
+  // agents, models, knowledge bases, MCP servers and tools, so the plugin declares its read routes
+  // `authz.authenticated()` and authorizes each entity type against its own service in the handler
+  // (a blanket 'tracing' mapping would 403 viewers who may read models/rag/mcp/tools but not tracing).
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
   { prefix: '/api/evaluation', service: 'evaluations' },

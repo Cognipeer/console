@@ -544,6 +544,12 @@ function isCognipeerRootSpan(span: OtlpSpan): boolean {
 export interface OtlpMappedResult {
   sessions: Array<Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>>;
   events: Array<Omit<IAgentTracingEvent, '_id' | 'createdAt'>>;
+  /**
+   * Sessions whose root span (the one that spans the whole run) is in this
+   * request AND has ended. OTLP has no explicit end signal: a root span is only
+   * exported once it finishes, so its arrival is what makes a session terminal.
+   */
+  endedSessionIds: string[];
 }
 
 function hasRealRootSpan(spans: OtlpSpan[]): boolean {
@@ -567,9 +573,10 @@ export function mapOtlpToInternalModels(
 ): OtlpMappedResult {
   const sessions: OtlpMappedResult['sessions'] = [];
   const events: OtlpMappedResult['events'] = [];
+  const endedSessionIds: string[] = [];
 
   if (!request.resourceSpans?.length) {
-    return { sessions, events };
+    return { sessions, events, endedSessionIds };
   }
 
   // Collect all spans grouped by traceId, with resource context
@@ -634,6 +641,11 @@ export function mapOtlpToInternalModels(
       : getDoubleAttr(rootSpan.attributes, 'cognipeer.session.duration_ms');
 
     const status = otlpStatusToString(rootSpan.status?.code);
+    // The chosen span is the session's root (not just the longest span of a
+    // partial batch) and carries an end time: the run is over.
+    const rootEnded = (!rootSpan.parentSpanId || isCognipeerRootSpan(rootSpan))
+      && Number(rootSpan.endTimeUnixNano) > 0;
+    if (rootEnded) endedSessionIds.push(sessionId);
 
     // Aggregate tokens from child spans
     let totalInputTokens = getIntAttr(rootSpan.attributes, 'cognipeer.session.total_input_tokens') ?? 0;
@@ -842,7 +854,7 @@ export function mapOtlpToInternalModels(
     eventCount: events.length,
   });
 
-  return { sessions, events };
+  return { sessions, events, endedSessionIds };
 }
 
 // ─── Section Synthesis ──────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import {
   IconDatabase,
   IconExternalLink,
   IconFolder,
+  IconHeartbeat,
   IconHistory,
   IconLayoutDashboard,
   IconMessage,
@@ -308,9 +309,19 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p) =>
         p === '/dashboard/tracing' ||
         (p.startsWith('/dashboard/tracing') &&
+          !p.startsWith('/dashboard/tracing/health') &&
           !p.startsWith('/dashboard/tracing/sessions') &&
           !p.startsWith('/dashboard/tracing/threads') &&
           !p.startsWith('/dashboard/tracing/agents')),
+    },
+    {
+      // Enterprise: the health scoreboard of every entity type (a placeholder page in the community build).
+      id: 'health',
+      label: 'Health',
+      labelKey: 'entityHealth',
+      href: '/dashboard/tracing/health',
+      icon: IconHeartbeat,
+      matcher: (p) => p.startsWith('/dashboard/tracing/health'),
     },
     {
       id: 'sessions',

@@ -50,6 +50,8 @@ export const resolveStatusColor = (status: string | undefined): string => {
   if (normalized === 'running' || normalized === 'in_progress') return 'blue';
   // Waiting on a person (tool approval, question, client tool).
   if (normalized === 'paused' || normalized === 'pending') return 'yellow';
+  // 'abandoned': the run went quiet without ever reporting an end.
+  if (normalized === 'abandoned') return 'yellow';
   if (normalized === 'expired') return 'orange';
   return 'gray';
 };
@@ -78,6 +80,7 @@ export function statusVariant(status?: string) {
   const v = status.toLowerCase();
   if (v === 'success' || v === 'completed') return 'ok' as const;
   if (v === 'error' || v === 'failed') return 'err' as const;
+  if (v === 'abandoned') return 'warn' as const;
   return 'info' as const;
 }
 

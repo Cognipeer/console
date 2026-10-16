@@ -221,6 +221,25 @@ POST /api/client/v1/traces
 }
 ```
 
+## Session Status
+
+The `status` of a session decides how it counts in the agent health numbers and in alerts. **A status the client sends wins**; the console derives one only when the client sends none (or `unknown`).
+
+| Ingest path | Status |
+|-------------|--------|
+| Batch (`POST /sessions`) | The `status` you send is kept as is. Without one the session counts as finished: `error` when any event failed or the payload lists a non-sink error, otherwise `success`. Send `in_progress` to keep it open |
+| Stream `/start` | `in_progress`. Starting an id that already exists reopens it, keeps its totals and makes the status derivable again |
+| Stream `/end` | The `status` you send is kept as is. Without one: `error` when any event so far failed or the end payload lists an error, otherwise `success` |
+| OTLP (`POST /traces`) | `in_progress` until a request carries the root span (no parent, or the `agent_session` span) with an end time, even while error spans arrive. Then `error` if any error was recorded, otherwise `success` |
+
+Other final statuses (`completed`, `failed`, `partial`, `cancelled`, ...) are stored as sent. For the health numbers `error` and `failed` are failures, and every status except `in_progress` and `unknown` is a finished run.
+
+- **A status you sent is final.** Events are posted in the background and can arrive after the session ended. A late failed event is still counted as an error event (agent error events, tool and model error rates) but does not turn a session whose status you sent on batch or `/end` into `error`. When the status was derived, or the session is OTLP, a late failed event does flip a finished `success`, `completed` or `partial` session to `error`.
+- **Sessions that never end.** A sweep runs every `TRACING_FINALIZER_INTERVAL_MS`. An OTLP session whose root span never arrives is closed after 10 minutes without activity as `error` or `success`; any other session still `in_progress` after `TRACING_STALE_SESSION_MINUTES` becomes `abandoned`, which is not an error. A late `/end` or root span revives it.
+- **Counting.** A session is counted once, when it reaches a final status, and later corrections are booked as differences. Tokens and cost are booked with the first final status. For an externally traced agent an event is counted at its arrival time clamped into 3 hours before to 5 minutes after; events dated more than 24 hours ago, and sessions that ended more than 24 hours ago, are not counted. The timeline keeps the timestamps you sent.
+
+Details and the metrics built on this: [Agent Tracing](/guide/tracing#session-status).
+
 ## Reading Traces Back
 
 ### Client API
@@ -246,6 +265,8 @@ your own workspace:
 | `GET /api/tracing/sessions/:sessionId/events/:eventId` | One event in full |
 | `GET /api/tracing/threads` · `/:threadId` | Threads and thread detail |
 | `GET /api/tracing/agents` · `/:agentName/overview` | Per-agent metrics and insights |
+| `GET /api/tracing/agents/health` | Health of every agent: totals, previous period, sparkline and alert state (see [Agent health](#agent-health)) |
+| `GET /api/tracing/agents/:agentName/health` | Health of one agent: bucketed series, normal-range band, markers and alert counts |
 | `GET /api/tracing/models/:modelName/overview` | Per-model metrics and insights |
 
 #### `?includeEventContent=false`
@@ -313,6 +334,18 @@ Two fields depend on what the producer recorded:
   `tool_call` section. Calls whose arguments cannot be read are excluded from
   `callsAnalyzed`.
 
+#### Agent health
+
+The two health endpoints read the 5-minute entity rollups, which are kept for `ENTITY_METRICS_RETENTION_DAYS` (45 days by default). Sessions are counted when they reach a final status (see [Session Status](#session-status)).
+
+| Parameter | Applies to | Description |
+|-----------|-----------|-------------|
+| `period` | both | `last_day` (default), `last_7_days`, `last_30_days` or `total` (the last 30 days) |
+| `from`, `to` | both | ISO dates. When given they win over `period`; `to` is never later than now and `from` defaults to 24 hours before `to` |
+| `limit` | list | Agents returned: 200 by default, at most 500 |
+
+Invalid dates, a `from` that is not earlier than `to` and a range outside the retained data answer `400`. The list returns, per agent, `totals`, `previous` (the period of the same length just before, or `null`), a 24-point `spark` and an `alert` object (`phase`, `severity`, `incidentId`, `covered`); the detail returns `buckets` (5 minutes up to 6 hours, 1 hour up to 48 hours, 1 day beyond), `totals`, `previous`, `baseline` (Enterprise; `null` otherwise), `markers` (agent versions and incidents) and the agent's alert counts. `alert.incidentId` and the incident markers are returned only to callers who may read the `alerts` service. Both responses carry `alertsAvailable: false` when the alert rules could not be read, in which case no agent is reported as covered or OK. The response fields are described in [Agent Tracing](/guide/tracing#agent-health-api).
+
 ## OTel Correlation Fields
 
 | Field | Scope | Description |
@@ -371,6 +404,12 @@ sessions it cannot map, and the deterministic insights read `tool_call` and
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRACING_MAX_BODY_SIZE_MB` | `10` | Maximum request body size for tracing payloads |
+| `TRACING_STALE_SESSION_MINUTES` | `360` | Quiet time after which a session that never ended becomes `abandoned` (minimum 5) |
+| `TRACING_FINALIZER_INTERVAL_MS` | `300000` | How often the sweep for sessions that never ended runs (minimum 10000) |
+| `ENTITY_METRICS_FLUSH_MS` | `30000` | How often the health rollup is written (minimum 1000) |
+| `ENTITY_METRICS_RETENTION_DAYS` | `45` | How long the 5-minute rollups are kept |
+
+The other health and alerting settings are listed under [Entity Health & Alerting](/guide/configuration#entity-health-alerting).
 
 ## Errors
 

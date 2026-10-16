@@ -12,13 +12,14 @@
 
 import type { DatabaseProvider, IAgentPendingAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { recordAgentSessionOutcome } from '@/lib/services/tracing/traceEntityMetrics';
 
 const logger = createLogger('pausedTraceClosure');
 
 export type PausedTraceDb = Pick<
     DatabaseProvider,
     'findAgentTracingSessionById' | 'updateAgentTracingSession' | 'createAgentTracingEvent'
->;
+> & Partial<Pick<DatabaseProvider, 'getCurrentTenantDbName'>>;
 
 export interface PausedTraceClosure {
     outcome: 'cancelled' | 'expired';
@@ -63,7 +64,7 @@ function stepLabel(action: IAgentPendingAction, outcome: PausedTraceClosure['out
 
 export async function closePausedTrace(
     db: PausedTraceDb,
-    input: { projectId: string; tenantId: string; pausedCtx: unknown; closure: PausedTraceClosure },
+    input: { projectId: string; tenantId: string; tenantDbName?: string; pausedCtx: unknown; closure: PausedTraceClosure },
 ): Promise<void> {
     const continuation = readContinuation(input.pausedCtx);
     if (!continuation) return;
@@ -112,13 +113,35 @@ export async function closePausedTrace(
         }
 
         const startedAt = session.startedAt ? new Date(session.startedAt) : undefined;
+        const durationMs = startedAt ? now.getTime() - startedAt.getTime() : undefined;
         await db.updateAgentTracingSession(continuation.sessionId, {
             status: input.closure.outcome,
             endedAt: now,
-            ...(startedAt ? { durationMs: now.getTime() - startedAt.getTime() } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
             eventCounts,
             totalEvents: (session.totalEvents ?? 0) + input.closure.actions.length,
         }, input.projectId);
+
+        // A paused run is booked when it ends: this is its end, there will be no resume to book it.
+        const tenantDbName = input.tenantDbName ?? db.getCurrentTenantDbName?.() ?? null;
+        if (tenantDbName) {
+            await recordAgentSessionOutcome({
+                tenantDbName,
+                tenantId: input.tenantId,
+                projectId: input.projectId,
+                session: {
+                    sessionId: continuation.sessionId,
+                    agentName: session.agentName,
+                    status: input.closure.outcome,
+                    endedAt: now,
+                    durationMs,
+                    totalInputTokens: session.totalInputTokens,
+                    totalOutputTokens: session.totalOutputTokens,
+                },
+                previousOutcome: session.metricsOutcome,
+                source: 'hosted',
+            });
+        }
     } catch (error) {
         logger.warn('Could not close the trace of a paused run', {
             sessionId: continuation.sessionId,

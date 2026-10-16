@@ -213,6 +213,22 @@ shared by all replicas.
 
 See [Cluster](/guide/cluster) for the full topology / assignment model.
 
+### Entity Health & Alerting
+
+Health views, alert rules and reports for agents, models, knowledge bases, MCP servers and tools read 5-minute rollups that every node buffers in memory and flushes to the database. See [Monitoring](/guide/monitoring#alerts-incidents) for how alert rules use them and [Agent Tracing](/guide/tracing#session-status) for how a session's status is decided.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENTITY_METRICS_FLUSH_MS` | How often buffered rollup increments are written to the database (minimum `1000`). Alert evaluation only reads data older than this, so a longer interval delays alerts by the same amount | `30000` |
+| `ENTITY_METRICS_RETENTION_DAYS` | Rollup buckets older than this many days are expired (database TTL plus an hourly purge, minimum `1`). Health ranges and baselines cannot look further back than this | `45` |
+| `ENTITY_METRICS_MAX_BUFFERED_ROWS` | Cap on distinct rollup rows buffered per process (minimum `100`); new rows beyond the cap are dropped and counted, existing rows keep accumulating | `50000` |
+| `ENTITY_METRICS_MAX_BUFFERED_ROWS_PER_TENANT` | Cap on distinct rollup rows one tenant may hold in the buffer (minimum `100`), so a single tenant cannot use up the share of the others; the effective cap is the lower of this and `ENTITY_METRICS_MAX_BUFFERED_ROWS`. Excess new rows are dropped and counted per tenant | `10000` |
+| `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` (minimum `5`). An abandoned session is not an error | `360` |
+| `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept (minimum `10000`) | `300000` |
+| `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification: webhook, Slack, Teams and PagerDuty (minimum `1000`) | `10000` |
+
+OTLP sessions are closed earlier than the stale window: one that has been quiet for 10 minutes (or the stale window, whichever is shorter) is finalized as `success` or `error` instead of `abandoned`. The 10 minutes are fixed.
+
 ### Logging
 
 | Variable | Description | Default |

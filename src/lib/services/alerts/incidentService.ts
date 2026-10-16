@@ -4,16 +4,26 @@
  * Incidents are created automatically when alerts fire and allow users
  * to track resolution through a defined status workflow:
  *   open → acknowledged → investigating → resolved → closed
+ *
+ * Failures that are the caller's doing (unknown incident, illegal transition,
+ * bad input) are thrown as `AlertApiError`, so the API answers 4xx instead of 500.
  */
 
 import { getTenantDatabase } from '@/lib/database';
 import type {
+  AlertConditionOperator,
+  AlertModule,
+  AlertRuleSeverity,
+  EntityMetricType,
+  IAlertCondition,
   IIncident,
+  IIncidentContext,
   IIncidentNote,
   IncidentStatus,
   IncidentSeverity,
   AlertMetric,
 } from '@/lib/database';
+import { AlertApiError } from './alertApiError';
 
 /** Status transitions — which statuses are reachable from the current one */
 const STATUS_TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
@@ -24,12 +34,42 @@ const STATUS_TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
   closed: ['open'],               // can reopen
 };
 
-/** Determine severity from metric + how far over threshold */
+export const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
+export const INCIDENT_SEVERITIES: IncidentSeverity[] = ['critical', 'warning', 'info'];
+
+/** How far past the threshold a breach is, as a ratio >= 1 when breached (operator-aware). */
+function breachRatio(operator: AlertConditionOperator | undefined, actual: number, threshold: number): number | null {
+  if (!Number.isFinite(actual) || !Number.isFinite(threshold)) return null;
+  // A zero or negative threshold has no meaningful ratio.
+  if (threshold <= 0) return null;
+  if (operator === 'lt' || operator === 'lte') return threshold / Math.max(actual, 1e-9);
+  if (operator === 'gt' || operator === 'gte') return actual / threshold;
+  return null;
+}
+
+function severityFromRatio(ratio: number): IncidentSeverity {
+  if (ratio >= 2) return 'critical';
+  if (ratio >= 1.25) return 'warning';
+  return 'info';
+}
+
+/**
+ * Determine severity from metric + how far over threshold.
+ *
+ * With an `operator` the ratio is operator-aware (`lt` rules compare
+ * threshold/actual). Without one the legacy heuristic applies.
+ */
 export function deriveSeverity(
   metric: AlertMetric,
   actualValue: number,
   threshold: number,
+  operator?: AlertConditionOperator,
 ): IncidentSeverity {
+  if (operator) {
+    const ratio = breachRatio(operator, actualValue, threshold);
+    return ratio === null ? 'warning' : severityFromRatio(ratio);
+  }
+
   const ratio = threshold !== 0 ? actualValue / threshold : 1;
 
   // Error-rate based metrics are critical if ≥ 2× threshold
@@ -44,6 +84,54 @@ export function deriveSeverity(
   return 'info';
 }
 
+export interface RuleSeverityInput {
+  rule: {
+    metric: AlertMetric;
+    severity?: AlertRuleSeverity | null;
+    condition: IAlertCondition;
+  };
+  value: number | null;
+  baseline?: { ratio: number | null; z: number | null } | null;
+  slo?: { burnShort: number | null } | null;
+}
+
+/**
+ * Severity of a fired alert: the rule's own unless it is 'auto' (or unset), then
+ * derived from the breach — threshold ratio (operator-aware), baseline ratio/z,
+ * absence (always critical) or SLO burn.
+ */
+export function deriveRuleSeverity(input: RuleSeverityInput): IncidentSeverity {
+  const configured = input.rule.severity;
+  if (configured && configured !== 'auto') return configured;
+
+  const { condition } = input.rule;
+  const mode = condition.mode ?? 'threshold';
+
+  if (mode === 'absence') return 'critical';
+
+  if (mode === 'baseline') {
+    const cfg = condition.baseline;
+    const ratio = input.baseline?.ratio ?? null;
+    const z = input.baseline?.z ?? null;
+    if (!cfg) return 'warning';
+    // Direction-aware: a drop reads ratio < 1 and a negative z (EE judgeDeviation), a rise ratio > 1 and a positive z.
+    const up = (ratio !== null && ratio >= 2 * cfg.minRatio) || (z !== null && z >= 2 * cfg.minZ);
+    const down = (ratio !== null && cfg.minRatio > 0 && ratio <= 1 / (2 * cfg.minRatio)) || (z !== null && z <= -2 * cfg.minZ);
+    if (cfg.direction === 'up' ? up : cfg.direction === 'down' ? down : up || down) return 'critical';
+    return 'warning';
+  }
+
+  if (mode === 'slo_burn') {
+    const burnShort = input.slo?.burnShort ?? null;
+    const burnRate = condition.slo?.burnRate;
+    if (burnShort !== null && burnRate !== undefined && burnShort >= 2 * burnRate) return 'critical';
+    return 'warning';
+  }
+
+  if (input.value === null) return 'warning';
+  return deriveSeverity(input.rule.metric, input.value, condition.threshold, condition.operator);
+}
+
 export interface CreateIncidentInput {
   tenantId: string;
   projectId: string;
@@ -56,7 +144,33 @@ export interface CreateIncidentInput {
   severity?: IncidentSeverity;
   metadata?: Record<string, unknown>;
   firedAt: Date;
+  module?: AlertModule;
+  entityType?: EntityMetricType | null;
+  entityKey?: string | null;
+  baselineValue?: number | null;
+  peakValue?: number | null;
+  context?: IIncidentContext;
 }
+
+/** Narrowing for by-id access: when `projectId` is given a record of another project reads as missing. */
+export interface IncidentScope {
+  projectId?: string;
+}
+
+export interface IncidentActor {
+  userId: string;
+  userName?: string;
+}
+
+export type BulkIncidentAction = 'acknowledge' | 'resolve' | 'close';
+
+const BULK_ACTION_STATUS: Record<BulkIncidentAction, IncidentStatus> = {
+  acknowledge: 'acknowledged',
+  resolve: 'resolved',
+  close: 'closed',
+};
+
+export const MAX_BULK_INCIDENTS = 100;
 
 export class IncidentService {
   /**
@@ -68,10 +182,12 @@ export class IncidentService {
   ): Promise<IIncident> {
     const db = await getTenantDatabase(tenantDbName);
 
+    const operator = (input.metadata?.operator as AlertConditionOperator | undefined) ?? undefined;
     const severity = input.severity ?? deriveSeverity(
       input.metric,
       input.actualValue,
       input.threshold,
+      operator,
     );
 
     return db.createIncident({
@@ -88,25 +204,43 @@ export class IncidentService {
       notes: [],
       firedAt: input.firedAt,
       metadata: input.metadata,
+      ...(input.module ? { module: input.module } : {}),
+      ...(input.entityType !== undefined ? { entityType: input.entityType } : {}),
+      ...(input.entityKey !== undefined ? { entityKey: input.entityKey } : {}),
+      ...(input.baselineValue !== undefined ? { baselineValue: input.baselineValue } : {}),
+      lastValue: input.actualValue,
+      peakValue: input.peakValue ?? input.actualValue,
+      ...(input.context ? { context: input.context } : {}),
     });
   }
 
   /**
    * Update incident status with workflow validation.
+   *
+   * `userId` of `'system'` marks an automatic resolution. `scope.projectId`
+   * narrows the lookup to that project (a record of another project reads as
+   * not found).
    */
   static async updateStatus(
     tenantDbName: string,
     incidentId: string,
     newStatus: IncidentStatus,
     userId: string,
+    scope: IncidentScope = {},
   ): Promise<IIncident | null> {
     const db = await getTenantDatabase(tenantDbName);
-    const incident = await db.findIncidentById(incidentId);
+    const incident = await db.findIncidentById(incidentId, scope.projectId);
     if (!incident) return null;
+
+    if (!INCIDENT_STATUSES.includes(newStatus)) {
+      throw new AlertApiError(400, 'invalid_status', `Invalid status. Must be one of: ${INCIDENT_STATUSES.join(', ')}`);
+    }
 
     const allowed = STATUS_TRANSITIONS[incident.status];
     if (!allowed.includes(newStatus)) {
-      throw new Error(
+      throw new AlertApiError(
+        409,
+        'invalid_transition',
         `Cannot transition from "${incident.status}" to "${newStatus}". Allowed: ${allowed.join(', ')}`,
       );
     }
@@ -115,14 +249,55 @@ export class IncidentService {
 
     if (newStatus === 'acknowledged') {
       updateData.acknowledgedAt = new Date();
+      updateData.acknowledgedBy = userId;
     } else if (newStatus === 'resolved') {
       updateData.resolvedAt = new Date();
       updateData.resolvedBy = userId;
     } else if (newStatus === 'closed') {
       updateData.closedAt = new Date();
+    } else if (newStatus === 'open') {
+      // Reopening: the incident must no longer read as resolved or closed, by anyone or by the system.
+      // Both providers store null as a cleared value.
+      Object.assign(updateData, { resolvedAt: null, resolvedBy: null, closedAt: null, autoResolved: false });
     }
 
-    return db.updateIncident(incidentId, updateData);
+    return db.updateIncident(incidentId, updateData, scope.projectId);
+  }
+
+  /**
+   * Resolve an incident because the alert recovered by itself. A person may
+   * already have resolved or closed it: then it is left alone (null returned).
+   */
+  static async autoResolve(
+    tenantDbName: string,
+    incidentId: string,
+    note: string,
+    values: { lastValue?: number | null; peakValue?: number | null } = {},
+  ): Promise<IIncident | null> {
+    const db = await getTenantDatabase(tenantDbName);
+    const incident = await db.findIncidentById(incidentId);
+    if (!incident) return null;
+    if (incident.status !== 'open' && incident.status !== 'acknowledged' && incident.status !== 'investigating') return null;
+
+    const now = new Date();
+    const notes: IIncidentNote[] = [
+      ...(incident.notes || []),
+      { userId: 'system', userName: 'System', content: note, createdAt: now },
+    ];
+    return db.updateIncident(incidentId, {
+      status: 'resolved',
+      resolvedAt: now,
+      resolvedBy: 'system',
+      autoResolved: true,
+      notes,
+      ...(values.lastValue !== undefined ? { lastValue: values.lastValue } : {}),
+      ...(values.peakValue !== undefined && values.peakValue !== null ? { peakValue: values.peakValue } : {}),
+    });
+  }
+
+  /** Append a system note without touching the status (e.g. "Rule disabled"). */
+  static async addSystemNote(tenantDbName: string, incidentId: string, content: string): Promise<IIncident | null> {
+    return IncidentService.addNote(tenantDbName, incidentId, 'system', 'System', content);
   }
 
   /**
@@ -134,9 +309,10 @@ export class IncidentService {
     userId: string,
     userName: string,
     content: string,
+    scope: IncidentScope = {},
   ): Promise<IIncident | null> {
     const db = await getTenantDatabase(tenantDbName);
-    const incident = await db.findIncidentById(incidentId);
+    const incident = await db.findIncidentById(incidentId, scope.projectId);
     if (!incident) return null;
 
     const note: IIncidentNote = {
@@ -147,7 +323,56 @@ export class IncidentService {
     };
 
     const notes = [...(incident.notes || []), note];
-    return db.updateIncident(incidentId, { notes });
+    return db.updateIncident(incidentId, { notes }, scope.projectId);
+  }
+
+  /** Assign (or unassign with null / empty) an incident. */
+  static async assign(
+    tenantDbName: string,
+    incidentId: string,
+    assignedTo: string | null,
+    scope: IncidentScope = {},
+  ): Promise<IIncident | null> {
+    const db = await getTenantDatabase(tenantDbName);
+    const incident = await db.findIncidentById(incidentId, scope.projectId);
+    if (!incident) return null;
+    const value = typeof assignedTo === 'string' && assignedTo.trim() ? assignedTo.trim() : null;
+    // `null` clears the field (Mongo stores null, SQLite NULL): both read as unassigned.
+    return db.updateIncident(incidentId, { assignedTo: value as unknown as string }, scope.projectId);
+  }
+
+  /**
+   * Apply one action to many incidents (<= 100). Each id is handled on its own:
+   * an unknown id or illegal transition lands in `failed`, never aborts the rest.
+   */
+  static async bulkUpdate(
+    tenantDbName: string,
+    ids: string[],
+    action: BulkIncidentAction,
+    actor: IncidentActor,
+    scope: IncidentScope = {},
+  ): Promise<{ updated: number; failed: Array<{ id: string; error: string }> }> {
+    const status = BULK_ACTION_STATUS[action];
+    if (!status) {
+      throw new AlertApiError(400, 'invalid_action', 'action must be one of: acknowledge, resolve, close');
+    }
+    const unique = [...new Set(ids)];
+    if (unique.length === 0 || unique.length > MAX_BULK_INCIDENTS) {
+      throw new AlertApiError(400, 'invalid_ids', `ids must contain 1 to ${MAX_BULK_INCIDENTS} incident ids`);
+    }
+
+    let updated = 0;
+    const failed: Array<{ id: string; error: string }> = [];
+    for (const id of unique) {
+      try {
+        const incident = await IncidentService.updateStatus(tenantDbName, id, status, actor.userId, scope);
+        if (incident) updated += 1;
+        else failed.push({ id, error: 'Incident not found' });
+      } catch (error) {
+        failed.push({ id, error: error instanceof Error ? error.message : 'Update failed' });
+      }
+    }
+    return { updated, failed };
   }
 
   /**
@@ -156,9 +381,10 @@ export class IncidentService {
   static async getIncident(
     tenantDbName: string,
     incidentId: string,
+    scope: IncidentScope = {},
   ): Promise<IIncident | null> {
     const db = await getTenantDatabase(tenantDbName);
-    return db.findIncidentById(incidentId);
+    return db.findIncidentById(incidentId, scope.projectId);
   }
 
   /**
@@ -172,6 +398,8 @@ export class IncidentService {
       ruleId?: string;
       status?: IncidentStatus;
       severity?: IncidentSeverity;
+      module?: AlertModule;
+      entityKey?: string;
       limit?: number;
       skip?: number;
     },
@@ -190,5 +418,54 @@ export class IncidentService {
   ): Promise<number> {
     const db = await getTenantDatabase(tenantDbName);
     return db.countIncidents(tenantId, options);
+  }
+
+  /**
+   * Display names of the people an incident list or detail refers to
+   * (acknowledged / assigned / resolved by). ONE read of the tenant's users,
+   * and only when the page names somebody. 'system' (automatic resolution) and
+   * ids that match no user are absent; emails are never exposed.
+   */
+  static async resolveUserNames(
+    tenantDbName: string,
+    incidents: Array<Pick<IIncident, 'acknowledgedBy' | 'assignedTo' | 'resolvedBy'>>,
+  ): Promise<Map<string, string>> {
+    const wanted = new Set<string>();
+    for (const incident of incidents) {
+      for (const id of [incident.acknowledgedBy, incident.assignedTo, incident.resolvedBy]) {
+        if (typeof id === 'string' && id && id !== 'system') wanted.add(id);
+      }
+    }
+    const names = new Map<string, string>();
+    if (wanted.size === 0) return names;
+    try {
+      const db = await getTenantDatabase(tenantDbName);
+      for (const user of await db.listUsers()) {
+        const id = String(user._id ?? '');
+        const name = typeof user.name === 'string' ? user.name.trim() : '';
+        if (id && name && wanted.has(id)) names.set(id, name);
+      }
+    } catch { /* names are a convenience: the ids still identify the people */ }
+    return names;
+  }
+
+  /** The incident with `acknowledgedByName`, `assignedToName` and `resolvedByName` (string | null). */
+  static withUserNames<T extends Pick<IIncident, 'acknowledgedBy' | 'assignedTo' | 'resolvedBy'>>(
+    incident: T,
+    names: Map<string, string>,
+  ): T & { acknowledgedByName: string | null; assignedToName: string | null; resolvedByName: string | null } {
+    const nameOf = (id: string | null | undefined) => (id ? names.get(id) ?? null : null);
+    return {
+      ...incident,
+      acknowledgedByName: nameOf(incident.acknowledgedBy),
+      assignedToName: nameOf(incident.assignedTo),
+      resolvedByName: nameOf(incident.resolvedBy),
+    };
+  }
+
+  /** Incident counts per status for one project (every status present). */
+  static async countByStatus(tenantDbName: string, projectId: string): Promise<Record<IncidentStatus, number>> {
+    const db = await getTenantDatabase(tenantDbName);
+    return db.countIncidentsByStatus(projectId);
   }
 }

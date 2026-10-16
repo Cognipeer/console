@@ -8,10 +8,15 @@
 
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
+import { alertsTr, incidentsTr } from './alerts.tr';
+import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
+import { entityHealthTr } from './entityHealth.tr';
+import { healthDigestTr } from './healthDigest.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { projectTabsTr } from './projectTabs.tr';
 import { portalsNowTr } from './portalsNow.tr';
+import { tracingHealthTr } from './tracingHealth.tr';
 import { projectsAccessTr } from './projectsAccess.tr';
 
 export const tr: typeof en = {
@@ -1232,6 +1237,12 @@ export const tr: typeof en = {
   },
   iamDirectory: iamDirectoryTr,
   directorySync: directorySyncTr,
+  alerts: alertsTr,
+  incidents: incidentsTr,
+  tracingHealth: tracingHealthTr,
+  entityHealth: entityHealthTr,
+  healthDigest: healthDigestTr,
+  analyticsDashboards: analyticsDashboardsTr,
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
   iamPrincipals: {
@@ -1628,6 +1639,8 @@ export const tr: typeof en = {
     iamDescription: 'Politikalar, kişiler, erişim kontrolü, denetim izi ve limitler',
     webhooks: 'Webhook’lar',
     webhooksDescription: 'Kendi uç noktalarınıza imzalı olaylar gönderin',
+    entityHealth: 'Sağlık',
+    entityHealthDescription: 'Ajanların, modellerin, bilgi tabanlarının, MCP sunucularının ve araçların sağlığı',
     evaluations: 'Değerlendirme',
     evaluationsDescription: 'Veri setleri ve skorlayıcılarla çevrimdışı agent & model testi',
     redteam: 'Red Team',
@@ -1636,6 +1649,7 @@ export const tr: typeof en = {
     analysisDescription: 'Konuşma alan çıkarımı, kalite değerlendirme ve doğruluk',
     pii: 'PII Servisi',
     piiDescription: 'Kişisel verileri tespit edin, redakte edin ve maskeleyin',
+    alertsDescription: 'Ajanlar, modeller ve araçlar için eşik, taban çizgisi, yokluk ve SLO alarmları ile olaylar',
     crawler: 'Crawler',
     crawlerDescription: 'Web sitelerini markdown olarak çekip knowledge engine ile birleştir',
     websearch: 'Web Arama',
@@ -2539,6 +2553,11 @@ export const tr: typeof en = {
   breadcrumbs: {
     ...en.breadcrumbs,
     iam: 'IAM merkezi',
+    health: 'Sağlık',
+    healthAgent: 'Ajanlar',
+    healthModel: 'Modeller',
+    healthKb: 'Bilgi tabanları',
+    healthTool: 'Araçlar',
     account: 'Hesabım',
     webhooks: 'Webhook’lar',
     pii: 'PII Servisi',
@@ -2637,6 +2656,7 @@ export const tr: typeof en = {
       feedback: 'Geri bildirim',
       agent_run: 'Arka plan çalıştırmaları',
       schedule: 'Zamanlamalar',
+      alert: 'Uyarılar',
     },
     events: {
       session_idled: 'Bir oturum boşa çıktı (her durma nedeni)',
@@ -2650,6 +2670,8 @@ export const tr: typeof en = {
       agent_run_requires_action: 'Bir arka plan çalıştırması bir kişiyi bekliyor',
       schedule_fired: 'Bir zamanlama tetiklendi',
       schedule_failed: 'Bir zamanlama başarısız oldu',
+      alert_fired: 'Bir uyarı tetiklendi',
+      alert_resolved: 'Bir uyarı çözüldü',
     },
     secret: {
       title: 'İmza sırrı',
@@ -4771,6 +4793,7 @@ export const tr: typeof en = {
       'analysis.extractionModel': 'Çıkarım modeli',
       'analysis.judgeModel': 'Hakem modeli',
       alert: 'Alarm kapsamı',
+      'alert.agent': 'Alarm kapsamı: ajan',
       'alert.model': 'Alarm kapsamı: model',
       'alert.guardrail': 'Alarm kapsamı: guardrail',
       'alert.ragModule': 'Alarm kapsamı: bilgi modülü',

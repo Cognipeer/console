@@ -41,6 +41,15 @@ describe('event matching', () => {
     expect(patternMatches('*', 'schedule.failed')).toBe(true);
   });
 
+  it('alerts are a catalog group: alert.fired and alert.resolved are selectable and covered by alert.*', () => {
+    const types = WEBHOOK_EVENT_CATALOG.filter((event) => event.group === 'alert').map((event) => event.type);
+    expect(types).toEqual(['alert.fired', 'alert.resolved']);
+    expect(eventMatches(['alert.*'], 'alert.fired')).toBe(true);
+    expect(eventMatches(['alert.*'], 'alert.resolved')).toBe(true);
+    expect(isValidEventPattern('alert.*')).toBe(true);
+    expect(normalizeEventList(['alert.fired'])).toEqual({ ok: true, events: ['alert.fired'] });
+  });
+
   it('a prefix pattern does not match a longer, different prefix', () => {
     expect(patternMatches('agent.*', 'agent_run.succeeded')).toBe(false);
   });

@@ -850,6 +850,7 @@ export async function sweepExpiredPendingActions(
                     actions: actions.filter((action) => snapshots.get(String(action._id))?.status === 'expired'),
                     projectId: first.projectId,
                     tenantId: first.tenantId,
+                    tenantDbName,
                 });
                 await db.updateAgentConversationRuntime(conversationId, {
                     runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [],

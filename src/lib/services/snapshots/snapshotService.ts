@@ -842,9 +842,13 @@ function matchesGatewayStatus(row: IModelUsageLog, status: SnapshotFilters['stat
   return !status || row.status === status;
 }
 
-function matchesTracingStatus(session: IAgentTracingSession, status: SnapshotFilters['status']): boolean {
+export function matchesTracingStatus(session: IAgentTracingSession, status: SnapshotFilters['status']): boolean {
   if (!status) return true;
-  const isError = TRACING_ERROR_STATUSES.has((session.status ?? '').toLowerCase());
+  const normalized = (session.status ?? '').toLowerCase();
+  // An abandoned session never reported an end: it is not an error, but it is
+  // not a completed conversation either, so a status filter matches neither side.
+  if (normalized === 'abandoned') return false;
+  const isError = TRACING_ERROR_STATUSES.has(normalized);
   return status === 'error' ? isError : !isError;
 }
 

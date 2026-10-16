@@ -1,365 +1,385 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Group,
-  Loader,
-  Menu,
-  Paper,
-  SegmentedControl,
-  Stack,
-  Switch,
-  Text,
-  ThemeIcon,
-  Tooltip,
-} from '@mantine/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Badge, Button, Switch, Text } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
+  IconAlertTriangle,
   IconBell,
   IconBellPlus,
-  IconDots,
-  IconEdit,
-  IconHistory,
-  IconTrash,
-  IconAlertTriangle,
   IconCheck,
   IconClock,
-  IconActivity,
+  IconCopy,
+  IconEdit,
   IconExclamationCircle,
+  IconFlame,
+  IconHistory,
+  IconTrash,
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import { StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import StatTile from '@/components/common/ui/StatTile';
-import AlertRuleForm from '@/components/alerts/AlertRuleForm';
-import { useTranslations } from '@/lib/i18n';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useDeleteResource } from '@/components/common/confirm';
+import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
+import AlertRuleForm from '@/components/alerts/AlertRuleForm';
+import LoadError from '@/components/alerts/LoadError';
+import { isAbortError, readApiError } from '@/components/alerts/apiError';
+import {
+  authorableModules,
+  conditionMode,
+  createAlertCatalog,
+  inferModule,
+  metricLabel,
+  moduleColor,
+  moduleLabel,
+  MODE_COLORS,
+  ruleStateView,
+  summarizeCondition,
+  summarizeTarget,
+} from '@/components/alerts/alertCatalog';
+import type { AlertMeta, AlertRuleDto, StateCounts } from '@/components/alerts/alertTypes';
+import { primeAlertMeta } from '@/components/alerts/useAlertMeta';
+import { duplicateRuleSeed, prefillFromParams } from '@/components/alerts/ruleForm';
+import { useLocale, useTranslations } from '@/lib/i18n';
 
-interface AlertRule {
-  _id: string;
-  name: string;
-  description?: string;
-  module?: string;
-  metric: string;
-  condition: { operator: string; threshold: number };
-  windowMinutes: number;
-  cooldownMinutes: number;
-  enabled: boolean;
-  scope?: { modelKey?: string; serverKey?: string; guardrailKey?: string; ragModuleKey?: string };
-  channels: Array<{ type: string; recipients: string[] }>;
-  lastTriggeredAt?: string;
-  createdAt: string;
-}
+const PAGE_SIZE = 25;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-const METRIC_LABELS: Record<string, string> = {
-  error_rate: 'Error Rate',
-  avg_latency_ms: 'Avg Latency',
-  p95_latency_ms: 'P95 Latency',
-  total_cost: 'Total Cost',
-  total_requests: 'Total Requests',
-  gpu_cache_usage: 'GPU Cache',
-  request_queue_depth: 'Queue Depth',
-  guardrail_fail_rate: 'Fail Rate',
-  guardrail_avg_latency_ms: 'Avg Latency',
-  guardrail_total_evaluations: 'Total Evals',
-  rag_avg_latency_ms: 'Avg Latency',
-  rag_total_queries: 'Total Queries',
-  rag_failed_documents: 'Failed Docs',
-  mcp_error_rate: 'Error Rate',
-  mcp_avg_latency_ms: 'Avg Latency',
-  mcp_total_requests: 'Total Requests',
-  evaluation_pass_rate: 'Pass Rate',
-  evaluation_avg_score: 'Avg Score',
-  analysis_pass_rate: 'Pass Rate',
-  analysis_avg_judge_score: 'Avg Judge Score',
-  analysis_avg_accuracy: 'Avg Accuracy',
-  redteam_attack_success_rate: 'Attack Success Rate',
-  redteam_resilience_score: 'Resilience Score',
-  // Guardrail hook-plane decision metrics — the four the rule form authors.
-  guardrail_block_rate: 'Block Rate',
-  guardrail_approval_rate: 'Approval Rate',
-  guardrail_avg_risk_score: 'Avg Risk Score',
-  guardrail_total_decisions: 'Total Decisions',
-  // Guardrail enforcement metrics. The `aegis_` ids are the PERSISTED metric
-  // names on every stored rule and on the collector that feeds them, so they
-  // stay exactly as they are — only the module they are filed under moved.
-  aegis_block_rate: 'Block Rate',
-  aegis_approval_rate: 'Approval Rate',
-  aegis_avg_risk_score: 'Avg Risk Score',
-  aegis_total_decisions: 'Total Decisions',
-  appgw_requests: 'Requests',
-  appgw_block_rate: 'Block Rate',
-  appgw_error_rate: 'Error Rate',
-  appgw_requests_per_user: 'Busiest User (requests)',
-};
-
-const METRIC_UNITS: Record<string, string> = {
-  error_rate: '%',
-  avg_latency_ms: 'ms',
-  p95_latency_ms: 'ms',
-  total_cost: 'USD',
-  total_requests: '',
-  gpu_cache_usage: '%',
-  request_queue_depth: '',
-  guardrail_fail_rate: '%',
-  guardrail_avg_latency_ms: 'ms',
-  guardrail_total_evaluations: '',
-  rag_avg_latency_ms: 'ms',
-  rag_total_queries: '',
-  rag_failed_documents: '',
-  mcp_error_rate: '%',
-  mcp_avg_latency_ms: 'ms',
-  mcp_total_requests: '',
-  evaluation_pass_rate: '%',
-  evaluation_avg_score: '%',
-  analysis_pass_rate: '%',
-  analysis_avg_judge_score: '%',
-  analysis_avg_accuracy: '%',
-  redteam_attack_success_rate: '%',
-  redteam_resilience_score: '%',
-  guardrail_block_rate: '%',
-  guardrail_approval_rate: '%',
-  guardrail_avg_risk_score: '',
-  guardrail_total_decisions: '',
-  aegis_block_rate: '%',
-  aegis_approval_rate: '%',
-  aegis_avg_risk_score: '',
-  aegis_total_decisions: '',
-  appgw_requests: '',
-  appgw_block_rate: '%',
-  appgw_error_rate: '%',
-  appgw_requests_per_user: '',
-};
-
-const METRIC_COLORS: Record<string, string> = {
-  error_rate: 'red',
-  avg_latency_ms: 'orange',
-  p95_latency_ms: 'orange',
-  total_cost: 'violet',
-  total_requests: 'blue',
-  gpu_cache_usage: 'teal',
-  request_queue_depth: 'cyan',
-  guardrail_fail_rate: 'red',
-  guardrail_avg_latency_ms: 'orange',
-  guardrail_total_evaluations: 'blue',
-  rag_avg_latency_ms: 'orange',
-  rag_total_queries: 'blue',
-  rag_failed_documents: 'red',
-  mcp_error_rate: 'red',
-  mcp_avg_latency_ms: 'orange',
-  mcp_total_requests: 'blue',
-  evaluation_pass_rate: 'green',
-  evaluation_avg_score: 'teal',
-  analysis_pass_rate: 'green',
-  analysis_avg_judge_score: 'teal',
-  analysis_avg_accuracy: 'teal',
-  redteam_attack_success_rate: 'red',
-  redteam_resilience_score: 'green',
-  guardrail_block_rate: 'red',
-  guardrail_approval_rate: 'orange',
-  guardrail_avg_risk_score: 'grape',
-  guardrail_total_decisions: 'blue',
-  aegis_block_rate: 'red',
-  aegis_approval_rate: 'orange',
-  aegis_avg_risk_score: 'grape',
-  aegis_total_decisions: 'blue',
-  appgw_requests: 'blue',
-  appgw_block_rate: 'red',
-  appgw_error_rate: 'orange',
-  appgw_requests_per_user: 'grape',
-};
-
-const MODULE_LABELS: Record<string, string> = {
-  models: 'Model Hub',
-  inference: 'Model Monitoring',
-  guardrails: 'Guardrail',
-  rag: 'Knowledge Engine',
-  mcp: 'MCP Servers',
-  evaluation: 'Evaluation',
-  analysis: 'Analysis',
-  redteam: 'Red Team',
-  'ai-app-gateway': 'AI App Gateway',
-};
-
-/**
- * Modules that no longer exist on their own. A rule persisted with
- * `module: 'aegis'` keeps firing — enforcement moved into the guardrail hook
- * plane, not away — so it is FILED under Guardrails rather than rewritten:
- * relabelling stored rows would break the collector that still emits
- * `aegis_*` metric ids.
- */
-const LEGACY_MODULE_ALIASES: Record<string, string> = {
-  aegis: 'guardrails',
-};
-
-const MODULE_COLORS: Record<string, string> = {
-  models: 'blue',
-  inference: 'teal',
-  guardrails: 'grape',
-  rag: 'indigo',
-  mcp: 'cyan',
-  evaluation: 'green',
-  analysis: 'lime',
-  redteam: 'red',
-  'ai-app-gateway': 'indigo',
-};
-
-const OPERATOR_SYMBOLS: Record<string, string> = {
-  gt: '>',
-  lt: '<',
-  gte: '≥',
-  lte: '≤',
-  eq: '=',
-};
+type StatusFilter = 'all' | 'enabled' | 'disabled' | 'firing';
 
 export default function AlertsPage() {
-  const [rules, setRules] = useState<AlertRule[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [formOpened, formControls] = useDisclosure(false);
-  const [editingRule, setEditingRule] = useState<AlertRule | null>(null);
-  const [createPrefill, setCreatePrefill] = useState<Record<string, unknown> | undefined>();
-  const [moduleFilter, setModuleFilter] = useState('all');
   const t = useTranslations('alerts');
   const tq = useTranslations('common.confirm.qos');
+  const locale = useLocale();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const deleteResource = useDeleteResource();
-  const searchParams = useSearchParams()!;
 
-  // Deep-link support: ?create=1&module=models[&metric=error_rate] opens the
-  // create form prefilled (used by dashboard report drill-downs).
+  const [rules, setRules] = useState<AlertRuleDto[]>([]);
+  const [meta, setMeta] = useState<AlertMeta | null>(null);
+  const [states, setStates] = useState<Record<string, StateCounts>>({});
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [search, setSearch] = useState('');
+  const [moduleFilter, setModuleFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [page, setPage] = useState(1);
+
+  const [formOpened, formControls] = useDisclosure(false);
+  const [editingRule, setEditingRule] = useState<AlertRuleDto | null>(null);
+  const [prefill, setPrefill] = useState<Record<string, unknown> | undefined>();
+
+  const catalog = useMemo(() => createAlertCatalog(meta?.catalog), [meta?.catalog]);
+
+  // ── Load ───────────────────────────────────────────────────────────────
+  const controllerRef = useRef<AbortController | null>(null);
+  const load = useCallback(
+    async (silent = false) => {
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      if (silent) setRefreshing(true);
+      else setLoading(true);
+      try {
+        const res = await fetch('/api/alerts/rules', { signal: controller.signal });
+        if (!res.ok) throw new Error(await readApiError(res, t('loadRulesError')));
+        const data = (await res.json()) as { rules?: AlertRuleDto[]; meta?: AlertMeta; states?: Record<string, StateCounts> };
+        setRules(data.rules ?? []);
+        setMeta(data.meta ?? null);
+        primeAlertMeta(data.meta);
+        setStates(data.states ?? {});
+        setLoadError(null);
+      } catch (error) {
+        if (isAbortError(error) || controller.signal.aborted) return;
+        setLoadError(error instanceof Error ? error.message : t('loadRulesError'));
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    },
+    [t],
+  );
+
   useEffect(() => {
-    if (searchParams.get('create') !== '1') return;
-    // Note: avoid a variable literally named `module` (Next lint:
-    // @next/next/no-assign-module-variable).
-    const moduleParam = searchParams.get('module');
-    const metric = searchParams.get('metric');
-    setCreatePrefill({
-      ...(moduleParam ? { module: moduleParam } : {}),
-      ...(metric ? { metric } : {}),
-    });
+    void load();
+    return () => controllerRef.current?.abort();
+  }, [load]);
+
+  // ── Deep links ─────────────────────────────────────────────────────────
+  // ?create=1&module=agents&metric=agent_error_rate&entityType=agent&entityKey=<name> opens the create form prefilled
+  // (tracing pages, report drill-downs); ?edit=<ruleId> opens a rule (incident detail). The parameters are consumed:
+  // the URL is cleaned so a reload or a later "New rule" does not open the form again.
+  const createParam = searchParams?.get('create') ?? null;
+  const moduleParam = searchParams?.get('module') ?? null;
+  const metricParam = searchParams?.get('metric') ?? null;
+  const entityTypeParam = searchParams?.get('entityType') ?? null;
+  const entityKeyParam = searchParams?.get('entityKey') ?? null;
+  const editParam = searchParams?.get('edit') ?? null;
+
+  // The create form opens once the first rules request has settled, so it starts with the server's catalog and mode
+  // availability (not the bundled fallback) whenever the server answered.
+  useEffect(() => {
+    if (createParam !== '1' || loading) return;
+    setEditingRule(null);
+    setPrefill(
+      prefillFromParams(
+        { module: moduleParam, metric: metricParam, entityType: entityTypeParam, entityKey: entityKeyParam },
+        catalog,
+      ) as Record<string, unknown>,
+    );
+    formControls.open();
+    router.replace(pathname ?? '/dashboard/alerts');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createParam, loading, moduleParam, metricParam, entityTypeParam, entityKeyParam]);
+
+  useEffect(() => {
+    if (!editParam || loading) return;
+    const rule = rules.find((entry) => entry._id === editParam);
+    router.replace(pathname ?? '/dashboard/alerts');
+    if (!rule) return;
+    setPrefill(undefined);
+    setEditingRule(rule);
     formControls.open();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [editParam, loading, rules]);
 
-  const fetchRules = useCallback(async () => {
+  // ── Actions ────────────────────────────────────────────────────────────
+  const handleToggle = async (rule: AlertRuleDto, enabled: boolean) => {
+    setRules((prev) => prev.map((entry) => (entry._id === rule._id ? { ...entry, enabled } : entry)));
     try {
-      const res = await fetch('/api/alerts/rules');
-      if (!res.ok) throw new Error('Failed to fetch alert rules');
-      const data = await res.json();
-      setRules(data.rules || []);
-    } catch (err) {
-      notifications.show({
-        title: t('error'),
-        message: err instanceof Error ? err.message : 'Failed to load alert rules',
-        color: 'red',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    fetchRules();
-  }, [fetchRules]);
-
-  const handleToggle = async (ruleId: string, enabled: boolean) => {
-    try {
-      const res = await fetch(`/api/alerts/rules/${ruleId}`, {
+      const res = await fetch(`/api/alerts/rules/${rule._id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
-      if (!res.ok) throw new Error('Failed to update rule');
-      setRules((prev) =>
-        prev.map((r) => (r._id === ruleId ? { ...r, enabled } : r)),
-      );
-    } catch {
-      notifications.show({
-        title: t('error'),
-        message: t('toggleError'),
-        color: 'red',
-      });
+      if (!res.ok) throw new Error(await readApiError(res, t('toggleError')));
+    } catch (error) {
+      setRules((prev) => prev.map((entry) => (entry._id === rule._id ? { ...entry, enabled: !enabled } : entry)));
+      notifications.show({ title: t('error'), message: error instanceof Error ? error.message : t('toggleError'), color: 'red' });
     }
   };
 
-  const handleDelete = async (rule: AlertRule) => {
+  const handleDelete = async (rule: AlertRuleDto) => {
     const done = await deleteResource({
       noun: tq('nouns.alertRule'),
       name: rule.name,
       type: 'alert-rule',
       id: rule._id,
       action: async () => {
-        const res = await fetch(`/api/alerts/rules/${rule._id}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) throw new Error(t('deleteError'));
+        const res = await fetch(`/api/alerts/rules/${rule._id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await readApiError(res, t('deleteError')));
       },
     });
     if (!done) return;
-    setRules((prev) => prev.filter((r) => r._id !== rule._id));
-    notifications.show({
-      title: t('ruleDeleted'),
-      message: t('ruleDeletedMessage'),
-      color: 'teal',
-    });
+    setRules((prev) => prev.filter((entry) => entry._id !== rule._id));
+    notifications.show({ title: t('ruleDeleted'), message: t('ruleDeletedMessage'), color: 'teal' });
   };
 
-  const handleEdit = (rule: AlertRule) => {
+  const openCreate = () => {
+    setEditingRule(null);
+    setPrefill(undefined);
+    formControls.open();
+  };
+
+  const openEdit = (rule: AlertRuleDto) => {
+    setPrefill(undefined);
     setEditingRule(rule);
     formControls.open();
   };
 
-  const handleCreate = () => {
+  /** Copy a rule into the create form. Secrets are never readable, so only email channels carry over. */
+  const duplicate = (rule: AlertRuleDto) => {
+    const { seed, droppedChannels } = duplicateRuleSeed(rule, t('copyOf', { name: rule.name }));
+    if (droppedChannels > 0) {
+      notifications.show({ title: t('duplicateNoticeTitle'), message: t('duplicateChannelsDropped'), color: 'blue' });
+    }
     setEditingRule(null);
+    setPrefill(seed as Record<string, unknown>);
     formControls.open();
   };
 
-  const enabledCount = rules.filter((r) => r.enabled).length;
-  const disabledCount = rules.filter((r) => !r.enabled).length;
-  const recentlyFiredCount = rules.filter((r) => {
-    if (!r.lastTriggeredAt) return false;
-    const elapsed = Date.now() - new Date(r.lastTriggeredAt).getTime();
-    return elapsed < 24 * 60 * 60 * 1000; // last 24h
-  }).length;
-
-  /** Determine module for a rule (backward compat: infer from metric) */
-  const getModule = (rule: AlertRule): string => {
-    if (rule.module) return LEGACY_MODULE_ALIASES[rule.module] ?? rule.module;
-    const modelMetrics = ['error_rate', 'avg_latency_ms', 'p95_latency_ms', 'total_cost', 'total_requests'];
-    const inferenceMetrics = ['gpu_cache_usage', 'request_queue_depth'];
-    if (modelMetrics.includes(rule.metric)) return 'models';
-    if (inferenceMetrics.includes(rule.metric)) return 'inference';
-    if (rule.metric.startsWith('guardrail_')) return 'guardrails';
-    if (rule.metric.startsWith('rag_')) return 'rag';
-    if (rule.metric.startsWith('mcp_')) return 'mcp';
-    if (rule.metric.startsWith('evaluation_')) return 'evaluation';
-    if (rule.metric.startsWith('analysis_')) return 'analysis';
-    if (rule.metric.startsWith('redteam_')) return 'redteam';
-    // Enforcement metrics, filed with the guardrails that now produce them.
-    if (rule.metric.startsWith('aegis_')) return 'guardrails';
-    if (rule.metric.startsWith('appgw_')) return 'ai-app-gateway';
-    return 'models';
+  const closeForm = () => {
+    formControls.close();
+    setEditingRule(null);
+    setPrefill(undefined);
   };
 
-  const filteredRules = moduleFilter === 'all'
-    ? rules
-    : rules.filter((r) => getModule(r) === moduleFilter);
+  // ── Derived ────────────────────────────────────────────────────────────
+  const firingTotal = useMemo(() => Object.values(states).reduce((sum, entry) => sum + (entry?.firing ?? 0), 0), [states]);
+  const enabledCount = rules.filter((rule) => rule.enabled).length;
+  const disabledCount = rules.length - enabledCount;
+  const firedRecently = rules.filter((rule) => rule.lastTriggeredAt && Date.now() - new Date(rule.lastTriggeredAt).getTime() < DAY_MS).length;
 
-  if (loading) {
-    return (
-      <Stack align="center" justify="center" h={400}>
-        <Loader size="lg" />
-      </Stack>
-    );
-  }
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return rules.filter((rule) => {
+      if (moduleFilter !== 'all' && inferModule(catalog, rule.metric, rule.module) !== moduleFilter) return false;
+      if (statusFilter === 'enabled' && !rule.enabled) return false;
+      if (statusFilter === 'disabled' && rule.enabled) return false;
+      if (statusFilter === 'firing' && !(states[rule._id]?.firing > 0)) return false;
+      if (!needle) return true;
+      const target = summarizeTarget(rule, t);
+      const haystack = [rule.name, rule.description ?? '', rule.metric, metricLabel(catalog, rule.metric, t), target.label, ...target.keys]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [rules, search, moduleFilter, statusFilter, states, catalog, t]);
+
+  useEffect(() => setPage(1), [search, moduleFilter, statusFilter]);
+  const pageRules = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  const moduleOptions = useMemo(
+    () => [
+      { value: 'all', label: t('filters.allModules') },
+      ...authorableModules(catalog, meta?.validModules).map((module) => ({ value: module as string, label: moduleLabel(module, t) })),
+    ],
+    [catalog, meta?.validModules, t],
+  );
+
+  const columns: DataGridColumn<AlertRuleDto>[] = [
+    {
+      key: 'name',
+      label: t('columns.rule'),
+      render: (rule) => (
+        <div style={{ minWidth: 0 }}>
+          <Text size="sm" fw={600} lineClamp={1}>
+            {rule.name}
+          </Text>
+          {rule.description ? (
+            <Text size="xs" c="dimmed" lineClamp={1}>
+              {rule.description}
+            </Text>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'metric',
+      label: t('columns.metric'),
+      render: (rule) => {
+        const moduleId = inferModule(catalog, rule.metric, rule.module);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+            <Badge size="xs" variant="light" color={moduleColor(moduleId)}>
+              {moduleLabel(moduleId, t)}
+            </Badge>
+            <Text size="xs" c="dimmed">
+              {metricLabel(catalog, rule.metric, t)}
+            </Text>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'target',
+      label: t('columns.target'),
+      render: (rule) => {
+        const target = summarizeTarget(rule, t);
+        return (
+          <Text size="xs" className={target.kind === 'selected' ? 'ds-mono' : undefined} lineClamp={2} title={target.keys.join(', ') || undefined}>
+            {target.label}
+          </Text>
+        );
+      },
+    },
+    {
+      key: 'condition',
+      label: t('columns.condition'),
+      render: (rule) => {
+        const mode = conditionMode(rule.condition);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+            <Badge size="xs" variant="light" color={MODE_COLORS[mode]}>
+              {t(`mode.${mode}`)}
+            </Badge>
+            <Text size="xs" c="dimmed">
+              {summarizeCondition(rule, catalog, t, locale)}
+            </Text>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'state',
+      label: t('columns.state'),
+      render: (rule) => {
+        const view = ruleStateView(rule, states[rule._id], meta?.modes);
+        if (view.kind === 'paused') return <span className="ds-badge">{t('state.paused')}</span>;
+        if (view.kind === 'blocked') {
+          return (
+            <span
+              className="ds-badge ds-badge-warn"
+              title={t(view.reason === 'license_required' ? 'state.needsEnterpriseLicense' : 'state.needsEnterpriseBuild')}
+            >
+              {t('state.needsEnterprise')}
+            </span>
+          );
+        }
+        return (
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {view.firing > 0 ? (
+              <Link
+                href={`/dashboard/alerts/incidents?ruleId=${encodeURIComponent(rule._id)}&status=all`}
+                className="ds-badge ds-badge-err"
+                style={{ textDecoration: 'none' }}
+              >
+                {t('state.firing', { count: view.firing })}
+              </Link>
+            ) : null}
+            {view.pending > 0 ? <span className="ds-badge ds-badge-warn">{t('state.pending', { count: view.pending })}</span> : null}
+            {view.ok > 0 || (view.firing === 0 && view.pending === 0) ? (
+              <span className="ds-badge ds-badge-ok">{view.ok > 0 ? t('state.okCount', { count: view.ok }) : t('state.ok')}</span>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'lastFired',
+      label: t('columns.lastFired'),
+      render: (rule) =>
+        rule.lastTriggeredAt ? (
+          <Text size="xs" title={formatDateTime(rule.lastTriggeredAt, locale)}>
+            {formatRelative(rule.lastTriggeredAt, locale)}
+          </Text>
+        ) : (
+          <Text size="xs" c="dimmed">
+            {t('neverFired')}
+          </Text>
+        ),
+    },
+    {
+      key: 'enabled',
+      label: t('columns.enabled'),
+      align: 'center',
+      render: (rule) => (
+        <Switch
+          size="sm"
+          checked={rule.enabled}
+          aria-label={rule.enabled ? t('clickToDisable') : t('clickToEnable')}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => void handleToggle(rule, event.currentTarget.checked)}
+        />
+      ),
+    },
+  ];
+
+  const pageEmpty = rules.length === 0;
 
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Operate · Alerts"
+        eyebrow={t('eyebrow')}
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
@@ -369,190 +389,96 @@ export default function AlertsPage() {
               href="/dashboard/alerts/incidents"
               variant="default"
               size="sm"
-              color="red"
               leftSection={<IconExclamationCircle size={14} stroke={1.7} />}
             >
-              Incidents
+              {t('incidentsLink')}
             </Button>
-            <Button
-              component={Link}
-              href="/dashboard/alerts/history"
-              variant="default"
-              size="sm"
-              leftSection={<IconHistory size={14} stroke={1.7} />}
-            >
+            <Button component={Link} href="/dashboard/alerts/history" variant="default" size="sm" leftSection={<IconHistory size={14} stroke={1.7} />}>
               {t('viewHistory')}
             </Button>
-            <Button
-              color="teal"
-              size="sm"
-              leftSection={<IconBellPlus size={14} stroke={1.7} />}
-              onClick={handleCreate}
-            >
+            <Button color="teal" size="sm" leftSection={<IconBellPlus size={14} stroke={1.7} />} onClick={openCreate}>
               {t('newRule')}
             </Button>
           </>
         }
       />
 
-      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
-        <StatTile
-          label={t('activeRules')}
-          value={enabledCount}
-          icon={<IconCheck size={14} stroke={1.7} />}
-        />
-        <StatTile
-          label={t('disabledRules')}
-          value={disabledCount}
-          icon={<IconClock size={14} stroke={1.7} />}
-        />
-        <StatTile
-          label={t('firedLast24h')}
-          value={recentlyFiredCount}
-          icon={<IconAlertTriangle size={14} stroke={1.7} />}
-        />
-      </div>
-
-      {/* Module Filter */}
-      <SegmentedControl
-        value={moduleFilter}
-        onChange={setModuleFilter}
-        data={[
-          { label: t('allModules'), value: 'all' },
-          { label: 'Model Hub', value: 'models' },
-          { label: 'Model Monitoring', value: 'inference' },
-          { label: 'Guardrail', value: 'guardrails' },
-          { label: 'Knowledge Engine', value: 'rag' },
-          { label: 'MCP Servers', value: 'mcp' },
-          { label: 'Evaluation', value: 'evaluation' },
-          { label: 'Analysis', value: 'analysis' },
-          { label: 'Red Team', value: 'redteam' },
-          { label: 'AI App Gateway', value: 'ai-app-gateway' },
-        ]}
-        size="xs"
-      />
-
-      {/* Rules List */}
-      {filteredRules.length === 0 ? (
-        <Paper p="xl" radius="md" withBorder>
-          <Stack align="center" gap="md" py="xl">
-            <ThemeIcon size={60} radius="xl" variant="light" color="orange">
-              <IconBell size={28} />
-            </ThemeIcon>
-            <Text size="lg" fw={600}>{t('noRules')}</Text>
-            <Text size="sm" c="dimmed" ta="center" maw={400}>
-              {t('noRulesDescription')}
-            </Text>
-            <Button
-              leftSection={<IconBellPlus size={16} />}
-              onClick={handleCreate}
-            >
-              {t('createFirstRule')}
-            </Button>
-          </Stack>
-        </Paper>
+      {loadError && rules.length === 0 ? (
+        <LoadError message={loadError} onRetry={() => void load()} />
       ) : (
-        <Stack gap="sm">
-          {filteredRules.map((rule) => (
-            <Paper key={rule._id} p="md" radius="md" withBorder>
-              <Group justify="space-between" wrap="nowrap">
-                <Group gap="md" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                  <ThemeIcon
-                    size={36}
-                    radius="md"
-                    variant="light"
-                    color={METRIC_COLORS[rule.metric] ?? 'gray'}
-                  >
-                    <IconActivity size={18} />
-                  </ThemeIcon>
-                  <div style={{ minWidth: 0 }}>
-                    <Group gap="xs" wrap="nowrap">
-                      <Text fw={600} size="sm" lineClamp={1}>
-                        {rule.name}
-                      </Text>
-                      <Badge
-                        size="xs"
-                        variant="light"
-                        color={MODULE_COLORS[getModule(rule)] ?? 'gray'}
-                      >
-                        {MODULE_LABELS[getModule(rule)] ?? getModule(rule)}
-                      </Badge>
-                      <Badge
-                        size="xs"
-                        variant="light"
-                        color={METRIC_COLORS[rule.metric] ?? 'gray'}
-                      >
-                        {METRIC_LABELS[rule.metric] ?? rule.metric}
-                      </Badge>
-                    </Group>
-                    <Text size="xs" c="dimmed" mt={2}>
-                      {OPERATOR_SYMBOLS[rule.condition.operator] ?? rule.condition.operator}{' '}
-                      {rule.condition.threshold}
-                      {METRIC_UNITS[rule.metric] ?? ''} ·{' '}
-                      {rule.windowMinutes}min window
-                      {rule.scope?.modelKey && ` · model: ${rule.scope.modelKey}`}
-                      {rule.scope?.serverKey && ` · server: ${rule.scope.serverKey}`}
-                      {rule.scope?.guardrailKey && ` · guardrail: ${rule.scope.guardrailKey}`}
-                      {rule.scope?.ragModuleKey && ` · rag: ${rule.scope.ragModuleKey}`}
-                    </Text>
-                    {rule.lastTriggeredAt && (
-                      <Text size="xs" c="orange" mt={2}>
-                        Last fired: {new Date(rule.lastTriggeredAt).toLocaleString()}
-                      </Text>
-                    )}
-                  </div>
-                </Group>
-                <Group gap="xs" wrap="nowrap">
-                  <Tooltip label={rule.enabled ? t('clickToDisable') : t('clickToEnable')}>
-                    <Switch
-                      size="sm"
-                      checked={rule.enabled}
-                      onChange={(e) => handleToggle(rule._id, e.currentTarget.checked)}
-                    />
-                  </Tooltip>
-                  <Menu shadow="md" position="bottom-end">
-                    <Menu.Target>
-                      <ActionIcon variant="subtle" size="sm">
-                        <IconDots size={16} />
-                      </ActionIcon>
-                    </Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Item
-                        leftSection={<IconEdit size={14} />}
-                        onClick={() => handleEdit(rule)}
-                      >
-                        {t('edit')}
-                      </Menu.Item>
-                      <Menu.Divider />
-                      <Menu.Item
-                        color="red"
-                        leftSection={<IconTrash size={14} />}
-                        onClick={() => handleDelete(rule)}
-                      >
-                        {t('delete')}
-                      </Menu.Item>
-                    </Menu.Dropdown>
-                  </Menu>
-                </Group>
-              </Group>
-            </Paper>
-          ))}
-        </Stack>
+        <>
+          {loading ? (
+            <StatGridSkeleton count={4} style={{ marginBottom: 16 }} />
+          ) : (
+            <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+              <StatTile label={t('activeRules')} value={enabledCount} icon={<IconCheck size={14} stroke={1.7} />} />
+              <StatTile label={t('disabledRules')} value={disabledCount} icon={<IconClock size={14} stroke={1.7} />} />
+              <StatTile label={t('firingNow')} value={firingTotal} icon={<IconFlame size={14} stroke={1.7} />} />
+              <StatTile label={t('firedLast24h')} value={firedRecently} icon={<IconAlertTriangle size={14} stroke={1.7} />} />
+            </div>
+          )}
+          {loadError ? (
+            <div style={{ marginBottom: 12 }}>
+              <LoadError message={loadError} onRetry={() => void load(true)} />
+            </div>
+          ) : null}
+
+          <DataGrid<AlertRuleDto>
+            records={pageRules}
+            rowKey={(rule) => rule._id}
+            columns={columns}
+            loading={loading}
+            refreshing={refreshing}
+            onRefresh={() => void load(true)}
+            onRowClick={openEdit}
+            search={{ value: search, onChange: setSearch, placeholder: t('searchPlaceholder') }}
+            filters={[
+              { value: moduleFilter, onChange: setModuleFilter, options: moduleOptions, ariaLabel: t('filters.module'), width: 170 },
+              {
+                value: statusFilter,
+                onChange: (value) => setStatusFilter(value as StatusFilter),
+                options: [
+                  { value: 'all', label: t('filters.allStatuses') },
+                  { value: 'enabled', label: t('filters.enabled') },
+                  { value: 'disabled', label: t('filters.disabled') },
+                  { value: 'firing', label: t('filters.firing') },
+                ],
+                ariaLabel: t('filters.status'),
+                width: 150,
+              },
+            ]}
+            rowActions={(rule) => [
+              { id: 'edit', label: t('edit'), icon: <IconEdit size={14} />, onClick: openEdit },
+              { id: 'duplicate', label: t('duplicate'), icon: <IconCopy size={14} />, onClick: duplicate },
+              { id: 'divider', divider: true },
+              { id: 'delete', label: t('delete'), icon: <IconTrash size={14} />, color: 'red', onClick: () => void handleDelete(rule) },
+            ]}
+            empty={{
+              icon: <IconBell size={28} />,
+              title: pageEmpty ? t('noRules') : t('noMatchingRules'),
+              description: pageEmpty ? t('noRulesDescription') : t('noMatchingRulesDescription'),
+              primaryAction: pageEmpty ? { label: t('createFirstRule'), icon: <IconBellPlus size={14} />, onClick: openCreate } : undefined,
+            }}
+            pagination={{
+              page,
+              onPageChange: setPage,
+              pageSize: PAGE_SIZE,
+              total: filtered.length,
+              hasMore: page * PAGE_SIZE < filtered.length,
+            }}
+            footerLeft={t('showingRules', { shown: pageRules.length, total: filtered.length })}
+          />
+        </>
       )}
 
-      {/* Create/Edit Modal */}
       <AlertRuleForm
         opened={formOpened}
-        onClose={() => {
-          formControls.close();
-          setEditingRule(null);
-        }}
-        onSuccess={fetchRules}
+        onClose={closeForm}
+        onSuccess={() => void load(true)}
         mode={editingRule ? 'edit' : 'create'}
         ruleId={editingRule?._id}
-        initialData={
-          editingRule ? (editingRule as unknown as Record<string, unknown>) : createPrefill
-        }
+        meta={meta}
+        initialData={editingRule ? (editingRule as unknown as Record<string, unknown>) : prefill}
       />
     </PageContainer>
   );

@@ -204,3 +204,36 @@ export function describeForEachProvider(
     });
   });
 }
+
+/** The provider's private tenant handle: a better-sqlite3 database or a MongoDB `Db` (test-only access). */
+type RawTenantHandle = {
+  prepare?: (sql: string) => { all: (params?: unknown) => unknown[] };
+  collection?: (name: string) => { indexes: () => Promise<Array<{ name: string }>> };
+};
+
+function rawTenantHandle(db: DatabaseProvider): RawTenantHandle {
+  return (db as unknown as { getTenantDb(): RawTenantHandle }).getTenantDb();
+}
+
+/**
+ * Names of the indexes on `table` (SQLite) / `collection` (MongoDB) in the tenant database the provider is
+ * currently bound to. The MongoDB collection must exist (indexes are created on the first write).
+ */
+export async function listTenantIndexNames(db: DatabaseProvider, table: string): Promise<string[]> {
+  const handle = rawTenantHandle(db);
+  if (typeof handle.prepare === 'function') {
+    return (handle.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
+  }
+  return (await handle.collection!(table).indexes()).map((index) => index.name);
+}
+
+/**
+ * SQLite only: the `EXPLAIN QUERY PLAN` detail lines of `sql`, joined; `null` on MongoDB (callers then skip the
+ * plan assertion and rely on the index-name check). Proves an index actually serves a query, not just that it exists.
+ */
+export function sqliteQueryPlan(db: DatabaseProvider, sql: string, params: Record<string, unknown> = {}): string | null {
+  const handle = rawTenantHandle(db);
+  if (typeof handle.prepare !== 'function') return null;
+  const rows = handle.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(params) as Array<{ detail: string }>;
+  return rows.map((row) => row.detail).join('\n');
+}

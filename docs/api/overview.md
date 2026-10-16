@@ -125,7 +125,9 @@ These endpoints are documented here because operators often need them during rol
 | [Reranker Admin](./reranker) | `/api/reranker/*` | Session | GET, POST, PATCH, DELETE |
 | [Browser Admin](./browser) | `/api/browser/*` | Session | GET, POST, PATCH, DELETE |
 | [Cluster](./cluster) | `/api/cluster/*` | Session (tenant admin) | GET, PUT, DELETE |
+| [Alerts](./alerts) | `/api/alerts/rules`, `/api/alerts/entities`, `/api/alerts/channels/test`, `/api/alerts/history` | JWT session | GET, POST, PUT, PATCH, DELETE |
 | [Incidents](./incidents) | `/api/alerts/incidents` | JWT session | GET, PATCH, POST |
+| [Agent Health](./tracing#agent-health) | `/api/tracing/agents/health`, `/api/tracing/agents/:agentName/health` | JWT session | GET |
 | [Health](./health) | `/api/health/live`, `/api/health/ready` | Public | GET |
 
 ## Request Format

@@ -482,6 +482,11 @@ export const TENANT_SCHEMA_SQL = `
     totalCachedInputTokens INTEGER DEFAULT 0,
     totalReasoningTokens INTEGER DEFAULT 0,
     truncatedEvents INTEGER DEFAULT 0,
+    errorEvents INTEGER DEFAULT 0,
+    toolErrors INTEGER DEFAULT 0,
+    aiErrors INTEGER DEFAULT 0,
+    metricsOutcome TEXT,
+    statusExplicit INTEGER DEFAULT 0,
     totalBytesIn INTEGER DEFAULT 0,
     totalBytesOut INTEGER DEFAULT 0,
     totalRequestBytes INTEGER DEFAULT 0,
@@ -652,6 +657,90 @@ export const TENANT_SCHEMA_SQL = `
   -- would abort the schema exec.
   CREATE INDEX IF NOT EXISTS idx_usage_daily_day ON usage_daily(tenantId, day DESC);
   CREATE INDEX IF NOT EXISTS idx_usage_daily_user_day ON usage_daily(tenantId, userId, day DESC);
+
+  -- Entity health rollup: one row per (project, entity, source, 5-minute
+  -- bucket). Dimension columns store '' (never NULL); counters are additive
+  -- (INSERT ... ON CONFLICT DO UPDATE SET c = c + excluded.c). No TTL in
+  -- SQLite: purgeEntityMetrics sweeps expired buckets.
+  CREATE TABLE IF NOT EXISTS entity_metrics (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL DEFAULT '',
+    entityType TEXT NOT NULL,
+    entityKey TEXT NOT NULL,
+    source TEXT NOT NULL,
+    bucketMs INTEGER NOT NULL,
+    bucketStart TEXT,
+    expiresAt TEXT,
+    requests REAL NOT NULL DEFAULT 0,
+    errors REAL NOT NULL DEFAULT 0,
+    cancelled REAL NOT NULL DEFAULT 0,
+    latencyMsSum REAL NOT NULL DEFAULT 0,
+    latencyMsMax REAL NOT NULL DEFAULT 0,
+    latencyCount REAL NOT NULL DEFAULT 0,
+    lat0 INTEGER NOT NULL DEFAULT 0,
+    lat1 INTEGER NOT NULL DEFAULT 0,
+    lat2 INTEGER NOT NULL DEFAULT 0,
+    lat3 INTEGER NOT NULL DEFAULT 0,
+    lat4 INTEGER NOT NULL DEFAULT 0,
+    lat5 INTEGER NOT NULL DEFAULT 0,
+    lat6 INTEGER NOT NULL DEFAULT 0,
+    lat7 INTEGER NOT NULL DEFAULT 0,
+    lat8 INTEGER NOT NULL DEFAULT 0,
+    lat9 INTEGER NOT NULL DEFAULT 0,
+    lat10 INTEGER NOT NULL DEFAULT 0,
+    lat11 INTEGER NOT NULL DEFAULT 0,
+    lat12 INTEGER NOT NULL DEFAULT 0,
+    lat13 INTEGER NOT NULL DEFAULT 0,
+    lat14 INTEGER NOT NULL DEFAULT 0,
+    inputTokens REAL NOT NULL DEFAULT 0,
+    outputTokens REAL NOT NULL DEFAULT 0,
+    costUsd REAL NOT NULL DEFAULT 0,
+    errorEvents REAL NOT NULL DEFAULT 0,
+    toolCalls REAL NOT NULL DEFAULT 0,
+    toolErrors REAL NOT NULL DEFAULT 0,
+    aiCalls REAL NOT NULL DEFAULT 0,
+    aiErrors REAL NOT NULL DEFAULT 0,
+    abandoned REAL NOT NULL DEFAULT 0,
+    emptyResults REAL NOT NULL DEFAULT 0,
+    updatedAt TEXT NOT NULL,
+    UNIQUE (tenantId, projectId, entityType, entityKey, source, bucketMs)
+  );
+  CREATE INDEX IF NOT EXISTS idx_entity_metrics_type_bucket ON entity_metrics(tenantId, projectId, entityType, bucketMs);
+  CREATE INDEX IF NOT EXISTS idx_entity_metrics_bucket ON entity_metrics(bucketMs);
+
+  -- Alert evaluation state: one row per (rule, entity). entityKey '' = rule-level target.
+  CREATE TABLE IF NOT EXISTS alert_states (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL DEFAULT '',
+    ruleId TEXT NOT NULL,
+    entityKey TEXT NOT NULL DEFAULT '',
+    entityType TEXT,
+    phase TEXT NOT NULL DEFAULT 'ok',
+    phaseSince TEXT NOT NULL,
+    breachStreak INTEGER NOT NULL DEFAULT 0,
+    okStreak INTEGER NOT NULL DEFAULT 0,
+    lastValue REAL,
+    lastBaseline REAL,
+    lastSampleCount INTEGER NOT NULL DEFAULT 0,
+    lastEvaluatedAt TEXT NOT NULL,
+    incidentId TEXT,
+    eventId TEXT,
+    firedAt TEXT,
+    lastFiredAt TEXT,
+    lastNotifiedAt TEXT,
+    peakValue REAL,
+    detail TEXT,
+    updatedAt TEXT NOT NULL,
+    UNIQUE (tenantId, ruleId, entityKey)
+  );
+  CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase ON alert_states(tenantId, projectId, phase);
+  -- listAlertStates() filters by ruleId and by (projectId, phase) without a tenantId predicate (the tenant DB
+  -- is already per tenant), which neither the UNIQUE (tenantId, ruleId, entityKey) nor the index above can serve.
+  -- Same names and key order as the MongoDB indexes.
+  CREATE INDEX IF NOT EXISTS idx_alert_states_rule ON alert_states(ruleId);
+  CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase_notenant ON alert_states(projectId, phase);
 
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
@@ -1190,6 +1279,10 @@ export const TENANT_SCHEMA_SQL = `
     windowMinutes INTEGER NOT NULL DEFAULT 5,
     cooldownMinutes INTEGER NOT NULL DEFAULT 15,
     scope TEXT DEFAULT '{}',
+    entity TEXT,
+    severity TEXT,
+    notifyOnResolve INTEGER,
+    renotifyMinutes INTEGER,
     channels TEXT NOT NULL DEFAULT '[]',
     lastTriggeredAt TEXT,
     createdBy TEXT NOT NULL,
@@ -1211,6 +1304,13 @@ export const TENANT_SCHEMA_SQL = `
     channels TEXT NOT NULL DEFAULT '[]',
     firedAt TEXT NOT NULL,
     resolvedAt TEXT,
+    entityType TEXT,
+    entityKey TEXT,
+    baselineValue REAL,
+    sampleCount INTEGER,
+    acknowledgedBy TEXT,
+    acknowledgedAt TEXT,
+    kind TEXT,
     metadata TEXT DEFAULT '{}'
   );
 
@@ -1257,6 +1357,15 @@ export const TENANT_SCHEMA_SQL = `
     resolvedAt TEXT,
     closedAt TEXT,
     resolvedBy TEXT,
+    module TEXT,
+    entityType TEXT,
+    entityKey TEXT,
+    baselineValue REAL,
+    lastValue REAL,
+    peakValue REAL,
+    autoResolved INTEGER,
+    acknowledgedBy TEXT,
+    context TEXT,
     metadata TEXT DEFAULT '{}',
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL

@@ -47,6 +47,8 @@ const RAW_LOG_CREATORS = [
   'createRerankerRunLog',
   'createBrowserSessionEvent',
   'incrementUsageDaily',
+  // entity_metrics is written only by the buffered rollup (recordEntityMetric).
+  'incrementEntityMetrics',
 ];
 
 function listFilesRecursive(dir: string): string[] {

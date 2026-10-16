@@ -91,7 +91,8 @@ interface ModelTokenTotals {
   durationSamples: number;
 }
 
-function isGatewayServed(event: TraceUsageEventLike): boolean {
+/** True for an event whose model call went through this gateway (the models service already accounted it). */
+export function isGatewayServed(event: Pick<TraceUsageEventLike, 'metadata'>): boolean {
   const metadata = event.metadata;
   if (!metadata) return false;
   if (metadata.gateway === true) return true;
@@ -100,7 +101,8 @@ function isGatewayServed(event: TraceUsageEventLike): boolean {
   );
 }
 
-function eventModelName(event: TraceUsageEventLike): string | undefined {
+/** The model name an event reports: `model`, else the first of `modelNames`. */
+export function eventModelName(event: Pick<TraceUsageEventLike, 'model' | 'modelNames'>): string | undefined {
   if (typeof event.model === 'string' && event.model.length > 0) return event.model;
   const fromList = event.modelNames?.find((name) => typeof name === 'string' && name.length > 0);
   return fromList;
@@ -142,6 +144,71 @@ function sumTokensByModel(events: TraceUsageEventLike[]): Map<string, ModelToken
   return byModel;
 }
 
+export interface TraceModelTokens {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+}
+
+/**
+ * Resolves a trace-reported model name to the Model Hub key it is accounted
+ * under and prices tokens with Model Hub pricing. Shared by the usage rollup
+ * (`recordTraceModelUsage`) and the entity-health emitters so both agree on
+ * keys and costs.
+ */
+export interface TraceModelPricer {
+  /** `refKey` = lowercase-matched Hub key, else the raw model name; `costUsd` is 0 when no price is known. */
+  price(modelName: string, tokens: TraceModelTokens): { refKey: string; costUsd: number };
+}
+
+export type TraceModelPricerLoader = () => Promise<TraceModelPricer>;
+
+async function loadTraceModelPricer(tenantDbName: string, projectId?: string): Promise<TraceModelPricer> {
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const models = await db.listModels({ projectId });
+  const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
+  const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
+  const externalEntries = await db.listExternalModelPricing(projectId);
+  // Project-scoped entries win over tenant-wide ('') ones for the same name.
+  const externalByName = new Map(
+    externalEntries
+      .sort((a, b) => (a.projectId === '' ? -1 : 1) - (b.projectId === '' ? -1 : 1))
+      .map((entry) => [entry.normalizedName, entry]),
+  );
+  const today = toUtcDay(new Date());
+
+  return {
+    price(modelName, tokens) {
+      const lookup = modelName.toLowerCase();
+      const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
+      const externalEntry = externalByName.get(lookup);
+      const pricing = hubModel?.pricing
+        ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
+      const costUsd = pricing ? calculateCost(pricing, tokens).totalCost : 0;
+      return { refKey: hubModel?.key ?? modelName, costUsd };
+    },
+  };
+}
+
+/**
+ * Lazy, memoized pricer for one ingest: the Model Hub is read at most once
+ * however many emitters (usage rollup, entity health) need a price, and not at
+ * all when nothing is billable. A failed load is retried on the next call.
+ */
+export function createTraceModelPricerLoader(tenantDbName: string, projectId?: string): TraceModelPricerLoader {
+  let loaded: Promise<TraceModelPricer> | undefined;
+  return () => {
+    if (!loaded) {
+      loaded = loadTraceModelPricer(tenantDbName, projectId).catch((error) => {
+        loaded = undefined;
+        throw error;
+      });
+    }
+    return loaded;
+  };
+}
+
 /**
  * Record trace-derived model usage into the usage rollup.
  *
@@ -164,6 +231,8 @@ export async function recordTraceModelUsage(params: {
   metadata?: Record<string, string>;
   events: TraceUsageEventLike[];
   previousEvents?: TraceUsageEventLike[];
+  /** Shared pricer for this ingest (see `createTraceModelPricerLoader`); built on demand when omitted. */
+  pricerLoader?: TraceModelPricerLoader;
 }): Promise<void> {
   try {
     const current = sumTokensByModel(params.events);
@@ -172,19 +241,7 @@ export async function recordTraceModelUsage(params: {
       ? sumTokensByModel(params.previousEvents)
       : undefined;
 
-    const db = await getDatabase();
-    await db.switchToTenant(params.tenantDbName);
-    const models = await db.listModels({ projectId: params.projectId });
-    const byKey = new Map(models.map((model) => [model.key.toLowerCase(), model]));
-    const byModelId = new Map(models.map((model) => [model.modelId.toLowerCase(), model]));
-    const externalEntries = await db.listExternalModelPricing(params.projectId);
-    // Project-scoped entries win over tenant-wide ('') ones for the same name.
-    const externalByName = new Map(
-      externalEntries
-        .sort((a, b) => (a.projectId === '' ? -1 : 1) - (b.projectId === '' ? -1 : 1))
-        .map((entry) => [entry.normalizedName, entry]),
-    );
-    const today = toUtcDay(new Date());
+    const pricer = await (params.pricerLoader ?? createTraceModelPricerLoader(params.tenantDbName, params.projectId))();
 
     for (const [modelName, totals] of current) {
       const prior = previous?.get(modelName);
@@ -203,21 +260,14 @@ export async function recordTraceModelUsage(params: {
       const durationSamples = Math.max(0, totals.durationSamples - (prior?.durationSamples ?? 0));
       if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === 0) continue;
 
-      const lookup = modelName.toLowerCase();
-      const hubModel = byKey.get(lookup) ?? byModelId.get(lookup);
-      const externalEntry = externalByName.get(lookup);
-      const pricing = hubModel?.pricing
-        ?? (externalEntry ? resolveExternalPricingForDay(externalEntry, today) : undefined);
-      const costUsd = pricing
-        ? calculateCost(pricing, { inputTokens, outputTokens, cachedInputTokens }).totalCost
-        : 0;
+      const { refKey, costUsd } = pricer.price(modelName, { inputTokens, outputTokens, cachedInputTokens });
 
       recordUsageEvent({
         tenantDbName: params.tenantDbName,
         tenantId: params.tenantId,
         projectId: params.projectId,
         service: 'models',
-        refKey: hubModel?.key ?? modelName,
+        refKey,
         agentKey: params.agentName ?? '',
         metadata: params.metadata,
         source: 'tracing',
@@ -838,8 +888,11 @@ export class AgentTracingService {
     const agents = [...new Set(sorted.map((s) => s.agentName).filter(Boolean))] as string[];
     const statuses = sorted.map((s) => s.status || 'unknown');
     const hasError = statuses.includes('error');
-    const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed');
-    const overallStatus = hasError ? 'error' : allDone ? 'success' : 'in_progress';
+    // 'abandoned' is a finished state too (the run went quiet and was closed by the finalizer); without it a thread would stay in_progress forever.
+    const allDone = statuses.every((s) => s === 'success' || s === 'error' || s === 'completed' || s === 'abandoned');
+    // A thread whose sessions ALL went quiet without an end is 'abandoned', not a successful conversation.
+    const allAbandoned = statuses.every((s) => s === 'abandoned');
+    const overallStatus = hasError ? 'error' : allAbandoned ? 'abandoned' : allDone ? 'success' : 'in_progress';
 
     const totalInputTokens = sorted.reduce((sum, s) => sum + (s.totalInputTokens || 0), 0);
     const totalOutputTokens = sorted.reduce((sum, s) => sum + (s.totalOutputTokens || 0), 0);

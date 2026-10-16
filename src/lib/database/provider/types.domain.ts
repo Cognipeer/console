@@ -1,5 +1,5 @@
 import type { ObjectId } from 'mongodb';
-import type { IUsageAttributionFields } from './types.base';
+import type { EntityMetricType, IUsageAttributionFields } from './types.base';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -1856,7 +1856,7 @@ export interface IWebSearchRunLog extends IUsageAttributionFields {
 
 // ── Alert types ─────────────────────────────────────────────────────────
 
-export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis' | 'ai-app-gateway';
+export type AlertModule = 'models' | 'inference' | 'guardrails' | 'rag' | 'mcp' | 'analysis' | 'evaluation' | 'redteam' | 'aegis' | 'ai-app-gateway' | 'agents' | 'tools';
 
 export type AlertMetric =
   // models
@@ -1914,17 +1914,146 @@ export type AlertMetric =
   | 'appgw_requests'
   | 'appgw_block_rate'
   | 'appgw_error_rate'
-  | 'appgw_requests_per_user';
+  | 'appgw_requests_per_user'
+  // agents (entity_metrics; traced + hosted agents)
+  | 'agent_sessions'
+  | 'agent_error_rate'
+  | 'agent_error_events'
+  | 'agent_tool_error_rate'
+  | 'agent_ai_error_rate'
+  | 'agent_p95_duration_ms'
+  | 'agent_avg_duration_ms'
+  | 'agent_abandoned_rate'
+  | 'agent_cost'
+  | 'agent_tokens_per_session'
+  // per-model health (entity_metrics)
+  | 'model_requests'
+  | 'model_error_rate'
+  | 'model_p95_latency_ms'
+  | 'model_avg_latency_ms'
+  | 'model_cost'
+  // per-knowledge-base health (entity_metrics)
+  | 'kb_queries'
+  | 'kb_error_rate'
+  | 'kb_p95_latency_ms'
+  | 'kb_avg_latency_ms'
+  | 'kb_empty_result_rate'
+  // per-MCP-server health (entity_metrics)
+  | 'mcp_server_requests'
+  | 'mcp_server_error_rate'
+  | 'mcp_server_p95_latency_ms'
+  // per-tool health (entity_metrics)
+  | 'tool_calls'
+  | 'tool_error_rate'
+  | 'tool_p95_latency_ms';
 
 export type AlertConditionOperator = 'gt' | 'lt' | 'gte' | 'lte' | 'eq';
 
-export interface IAlertCondition {
-  operator: AlertConditionOperator;
-  threshold: number;
+export type AlertConditionMode = 'threshold' | 'baseline' | 'absence' | 'slo_burn';
+
+export interface IAlertBaselineConfig {
+  direction: 'up' | 'down' | 'both';
+  minRatio: number;
+  minZ: number;
+  minDelta: number;
+  lookbackDays: number;
+  seasonality: 'daily' | 'weekly' | 'trailing';
 }
 
+export interface IAlertAbsenceConfig {
+  lookbackHours: number;
+  minExpectedPerWindow: number;
+}
+
+export interface IAlertSloConfig {
+  objectivePct: number;
+  windowDays: number;
+  burnRate: number;
+  longWindowMinutes: number;
+  shortWindowMinutes: number;
+  latencyThresholdMs?: number;
+}
+
+export interface IAlertCondition {
+  /** Threshold mode (existing); ignored by the other modes. */
+  operator: AlertConditionOperator;
+  threshold: number;
+  /** Default 'threshold'. */
+  mode?: AlertConditionMode;
+  /** Pending duration before firing; default 0, max 1440. */
+  forMinutes?: number;
+  /** Default 1 (threshold/absence), 20 (baseline), 50 (slo_burn). */
+  minSamples?: number;
+  baseline?: IAlertBaselineConfig;
+  absence?: IAlertAbsenceConfig;
+  slo?: IAlertSloConfig;
+}
+
+/** `keys` required (1..50) when mode is 'selected'. */
+export interface IAlertRuleEntityScope {
+  entityType: EntityMetricType;
+  mode: 'all' | 'selected';
+  keys?: string[];
+}
+
+export type AlertRuleSeverity = 'auto' | IncidentSeverity;
+
+/** Stored channel shape. Every channel has a stable id ('ch_' + 12 hex), created server-side if missing. */
 export type IAlertChannel =
-  | { type: 'email'; recipients: string[] };
+  | { id?: string; type: 'email'; recipients: string[] }
+  /** sealed = encryptObject({ url, secret? }) */
+  | { id?: string; type: 'webhook'; urlHint: string; hasSecret: boolean; sealed: string }
+  /** sealed = encryptObject({ url }) */
+  | { id?: string; type: 'slack'; urlHint: string; sealed: string }
+  /** sealed = encryptObject({ url }) */
+  | { id?: string; type: 'teams'; urlHint: string; sealed: string }
+  /** sealed = encryptObject({ routingKey }) */
+  | { id?: string; type: 'pagerduty'; keyHint: string; sealed: string };
+
+/** Input accepted by the API (plaintext only on write; omit secret fields to keep the stored ones for that channel id). */
+export type AlertChannelInput =
+  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'webhook'; url?: string; secret?: string }
+  | { id?: string; type: 'slack'; url?: string }
+  | { id?: string; type: 'teams'; url?: string }
+  | { id?: string; type: 'pagerduty'; routingKey?: string };
+
+export type AlertStatePhase = 'ok' | 'pending' | 'firing';
+
+export interface IAlertState {
+  _id?: string;
+  tenantId: string;
+  projectId: string;
+  ruleId: string;
+  /** '' = rule-level target (legacy single scope). */
+  entityKey: string;
+  entityType?: EntityMetricType | null;
+  phase: AlertStatePhase;
+  phaseSince: Date;
+  breachStreak: number;
+  okStreak: number;
+  lastValue: number | null;
+  lastBaseline: number | null;
+  lastSampleCount: number;
+  lastEvaluatedAt: Date;
+  incidentId?: string | null;
+  eventId?: string | null;
+  firedAt?: Date | null;
+  lastFiredAt?: Date | null;
+  lastNotifiedAt?: Date | null;
+  peakValue?: number | null;
+  /** e.g. { licenseRequired: true }, { insufficientData: true }, baseline z/ratio. */
+  detail?: Record<string, unknown> | null;
+  updatedAt?: Date;
+}
+
+export interface IAlertStateFilter {
+  ruleId?: string;
+  ruleIds?: string[];
+  projectId?: string;
+  phases?: AlertStatePhase[];
+  limit?: number;
+}
 
 export type AlertEventStatus = 'fired' | 'resolved' | 'acknowledged';
 
@@ -1947,6 +2076,12 @@ export interface IAlertRule {
     ragModuleKey?: string;
     mcpServerKey?: string;
   };
+  /** Per-entity targeting for entity metrics (agents, models, KBs, MCP servers, tools). */
+  entity?: IAlertRuleEntityScope;
+  /** Default 'auto' (derived from the breach). */
+  severity?: AlertRuleSeverity;
+  notifyOnResolve?: boolean;
+  renotifyMinutes?: number;
   channels: IAlertChannel[];
   lastTriggeredAt?: Date;
   createdBy: string;
@@ -1973,6 +2108,13 @@ export interface IAlertEvent {
   }>;
   firedAt: Date;
   resolvedAt?: Date;
+  entityType?: EntityMetricType | null;
+  entityKey?: string | null;
+  baselineValue?: number | null;
+  sampleCount?: number;
+  acknowledgedBy?: string;
+  acknowledgedAt?: Date;
+  kind?: 'fired' | 'resolved';
   metadata?: Record<string, unknown>;
 }
 
@@ -3291,9 +3433,37 @@ export interface IIncident {
   resolvedAt?: Date;
   closedAt?: Date;
   resolvedBy?: string;
+  module?: AlertModule;
+  entityType?: EntityMetricType | null;
+  entityKey?: string | null;
+  baselineValue?: number | null;
+  lastValue?: number | null;
+  peakValue?: number | null;
+  autoResolved?: boolean;
+  acknowledgedBy?: string;
+  context?: IIncidentContext;
   metadata?: Record<string, unknown>;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IIncidentContext {
+  mode: AlertConditionMode;
+  windowMinutes: number;
+  /** `firstSeenAt` is when the new version's first session started (ISO). */
+  versionChange?: { from: string | null; to: string | null; firstSeenAt?: string } | null;
+  errorSignatures?: Array<{ message: string; count: number }>;
+  /** e.g. /dashboard/tracing/sessions?agent=<name>&status=error&from=..&to=.. (no session ids). */
+  failingSessions?: { count: number; listPath: string } | null;
+  correlations?: Array<{
+    entityType: EntityMetricType;
+    entityKey: string;
+    metric: AlertMetric;
+    value: number;
+    baseline: number | null;
+    ratio: number | null;
+  }>;
+  notes?: string[];
 }
 
 // ── Browser session & agent types ──────────────────────────────────────────

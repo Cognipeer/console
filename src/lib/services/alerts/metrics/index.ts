@@ -6,6 +6,7 @@
 
 import type { AlertMetric } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { getRegisteredAlertMetricCollectors } from '@/enterprise/alert-extensions';
 import type { IMetricCollector, MetricQuery, MetricResult } from './types';
 
 const logger = createLogger('alert-metrics');
@@ -17,6 +18,7 @@ import { McpCollector } from './mcpCollector';
 import { AnalysisCollector } from './analysisCollector';
 import { EvaluationCollector } from './evaluationCollector';
 import { RedTeamCollector } from './redTeamCollector';
+import { EntityMetricsCollector } from './entityMetricsCollector';
 // Hook-plane decisions (block rate, approval rate, risk score, total). Serves
 // the four `guardrail_*` decision metrics and their persisted `aegis_*` aliases
 // from `guardrail_evaluation_logs`, which every edition writes. The enterprise
@@ -31,8 +33,17 @@ function register(collector: IMetricCollector): void {
   collectors.push(collector);
 }
 
+/**
+ * Built-in collectors first, then collectors registered through the
+ * enterprise seam (`alert-extensions`). The seam list is read at CALL time:
+ * the overlay registers its collectors when its registry loads, which can be
+ * after this module has been evaluated.
+ */
 export function getCollectorForMetric(metric: AlertMetric): IMetricCollector | undefined {
-  return collectors.find((c) => c.supportedMetrics.includes(metric));
+  const builtIn = collectors.find((c) => c.supportedMetrics.includes(metric));
+  if (builtIn) return builtIn;
+  const extra = getRegisteredAlertMetricCollectors().find((c) => c.supportedMetrics.includes(metric));
+  return extra as IMetricCollector | undefined;
 }
 
 export async function collectMetric(query: MetricQuery): Promise<MetricResult> {
@@ -54,5 +65,7 @@ register(new AnalysisCollector());
 register(new EvaluationCollector());
 register(new RedTeamCollector());
 register(new GuardrailDecisionCollector());
+// Per-entity health metrics (agent/model/kb/mcp/tool) over `entity_metrics`.
+register(new EntityMetricsCollector());
 
-export type { IMetricCollector, MetricQuery, MetricResult } from './types';
+export type { EntityMetricQuery, IMetricCollector, MetricQuery, MetricResult } from './types';

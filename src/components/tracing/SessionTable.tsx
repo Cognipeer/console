@@ -4,7 +4,8 @@ import type { CSSProperties } from 'react';
 import { Tooltip } from '@mantine/core';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
-import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
+import SessionStatusBadge from './SessionStatusBadge';
 import {
   formatDuration,
   formatRelativeTime,
@@ -31,38 +32,22 @@ interface SessionTableProps {
 
 const NUM_CELL: CSSProperties = { textAlign: 'right', fontSize: 12.5, fontVariantNumeric: 'tabular-nums' };
 
-function statusVariant(status?: string) {
-  switch ((status ?? '').toLowerCase()) {
-    case 'success':
-    case 'completed':
-    case 'ok':
-      return 'ok' as const;
-    case 'error':
-    case 'failed':
-      return 'err' as const;
-    case 'paused':
-    case 'cancelled':
-      return 'paused' as const;
-    default:
-      return 'info' as const;
-  }
-}
-
 export default function SessionTable({
   sessions,
   onRowClick,
   onThreadClick,
   loading,
 }: SessionTableProps) {
+  const t = useTranslations('tracingHealth');
   if (loading) {
-    return <LoadingState label="Loading sessions..." minHeight={180} />;
+    return <LoadingState label={t('sessionTable.loading')} minHeight={180} />;
   }
 
   if (!sessions || sessions.length === 0) {
     return (
       <EmptyState
-        title="No sessions found"
-        description="Tracing sessions will appear here once agents start running."
+        title={t('sessionTable.emptyTitle')}
+        description={t('sessionTable.emptyDescription')}
         minHeight={180}
       />
     );
@@ -73,14 +58,14 @@ export default function SessionTable({
       <table className="ds-tbl">
         <thead>
           <tr>
-            <th>Agent</th>
-            <th>Session ID</th>
-            <th>Thread</th>
-            <th>Status</th>
-            <th>Started</th>
-            <th style={{ textAlign: 'right' }}>Duration</th>
-            <th style={{ textAlign: 'right' }}>Events</th>
-            <th style={{ textAlign: 'right' }}>Tokens</th>
+            <th>{t('sessionTable.agent')}</th>
+            <th>{t('sessionTable.sessionId')}</th>
+            <th>{t('sessionTable.thread')}</th>
+            <th>{t('sessionTable.status')}</th>
+            <th>{t('sessionTable.started')}</th>
+            <th style={{ textAlign: 'right' }}>{t('sessionTable.duration')}</th>
+            <th style={{ textAlign: 'right' }}>{t('sessionTable.events')}</th>
+            <th style={{ textAlign: 'right' }}>{t('sessionTable.tokens')}</th>
           </tr>
         </thead>
         <tbody>
@@ -143,10 +128,7 @@ export default function SessionTable({
                 )}
               </td>
               <td>
-                <StatusBadge
-                  status={statusVariant(session.status)}
-                  label={(session.status || 'unknown').toUpperCase()}
-                />
+                <SessionStatusBadge status={session.status} />
               </td>
               <td className="ds-faint" style={{ fontSize: 12.5 }}>
                 {formatRelativeTime(session.startedAt)}

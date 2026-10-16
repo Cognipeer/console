@@ -138,6 +138,47 @@ beforeAll(() => {
       updatedAt: new Date().toISOString(),
     });
 
+  // Entity health / alerting v2: the alert and tracing tables of a tenant DB
+  // created before the new columns. They gain them via ensureTableColumn, and
+  // the indexes over them must only be created after that migration.
+  legacy.exec(`
+    CREATE TABLE alert_rules (
+      id TEXT PRIMARY KEY, tenantId TEXT NOT NULL, projectId TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT, module TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, metric TEXT NOT NULL,
+      condition TEXT NOT NULL DEFAULT '{}', windowMinutes INTEGER NOT NULL DEFAULT 5,
+      cooldownMinutes INTEGER NOT NULL DEFAULT 15, scope TEXT DEFAULT '{}',
+      channels TEXT NOT NULL DEFAULT '[]', lastTriggeredAt TEXT, createdBy TEXT NOT NULL,
+      updatedBy TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+    );
+    CREATE TABLE alert_events (
+      id TEXT PRIMARY KEY, tenantId TEXT NOT NULL, projectId TEXT NOT NULL, ruleId TEXT NOT NULL,
+      ruleName TEXT NOT NULL, metric TEXT NOT NULL, threshold REAL NOT NULL, actualValue REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'fired', channels TEXT NOT NULL DEFAULT '[]', firedAt TEXT NOT NULL,
+      resolvedAt TEXT, metadata TEXT DEFAULT '{}'
+    );
+    CREATE TABLE incidents (
+      id TEXT PRIMARY KEY, tenantId TEXT NOT NULL, projectId TEXT NOT NULL, alertEventId TEXT NOT NULL,
+      ruleId TEXT NOT NULL, ruleName TEXT NOT NULL, metric TEXT NOT NULL, threshold REAL NOT NULL,
+      actualValue REAL NOT NULL, severity TEXT NOT NULL DEFAULT 'warning', status TEXT NOT NULL DEFAULT 'open',
+      assignedTo TEXT, notes TEXT NOT NULL DEFAULT '[]', firedAt TEXT NOT NULL, acknowledgedAt TEXT,
+      resolvedAt TEXT, closedAt TEXT, resolvedBy TEXT, metadata TEXT DEFAULT '{}',
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+    );
+    CREATE TABLE agent_tracing_sessions (
+      id TEXT PRIMARY KEY, sessionId TEXT NOT NULL UNIQUE, traceId TEXT, rootSpanId TEXT, threadId TEXT,
+      tenantId TEXT NOT NULL, projectId TEXT, source TEXT, agent TEXT DEFAULT '{}', agentName TEXT,
+      agentVersion TEXT, agentModel TEXT, metadata TEXT DEFAULT '{}', config TEXT DEFAULT '{}',
+      summary TEXT DEFAULT '{}', status TEXT, startedAt TEXT, endedAt TEXT, durationMs INTEGER,
+      errors TEXT DEFAULT '[]', modelsUsed TEXT DEFAULT '[]', toolsUsed TEXT DEFAULT '[]',
+      eventCounts TEXT DEFAULT '{}', totalEvents INTEGER DEFAULT 0, totalInputTokens INTEGER DEFAULT 0,
+      totalOutputTokens INTEGER DEFAULT 0, totalCachedInputTokens INTEGER DEFAULT 0,
+      totalReasoningTokens INTEGER DEFAULT 0, truncatedEvents INTEGER DEFAULT 0,
+      totalBytesIn INTEGER DEFAULT 0, totalBytesOut INTEGER DEFAULT 0, totalRequestBytes INTEGER DEFAULT 0,
+      totalResponseBytes INTEGER DEFAULT 0, userId TEXT, apiTokenId TEXT, actorType TEXT,
+      createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+    );
+  `);
+
   legacy.close();
 });
 
@@ -273,5 +314,86 @@ describe('Legacy tenant DB schema migration', () => {
       .get();
     policy.close();
     expect(table).toBeTruthy();
+  });
+
+  it('adds the entity-health columns to legacy alert and tracing tables', () => {
+    const db = new Database(path.join(tmpDir, `${LEGACY_DB_NAME}.db`), { readonly: true });
+    const colsOf = (table: string) =>
+      new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+    const rules = colsOf('alert_rules');
+    const events = colsOf('alert_events');
+    const incidents = colsOf('incidents');
+    const sessions = colsOf('agent_tracing_sessions');
+    db.close();
+
+    for (const c of ['entity', 'severity', 'notifyOnResolve', 'renotifyMinutes']) expect(rules.has(c)).toBe(true);
+    for (const c of ['entityType', 'entityKey', 'baselineValue', 'sampleCount', 'acknowledgedBy', 'acknowledgedAt', 'kind']) expect(events.has(c)).toBe(true);
+    for (const c of ['module', 'entityType', 'entityKey', 'baselineValue', 'lastValue', 'peakValue', 'autoResolved', 'acknowledgedBy', 'context']) expect(incidents.has(c)).toBe(true);
+    for (const c of ['errorEvents', 'toolErrors', 'aiErrors', 'metricsOutcome']) expect(sessions.has(c)).toBe(true);
+  });
+
+  it('creates the indexes over the migrated columns and the new tables after the migration', () => {
+    const db = new Database(path.join(tmpDir, `${LEGACY_DB_NAME}.db`), { readonly: true });
+    const has = (name: string) => !!db.prepare(`SELECT 1 FROM sqlite_master WHERE name = ?`).get(name);
+    const checks = {
+      incidentsRuleEntity: has('idx_incidents_rule_entity'),
+      incidentsProjectStatus: has('idx_incidents_project_status_firedAt'),
+      incidentsProjectEntity: has('idx_incidents_project_entity_firedAt'),
+      incidentsAlertEvent: has('idx_incidents_alertEventId'),
+      sessionsStale: has('idx_tracing_sessions_status_updatedAt'),
+      entityMetrics: has('entity_metrics'),
+      alertStates: has('alert_states'),
+      alertStatesRule: has('idx_alert_states_rule'),
+      alertStatesProjectPhase: has('idx_alert_states_project_phase_notenant'),
+    };
+    db.close();
+    expect(checks).toEqual({
+      incidentsRuleEntity: true,
+      incidentsProjectStatus: true,
+      incidentsProjectEntity: true,
+      incidentsAlertEvent: true,
+      sessionsStale: true,
+      entityMetrics: true,
+      alertStates: true,
+      alertStatesRule: true,
+      alertStatesProjectPhase: true,
+    });
+  });
+
+  it('reads and writes a legacy alert rule, incident and tracing session through the new mappers', async () => {
+    const created = await provider.createAlertRule({
+      tenantId: 'tenant-legacy',
+      projectId: LEGACY_PROJECT_ID,
+      name: 'legacy',
+      module: 'models',
+      enabled: true,
+      metric: 'error_rate',
+      condition: { operator: 'gt', threshold: 1 },
+      windowMinutes: 5,
+      cooldownMinutes: 15,
+      channels: [],
+      createdBy: 'u',
+    });
+    const rule = await provider.findAlertRuleById(String(created._id), LEGACY_PROJECT_ID);
+    expect(rule?.name).toBe('legacy');
+    expect(rule?.entity).toBeUndefined();
+
+    const incident = await provider.createIncident({
+      tenantId: 'tenant-legacy', projectId: LEGACY_PROJECT_ID, alertEventId: 'e1', ruleId: String(created._id),
+      ruleName: 'legacy', metric: 'error_rate', threshold: 1, actualValue: 2, severity: 'warning',
+      status: 'open', notes: [], firedAt: new Date(), entityKey: 'k', module: 'models',
+    });
+    expect((await provider.listIncidents('tenant-legacy', { projectId: LEGACY_PROJECT_ID, entityKey: 'k' }))).toHaveLength(1);
+    expect((await provider.countIncidentsByStatus(LEGACY_PROJECT_ID)).open).toBe(1);
+    expect(String(incident._id)).toBeTruthy();
+
+    await provider.createAgentTracingSession({
+      sessionId: 'legacy-session', projectId: LEGACY_PROJECT_ID, tenantId: 'tenant-legacy', status: 'in_progress',
+      startedAt: new Date(Date.now() - 1000),
+    });
+    await provider.applyAgentTracingSessionEvent('legacy-session', { eventType: 'tool_call', errorEvents: 1, toolErrors: 1 }, LEGACY_PROJECT_ID);
+    const session = await provider.findAgentTracingSessionById('legacy-session', LEGACY_PROJECT_ID);
+    expect(session?.errorEvents).toBe(1);
+    expect(session?.toolErrors).toBe(1);
   });
 });

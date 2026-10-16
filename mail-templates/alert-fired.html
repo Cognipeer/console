@@ -1,4 +1,4 @@
-<!-- subject: Alert: {{alertName}} — {{metricLabel}} threshold breached -->
+<!-- subject: [{{severityLabel}}] {{badge}}: {{alertName}}{{#if entityKey}} ({{entityKey}}){{/if}} -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -169,20 +169,23 @@
     <div class="container">
         <div class="header">
             <div class="logo">Cognipeer</div>
-            <div class="alert-badge">Alert fired</div>
+            <div class="alert-badge">{{badge}}</div>
         </div>
 
         <h1>{{alertName}}</h1>
 
         <p>
-            An alert rule has been triggered for
+            {{#if isTest}}
+            This is a test notification: no alert condition was breached and no incident was created.
+            {{else}}
+            An alert rule has {{#if isRenotify}}been firing for a while{{else}}been triggered{{/if}} for
             <span class="project-tag">{{projectName}}</span>
             in <strong>{{companyName}}</strong>.
+            {{/if}}
         </p>
 
         <div class="warning-box">
-            <strong>{{metricLabel}}</strong> reached <strong>{{actualValue}}{{unit}}</strong>,
-            which breaches the configured threshold of <strong>{{threshold}}{{unit}}</strong>.
+            <strong>{{summary}}</strong>
         </div>
 
         <table class="metric-table">
@@ -190,23 +193,68 @@
                 <td>Metric</td>
                 <td>{{metricLabel}}</td>
             </tr>
+            {{#if entityLabel}}
+            <tr>
+                <td>Entity</td>
+                <td>{{entityLabel}}</td>
+            </tr>
+            {{/if}}
             <tr>
                 <td>Actual value</td>
-                <td class="metric-value">{{actualValue}}{{unit}}</td>
+                <td class="metric-value">{{valueText}}</td>
             </tr>
+            {{#if isThreshold}}
             <tr>
-                <td>Threshold</td>
-                <td class="threshold-value">{{threshold}}{{unit}}</td>
+                <td>Condition</td>
+                <td class="threshold-value">{{operator}} {{thresholdText}}</td>
             </tr>
+            {{/if}}
+            {{#if hasBaseline}}
+            <tr>
+                <td>Baseline</td>
+                <td class="threshold-value">{{baselineText}}</td>
+            </tr>
+            {{/if}}
             <tr>
                 <td>Evaluation window</td>
-                <td>Last {{windowMinutes}} minutes</td>
+                <td>Last {{windowText}}</td>
+            </tr>
+            <tr>
+                <td>Severity</td>
+                <td>{{severityLabel}}</td>
             </tr>
             <tr>
                 <td>Fired at</td>
                 <td>{{firedAt}}</td>
             </tr>
+            {{#if resolvedAt}}
+            <tr>
+                <td>Resolved at</td>
+                <td>{{resolvedAt}}</td>
+            </tr>
+            <tr>
+                <td>Duration</td>
+                <td>{{duration}}</td>
+            </tr>
+            {{/if}}
+            {{#if versionChange}}
+            <tr>
+                <td>Version change</td>
+                <td>{{versionChange}}</td>
+            </tr>
+            {{/if}}
         </table>
+
+        {{#if errorSignatures.length}}
+        <div class="alert">
+            <strong>Most frequent errors</strong>
+            <ul style="margin: 8px 0 0; padding-left: 18px;">
+                {{#each errorSignatures}}
+                <li>{{message}} ({{count}}x)</li>
+                {{/each}}
+            </ul>
+        </div>
+        {{/if}}
 
         <div style="text-align: center;">
             <a href="{{incidentUrl}}" class="button">View incident</a>
@@ -216,7 +264,7 @@
 
         <div class="footer">
             <p>This is an automated alert from Cognipeer Console.</p>
-            <p>An incident has been created for this alert. You can acknowledge, investigate, and resolve it from the Incidents dashboard.</p>
+            <p>An incident is tracked for this alert. You can acknowledge, investigate, and resolve it from the Incidents dashboard. It is resolved automatically when the metric recovers.</p>
             <p style="font-size: 12px; color: #98a1ad;">
                 To manage alert rules, visit your project's Alerts settings.
             </p>

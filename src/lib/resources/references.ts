@@ -246,6 +246,9 @@ kind('analysis.judgeModel', 'analysis-definition', 'model', 'strict-project', 'w
 // ── operations ───────────────────────────────────────────────────────────────
 // alertEvaluator reads 0 samples for an unknown key, so the rule never fires and
 // shows no error. Inference servers have no project at all.
+// A rule on agents names them by the tracing agent name; a traced agent that is not a
+// console agent has no row, so an unresolved name is a warning, not an error.
+kind('alert.agent', 'alert-rule', 'agent', 'strict-project', 'warning');
 kind('alert.model', 'alert-rule', 'model', 'strict-project', 'warning');
 kind('alert.guardrail', 'alert-rule', 'guardrail', 'strict-project', 'warning');
 kind('alert.ragModule', 'alert-rule', 'rag-module', 'strict-project', 'warning');
