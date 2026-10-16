@@ -521,7 +521,7 @@ export function ActivitySection({ userId, locale }: { userId: string; locale: st
                   </Text>
                   <Group gap={6} mt={2}>
                     <Text size="xs" c="dimmed">{formatDateTime(event.at, locale)}</Text>
-                    <Badge size="xs" variant="light" color={OUTCOME_COLOR[event.outcome] ?? 'gray'}>
+                    <Badge size="xs" variant={badgeVariant(OUTCOME_COLOR[event.outcome] ?? 'gray')} color={OUTCOME_COLOR[event.outcome] ?? 'gray'}>
                       {translateOr(td, 'iamDirectory', `drawer.activity.outcomes.${event.outcome}`, event.outcome)}
                     </Badge>
                     {event.viaToken ? (

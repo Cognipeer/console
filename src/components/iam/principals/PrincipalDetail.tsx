@@ -70,7 +70,7 @@ import { MATRIX_SERVICES } from './permissionModel';
 import { useServiceLabels } from './serviceLabels';
 import type { EditKind } from './listState';
 import type { PeopleActions } from './usePeopleActions';
-import { PrincipalAvatar } from './visuals';
+import { badgeVariant, PrincipalAvatar } from './visuals';
 import styles from './PrincipalDetail.module.css';
 import type { Translate } from './format';
 
@@ -177,7 +177,7 @@ function GrantsSummary({
   return (
     <Group gap={6} wrap="wrap" data-testid="group-grants">
       {entries.map(([service, level]) => (
-        <Badge key={service} variant="light" color={level === 'none' ? 'gray' : 'blue'} radius="sm" tt="none">
+        <Badge key={service} variant={badgeVariant(level === 'none' ? 'gray' : 'blue')} color={level === 'none' ? 'gray' : 'blue'} radius="sm" tt="none">
           {labelOf(service)}: {td(`matrix.levels.${level}`)}
         </Badge>
       ))}
