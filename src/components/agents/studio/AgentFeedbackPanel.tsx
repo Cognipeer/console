@@ -127,7 +127,11 @@ export default function AgentFeedbackPanel({ agentId }: { agentId: string }) {
                             size="xs"
                             label={t('onlyWithComment')}
                             checked={filter.onlyWithComment}
-                            onChange={(event) => setFilter((current) => ({ ...current, onlyWithComment: event.currentTarget.checked }))}
+                            onChange={(event) => {
+                                // read the event now: the updater runs later, when currentTarget is already null
+                                const { checked } = event.currentTarget;
+                                setFilter((current) => ({ ...current, onlyWithComment: checked }));
+                            }}
                         />
                     ) : null}
                 </Group>
