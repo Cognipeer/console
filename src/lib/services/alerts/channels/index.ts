@@ -10,6 +10,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAlertChannel } from '@/lib/database';
 import { channelTarget, channelTimeoutMs } from './channelHttp';
 import { EmailAlertChannel } from './emailChannel';
+import { CHANNEL_MISSING, resolveLibraryChannels } from './libraryResolve';
 import { PagerDutyAlertChannel } from './pagerDutyChannel';
 import { SlackAlertChannel } from './slackChannel';
 import { TeamsAlertChannel } from './teamsChannel';
@@ -99,10 +100,23 @@ export async function dispatchNotification(
   ctx: AlertContext,
 ): Promise<DispatchResult[]> {
   try {
+    // library references become their stored channel (rule-local id kept); a gone entry is a failed delivery
+    const resolved = await resolveLibraryChannels(channels ?? [], ctx);
     const lists = await Promise.all(
-      (channels ?? []).map((channel) =>
-        runChannel(channel, (dispatcher) => dispatcher.dispatch(notification, channel, ctx), 'unsupported'),
-      ),
+      resolved.map(async (entry) => {
+        const channel = entry.missing ? entry.ref : entry.channel;
+        const results = entry.missing
+          ? [{ ...failure(entry.ref, CHANNEL_MISSING), reason: CHANNEL_MISSING }]
+          : await runChannel(channel, (dispatcher) => dispatcher.dispatch(notification, channel, ctx), 'unsupported');
+        const at = new Date();
+        return results.map((result) => ({
+          ...result,
+          channelId: result.channelId ?? channel?.id,
+          ...(entry.entry ? { channelName: entry.entry.name } : {}),
+          kind: notification.kind,
+          at,
+        }));
+      }),
     );
     return lists.flat();
   } catch {
@@ -124,6 +138,7 @@ export async function sendChannelMessage(
 }
 
 export { buildNotificationMessage } from './message';
+export { CHANNEL_MISSING } from './libraryResolve';
 export { resolveAlertEmailRecipients } from './emailChannel';
 export {
   keyHint,

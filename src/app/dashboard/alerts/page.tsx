@@ -5,16 +5,17 @@ import { Badge, Button, Switch, Text } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
-  IconAlertTriangle,
   IconBell,
+  IconBellOff,
   IconBellPlus,
+  IconBroadcast,
   IconCheck,
-  IconClock,
   IconCopy,
   IconEdit,
   IconExclamationCircle,
   IconFlame,
   IconHistory,
+  IconRipple,
   IconTrash,
 } from '@tabler/icons-react';
 import Link from 'next/link';
@@ -22,6 +23,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import StatTile from '@/components/common/ui/StatTile';
+import Spark from '@/components/common/ui/Spark';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useDeleteResource } from '@/components/common/confirm';
 import { formatDateTime, formatRelative } from '@/components/iam/timeFormat';
@@ -41,15 +43,36 @@ import {
   summarizeCondition,
   summarizeTarget,
 } from '@/components/alerts/alertCatalog';
-import type { AlertMeta, AlertRuleDto, StateCounts } from '@/components/alerts/alertTypes';
+import type {
+  AlertMeta,
+  AlertRuleDto,
+  RuleDerivedDto,
+  RuleKpisDto,
+  RuleStatsDto,
+  StateCounts,
+} from '@/components/alerts/alertTypes';
+import MuteMenu from '@/components/alerts/rules/MuteMenu';
+import {
+  DEFAULT_RULE_FILTERS,
+  RULE_SORTS,
+  RULE_STATUS_FILTERS,
+  buildRulesQuery,
+  dailySeries,
+  firedLast7d,
+  isMuted,
+  isNoisy,
+  type RuleListFilters,
+  type RuleSort,
+  type RuleStatusFilter,
+} from '@/components/alerts/rules/ruleListUi';
+import { useUserDirectory } from '@/components/alerts/useUserDirectory';
 import { primeAlertMeta } from '@/components/alerts/useAlertMeta';
 import { duplicateRuleSeed, prefillFromParams } from '@/components/alerts/ruleForm';
+import { pluralKey } from '@/components/alerts/plural';
 import { useLocale, useTranslations } from '@/lib/i18n';
 
 const PAGE_SIZE = 25;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-type StatusFilter = 'all' | 'enabled' | 'disabled' | 'firing';
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function AlertsPage() {
   const t = useTranslations('alerts');
@@ -63,14 +86,21 @@ export default function AlertsPage() {
   const [rules, setRules] = useState<AlertRuleDto[]>([]);
   const [meta, setMeta] = useState<AlertMeta | null>(null);
   const [states, setStates] = useState<Record<string, StateCounts>>({});
+  const [derived, setDerived] = useState<Record<string, RuleDerivedDto>>({});
+  const [stats, setStats] = useState<Record<string, RuleStatsDto>>({});
+  const [statsCapped, setStatsCapped] = useState(false);
+  const [kpis, setKpis] = useState<RuleKpisDto | null>(null);
+  const [matching, setMatching] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [search, setSearch] = useState('');
+  // Status, owner, search and sort are applied by the server; only the module filter works on the loaded list.
+  const [filters, setFilters] = useState<RuleListFilters>(DEFAULT_RULE_FILTERS);
+  const [searchInput, setSearchInput] = useState('');
   const [moduleFilter, setModuleFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [page, setPage] = useState(1);
+  const directory = useUserDirectory();
 
   const [formOpened, formControls] = useDisclosure(false);
   const [editingRule, setEditingRule] = useState<AlertRuleDto | null>(null);
@@ -80,6 +110,8 @@ export default function AlertsPage() {
 
   // ── Load ───────────────────────────────────────────────────────────────
   const controllerRef = useRef<AbortController | null>(null);
+  const loadedOnce = useRef(false);
+  const rulesQuery = useMemo(() => buildRulesQuery(filters), [filters]);
   const load = useCallback(
     async (silent = false) => {
       controllerRef.current?.abort();
@@ -88,10 +120,25 @@ export default function AlertsPage() {
       if (silent) setRefreshing(true);
       else setLoading(true);
       try {
-        const res = await fetch('/api/alerts/rules', { signal: controller.signal });
+        const res = await fetch(`/api/alerts/rules?${rulesQuery}`, { signal: controller.signal });
         if (!res.ok) throw new Error(await readApiError(res, t('loadRulesError')));
-        const data = (await res.json()) as { rules?: AlertRuleDto[]; meta?: AlertMeta; states?: Record<string, StateCounts> };
+        const data = (await res.json()) as {
+          rules?: AlertRuleDto[];
+          meta?: AlertMeta;
+          states?: Record<string, StateCounts>;
+          derived?: Record<string, RuleDerivedDto>;
+          stats?: Record<string, RuleStatsDto>;
+          statsCapped?: boolean;
+          kpis?: RuleKpisDto;
+          total?: number;
+        };
         setRules(data.rules ?? []);
+        setDerived(data.derived ?? {});
+        setStats(data.stats ?? {});
+        setStatsCapped(Boolean(data.statsCapped));
+        setKpis(data.kpis ?? null);
+        setMatching(typeof data.total === 'number' ? data.total : null);
+        loadedOnce.current = true;
         setMeta(data.meta ?? null);
         primeAlertMeta(data.meta);
         setStates(data.states ?? {});
@@ -106,13 +153,22 @@ export default function AlertsPage() {
         }
       }
     },
-    [t],
+    [t, rulesQuery],
   );
 
+  // The first load shows the skeleton; a changed filter or sort refreshes in place.
   useEffect(() => {
-    void load();
+    void load(loadedOnce.current);
     return () => controllerRef.current?.abort();
   }, [load]);
+
+  // The search box commits to the server query after a pause, not on every keystroke.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setFilters((current) => (current.q === searchInput.trim() ? current : { ...current, q: searchInput.trim() }));
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
 
   // ── Deep links ─────────────────────────────────────────────────────────
   // ?create=1&module=agents&metric=agent_error_rate&entityType=agent&entityKey=<name> opens the create form prefilled
@@ -215,28 +271,35 @@ export default function AlertsPage() {
 
   // ── Derived ────────────────────────────────────────────────────────────
   const firingTotal = useMemo(() => Object.values(states).reduce((sum, entry) => sum + (entry?.firing ?? 0), 0), [states]);
-  const enabledCount = rules.filter((rule) => rule.enabled).length;
-  const disabledCount = rules.length - enabledCount;
-  const firedRecently = rules.filter((rule) => rule.lastTriggeredAt && Date.now() - new Date(rule.lastTriggeredAt).getTime() < DAY_MS).length;
+  // The server's KPIs cover the whole rule set; a response without them (older server) falls back to the loaded list.
+  const kpiValues = {
+    active: kpis?.enabled ?? rules.filter((rule) => rule.enabled).length,
+    firing: kpis ? Math.max(kpis.firing, firingTotal) : firingTotal,
+    muted: kpis?.muted ?? rules.filter((rule) => isMuted(rule, derived[rule._id])).length,
+    noisy: kpis?.noisy ?? Object.values(stats).filter((entry) => isNoisy(entry)).length,
+  };
 
-  const filtered = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return rules.filter((rule) => {
-      if (moduleFilter !== 'all' && inferModule(catalog, rule.metric, rule.module) !== moduleFilter) return false;
-      if (statusFilter === 'enabled' && !rule.enabled) return false;
-      if (statusFilter === 'disabled' && rule.enabled) return false;
-      if (statusFilter === 'firing' && !(states[rule._id]?.firing > 0)) return false;
-      if (!needle) return true;
-      const target = summarizeTarget(rule, t);
-      const haystack = [rule.name, rule.description ?? '', rule.metric, metricLabel(catalog, rule.metric, t), target.label, ...target.keys]
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(needle);
-    });
-  }, [rules, search, moduleFilter, statusFilter, states, catalog, t]);
+  const visible = useMemo(
+    () => (moduleFilter === 'all' ? rules : rules.filter((rule) => inferModule(catalog, rule.metric, rule.module) === moduleFilter)),
+    [rules, moduleFilter, catalog],
+  );
+  const filtersActive = filters.status !== 'all' || filters.owner !== 'all' || filters.q !== '' || moduleFilter !== 'all';
 
-  useEffect(() => setPage(1), [search, moduleFilter, statusFilter]);
-  const pageRules = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  useEffect(() => setPage(1), [filters, moduleFilter]);
+  const pageRules = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const rulesTotal = matching !== null && moduleFilter === 'all' ? matching : visible.length;
+
+  // Owner = who created the rule. The list of people is only there for viewers who may list users.
+  const ownerOptions = useMemo(
+    () => [
+      { value: 'all', label: t('rulesUx.ownerAll') },
+      { value: 'me', label: t('rulesUx.ownerMe') },
+      ...Object.entries(directory.names)
+        .filter(([id]) => id !== directory.meId)
+        .map(([id, name]) => ({ value: id, label: name })),
+    ],
+    [t, directory.names, directory.meId],
+  );
 
   const moduleOptions = useMemo(
     () => [
@@ -314,6 +377,22 @@ export default function AlertsPage() {
       label: t('columns.state'),
       render: (rule) => {
         const view = ruleStateView(rule, states[rule._id], meta?.modes);
+        const flags = derived[rule._id];
+        const muted = isMuted(rule, flags);
+        const mutedBadge = muted ? (
+          <span
+            className="ds-badge ds-badge-warn"
+            title={rule.mutedUntil ? t('rulesUx.mutedUntil', { time: formatDateTime(rule.mutedUntil, locale) }) : undefined}
+          >
+            {rule.mutedUntil ? t('rulesUx.mutedUntilShort', { time: formatRelative(rule.mutedUntil, locale) }) : t('rulesUx.mutedBadge')}
+          </span>
+        ) : null;
+        const noDataBadge =
+          flags?.status === 'noData' ? (
+            <span className="ds-badge ds-badge-info" title={t('rulesUx.noDataHint')}>
+              {t('rulesUx.noDataBadge')}
+            </span>
+          ) : null;
         if (view.kind === 'paused') return <span className="ds-badge">{t('state.paused')}</span>;
         if (view.kind === 'blocked') {
           return (
@@ -327,6 +406,8 @@ export default function AlertsPage() {
         }
         return (
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {mutedBadge}
+            {noDataBadge}
             {view.firing > 0 ? (
               <Link
                 href={`/dashboard/alerts/incidents?ruleId=${encodeURIComponent(rule._id)}&status=all`}
@@ -337,9 +418,35 @@ export default function AlertsPage() {
               </Link>
             ) : null}
             {view.pending > 0 ? <span className="ds-badge ds-badge-warn">{t('state.pending', { count: view.pending })}</span> : null}
-            {view.ok > 0 || (view.firing === 0 && view.pending === 0) ? (
+            {(view.ok > 0 || (view.firing === 0 && view.pending === 0)) && !noDataBadge ? (
               <span className="ds-badge ds-badge-ok">{view.ok > 0 ? t('state.okCount', { count: view.ok }) : t('state.ok')}</span>
             ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'noise',
+      label: t('rulesUx.noiseColumn'),
+      render: (rule) => {
+        const entry = stats[rule._id];
+        const fired = firedLast7d(entry);
+        if (fired === 0) {
+          return (
+            <Text size="xs" c="dimmed">
+              {entry || Object.keys(stats).length > 0 ? '0' : '—'}
+            </Text>
+          );
+        }
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={t(pluralKey('rulesUx.noiseTitle', fired), { count: fired })}>
+            <div style={{ width: 64, flex: '0 0 64px' }} aria-hidden="true">
+              <Spark data={dailySeries(entry)} height={22} filled={false} color={isNoisy(entry) ? 'var(--ds-danger, #e03131)' : undefined} />
+            </div>
+            <Text size="xs" fw={600}>
+              {fired}
+            </Text>
+            {isNoisy(entry) ? <span className="ds-badge ds-badge-warn">{t('rulesUx.noisyBadge')}</span> : null}
           </div>
         );
       },
@@ -359,6 +466,14 @@ export default function AlertsPage() {
         ),
     },
     {
+      key: 'mute',
+      label: t('rulesUx.muteColumn'),
+      align: 'center',
+      render: (rule) => (
+        <MuteMenu rule={rule} muted={isMuted(rule, derived[rule._id])} onChanged={() => void load(true)} disabled={!rule.enabled && !isMuted(rule, derived[rule._id])} />
+      ),
+    },
+    {
       key: 'enabled',
       label: t('columns.enabled'),
       align: 'center',
@@ -374,7 +489,7 @@ export default function AlertsPage() {
     },
   ];
 
-  const pageEmpty = rules.length === 0;
+  const pageEmpty = rules.length === 0 && !filtersActive;
 
   return (
     <PageContainer>
@@ -392,6 +507,15 @@ export default function AlertsPage() {
               leftSection={<IconExclamationCircle size={14} stroke={1.7} />}
             >
               {t('incidentsLink')}
+            </Button>
+            <Button
+              component={Link}
+              href="/dashboard/alerts/channels"
+              variant="default"
+              size="sm"
+              leftSection={<IconBroadcast size={14} stroke={1.7} />}
+            >
+              {t('libraryUx.pageLink')}
             </Button>
             <Button component={Link} href="/dashboard/alerts/history" variant="default" size="sm" leftSection={<IconHistory size={14} stroke={1.7} />}>
               {t('viewHistory')}
@@ -411,10 +535,10 @@ export default function AlertsPage() {
             <StatGridSkeleton count={4} style={{ marginBottom: 16 }} />
           ) : (
             <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
-              <StatTile label={t('activeRules')} value={enabledCount} icon={<IconCheck size={14} stroke={1.7} />} />
-              <StatTile label={t('disabledRules')} value={disabledCount} icon={<IconClock size={14} stroke={1.7} />} />
-              <StatTile label={t('firingNow')} value={firingTotal} icon={<IconFlame size={14} stroke={1.7} />} />
-              <StatTile label={t('firedLast24h')} value={firedRecently} icon={<IconAlertTriangle size={14} stroke={1.7} />} />
+              <StatTile label={t('activeRules')} value={kpiValues.active} icon={<IconCheck size={14} stroke={1.7} />} />
+              <StatTile label={t('firingNow')} value={kpiValues.firing} icon={<IconFlame size={14} stroke={1.7} />} />
+              <StatTile label={t('rulesUx.kpiMuted')} value={kpiValues.muted} icon={<IconBellOff size={14} stroke={1.7} />} />
+              <StatTile label={t('rulesUx.kpiNoisy')} value={kpiValues.noisy} icon={<IconRipple size={14} stroke={1.7} />} />
             </div>
           )}
           {loadError ? (
@@ -431,20 +555,32 @@ export default function AlertsPage() {
             refreshing={refreshing}
             onRefresh={() => void load(true)}
             onRowClick={openEdit}
-            search={{ value: search, onChange: setSearch, placeholder: t('searchPlaceholder') }}
+            search={{ value: searchInput, onChange: setSearchInput, placeholder: t('searchPlaceholder') }}
             filters={[
               { value: moduleFilter, onChange: setModuleFilter, options: moduleOptions, ariaLabel: t('filters.module'), width: 170 },
               {
-                value: statusFilter,
-                onChange: (value) => setStatusFilter(value as StatusFilter),
-                options: [
-                  { value: 'all', label: t('filters.allStatuses') },
-                  { value: 'enabled', label: t('filters.enabled') },
-                  { value: 'disabled', label: t('filters.disabled') },
-                  { value: 'firing', label: t('filters.firing') },
-                ],
+                value: filters.status,
+                onChange: (value) => setFilters((current) => ({ ...current, status: value as RuleStatusFilter })),
+                options: RULE_STATUS_FILTERS.map((status) => ({
+                  value: status,
+                  label: status === 'all' ? t('filters.allStatuses') : t(`rulesUx.status.${status}`),
+                })),
                 ariaLabel: t('filters.status'),
                 width: 150,
+              },
+              {
+                value: filters.owner,
+                onChange: (value) => setFilters((current) => ({ ...current, owner: value })),
+                options: ownerOptions,
+                ariaLabel: t('rulesUx.owner'),
+                width: 160,
+              },
+              {
+                value: filters.sort,
+                onChange: (value) => setFilters((current) => ({ ...current, sort: value as RuleSort })),
+                options: RULE_SORTS.map((sort) => ({ value: sort, label: t(`rulesUx.sort.${sort}`) })),
+                ariaLabel: t('rulesUx.sortLabel'),
+                width: 190,
               },
             ]}
             rowActions={(rule) => [
@@ -463,10 +599,15 @@ export default function AlertsPage() {
               page,
               onPageChange: setPage,
               pageSize: PAGE_SIZE,
-              total: filtered.length,
-              hasMore: page * PAGE_SIZE < filtered.length,
+              total: visible.length,
+              hasMore: page * PAGE_SIZE < visible.length,
             }}
-            footerLeft={t('showingRules', { shown: pageRules.length, total: filtered.length })}
+            footerLeft={
+              <>
+                {t(pluralKey('showingRules', rulesTotal), { shown: pageRules.length, total: rulesTotal })}
+                {statsCapped ? ` · ${t('rulesUx.statsCapped')}` : ''}
+              </>
+            }
           />
         </>
       )}

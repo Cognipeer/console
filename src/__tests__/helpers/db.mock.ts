@@ -228,6 +228,7 @@ function buildPrimers(): Record<string, Mock> {
     aggregateEntityMetrics: vi.fn().mockResolvedValue([]),
     purgeEntityMetrics: vi.fn().mockResolvedValue(0),
     abandonAgentTracingSession: vi.fn().mockResolvedValue(null),
+    listIncidentStatRows: vi.fn().mockResolvedValue([]),
     countIncidentsByStatus: vi.fn().mockResolvedValue({
       open: 0,
       acknowledged: 0,

@@ -42,8 +42,11 @@ import {
   type ChannelTestResult,
   type PreviewTarget,
 } from './alertTypes';
-import ChannelsEditor from './ChannelsEditor';
+import ChannelsEditor, { MAX_CHANNELS } from './ChannelsEditor';
 import { buildChannelTestBody } from './channelItems';
+import LibraryChannelPicker from './channels/LibraryChannelPicker';
+import { useChannelLibrary } from './channels/useChannelLibrary';
+import BacktestPanel from './rules/BacktestPanel';
 import EntityPicker from './EntityPicker';
 import { moduleIcon } from './moduleIcons';
 import { translateServerNotes } from './incidentUi';
@@ -57,11 +60,14 @@ import {
   SLO_LATENCY_BOUNDS_MS,
   applyBaselinePreset,
   applyMetricChange,
+  applyBacktestSuggestion,
   applyModuleChange,
+  buildBacktestBody,
   buildRulePayload,
   channelsSignature,
   checkRule,
   describeRule,
+  isValidRunbookUrl,
   valuesFromRule,
   type BaselinePreset,
   type RuleFormValues,
@@ -130,7 +136,7 @@ export default function AlertRuleForm({
   useEffect(() => {
     if (!opened) return;
     const seeded = valuesFromRule(initialRef.current as Partial<AlertRuleDto> | undefined, catalogRef.current);
-    initialChannelsSig.current = mode === 'edit' ? channelsSignature(seeded.channels) : null;
+    initialChannelsSig.current = mode === 'edit' ? channelsSignature(seeded.channels, seeded.libraryRefs) : null;
     setValues(seeded);
     setShowAdvanced(false);
     setPreview(null);
@@ -138,9 +144,12 @@ export default function AlertRuleForm({
 
   const def = getDef(catalog, values.metric);
   const entityRule = isEntityMetric(def);
-  const channelsUnchanged = isEdit && initialChannelsSig.current !== null && channelsSignature(values.channels) === initialChannelsSig.current;
+  const channelsUnchanged = isEdit && initialChannelsSig.current !== null && channelsSignature(values.channels, values.libraryRefs) === initialChannelsSig.current;
   const checks = useMemo(() => checkRule(values, catalog, { channelsUnchanged }), [values, catalog, channelsUnchanged]);
   const unit = metricUnit(catalog, values.metric);
+  const runbookValid = isValidRunbookUrl(values.runbookUrl);
+  const library = useChannelLibrary({ enabled: opened, fallbackError: t('libraryUx.loadError') });
+  const backtestKey = useMemo(() => JSON.stringify(buildBacktestBody(values, { catalog, isEdit })), [values, catalog, isEdit]);
 
   const editingMetric = isEdit ? ((initialData?.metric as string | undefined) ?? null) : null;
   const modules = useMemo(() => {
@@ -215,7 +224,7 @@ export default function AlertRuleForm({
 
   // ── Submit ─────────────────────────────────────────────────────────────
   const submit = async () => {
-    if (!checks.canSave) return;
+    if (!checks.canSave || !runbookValid) return;
     setSaving(true);
     try {
       const body = buildRulePayload(values, { catalog, isEdit, channelsUnchanged });
@@ -330,6 +339,14 @@ export default function AlertRuleForm({
           )
         ) : null}
       </SummaryGroup>
+
+      <SummaryGroup title={t('rulesUx.backtest.title')}>
+        <BacktestPanel
+          requestKey={backtestKey}
+          ready={checks.metric && checks.target && checks.condition}
+          onApplyThreshold={(threshold) => setValues((current) => applyBacktestSuggestion(current, { threshold }))}
+        />
+      </SummaryGroup>
     </>
   );
 
@@ -349,23 +366,25 @@ export default function AlertRuleForm({
       primaryAction={{
         label: isEdit ? t('save') : t('create'),
         loading: saving,
-        disabled: !checks.canSave,
+        disabled: !checks.canSave || !runbookValid,
         onClick: () => void submit(),
       }}
       secondaryAction={{ label: t('cancel'), onClick: onClose }}
     >
       {/* 1 · module & metric */}
       <FormSection number={1} title={t('form.sectionMetric')} description={t('form.sectionMetricDescription')} done={checks.metric}>
-        <FormField label={t('form.module')} required>
-          <ChipPicker<string>
-            options={modules.map((module) => {
-              const ModuleIcon = moduleIcon(module);
-              return { value: module, label: moduleLabel(module, t), icon: <ModuleIcon size={14} stroke={1.7} /> };
-            })}
-            value={values.module}
-            onChange={(next) => setValues((current) => applyModuleChange(current, next as string, catalog))}
-          />
-        </FormField>
+        <FormRow cols={1}>
+          <FormField label={t('form.module')} required>
+            <ChipPicker<string>
+              options={modules.map((module) => {
+                const ModuleIcon = moduleIcon(module);
+                return { value: module, label: moduleLabel(module, t), icon: <ModuleIcon size={14} stroke={1.7} /> };
+              })}
+              value={values.module}
+              onChange={(next) => setValues((current) => applyModuleChange(current, next as string, catalog))}
+            />
+          </FormField>
+        </FormRow>
         <FormRow cols={1}>
           <FormField label={t('form.metric')} required>
             <Select
@@ -438,43 +457,45 @@ export default function AlertRuleForm({
 
       {/* 3 · condition */}
       <FormSection number={3} title={t('form.sectionCondition')} description={t('form.sectionConditionDescription')} done={checks.condition}>
-        <FormField label={t('form.conditionMode')} required>
-          <div className="form-chips" role="group" aria-label={t('form.conditionMode')}>
-            {supportedModes.map((candidate) => {
-              const available = modeAvailable(candidate);
-              return (
-                <button
-                  key={candidate}
-                  type="button"
-                  className={`form-chip ${values.mode === candidate ? 'selected' : ''}`}
-                  aria-pressed={values.mode === candidate}
-                  disabled={!available && values.mode !== candidate}
-                  title={available ? t(`modeHint.${candidate}`) : t('form.modeNeedsEnterprise')}
-                  onClick={() => patch({ mode: candidate })}
-                >
-                  {t(`mode.${candidate}`)}
-                  {!available ? <span className="ds-badge ds-badge-info">{t('form.badgeEnterprise')}</span> : null}
-                </button>
-              );
-            })}
-          </div>
-          <div className="form-field-hint">{t(`modeHint.${values.mode}`)}</div>
-          {blockedModes.length > 0 ? (
-            <Text size="xs" c="dimmed" data-testid="mode-upsell">
-              {t(blockedReason === 'license_required' ? 'form.modeUpsellLicense' : 'form.modeUpsellBuild')}
-            </Text>
-          ) : null}
-          {metaUnknown ? (
-            <Text size="xs" c="orange" data-testid="mode-unknown">
-              {t('form.modeAvailabilityUnknown')}
-            </Text>
-          ) : null}
-          {!modeAvailable(values.mode) ? (
-            <Text size="xs" c="orange" role="alert">
-              {t('form.modeUnavailableSelected')}
-            </Text>
-          ) : null}
-        </FormField>
+        <FormRow cols={1}>
+          <FormField label={t('form.conditionMode')} required>
+            <div className="form-chips" role="group" aria-label={t('form.conditionMode')}>
+              {supportedModes.map((candidate) => {
+                const available = modeAvailable(candidate);
+                return (
+                  <button
+                    key={candidate}
+                    type="button"
+                    className={`form-chip ${values.mode === candidate ? 'selected' : ''}`}
+                    aria-pressed={values.mode === candidate}
+                    disabled={!available && values.mode !== candidate}
+                    title={available ? t(`modeHint.${candidate}`) : t('form.modeNeedsEnterprise')}
+                    onClick={() => patch({ mode: candidate })}
+                  >
+                    {t(`mode.${candidate}`)}
+                    {!available ? <span className="ds-badge ds-badge-info">{t('form.badgeEnterprise')}</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="form-field-hint">{t(`modeHint.${values.mode}`)}</div>
+            {blockedModes.length > 0 ? (
+              <Text size="xs" c="dimmed" data-testid="mode-upsell">
+                {t(blockedReason === 'license_required' ? 'form.modeUpsellLicense' : 'form.modeUpsellBuild')}
+              </Text>
+            ) : null}
+            {metaUnknown ? (
+              <Text size="xs" c="orange" data-testid="mode-unknown">
+                {t('form.modeAvailabilityUnknown')}
+              </Text>
+            ) : null}
+            {!modeAvailable(values.mode) ? (
+              <Text size="xs" c="orange" role="alert">
+                {t('form.modeUnavailableSelected')}
+              </Text>
+            ) : null}
+          </FormField>
+        </FormRow>
 
         {values.mode === 'threshold' ? (
           <FormRow cols={2}>
@@ -502,32 +523,37 @@ export default function AlertRuleForm({
 
         {values.mode === 'baseline' ? (
           <>
-            <FormField label={t('form.sensitivity')} hint={t('form.sensitivityHint')}>
-              <ChipPicker<string>
-                options={[
-                  { value: 'sensitive', label: t('baseline.sensitive') },
-                  { value: 'balanced', label: t('baseline.balanced') },
-                  { value: 'calm', label: t('baseline.calm') },
-                  ...(values.baselinePreset === 'custom' ? [{ value: 'custom', label: t('baseline.custom') }] : []),
-                ]}
-                value={values.baselinePreset}
-                onChange={(next) => setValues((current) => applyBaselinePreset(current, next as BaselinePreset))}
-              />
-              <div className="form-field-hint">
-                {values.baselinePreset !== 'custom'
-                  ? t('baseline.presetSummary', {
-                      ratio: BASELINE_PRESETS[values.baselinePreset].minRatio,
-                      z: BASELINE_PRESETS[values.baselinePreset].minZ,
-                      days: BASELINE_PRESETS[values.baselinePreset].lookbackDays,
-                    })
-                  : t('baseline.customSummary')}
-              </div>
-            </FormField>
+            <FormRow cols={1}>
+              <FormField label={t('form.sensitivity')} hint={t('form.sensitivityHint')}>
+                <ChipPicker<string>
+                  options={[
+                    { value: 'sensitive', label: t('baseline.sensitive') },
+                    { value: 'balanced', label: t('baseline.balanced') },
+                    { value: 'calm', label: t('baseline.calm') },
+                    ...(values.baselinePreset === 'custom' ? [{ value: 'custom', label: t('baseline.custom') }] : []),
+                  ]}
+                  value={values.baselinePreset}
+                  onChange={(next) => setValues((current) => applyBaselinePreset(current, next as BaselinePreset))}
+                />
+                <div className="form-field-hint">
+                  {values.baselinePreset !== 'custom'
+                    ? t('baseline.presetSummary', {
+                        ratio: BASELINE_PRESETS[values.baselinePreset].minRatio,
+                        z: BASELINE_PRESETS[values.baselinePreset].minZ,
+                        days: BASELINE_PRESETS[values.baselinePreset].lookbackDays,
+                      })
+                    : t('baseline.customSummary')}
+                </div>
+              </FormField>
+            </FormRow>
             <div>
               <Button
                 variant="subtle"
                 size="compact-xs"
                 color="gray"
+                // The form is portaled out of the app shell, where the design system's subtle-button colour does not
+                // apply and Mantine's own gray is the near-invisible border tone.
+                style={{ color: 'var(--ds-text-muted)' }}
                 leftSection={showAdvanced ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
                 aria-expanded={showAdvanced}
                 onClick={() => setShowAdvanced((open) => !open)}
@@ -678,30 +704,49 @@ export default function AlertRuleForm({
 
       {/* 4 · severity & notifications */}
       <FormSection number={4} title={t('form.sectionNotify')} description={t('form.sectionNotifyDescription')} done={checks.channels}>
-        <FormField label={t('form.severity')} hint={t('form.severityHint')}>
-          <ChipPicker<string>
-            options={SEVERITIES.map((severity) => ({ value: severity, label: t(`severity.${severity}`) }))}
-            value={values.severity}
-            onChange={(next) => patch({ severity: next as AlertRuleSeverity })}
-          />
-        </FormField>
-        <FormField label={t('form.channels')} hint={t('form.channelsHint')}>
-          <ChannelsEditor
-            value={values.channels}
-            onChange={(channels) => patch({ channels })}
-            allowedTypes={meta?.channelTypes?.length ? meta.channelTypes : ALL_CHANNEL_TYPES}
-            onTest={onTestChannel}
-            canTest={canTestChannel}
-          />
-        </FormField>
-        <ToggleList>
-          <ToggleRow
-            label={t('form.notifyOnResolve')}
-            description={t('form.notifyOnResolveDescription')}
-            checked={values.notifyOnResolve}
-            onChange={(next) => patch({ notifyOnResolve: next })}
-          />
-        </ToggleList>
+        <FormRow cols={1}>
+          <FormField label={t('form.severity')} hint={t('form.severityHint')}>
+            <ChipPicker<string>
+              options={SEVERITIES.map((severity) => ({ value: severity, label: t(`severity.${severity}`) }))}
+              value={values.severity}
+              onChange={(next) => patch({ severity: next as AlertRuleSeverity })}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={t('form.channels')} hint={t('form.channelsHint')}>
+            <ChannelsEditor
+              value={values.channels}
+              onChange={(channels) => patch({ channels })}
+              allowedTypes={meta?.channelTypes?.length ? meta.channelTypes : ALL_CHANNEL_TYPES}
+              onTest={onTestChannel}
+              canTest={canTestChannel}
+              maxChannels={Math.max(0, MAX_CHANNELS - values.libraryRefs.length)}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={optional(t('libraryUx.fieldLabel'))} hint={t('libraryUx.fieldHint')}>
+            <LibraryChannelPicker
+              value={values.libraryRefs}
+              onChange={(libraryRefs) => patch({ libraryRefs })}
+              library={library.channels}
+              loading={library.loading}
+              error={library.error}
+              canAddMore={values.channels.length + values.libraryRefs.length < MAX_CHANNELS}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <ToggleList>
+            <ToggleRow
+              label={t('form.notifyOnResolve')}
+              description={t('form.notifyOnResolveDescription')}
+              checked={values.notifyOnResolve}
+              onChange={(next) => patch({ notifyOnResolve: next })}
+            />
+          </ToggleList>
+        </FormRow>
         <FormRow cols={2}>
           <FormField label={t('form.renotify')} hint={t('form.renotifyHint')}>
             <Select
@@ -749,6 +794,19 @@ export default function AlertRuleForm({
               maxLength={1000}
               value={values.description}
               onChange={(event) => patch({ description: event.currentTarget.value })}
+            />
+          </FormField>
+        </FormRow>
+        <FormRow cols={1}>
+          <FormField label={optional(t('rulesUx.runbookUrl'))} hint={t('rulesUx.runbookUrlHint')}>
+            <TextInput
+              aria-label={t('rulesUx.runbookUrl')}
+              placeholder="https://"
+              autoComplete="off"
+              maxLength={2048}
+              value={values.runbookUrl}
+              error={runbookValid ? undefined : t('rulesUx.runbookUrlInvalid')}
+              onChange={(event) => patch({ runbookUrl: event.currentTarget.value })}
             />
           </FormField>
         </FormRow>

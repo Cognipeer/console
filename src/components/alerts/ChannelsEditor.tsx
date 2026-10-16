@@ -26,6 +26,12 @@ import {
 
 export const MAX_CHANNELS = 10;
 
+/**
+ * The editor lives in full-screen forms, which are portaled out of the app shell: the design system's colour for subtle
+ * buttons does not reach them and Mantine's gray is the near-invisible border tone, so the quiet text buttons set it.
+ */
+const KEEP_STORED_COLOR = 'var(--ds-text-muted)';
+
 const CHANNEL_ICONS: Record<AlertChannelType, TablerIcon> = {
   email: IconMail,
   webhook: IconWebhook,
@@ -46,6 +52,8 @@ export interface ChannelsEditorProps {
   canTest?: (channel: ChannelItem) => boolean;
   maxChannels?: number;
   disabled?: boolean;
+  /** One fixed channel (the channel library form): no remove button and no "add" bar. */
+  single?: boolean;
 }
 
 type TestState = { status: 'loading' } | { status: 'done'; ok: boolean; message: string };
@@ -58,6 +66,7 @@ export default function ChannelsEditor({
   canTest,
   maxChannels = MAX_CHANNELS,
   disabled = false,
+  single = false,
 }: ChannelsEditorProps) {
   const t = useTranslations('alerts');
   const [tests, setTests] = useState<Record<string, TestState>>({});
@@ -106,7 +115,7 @@ export default function ChannelsEditor({
 
   return (
     <div className="ds-col ds-gap-sm" data-testid="channels-editor">
-      {value.length === 0 ? (
+      {value.length === 0 && !single ? (
         <Text size="sm" c="dimmed">
           {t('channels.empty')}
         </Text>
@@ -142,6 +151,7 @@ export default function ChannelsEditor({
                     {t('channels.sendTest')}
                   </Button>
                 ) : null}
+                {single ? null : (
                 <Tooltip label={t('channels.remove')} withArrow>
                   <ActionIcon
                     variant="subtle"
@@ -154,6 +164,7 @@ export default function ChannelsEditor({
                     <IconTrash size={14} stroke={1.7} />
                   </ActionIcon>
                 </Tooltip>
+                )}
               </Group>
             </Group>
 
@@ -228,7 +239,7 @@ export default function ChannelsEditor({
                         size="compact-xs"
                         variant="subtle"
                         color="gray"
-                        style={{ alignSelf: 'flex-start' }}
+                        style={{ alignSelf: 'flex-start', color: KEEP_STORED_COLOR }}
                         onClick={() => update(item.key, { replace: false, url: '', secret: '', clearSecret: false })}
                       >
                         {t('channels.keepStored')}
@@ -264,7 +275,7 @@ export default function ChannelsEditor({
                       size="compact-xs"
                       variant="subtle"
                       color="gray"
-                      style={{ alignSelf: 'flex-start' }}
+                      style={{ alignSelf: 'flex-start', color: KEEP_STORED_COLOR }}
                       onClick={() => update(item.key, { replace: false, routingKey: '' })}
                     >
                       {t('channels.keepStored')}
@@ -283,7 +294,7 @@ export default function ChannelsEditor({
         );
       })}
 
-      {canAddMore ? (
+      {single ? null : canAddMore ? (
         <Group gap={6}>
           <Text size="xs" c="dimmed">
             {t('channels.add')}

@@ -10,6 +10,7 @@
  *   - SLO burn-rate alerting (`SloBurnEvaluator`);
  *   - incident enrichment such as correlated dependency regressions
  *     (`IncidentEnricher`);
+ *   - entity links to the enterprise health pages (`EntityLinkResolver`);
  *   - extra metric collectors (e.g. the AI App Gateway collector), searched by
  *     the collector registry at call time.
  *
@@ -141,10 +142,19 @@ export interface IMetricCollectorLike {
   collect(query: unknown): Promise<{ value: number; sampleCount: number }>;
 }
 
+// ── Entity links ────────────────────────────────────────────────────────
+
+/**
+ * Path (no origin) of the page an entity should link to, or null to use the core page. Synchronous
+ * and pure: the overlay answers from the entity type and key alone.
+ */
+export type EntityLinkResolver = (entityType: EntityMetricType, entityKey: string) => string | null;
+
 let baselineProvider: EntityBaselineProvider | null = null;
 let sloBurnEvaluator: SloBurnEvaluator | null = null;
 let incidentEnricher: IncidentEnricher | null = null;
 const metricCollectors: IMetricCollectorLike[] = [];
+let entityLinkResolver: EntityLinkResolver | null = null;
 
 /** The overlay registers its provider once at load; `null` clears it (tests). A later registration replaces the earlier one. */
 export function registerEntityBaselineProvider(provider: EntityBaselineProvider | null): void {
@@ -171,6 +181,15 @@ export function getIncidentEnricher(): IncidentEnricher | null {
   return incidentEnricher;
 }
 
+/** The overlay registers its health-page links once at load; `null` clears them (tests). */
+export function registerEntityLinkResolver(fn: EntityLinkResolver | null): void {
+  entityLinkResolver = fn;
+}
+
+export function getEntityLinkResolver(): EntityLinkResolver | null {
+  return entityLinkResolver;
+}
+
 /** Add a collector the registry should search besides the built-in ones. Registering the same instance twice is a no-op. */
 export function registerAlertMetricCollector(collector: IMetricCollectorLike): void {
   if (metricCollectors.includes(collector)) return;
@@ -186,5 +205,6 @@ export function __resetAlertExtensionsForTests(): void {
   baselineProvider = null;
   sloBurnEvaluator = null;
   incidentEnricher = null;
+  entityLinkResolver = null;
   metricCollectors.length = 0;
 }

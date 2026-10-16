@@ -480,6 +480,9 @@ export function EntityHealthCharts({ series, requestsLabel, chartHeight = 220 }:
               gridAxis="x"
               tickLine="x"
               valueFormatter={(value) => formatHealthCount(value, locale)}
+              // A request count is whole: with a handful of requests the axis would otherwise tick at 0.25 steps and,
+              // rounded, label them "1 1 1 0 0".
+              yAxisProps={{ allowDecimals: false }}
               rightYAxisProps={{
                 domain: [0, 'auto'],
                 tickFormatter: (value: number) => formatHealthPercent(value, locale),

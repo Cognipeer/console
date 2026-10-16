@@ -50,6 +50,7 @@ import { BatchJobMixin } from './sqlite/batch.mixin';
 import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { EntityMetricsMixin } from './sqlite/entity-metrics.mixin';
 import { AlertStateMixin } from './sqlite/alert-state.mixin';
+import { AlertChannelLibraryMixin } from './sqlite/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './sqlite/external-model-pricing.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
@@ -94,7 +95,7 @@ const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the
 // enterprise overlay.
 // Entity health rollup + alert evaluation state (split steps keep the nesting shallow).
-const HealthBase = EntityMetricsMixin(AlertStateMixin(PricingBase));
+const HealthBase = EntityMetricsMixin(AlertChannelLibraryMixin(AlertStateMixin(PricingBase)));
 const ClusterBase = ClusterMixin(HealthBase);
 
 // Group 7 – Signup gating (main database; beta access codes)

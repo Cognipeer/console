@@ -266,12 +266,19 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } },
     { key: { tenantId: 1, projectId: 1, firedAt: -1 }, options: { name: 'idx_alert_events_project_firedAt' } },
   ],
+  // Delivery log: per-incident timeline and per-rule history (newest first).
+  alert_deliveries: [
+    { key: { tenantId: 1, incidentId: 1, attemptAt: -1 }, options: { name: 'idx_alert_deliveries_incident_attemptAt' } },
+    { key: { tenantId: 1, ruleId: 1, attemptAt: -1 }, options: { name: 'idx_alert_deliveries_rule_attemptAt' } },
+  ],
   incidents: [
     { key: { projectId: 1, status: 1, firedAt: -1 }, options: { name: 'idx_incidents_project_status_firedAt' } },
     { key: { ruleId: 1, entityKey: 1 }, options: { name: 'idx_incidents_rule_entity' } },
     // listIncidents filtered by entity (newest first) and findIncidentByAlertEventId.
     { key: { projectId: 1, entityKey: 1, firedAt: -1 }, options: { name: 'idx_incidents_project_entity_firedAt' } },
     { key: { alertEventId: 1 }, options: { name: 'idx_incidents_alertEventId' } },
+    // Live refresh (updatedAfter / sort by updatedAt).
+    { key: { tenantId: 1, projectId: 1, updatedAt: 1 }, options: { name: 'idx_incidents_tenant_project_updatedAt' } },
   ],
   files: [
     { key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } },

@@ -156,6 +156,13 @@ export async function sealChannels(
         out.push({ id, type: 'pagerduty', keyHint: keyHint(routingKey), sealed: encryptObject({ routingKey }) });
         break;
       }
+      case 'library': {
+        // A reference carries no secret: the entry is resolved (and unsealed) at dispatch time.
+        const libraryId = trimmed(withId.libraryId);
+        if (!libraryId) throw new Error('A library channel needs a libraryId');
+        out.push({ id, type: 'library', libraryId });
+        break;
+      }
       default:
         throw new Error(`Unsupported channel type "${(channel as { type?: string }).type}"`);
     }
@@ -189,6 +196,9 @@ export function maskChannels(stored: IAlertChannel[] | null | undefined): IAlert
         break;
       case 'pagerduty':
         out.push({ ...id, type: 'pagerduty', keyHint: channel.keyHint } as IAlertChannel);
+        break;
+      case 'library':
+        out.push({ ...id, type: 'library', libraryId: channel.libraryId });
         break;
       default:
         // A type registered by another module (or a damaged row): keep the

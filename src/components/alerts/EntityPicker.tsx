@@ -6,6 +6,7 @@ import { useDebouncedValue } from '@mantine/hooks';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { entityTypeLabel } from './alertCatalog';
 import type { EntityMetricType } from './alertTypes';
+import { pluralKey } from './plural';
 
 const MAX_KEYS = 50;
 const MAX_KEY_LENGTH = 200;
@@ -90,7 +91,7 @@ export default function EntityPicker({ entityType, value, onChange, disabled, er
             </Text>
             {requests !== undefined ? (
               <Text size="xs" c="dimmed">
-                {t('target.pickerRequests', { count: requests.toLocaleString(locale) })}
+                {t(pluralKey('target.pickerRequests', requests), { count: requests.toLocaleString(locale) })}
               </Text>
             ) : null}
           </Group>

@@ -1285,6 +1285,11 @@ export const TENANT_SCHEMA_SQL = `
     renotifyMinutes INTEGER,
     channels TEXT NOT NULL DEFAULT '[]',
     lastTriggeredAt TEXT,
+    mutedUntil TEXT,
+    mutedBy TEXT,
+    muteReason TEXT,
+    runbookUrl TEXT,
+    lastEvaluation TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -1312,6 +1317,23 @@ export const TENANT_SCHEMA_SQL = `
     acknowledgedAt TEXT,
     kind TEXT,
     metadata TEXT DEFAULT '{}'
+  );
+
+  CREATE TABLE IF NOT EXISTS alert_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    ruleId TEXT NOT NULL,
+    incidentId TEXT,
+    eventId TEXT,
+    channelId TEXT NOT NULL,
+    channelKind TEXT NOT NULL,
+    channelName TEXT,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    error TEXT,
+    attemptAt TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS prescription_reports (
@@ -1366,6 +1388,10 @@ export const TENANT_SCHEMA_SQL = `
     autoResolved INTEGER,
     acknowledgedBy TEXT,
     context TEXT,
+    snoozedUntil TEXT,
+    snoozedBy TEXT,
+    reopenedAt TEXT,
+    reopenCount INTEGER,
     metadata TEXT DEFAULT '{}',
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL

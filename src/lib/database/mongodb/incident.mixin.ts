@@ -5,7 +5,8 @@
  */
 
 import { ObjectId, type Db } from 'mongodb';
-import type { IIncident, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
+import type { IIncident, IIncidentStatRow, IncidentSort, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
+import { foldedRegexSource } from '@/lib/shared/searchFold';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -51,6 +52,7 @@ export function IncidentMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         coll.createIndex({ ruleId: 1, entityKey: 1 }, { name: 'idx_incidents_rule_entity' }),
         coll.createIndex({ projectId: 1, entityKey: 1, firedAt: -1 }, { name: 'idx_incidents_project_entity_firedAt' }),
         coll.createIndex({ alertEventId: 1 }, { name: 'idx_incidents_alertEventId' }),
+        coll.createIndex({ tenantId: 1, projectId: 1, updatedAt: 1 }, { name: 'idx_incidents_tenant_project_updatedAt' }),
       ]);
       this.incidentIndexesReady.add(dbName);
     }
@@ -116,26 +118,104 @@ export function IncidentMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         severity?: IncidentSeverity;
         entityKey?: string;
         module?: AlertModule;
+        updatedAfter?: Date;
+        firedAfter?: Date;
+        q?: string;
+        assignee?: string | null;
+        snoozed?: boolean;
+        excludeId?: string;
+        sort?: IncidentSort;
         limit?: number;
         skip?: number;
       },
     ): Promise<IIncident[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { tenantId };
+      const and: Record<string, unknown>[] = [];
       if (options?.projectId) filter.projectId = options.projectId;
       if (options?.ruleId) filter.ruleId = options.ruleId;
       if (options?.status) filter.status = options.status;
       if (options?.severity) filter.severity = options.severity;
       if (options?.entityKey) filter.entityKey = options.entityKey;
       if (options?.module) filter.module = options.module;
+      if (options?.updatedAfter) filter.updatedAt = { $gt: options.updatedAfter };
+      if (options?.firedAfter) filter.firedAt = { $gte: options.firedAfter };
+      if (options?.excludeId) {
+        if (ObjectId.isValid(options.excludeId)) filter._id = { $ne: new ObjectId(options.excludeId) };
+      }
+      const q = options?.q?.trim();
+      if (q) {
+        const rx = { $regex: foldedRegexSource(q), $options: 'i' };
+        and.push({ $or: [{ ruleName: rx }, { entityKey: rx }, { metric: rx }] });
+      }
+      // `{ assignedTo: null }` matches both null and a missing field (unassigned).
+      if (options?.assignee === null) filter.assignedTo = null;
+      else if (typeof options?.assignee === 'string') filter.assignedTo = options.assignee;
+      if (options?.snoozed !== undefined) {
+        const now = new Date();
+        and.push(options.snoozed
+          ? { snoozedUntil: { $gt: now } }
+          : { $or: [{ snoozedUntil: null }, { snoozedUntil: { $lte: now } }] });
+      }
+      if (and.length > 0) filter.$and = and;
+
+      const limit = clampLimit(options?.limit, 50);
+      const skip = clampSkip(options?.skip);
+      const coll = db.collection(COLLECTIONS.incidents);
+      const sort = options?.sort;
+
+      if (sort === 'severity' || sort === '-severity') {
+        // A computed rank cannot be sorted by a plain find (and Cosmos needs an index for every
+        // sort key), so walk the severities in rank order, newest first inside each one.
+        const order: IncidentSeverity[] = sort === '-severity'
+          ? ['critical', 'warning', 'info']
+          : ['info', 'warning', 'critical'];
+        const segments = options?.severity ? [options.severity] : order;
+        const out: IIncident[] = [];
+        let toSkip = skip;
+        for (const severity of segments) {
+          const remaining = limit - out.length;
+          if (remaining <= 0) break;
+          const segFilter = { ...filter, severity };
+          if (toSkip > 0) {
+            const inSegment = await coll.countDocuments(segFilter);
+            if (toSkip >= inSegment) { toSkip -= inSegment; continue; }
+          }
+          const docs = await coll.find(segFilter).sort({ firedAt: -1 }).skip(toSkip).limit(remaining).toArray();
+          toSkip = 0;
+          out.push(...docs.map((d) => toIncident(d as unknown as Record<string, unknown>)));
+        }
+        return out;
+      }
+
+      const sortSpec: Record<string, 1 | -1> =
+        sort === 'firedAt' ? { firedAt: 1 }
+          : sort === 'updatedAt' ? { updatedAt: 1 }
+            : sort === '-updatedAt' ? { updatedAt: -1 }
+              : { firedAt: -1 };
+      const docs = await coll.find(filter).sort(sortSpec).skip(skip).limit(limit).toArray();
+      return docs.map((d) => toIncident(d as unknown as Record<string, unknown>));
+    }
+
+    async listIncidentStatRows(
+      projectId: string,
+      options: { firedSince?: Date; resolvedSince?: Date; limit?: number },
+    ): Promise<IIncidentStatRow[]> {
+      const or: Record<string, unknown>[] = [];
+      if (options.firedSince) or.push({ firedAt: { $gte: options.firedSince } });
+      if (options.resolvedSince) or.push({ resolvedAt: { $gte: options.resolvedSince } });
+      if (or.length === 0) return [];
+      const n = Number(options.limit);
+      const limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 5000;
+      const db = this.getTenantDb();
       const docs = await db
         .collection(COLLECTIONS.incidents)
-        .find(filter)
+        .find(or.length === 1 ? { projectId, ...or[0] } : { projectId, $or: or })
+        .project({ status: 1, firedAt: 1, acknowledgedAt: 1, resolvedAt: 1, closedAt: 1, reopenedAt: 1, autoResolved: 1 })
         .sort({ firedAt: -1 })
-        .skip(clampSkip(options?.skip))
-        .limit(clampLimit(options?.limit, 50))
+        .limit(limit)
         .toArray();
-      return docs.map((d) => toIncident(d as unknown as Record<string, unknown>));
+      return docs.map((d) => ({ ...d, _id: String(d._id) }) as unknown as IIncidentStatRow);
     }
 
     async countIncidents(

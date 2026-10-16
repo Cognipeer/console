@@ -4,7 +4,8 @@
  * Incidents are created when alerts fire and track resolution lifecycle.
  */
 
-import type { IIncident, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
+import type { IIncident, IIncidentStatRow, IncidentSort, IncidentStatus, IncidentSeverity, AlertModule } from '../provider.interface';
+import { toLikePattern } from '../provider/conversationSearch';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -20,6 +21,26 @@ function clampSkip(value: number | undefined): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.floor(n);
+}
+
+function isoOrNull(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+const SEVERITY_RANK_SQL = `CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END`;
+
+/** ORDER BY for an incident sort; ties break on id so pages never reorder. */
+function incidentOrderBy(sort: IncidentSort | undefined): string {
+  switch (sort) {
+    case 'firedAt': return 'firedAt ASC, id ASC';
+    case 'updatedAt': return 'updatedAt ASC, id ASC';
+    case '-updatedAt': return 'updatedAt DESC, id DESC';
+    // Severity: worst first when descending (critical > warning > info), newest first inside a rank.
+    case '-severity': return `${SEVERITY_RANK_SQL} ASC, firedAt DESC, id DESC`;
+    case 'severity': return `${SEVERITY_RANK_SQL} DESC, firedAt DESC, id DESC`;
+    default: return 'firedAt DESC, id DESC';
+  }
 }
 
 export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
@@ -38,12 +59,14 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
          firedAt, acknowledgedAt, resolvedAt, closedAt, resolvedBy,
          module, entityType, entityKey, baselineValue, lastValue, peakValue,
          autoResolved, acknowledgedBy, context,
+         snoozedUntil, snoozedBy, reopenedAt, reopenCount,
          metadata, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @alertEventId, @ruleId, @ruleName, @metric,
          @threshold, @actualValue, @severity, @status, @assignedTo, @notes,
          @firedAt, @acknowledgedAt, @resolvedAt, @closedAt, @resolvedBy,
          @module, @entityType, @entityKey, @baselineValue, @lastValue, @peakValue,
          @autoResolved, @acknowledgedBy, @context,
+         @snoozedUntil, @snoozedBy, @reopenedAt, @reopenCount,
          @metadata, @createdAt, @updatedAt)
       `).run({
         id,
@@ -79,6 +102,10 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         autoResolved: incident.autoResolved === undefined ? null : this.toBoolInt(incident.autoResolved),
         acknowledgedBy: incident.acknowledgedBy ?? null,
         context: incident.context ? this.toJson(incident.context) : null,
+        snoozedUntil: isoOrNull(incident.snoozedUntil),
+        snoozedBy: incident.snoozedBy ?? null,
+        reopenedAt: isoOrNull(incident.reopenedAt),
+        reopenCount: incident.reopenCount ?? null,
         metadata: this.toJson(incident.metadata ?? {}),
         createdAt: now,
         updatedAt: now,
@@ -126,6 +153,10 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.autoResolved !== undefined) { sets.push('autoResolved = @autoResolved'); params.autoResolved = data.autoResolved === null ? null : this.toBoolInt(data.autoResolved); }
       if (data.acknowledgedBy !== undefined) { sets.push('acknowledgedBy = @acknowledgedBy'); params.acknowledgedBy = data.acknowledgedBy ?? null; }
       if (data.context !== undefined) { sets.push('context = @context'); params.context = data.context ? this.toJson(data.context) : null; }
+      if (data.snoozedUntil !== undefined) { sets.push('snoozedUntil = @snoozedUntil'); params.snoozedUntil = isoOrNull(data.snoozedUntil); }
+      if (data.snoozedBy !== undefined) { sets.push('snoozedBy = @snoozedBy'); params.snoozedBy = data.snoozedBy ?? null; }
+      if (data.reopenedAt !== undefined) { sets.push('reopenedAt = @reopenedAt'); params.reopenedAt = isoOrNull(data.reopenedAt); }
+      if (data.reopenCount !== undefined) { sets.push('reopenCount = @reopenCount'); params.reopenCount = data.reopenCount ?? null; }
 
       let where = 'id = @id';
       if (projectId !== undefined) { where += ' AND projectId = @scopeProjectId'; params.scopeProjectId = projectId; }
@@ -160,6 +191,13 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         severity?: IncidentSeverity;
         entityKey?: string;
         module?: AlertModule;
+        updatedAfter?: Date;
+        firedAfter?: Date;
+        q?: string;
+        assignee?: string | null;
+        snoozed?: boolean;
+        excludeId?: string;
+        sort?: IncidentSort;
         limit?: number;
         skip?: number;
       },
@@ -173,13 +211,57 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (options?.severity) { clauses.push('severity = @severity'); params.severity = options.severity; }
       if (options?.entityKey) { clauses.push('entityKey = @entityKey'); params.entityKey = options.entityKey; }
       if (options?.module) { clauses.push('module = @module'); params.module = options.module; }
+      if (options?.updatedAfter) { clauses.push('updatedAt > @updatedAfter'); params.updatedAfter = options.updatedAfter.toISOString(); }
+      if (options?.firedAfter) { clauses.push('firedAt >= @firedAfter'); params.firedAfter = options.firedAfter.toISOString(); }
+      if (options?.excludeId) { clauses.push('id != @excludeId'); params.excludeId = options.excludeId; }
+      const q = options?.q?.trim();
+      if (q) {
+        clauses.push(`(iam_fold(ruleName) LIKE iam_fold(@q) ESCAPE '\\' OR iam_fold(entityKey) LIKE iam_fold(@q) ESCAPE '\\' OR iam_fold(metric) LIKE iam_fold(@q) ESCAPE '\\')`);
+        params.q = toLikePattern(q);
+      }
+      if (options?.assignee === null) clauses.push('assignedTo IS NULL');
+      else if (typeof options?.assignee === 'string') { clauses.push('assignedTo = @assignee'); params.assignee = options.assignee; }
+      if (options?.snoozed !== undefined) {
+        params.nowIso = this.now();
+        clauses.push(options.snoozed
+          ? 'snoozedUntil IS NOT NULL AND snoozedUntil > @nowIso'
+          : '(snoozedUntil IS NULL OR snoozedUntil <= @nowIso)');
+      }
 
       params.limit = clampLimit(options?.limit, 50);
       params.skip = clampSkip(options?.skip);
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.incidents} WHERE ${clauses.join(' AND ')} ORDER BY firedAt DESC LIMIT @limit OFFSET @skip`,
+        `SELECT * FROM ${TABLES.incidents} WHERE ${clauses.join(' AND ')} ORDER BY ${incidentOrderBy(options?.sort)} LIMIT @limit OFFSET @skip`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapIncidentRow(r));
+    }
+
+    async listIncidentStatRows(
+      projectId: string,
+      options: { firedSince?: Date; resolvedSince?: Date; limit?: number },
+    ): Promise<IIncidentStatRow[]> {
+      const db = this.getTenantDb();
+      const or: string[] = [];
+      const params: Record<string, unknown> = { projectId };
+      if (options.firedSince) { or.push('firedAt >= @firedSince'); params.firedSince = options.firedSince.toISOString(); }
+      if (options.resolvedSince) { or.push('(resolvedAt IS NOT NULL AND resolvedAt >= @resolvedSince)'); params.resolvedSince = options.resolvedSince.toISOString(); }
+      if (or.length === 0) return [];
+      const n = Number(options.limit);
+      params.limit = Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 1), 5000) : 5000;
+      const rows = db.prepare(
+        `SELECT id, status, firedAt, acknowledgedAt, resolvedAt, closedAt, reopenedAt, autoResolved FROM ${TABLES.incidents}
+         WHERE projectId = @projectId AND (${or.join(' OR ')}) ORDER BY firedAt DESC, id DESC LIMIT @limit`,
+      ).all(params) as SqliteRow[];
+      return rows.map((r) => ({
+        _id: r.id as string,
+        status: r.status as IncidentStatus,
+        firedAt: this.toDate(r.firedAt) ?? new Date(),
+        acknowledgedAt: r.acknowledgedAt ? this.toDate(r.acknowledgedAt) : null,
+        resolvedAt: r.resolvedAt ? this.toDate(r.resolvedAt) : null,
+        closedAt: r.closedAt ? this.toDate(r.closedAt) : null,
+        reopenedAt: r.reopenedAt ? this.toDate(r.reopenedAt) : null,
+        ...(r.autoResolved !== null && r.autoResolved !== undefined ? { autoResolved: this.fromBoolInt(r.autoResolved) } : {}),
+      }));
     }
 
     async countIncidents(
@@ -239,6 +321,10 @@ export function IncidentMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         ...(r.autoResolved !== null && r.autoResolved !== undefined ? { autoResolved: this.fromBoolInt(r.autoResolved) } : {}),
         ...(r.acknowledgedBy ? { acknowledgedBy: r.acknowledgedBy as string } : {}),
         ...(r.context ? { context: this.parseJson(r.context, undefined) } : {}),
+        ...(r.snoozedUntil ? { snoozedUntil: this.toDate(r.snoozedUntil) } : {}),
+        ...(r.snoozedBy ? { snoozedBy: r.snoozedBy as string } : {}),
+        ...(r.reopenedAt ? { reopenedAt: this.toDate(r.reopenedAt) } : {}),
+        ...(r.reopenCount !== null && r.reopenCount !== undefined ? { reopenCount: r.reopenCount as number } : {}),
         metadata: this.parseJson(r.metadata, {}),
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
