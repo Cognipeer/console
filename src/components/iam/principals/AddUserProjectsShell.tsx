@@ -170,7 +170,7 @@ export default function AddUserProjectsShell({ open, subject, onClose, onDone }:
       summary={summary}
       disableEscape={saving}
       primaryAction={{
-        label: t('multi.submit', { count: picked.length }),
+        label: t(picked.length === 1 ? 'multi.submitOne' : 'multi.submit', { count: picked.length }),
         loading: saving,
         disabled: picked.length === 0 || (access === 'custom' && !custom),
         onClick: () => void save(),
@@ -250,7 +250,7 @@ export default function AddUserProjectsShell({ open, subject, onClose, onDone }:
                     </div>
                     {locked ? (
                       <Badge size="sm" variant="default" tt="none">
-                        {t('multi.member')}
+                        {t(`project.roles.${offer.currentRole === 'project_admin' ? 'project_admin' : 'member'}`)}
                       </Badge>
                     ) : role ? (
                       <SegmentedControl

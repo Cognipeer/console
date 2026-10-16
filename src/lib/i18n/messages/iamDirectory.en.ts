@@ -706,6 +706,7 @@ export const iamDirectoryEn = {
     notify: 'Notify by email',
     notifyHint: 'Sends the person an email listing the projects they were added to, if mail is configured.',
     submit: 'Add to {count} projects',
+    submitOne: 'Add to 1 project',
     done: '{name}: {added} added, {updated} updated',
     skippedTitle: 'Some projects were skipped',
     skip: {

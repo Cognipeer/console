@@ -614,10 +614,26 @@ describe('MembershipShell and AddToProjectShell', () => {
     expect(shell().textContent).toContain('Already a member');
     const beta = qa('input[type="checkbox"]').find((c) => c.getAttribute('aria-label') === 'Beta')!;
     await click(beta);
-    await click(shellButton('Add to 1 projects'));
+    await click(shellButton('Add to 1 project'));
     await settle(80);
     expect(api.to('POST', '/api/users/u-ann/projects')[0]?.body).toEqual({ projects: [{ projectId: 'p-b', role: 'member' }], servicePermissions: null });
     expect(onDone).toHaveBeenCalled();
+  });
+
+  it('names the role a person already has in a project it locks, not just "member"', async () => {
+    await show(
+      createElement(AddToProjectShell, {
+        open: true,
+        subject: { kind: 'user', id: 'u-ann', name: 'Ann Lee', projectIds: ['p-a'], memberships: [{ id: 'p-a', name: 'Alpha', role: 'project_admin', via: 'direct', groupName: null }] },
+        onClose: vi.fn(),
+        onDone: vi.fn(),
+      } as never),
+      [['GET', '/api/projects', () => PROJECTS]],
+    );
+    await settle(60);
+    const row = qa('[data-testid="project-offer"]', shell()).find((r) => r.textContent?.includes('Alpha'))!;
+    // the badge is a leaf of its own; the muted line above it is a sentence
+    expect(qa('span', row).some((s) => s.children.length === 0 && s.textContent === 'Project admin')).toBe(true);
   });
 
   it('explains why an external account cannot be added to a project', async () => {

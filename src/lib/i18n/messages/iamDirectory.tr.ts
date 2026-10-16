@@ -705,6 +705,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     notify: 'E-postayla bildir',
     notifyHint: 'E-posta yapılandırılmışsa kişiye eklendiği projeleri listeleyen bir e-posta gönderir.',
     submit: '{count} projeye ekle',
+    submitOne: '1 projeye ekle',
     done: '{name}: {added} eklendi, {updated} güncellendi',
     skippedTitle: 'Bazı projeler atlandı',
     skip: {
