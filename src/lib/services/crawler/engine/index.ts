@@ -14,7 +14,13 @@ import {
   fetchWithAxios,
   isFileByExtension,
 } from './axiosFetcher';
-import { Semaphore, isTransientFetchError, retry } from './concurrency';
+import {
+  Semaphore,
+  coolDownAfterReset,
+  isTransientFetchError,
+  resetAwareDelayMs,
+  retry,
+} from './concurrency';
 import { extractLinks, extractMeta, looksLikeJsShell } from './links';
 import { fileToMarkdown, htmlToMarkdown } from './markdown';
 import {
@@ -173,7 +179,13 @@ export async function* crawl(
     axiosChallengeHosts.add(getHostname(url));
   }
 
-  const axiosRetryOptions = { isRetryable: isTransientFetchError } as const;
+  // Connection resets (firewall/WAF shedding load) get a long jittered backoff;
+  // every other retryable error keeps the short linear one.
+  const axiosRetryOptions = {
+    isRetryable: isTransientFetchError,
+    getDelayMs: resetAwareDelayMs,
+  } as const;
+  const resetAwareRetryOptions = { getDelayMs: resetAwareDelayMs } as const;
 
   // ── per-URL fetch with engine auto-selection ─────────────────────
   async function fetchOne(url: string): Promise<{
@@ -190,11 +202,12 @@ export async function* crawl(
       return retry(
         () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
         retries,
+        resetAwareRetryOptions,
       );
     }
     if (plan.engine === 'playwright') {
       if (!session) throw new Error('Playwright session unavailable');
-      return retry(() => session.fetch(url, deps.signal), retries);
+      return retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
     }
     // auto mode, known-file URL (by extension): try axios first (it streams
     // bytes cheaply), but fall back to the browser download path when axios
@@ -207,7 +220,7 @@ export async function* crawl(
       // Host already known to break axios (bad TLS chain) — skip straight to
       // the browser download path instead of re-paying a doomed axios attempt.
       if (session && axiosCircuitOpen(url)) {
-        return retry(() => session.fetch(url, deps.signal), retries);
+        return retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
       }
       try {
         return await retry(
@@ -218,8 +231,9 @@ export async function* crawl(
       } catch (err) {
         recordAxiosOutcome(url, err);
         if (!session) throw err;
+        await coolDownAfterReset(err, deps.signal);
         try {
-          return await retry(() => session.fetch(url, deps.signal), retries);
+          return await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
         } catch (pwErr) {
           throw new Error(
             `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -230,7 +244,7 @@ export async function* crawl(
     // auto: axios first, escalate to playwright if shell-like.
     // Skip axios entirely when the host's breaker is open.
     if (session && axiosCircuitOpen(url)) {
-      const pw = await retry(() => session.fetch(url, deps.signal), retries);
+      const pw = await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
       if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
         throw new FetchStageError(
           `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
@@ -276,7 +290,7 @@ export async function* crawl(
         for (const candidate of candidates) {
           let attempt: Awaited<ReturnType<typeof session.fetch>>;
           try {
-            attempt = await retry(() => session.fetch(candidate, deps.signal), retries);
+            attempt = await retry(() => session.fetch(candidate, deps.signal), retries, resetAwareRetryOptions);
           } catch (err) {
             failure = `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`;
             if (deps.signal?.aborted) break;
@@ -311,9 +325,10 @@ export async function* crawl(
       if (err instanceof FetchStageError) throw err;
       recordAxiosOutcome(url, err);
       if (!session) throw err;
+      await coolDownAfterReset(err, deps.signal);
       let pw: Awaited<ReturnType<typeof session.fetch>>;
       try {
-        pw = await retry(() => session.fetch(url, deps.signal), retries);
+        pw = await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
       } catch (pwErr) {
         throw new Error(
           `All engines failed for ${url}: ${(pwErr as Error).message}`,

@@ -3,7 +3,7 @@
  * Covers: URL normalize, link extraction with scope, SSRF guard.
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   normalizeUrl,
   isSkippableExtension,
@@ -13,7 +13,13 @@ import {
 } from '@/lib/services/crawler/engine/normalize';
 import { extractLinks } from '@/lib/services/crawler/engine/links';
 import { assertSafeUrl, isPrivateHost } from '@/lib/services/crawler/engine/ssrf';
-import { isTransientFetchError, retry } from '@/lib/services/crawler/engine/concurrency';
+import {
+  coolDownAfterReset,
+  isConnectionResetError,
+  isTransientFetchError,
+  resetAwareDelayMs,
+  retry,
+} from '@/lib/services/crawler/engine/concurrency';
 import { htmlToMarkdown, cleanupMarkdown, markdownToText } from '@/lib/services/crawler/engine/markdown';
 
 describe('engine/normalize', () => {
@@ -311,5 +317,92 @@ describe('engine/markdown — text output', () => {
     expect(text).not.toContain('---');
     expect(text).toContain('Phone +90 212');
     expect(text).toContain('Address Istanbul');
+  });
+});
+
+describe('engine/concurrency — connection reset handling', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('recognises reset/closed-connection errors from axios and Chromium', () => {
+    for (const msg of [
+      'Axios error for https://x/: read ECONNRESET',
+      'page.goto: net::ERR_CONNECTION_RESET at https://x/',
+      'page.goto: net::ERR_CONNECTION_CLOSED at https://x/',
+      'page.goto: net::ERR_EMPTY_RESPONSE at https://x/',
+      'Axios error for https://x/: socket hang up',
+      'other side closed',
+    ]) {
+      expect(isConnectionResetError(new Error(msg))).toBe(true);
+    }
+    for (const msg of ['HTTP 503 for https://x/', 'Timeout fetching https://x/ (30000ms)', 'getaddrinfo ENOTFOUND x']) {
+      expect(isConnectionResetError(new Error(msg))).toBe(false);
+    }
+  });
+
+  it('backs off long (jittered) for resets and keeps the linear delay otherwise', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // jitter factor 1.0
+    const reset = new Error('net::ERR_CONNECTION_RESET');
+    expect(resetAwareDelayMs(reset, 0)).toBe(2000);
+    expect(resetAwareDelayMs(reset, 1)).toBe(6000);
+    expect(resetAwareDelayMs(reset, 2)).toBe(15000);
+    expect(resetAwareDelayMs(reset, 9)).toBe(15000); // last value repeats
+
+    const other = new Error('HTTP 503 for https://x/');
+    expect(resetAwareDelayMs(other, 0)).toBe(1000);
+    expect(resetAwareDelayMs(other, 1)).toBe(2000);
+
+    vi.spyOn(Math, 'random').mockReturnValue(0); // -25%
+    expect(resetAwareDelayMs(reset, 0)).toBe(1500);
+    vi.spyOn(Math, 'random').mockReturnValue(0.999); // ~+25%
+    expect(resetAwareDelayMs(reset, 0)).toBeLessThanOrEqual(2500);
+  });
+
+  it('retry() waits the policy delay between attempts', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    let calls = 0;
+    const p = retry(
+      async () => {
+        calls += 1;
+        if (calls < 3) throw new Error('read ECONNRESET');
+        return 'ok';
+      },
+      3,
+      { getDelayMs: resetAwareDelayMs },
+    );
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(calls).toBe(1); // still inside the first 2s backoff
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toBe(2);
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(calls).toBe(2); // still inside the 6s backoff
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toBe('ok');
+  });
+
+  it('coolDownAfterReset pauses only for resets and ends early on abort', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    let done = false;
+    void coolDownAfterReset(new Error('ERR_CONNECTION_RESET')).then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+
+    // other errors: no pause at all
+    await expect(coolDownAfterReset(new Error('HTTP 503 for https://x/'))).resolves.toBeUndefined();
+
+    // cancelled crawl: returns immediately instead of sitting out the pause
+    const ctrl = new AbortController();
+    let aborted = false;
+    void coolDownAfterReset(new Error('ECONNRESET'), ctrl.signal).then(() => { aborted = true; });
+    ctrl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(aborted).toBe(true);
   });
 });

@@ -153,3 +153,35 @@ describe('engine — browser fallback target', () => {
     expect(page.errorMessage).toMatch(/still looks JS-rendered or bot-challenged/);
   });
 });
+
+describe('engine — connection reset on the first engine', () => {
+  it('cools down, then hands the host to the browser', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const events: string[] = [];
+    axiosFetch.mockImplementation(async () => {
+      events.push('axios');
+      throw new Error('Axios error for https://example.com/: read ECONNRESET');
+    });
+    pwFetch.mockImplementation(async () => {
+      events.push('browser');
+      return html(REAL_PAGE);
+    });
+
+    const pending = run(plan({ engine: 'auto', seeds: ['https://example.com/'], http: { retries: 3 } as never }));
+    // axios attempts at t=0, +2s, +8s (2s then 6s backoff) …
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(events).toEqual(['axios', 'axios']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(events).toEqual(['axios', 'axios', 'axios']);
+    // … then a 3s cool-down before the browser is tried.
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(events).not.toContain('browser');
+    await vi.advanceTimersByTimeAsync(1);
+    const pages = await pending;
+
+    expect(events).toEqual(['axios', 'axios', 'axios', 'browser']);
+    expect(pages[0].type).toBe('html');
+    vi.useRealTimers();
+  });
+});
