@@ -198,6 +198,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   a stream session again resets an earlier explicit status.
 - Health counters of externally traced agents are booked at the event time clamped into 3 hours before to 5 minutes after
   the arrival; events older than 24 hours are not counted. A session is counted once, when it reaches a final status.
+  A run that pauses for a person or for the calling app (`paused`) is counted when it finishes or is closed, with the
+  tokens and cost of all of its parts and a duration that leaves out the waiting.
 - **Prometheus** (`GET /api/metrics`): `console_tracing_input_tokens_total` and `console_tracing_output_tokens_total` are
   renamed `console_tracing_input_tokens_24h` and `console_tracing_output_tokens_24h` (they are 24-hour gauges, not
   counters); `console_tracing_sessions_total` has the statuses `success`, `error` and `abandoned` and counts the sessions

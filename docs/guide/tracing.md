@@ -87,11 +87,12 @@ A session ends up in one of four statuses:
 | `success` | The run finished and no error was recorded |
 | `error` | The run finished and an error was recorded: a failed event, an error on the session that is not a tracing-sink failure, or a root span that ended in error |
 | `in_progress` | The run has started and has not ended |
+| `paused` | The run stopped to wait for a person (an approval or an answer) or for the calling app (a client tool result). The rest of the run lands in the same session when it resumes. A hosted agent's paused run that will not resume (a new message, a stop or a timeout ended the wait) is closed as `cancelled` or `expired` |
 | `abandoned` | The run never reported an end and has been quiet for `TRACING_STALE_SESSION_MINUTES` (6 hours by default). An abandoned session is **not** counted as an error |
 
-A client may send other final statuses (`completed`, `failed`, `partial`, `cancelled` and so on). They are stored and shown as sent. For the health numbers, `error` and `failed` are failures, and every status except `in_progress` and `unknown` is a finished run.
+A client may send other final statuses (`completed`, `failed`, `partial`, `cancelled` and so on). They are stored and shown as sent. For the health numbers, `error` and `failed` are failures, and every status except `in_progress`, `paused` and `unknown` is a finished run.
 
-An event is an error when its `status` is `error` or `failed`, or when it has no status and carries a non-empty `error`. `skipped` events (a policy or a cancellation) and `retry` events are not errors, and skipped calls are left out of the call counts behind the tool and model error rates.
+An event is an error when its `status` is `error` or `failed`, or when it has no status and carries a non-empty `error`. `skipped` events (a policy or a cancellation), `pending` events (a request still waiting for its answer) and `retry` events are not errors, and skipped and pending calls are left out of the call counts behind the tool and model error rates.
 
 ### How the status is decided
 
@@ -120,6 +121,8 @@ A late `/end` or root span revives such a session, gives it its real status and 
 ### How a status reaches the health numbers
 
 A session is counted **once**, when it reaches a final status. It counts as one request of its agent; an `error` session also counts as an error, and an `abandoned` one as abandoned (with no duration). If the status changes afterwards, only the difference is booked, so nothing is counted twice. Tokens and cost are booked with the first final status. Running sessions are not counted until they end, so a rule or chart can trail a long run by its duration. See [Monitoring](/guide/monitoring#metrics) for the metrics built on this.
+
+A `paused` session is not counted either, since its run has not ended. It is counted once, when it finishes or is closed: its tokens and cost cover every part of the run, and its duration leaves out the time spent waiting for a person or for the calling app (overlapping waits count once). A run that was waiting the whole time is counted without a duration. A paused session is not swept as abandoned, so one that never resumes stays out of the health numbers.
 
 The tool calls, model calls and error events of a session are counted as their events arrive. For an externally traced agent, the time an event is counted at is clamped into the window from 3 hours before to 5 minutes after the moment it is received: an event dated between 3 and 24 hours ago is counted in the bucket 3 hours back, and a future-dated one 5 minutes ahead (its counts are kept, only its time moves). Events dated more than 24 hours ago are not counted at all, and neither is a session that ended more than 24 hours ago (a session is counted at its end time), so a replay or a re-import of old traces does not change current health. Hosted agents, whose times come from the console itself, keep their real timestamps. The session timeline always shows the timestamps the client sent. One ingest request is counted for at most 50 distinct models and 50 distinct tools.
 
