@@ -10,6 +10,7 @@ import { sendEmail } from '@/lib/email/mailer';
 import { INVITATION_TOKEN_PURPOSE } from '@/lib/services/auth/invitation';
 import {
   checkRateLimit,
+  clientRateLimitKey,
   LOGIN_RATE_LIMIT,
   PASSWORD_RESET_RATE_LIMIT,
   REGISTER_RATE_LIMIT,
@@ -134,7 +135,7 @@ export async function issueSessionForAuthenticatedUser(
   // the one place that's guaranteed to run regardless of which of those
   // called it, so it's where a shared, can't-forget-it limit belongs.
   const clientIp = getClientIp(request);
-  const rl = checkRateLimit(`session:${clientIp}`, SESSION_ISSUANCE_RATE_LIMIT);
+  const rl = checkRateLimit(clientRateLimitKey('session', clientIp), SESSION_ISSUANCE_RATE_LIMIT);
   if (!rl.allowed) {
     sendRateLimitHeaders(
       {
@@ -255,7 +256,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/auth/login', { config: authz.public() }, async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
+      const rl = checkRateLimit(clientRateLimitKey('login', clientIp), LOGIN_RATE_LIMIT);
       if (!rl.allowed) {
         sendRateLimitHeaders(
           {
@@ -510,7 +511,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const clientIp = getClientIp(request);
-      const rl = checkRateLimit(`register:${clientIp}`, REGISTER_RATE_LIMIT);
+      const rl = checkRateLimit(clientRateLimitKey('register', clientIp), REGISTER_RATE_LIMIT);
       if (!rl.allowed) {
         sendRateLimitHeaders(
           {
@@ -970,7 +971,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(
-        `forgot-password:${clientIp}`,
+        clientRateLimitKey('forgot-password', clientIp),
         PASSWORD_RESET_RATE_LIMIT,
       );
       if (!rl.allowed) {
@@ -1050,7 +1051,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(
-        `reset-password:${clientIp}`,
+        clientRateLimitKey('reset-password', clientIp),
         PASSWORD_RESET_RATE_LIMIT,
       );
       if (!rl.allowed) {

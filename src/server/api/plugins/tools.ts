@@ -2,6 +2,7 @@ import type { ITool, IToolAuthConfig, IUser } from '@/lib/database';
 import type { FastifyPluginAsync } from 'fastify';
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { createLogger } from '@/lib/core/logger';
+import { isMcpToolInputError } from '@/lib/services/mcp/errors';
 import {
   aggregateToolRequestLogs,
   countToolRequestLogs,
@@ -345,7 +346,9 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           secretValues,
         );
 
-        return reply.code(500).send({ error: errorMessage });
+        // A bad or missing argument is a mistake in the request, not a failure
+        // of the server or its upstream.
+        return reply.code(isMcpToolInputError(execError) ? 400 : 500).send({ error: errorMessage });
       }
     } catch (error) {
       logger.error('Execute tool action error', { error });

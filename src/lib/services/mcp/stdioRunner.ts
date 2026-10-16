@@ -15,13 +15,16 @@
  *   the package spec is always passed after a literal `--`, so it can never
  *   be reinterpreted as an npx/uvx flag (e.g. npx's own `-c`/`--call`)
  * - per-call timeout and stdout buffer cap
- * - global concurrency cap so a burst cannot fork-bomb the gateway
+ * - global concurrency cap so a burst cannot fork-bomb the gateway, and a
+ *   per-tenant share of it so one tenant cannot hold every slot
  * - can be disabled entirely with MCP_STDIO_ENABLED=false
  */
 
 import { spawn } from 'node:child_process';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type { IMcpStdioConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
+import { maskSecretValues } from '@/lib/services/logRedaction';
 import { openStdioEnv } from './secretVault';
 
 const logger = createLogger('mcp-stdio-runner');
@@ -31,9 +34,48 @@ const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.MCP_STDIO_TIMEOUT_MS ?? 90_000);
 const MAX_STDOUT_BYTES = Number(process.env.MCP_STDIO_MAX_OUTPUT_BYTES ?? 8 * 1024 * 1024);
-const MAX_CONCURRENT = Number(process.env.MCP_STDIO_MAX_CONCURRENT ?? 8);
+
+/** Which tenant a run is for, so the pool can be shared fairly. */
+export interface StdioRunOptions {
+  tenantId?: string;
+}
 
 let activeProcesses = 0;
+const activeByTenant = new Map<string, number>();
+
+/**
+ * Take a slot of the pool (and of the tenant's share of it). Returns the
+ * function that gives it back; throws when either limit is reached, with a
+ * message that says which.
+ */
+function acquireSlot(tenantId: string | undefined): () => void {
+  // MCP_STDIO_MAX_CONCURRENT and MCP_STDIO_MAX_CONCURRENT_PER_TENANT.
+  const { maxConcurrent, maxConcurrentPerTenant } = getConfig().mcp.stdio;
+  if (activeProcesses >= maxConcurrent) {
+    throw new Error('Too many concurrent stdio MCP executions; try again shortly');
+  }
+  const held = tenantId ? (activeByTenant.get(tenantId) ?? 0) : 0;
+  if (tenantId && maxConcurrentPerTenant > 0 && held >= maxConcurrentPerTenant) {
+    throw new Error(
+      `This workspace has reached its limit of ${maxConcurrentPerTenant} concurrent stdio MCP executions; try again shortly`,
+    );
+  }
+
+  activeProcesses += 1;
+  if (tenantId) activeByTenant.set(tenantId, held + 1);
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeProcesses = Math.max(0, activeProcesses - 1);
+    if (tenantId) {
+      const left = (activeByTenant.get(tenantId) ?? 1) - 1;
+      if (left > 0) activeByTenant.set(tenantId, left);
+      else activeByTenant.delete(tenantId);
+    }
+  };
+}
 
 /**
  * The gateway process environment carries platform-wide secrets (JWT signing
@@ -103,7 +145,7 @@ function isSafeEnvVarName(name: string): boolean {
  * gateway's own environment, plus the tenant-supplied stdio env for this MCP
  * server. The full `process.env` is never spread into the child.
  */
-function buildChildEnv(config: IMcpStdioConfig): NodeJS.ProcessEnv {
+function buildChildEnv(tenantEnv: Record<string, string>): NodeJS.ProcessEnv {
   const safe: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && isSafeEnvVarName(key)) {
@@ -116,7 +158,7 @@ function buildChildEnv(config: IMcpStdioConfig): NodeJS.ProcessEnv {
     // widen exposure beyond the allowlist above.
     NODE_ENV: process.env.NODE_ENV,
     ...safe,
-    ...openStdioEnv(config),
+    ...tenantEnv,
     // MCP servers must not inherit interactive npm prompts.
     npm_config_yes: 'true',
     NO_COLOR: '1',
@@ -180,24 +222,34 @@ async function runStdioSession(
   config: IMcpStdioConfig,
   requests: Array<{ method: string; params?: Record<string, unknown>; notification?: boolean }>,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  options: StdioRunOptions = {},
 ): Promise<JsonRpcResponse[]> {
   if (!isStdioRunnerEnabled()) {
     throw new Error('Stdio MCP execution is disabled on this deployment (MCP_STDIO_ENABLED=false)');
   }
-  if (activeProcesses >= MAX_CONCURRENT) {
-    throw new Error('Too many concurrent stdio MCP executions; try again shortly');
-  }
 
   const { command, args } = buildCommand(config);
-  const env = buildChildEnv(config);
+  const tenantEnv = openStdioEnv(config);
+  const env = buildChildEnv(tenantEnv);
+  // What the process writes to stderr ends up in the error a caller sees:
+  // values it was given are masked before the tail is cut.
+  const stderrSecrets = Object.values(tenantEnv);
+  const stderrExcerpt = (tail: string) => maskSecretValues(tail, stderrSecrets).slice(-400);
 
-  activeProcesses += 1;
-  const child = spawn(command, args, {
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    // No shell: the package name and args are passed verbatim, never parsed.
-    shell: false,
-  });
+  const releaseSlot = acquireSlot(options.tenantId);
+  const child = (() => {
+    try {
+      return spawn(command, args, {
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // No shell: the package name and args are passed verbatim, never parsed.
+        shell: false,
+      });
+    } catch (error) {
+      releaseSlot();
+      throw error;
+    }
+  })();
 
   const responses = new Map<number, JsonRpcResponse>();
   const expectedIds: number[] = [];
@@ -211,7 +263,7 @@ async function runStdioSession(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      activeProcesses = Math.max(0, activeProcesses - 1);
+      releaseSlot();
       try {
         child.kill('SIGTERM');
         // Escalate if the process ignores SIGTERM.
@@ -232,7 +284,7 @@ async function runStdioSession(
     const timer = setTimeout(() => {
       finish(new Error(
         `Stdio MCP server timed out after ${timeoutMs}ms`
-        + (stderrTail ? ` — stderr: ${stderrTail.slice(-400)}` : ''),
+        + (stderrTail ? ` — stderr: ${stderrExcerpt(stderrTail)}` : ''),
       ));
     }, timeoutMs);
 
@@ -288,7 +340,7 @@ async function runStdioSession(
       } else {
         finish(new Error(
           `Stdio MCP server exited (code ${code ?? 'null'}) before responding`
-          + (stderrTail ? ` — stderr: ${stderrTail.slice(-400)}` : ''),
+          + (stderrTail ? ` — stderr: ${stderrExcerpt(stderrTail)}` : ''),
         ));
       }
     });
@@ -346,12 +398,15 @@ const INITIALIZE_REQUEST = {
 const INITIALIZED_NOTIFICATION = { method: 'notifications/initialized', notification: true };
 
 /** Discover tools by spawning the stdio server once. */
-export async function stdioListTools(config: IMcpStdioConfig): Promise<IMcpTool[]> {
+export async function stdioListTools(
+  config: IMcpStdioConfig,
+  options: StdioRunOptions = {},
+): Promise<IMcpTool[]> {
   const [initRes, listRes] = await runStdioSession(config, [
     INITIALIZE_REQUEST,
     INITIALIZED_NOTIFICATION,
     { method: 'tools/list', params: {} },
-  ]);
+  ], DEFAULT_TIMEOUT_MS, options);
 
   if (initRes.error) {
     throw new Error(`MCP initialize failed: ${initRes.error.message ?? 'unknown error'}`);
@@ -388,12 +443,13 @@ export async function stdioCallTool(
   config: IMcpStdioConfig,
   toolName: string,
   args: Record<string, unknown>,
+  options: StdioRunOptions = {},
 ): Promise<unknown> {
   const [initRes, callRes] = await runStdioSession(config, [
     INITIALIZE_REQUEST,
     INITIALIZED_NOTIFICATION,
     { method: 'tools/call', params: { name: toolName, arguments: args } },
-  ]);
+  ], DEFAULT_TIMEOUT_MS, options);
 
   if (initRes.error) {
     throw new Error(`MCP initialize failed: ${initRes.error.message ?? 'unknown error'}`);

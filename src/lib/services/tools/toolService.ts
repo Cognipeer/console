@@ -9,6 +9,8 @@ import { currentTurnSignal } from '@/lib/core/turnSignal';
 import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
+import { buildOpenApiRequest } from '@/lib/services/mcp/openApiRequest';
+import { specDeclaredParameters } from '@/lib/services/mcp/openApiSpecParameters';
 import { createLogger } from '@/lib/core/logger';
 import {
   authConfigSecretValues,
@@ -212,7 +214,7 @@ export async function discoverMcpTools(
       method: 'POST',
       headers,
       body: listToolsBody,
-    });
+    }, { sensitiveHeaders: credentialHeaderNames(auth) });
 
     if (!response.ok) {
       const errText = await response.text().catch(() => 'Unknown error');
@@ -451,6 +453,21 @@ export async function syncToolActions(
 // ── Execution ─────────────────────────────────────────────────────────────
 
 /**
+ * Names of the headers that carry a credential for a tool's upstream: the
+ * configured auth header and the caller's runtime headers. They are dropped
+ * when a redirect leads to another origin (`safeFetch` `sensitiveHeaders`).
+ */
+function credentialHeaderNames(
+  auth: IToolAuthConfig | undefined,
+  runtimeHeaders?: Record<string, string>,
+): string[] {
+  return [
+    ...(auth?.type === 'header' && auth.headerName ? [auth.headerName] : []),
+    ...Object.keys(runtimeHeaders ?? {}),
+  ];
+}
+
+/**
  * Execute a specific action on a tool.
  */
 export async function executeToolAction(
@@ -485,23 +502,20 @@ async function executeOpenApiAction(
   if (!tool.upstreamBaseUrl) {
     throw new Error('Tool has no upstream base URL configured');
   }
-
-  // Build URL with path parameters
-  let url = `${tool.upstreamBaseUrl}${action.httpPath}`;
-  const queryParams: Record<string, string> = {};
-  const bodyContent = args.body;
-
-  for (const [key, value] of Object.entries(args)) {
-    if (key === 'body') continue;
-    if (url.includes(`{${key}}`)) {
-      url = url.replace(`{${key}}`, encodeURIComponent(String(value)));
-    } else {
-      queryParams[key] = String(value);
-    }
+  if (!action.httpPath) {
+    throw new Error(`Action "${action.key}" has no HTTP path`);
   }
 
-  const qp = new URLSearchParams(queryParams);
-  if (qp.toString()) url += `?${qp.toString()}`;
+  // Path parameters are filled in the action's path template only, and only the
+  // arguments the action declares are sent; see `buildOpenApiRequest` for the
+  // rules. A problem with the arguments throws `McpToolInputError`.
+  const request = buildOpenApiRequest({
+    baseUrl: tool.upstreamBaseUrl,
+    httpPath: action.httpPath,
+    inputSchema: action.inputSchema,
+    declaredNames: specDeclaredParameters(tool, action),
+    args,
+  });
 
   // Build headers with auth
   const headers: Record<string, string> = {
@@ -527,13 +541,15 @@ async function executeOpenApiAction(
     headers,
   };
 
-  if (bodyContent && ['POST', 'PUT', 'PATCH'].includes(action.httpMethod || '')) {
-    fetchOptions.body = JSON.stringify(bodyContent);
+  if (request.body && ['POST', 'PUT', 'PATCH'].includes(action.httpMethod || '')) {
+    fetchOptions.body = JSON.stringify(request.body);
   }
 
   const turnSignal = currentTurnSignal();
   if (turnSignal) fetchOptions.signal = turnSignal;
-  const response = await safeFetch(url, fetchOptions);
+  const response = await safeFetch(request.url, fetchOptions, {
+    sensitiveHeaders: credentialHeaderNames(auth, runtimeHeaders),
+  });
   const latencyMs = Date.now() - start;
 
   if (!response.ok) {
@@ -597,7 +613,7 @@ async function executeMcpAction(
     headers,
     body: callBody,
     ...(turnSignal ? { signal: turnSignal } : {}),
-  });
+  }, { sensitiveHeaders: credentialHeaderNames(auth, runtimeHeaders) });
 
   const latencyMs = Date.now() - start;
 

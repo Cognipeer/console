@@ -1,5 +1,5 @@
 import slugify from 'slugify';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
 import type {
   DatabaseProvider,
@@ -24,9 +24,12 @@ import type {
   OpenApiSpec,
   OpenApiOperation,
 } from './types';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
   authConfigSecretValues,
+  DEFAULT_MAX_STRING_CHARS,
+  maskSecretValues,
   redactLogPayload,
   redactLogString,
 } from '@/lib/services/logRedaction';
@@ -36,6 +39,9 @@ import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport
 import { deleteInstanceAssignment, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
+import { isMcpToolInputError, McpToolInputError, McpUpstreamError } from './errors';
+import { buildOpenApiRequest } from './openApiRequest';
+import { specDeclaredParameters } from './openApiSpecParameters';
 import {
   defaultAnnotationsForSource,
   describeMcpTools,
@@ -658,7 +664,7 @@ async function discoverToolsForServer(server: IMcpServer): Promise<IMcpTool[]> {
     return runner.listTools(ref, runnerConfig);
   }
 
-  return stdioListTools(config);
+  return stdioListTools(config, { tenantId: server.tenantId });
 }
 
 async function resolveSandboxRunner(server: IMcpServer) {
@@ -889,6 +895,7 @@ async function reconcileOneComposite(
     config.members,
     composite.tools,
   );
+  forgetLastErrorWrite(composite);
   return db.updateMcpServer(String(composite._id), {
     tools: built.tools,
     toolsDiscoveredAt: new Date(),
@@ -937,7 +944,7 @@ export async function reconcileCompositesForMember(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await db.updateMcpServer(String(composite._id), { lastError: { message, at: new Date() } });
+      await db.updateMcpServer(String(composite._id), { lastError: lastErrorRecord(composite, message) });
       logger.warn('Composite reconcile failed', { compositeKey: composite.key, memberId, error: message });
     }
   }
@@ -977,7 +984,7 @@ export async function createMcpServer(
     });
   } else if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'subprocess') {
     // Discover eagerly so the create screen fails fast on a broken package.
-    tools = await stdioListTools(input.stdioConfig!);
+    tools = await stdioListTools(input.stdioConfig!, { tenantId });
   }
 
   const db = await getDatabase();
@@ -1046,6 +1053,7 @@ export async function createMcpServer(
     try {
       const discovered = await discoverToolsForServer({ ...server, stdioConfig });
       await db.switchToTenant(tenantDbName);
+      forgetLastErrorWrite(server);
       await db.updateMcpServer(String(server._id), {
         tools: discovered,
         toolsDiscoveredAt: new Date(),
@@ -1055,7 +1063,7 @@ export async function createMcpServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await db.updateMcpServer(String(server._id), {
-        lastError: { message, at: new Date() },
+        lastError: lastErrorRecord(server, message),
       });
       logger.warn('Sandbox MCP provisioning failed at create', { key, error: message });
     }
@@ -1215,7 +1223,7 @@ export async function updateMcpServer(
   }
   if (sourceType === 'stdio' && input.stdioConfig !== undefined
     && (updateData.stdioConfig as IMcpStdioConfig).executionMode === 'subprocess') {
-    updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig);
+    updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig, { tenantId: existing.tenantId });
     updateData.toolsDiscoveredAt = new Date();
   }
   if (sourceType === 'internal' && input.internalConfig !== undefined) {
@@ -1430,6 +1438,7 @@ export async function refreshMcpServerTools(
       updated = await reconcileOneComposite(db, server);
     } else {
       const tools = await discoverToolsForServer(server);
+      forgetLastErrorWrite(server);
       const refreshUpdate: Partial<IMcpServer> = {
         tools,
         toolsDiscoveredAt: new Date(),
@@ -1458,7 +1467,7 @@ export async function refreshMcpServerTools(
     return updated;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await db.updateMcpServer(serverId, { lastError: { message, at: new Date() } });
+    await db.updateMcpServer(serverId, { lastError: lastErrorRecord(server, message) });
     throw error;
   }
 }
@@ -1565,20 +1574,165 @@ function mcpLogScope(server: IMcpServer): McpLogServerScope {
   };
 }
 
+/** Values of the server's static upstream credential, opened from the vault. */
+function upstreamCredentialValues(server: IMcpServer): string[] {
+  try {
+    return authConfigSecretValues(openAuthConfig(server.upstreamAuth));
+  } catch {
+    return [];
+  }
+}
+
+/** The password and the query-string values of a URL that may carry a credential. */
+function urlSecretValues(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const url = new URL(raw);
+    const out: string[] = [];
+    if (url.password) out.push(url.password, decodeURIComponent(url.password));
+    url.searchParams.forEach((value) => out.push(value));
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Outbound secret values that could be echoed back into a logged response for
- * this server: the caller's applied runtime-header values plus the server's
- * own static upstream credential (opened from the vault). Passed to
- * `logMcpRequest` so an echoing upstream can't leak them into the log.
+ * Outbound secret values that could be echoed back in a response or an error
+ * for this server: the caller's applied runtime-header values, the server's own
+ * static upstream credential (opened from the vault), its stdio environment
+ * values, and any credential embedded in its upstream URL. Passed to
+ * `logMcpRequest` so an echoing upstream can't leak them into the log, and used
+ * by the executors to mask them in the errors they throw.
  */
 export function mcpRequestSecretValues(
   server: IMcpServer,
   runtimeHeaders?: Record<string, string>,
 ): string[] {
-  return [
+  const out: string[] = [
     ...Object.values(runtimeHeaders ?? {}),
-    ...authConfigSecretValues(openAuthConfig(server.upstreamAuth)),
+    ...upstreamCredentialValues(server),
   ];
+  if (server.stdioConfig) {
+    try {
+      out.push(...Object.values(openStdioEnv(server.stdioConfig)));
+    } catch {
+      // An unreadable env map has no values to mask.
+    }
+  }
+  out.push(...urlSecretValues(server.remoteConfig?.url), ...urlSecretValues(server.upstreamBaseUrl));
+  return out.filter((value): value is string => typeof value === 'string');
+}
+
+// ── lastError ──────────────────────────────────────────────────────────────
+// `server.lastError` is shown to every `mcp:read` user and drives the monitor's
+// "degraded" state, so what is written there is masked and bounded, and a
+// failure that repeats is not written on every call.
+
+/** `${tenantId}\0${serverId}` → a digest of the message last written, and when. */
+const lastErrorWrites = new Map<string, { digest: string; at: number }>();
+const MAX_TRACKED_LAST_ERRORS = 5_000;
+
+function lastErrorKey(server: Pick<IMcpServer, 'tenantId' | '_id'>): string {
+  return `${server.tenantId}\0${String(server._id ?? '')}`;
+}
+
+/**
+ * The `lastError` value for a record: secret values masked, length bounded.
+ * `secretValues` defaults to everything the server holds; a caller that has
+ * already collected them passes them in.
+ */
+function lastErrorRecord(
+  server: IMcpServer,
+  message: string,
+  secretValues: string[] = mcpRequestSecretValues(server),
+): { message: string; at: Date } {
+  return {
+    message: maskSecretValues(message, secretValues, { maxChars: getConfig().mcp.lastErrorMaxChars }),
+    at: new Date(),
+  };
+}
+
+/** Call wherever `lastError` is cleared, so the same failure is recorded again afterwards. */
+function forgetLastErrorWrite(server: Pick<IMcpServer, 'tenantId' | '_id'>): void {
+  lastErrorWrites.delete(lastErrorKey(server));
+}
+
+/** True (and remembers it) unless this exact message was written within the throttle window. */
+function claimLastErrorWrite(server: IMcpServer, message: string): boolean {
+  const windowMs = getConfig().mcp.lastErrorThrottleMs;
+  const now = Date.now();
+  const key = lastErrorKey(server);
+  const digest = createHash('sha256').update(message).digest('base64');
+  const previous = lastErrorWrites.get(key);
+  if (windowMs > 0 && previous && previous.digest === digest && now - previous.at < windowMs) {
+    return false;
+  }
+  lastErrorWrites.set(key, { digest, at: now });
+  if (lastErrorWrites.size > MAX_TRACKED_LAST_ERRORS) {
+    for (const [trackedKey, entry] of lastErrorWrites) {
+      if (now - entry.at >= windowMs) lastErrorWrites.delete(trackedKey);
+    }
+    // Still over the bound (a burst inside one window): drop the oldest tenth.
+    if (lastErrorWrites.size > MAX_TRACKED_LAST_ERRORS) {
+      let excess = Math.ceil(lastErrorWrites.size / 10);
+      for (const trackedKey of lastErrorWrites.keys()) {
+        if (excess-- <= 0) break;
+        lastErrorWrites.delete(trackedKey);
+      }
+    }
+  }
+  return true;
+}
+
+// ── Request-log inputs ────────────────────────────────────────────────────
+
+/**
+ * The session ids this gateway issues (`randomUUID()` when an SSE stream is
+ * opened). Anything else in a `?sessionId=` query string was not issued here.
+ */
+const SERVER_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isServerIssuedSessionId(value: unknown): value is string {
+  return typeof value === 'string' && SERVER_SESSION_ID_PATTERN.test(value);
+}
+
+/** Caller-supplied attribution for a request-log row. */
+export interface McpRequestClientInfo {
+  ip?: string;
+  userAgent?: string;
+}
+
+/** An IP address in text form (IPv6 with a zone id included) is well inside this. */
+const CLIENT_IP_MAX_CHARS = 64;
+
+function cleanClientField(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, maxChars);
+  return cleaned || undefined;
+}
+
+/**
+ * The log row has no column for the caller's network identity (adding one
+ * would need a schema change on both databases), so it rides next to the tool
+ * and arguments in the request payload under `_client` — the same convention
+ * as `_runtimeAuth`.
+ */
+function withClientInfo(
+  payload: Record<string, unknown> | undefined,
+  client: McpRequestClientInfo | undefined,
+): Record<string, unknown> | undefined {
+  const ip = cleanClientField(client?.ip, CLIENT_IP_MAX_CHARS);
+  const userAgent = cleanClientField(client?.userAgent, getConfig().mcp.logUserAgentMaxChars);
+  if (!ip && !userAgent) return payload;
+  return {
+    ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}),
+    _client: { ...(ip ? { ip } : {}), ...(userAgent ? { userAgent } : {}) },
+  };
+}
+
+function boundedLogToolName(toolName: unknown): string {
+  return String(toolName ?? '').slice(0, getConfig().mcp.logToolNameMaxChars);
 }
 
 export async function logMcpRequest(
@@ -1594,8 +1748,16 @@ export async function logMcpRequest(
      * Logs tab and per-tool aggregate.
      */
     skipUsageEvent?: boolean;
+    /**
+     * Cap for each persisted request/response payload, in the unit
+     * `DEFAULT_MAX_PAYLOAD_BYTES` uses. Absent = that default. A surface that
+     * accepts calls from anyone passes a smaller one.
+     */
+    payloadLimitBytes?: number;
+    /** Who made the call; stored with the request payload as `_client`. */
+    client?: McpRequestClientInfo;
   },
-) {
+): Promise<string | undefined> {
   // Resolve attribution + rollup before any await so the request ALS is in
   // scope. `callerTokenId`/`callerUserId` stay for compat; the standard
   // userId/apiTokenId/actorType columns are stamped alongside.
@@ -1610,26 +1772,46 @@ export async function logMcpRequest(
       status: entry.status,
       latencyMs: entry.latencyMs,
     });
+  const toolName = boundedLogToolName(entry.toolName);
   try {
+    const maxBytes = typeof opts?.payloadLimitBytes === 'number' && opts.payloadLimitBytes > 0
+      ? opts.payloadLimitBytes
+      : undefined;
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    await db.createMcpRequestLog({
+    const row: Omit<IMcpRequestLog, '_id' | 'createdAt'> = {
       ...entry,
+      // The name comes from the caller's request: bound it.
+      toolName,
       // Scrub echoed secrets / sensitive keys and cap size before persisting
       // (redactLogPayload passes undefined through).
-      requestPayload: redactLogPayload(entry.requestPayload, { secretValues }),
-      responsePayload: redactLogPayload(entry.responsePayload, { secretValues }),
-      errorMessage: redactLogString(entry.errorMessage, secretValues),
+      requestPayload: withClientInfo(
+        redactLogPayload(entry.requestPayload, { secretValues, maxBytes }),
+        opts?.client,
+      ),
+      responsePayload: redactLogPayload(entry.responsePayload, { secretValues, maxBytes }),
+      errorMessage: redactLogString(
+        entry.errorMessage,
+        secretValues,
+        maxBytes === undefined ? DEFAULT_MAX_STRING_CHARS : Math.min(DEFAULT_MAX_STRING_CHARS, maxBytes),
+      ),
       userId: attribution.userId,
       apiTokenId: attribution.apiTokenId,
       actorType: attribution.actorType,
-    });
+    };
+    // Also from the caller's request: keep a session id only when this
+    // gateway issued it.
+    if (!isServerIssuedSessionId(entry.sessionId)) delete row.sessionId;
+    const created = await db.createMcpRequestLog(row);
+    // The id a caller can quote to the operator to have the call looked up.
+    return created?._id ? String(created._id) : undefined;
   } catch (err) {
     logger.error('Failed to log MCP request', {
       serverKey: entry.serverKey,
-      toolName: entry.toolName,
+      toolName,
       error: err,
     });
+    return undefined;
   }
 }
 
@@ -1822,21 +2004,82 @@ export async function getMcpMonitorSnapshot(
 
 // ── MCP Proxy ─────────────────────────────────────────────────────────────
 
+/**
+ * What a cross-node `invoke` job carries: which server to run (the worker
+ * loads the record itself), and the call. The server record — with its sealed
+ * credentials and stdio config — never travels through the queue.
+ */
+export interface McpInvokeJob {
+  tenantId: string;
+  serverId: string;
+  serverKey: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  runtimeHeaders?: Record<string, string>;
+}
+
 export async function executeMcpTool(
   server: IMcpServer,
   toolName: string,
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  // A record that was never persisted has no id a worker could load it by.
+  if (server._id === undefined || server._id === null) {
+    return executeMcpToolLocal(server, toolName, args, runtimeHeaders);
+  }
+  const job: McpInvokeJob = {
+    tenantId: server.tenantId,
+    serverId: String(server._id),
+    serverKey: server.key,
+    toolName,
+    args,
+    runtimeHeaders,
+  };
   return routeInstanceCall(
     {
       entityType: 'mcp',
       entityId: mcpEntityId(server.tenantId, server.key),
       jobName: 'invoke',
     },
-    { server, toolName, args, runtimeHeaders } as unknown as QueuePayload,
+    job as unknown as QueuePayload,
     () => executeMcpToolLocal(server, toolName, args, runtimeHeaders),
   );
+}
+
+/**
+ * Mask secret values in an error an executor is about to throw, in place (the
+ * class and any structured fields survive), and bound its length. The text of
+ * an upstream failure — a response body, a stderr tail, a remote client error —
+ * is not ours to vouch for, and it travels to whoever made the call.
+ */
+function sanitizeExecutionError(error: unknown, secretValues: string[]): Error {
+  const original = error instanceof Error
+    ? error
+    : new Error(typeof error === 'string' ? error : 'Tool execution failed');
+  const originalMessage = original.message;
+  const message = maskSecretValues(originalMessage, secretValues, {
+    maxChars: getConfig().mcp.errorMessageMaxChars,
+  });
+  if (message === originalMessage) return original;
+  try {
+    const stack = original.stack;
+    original.message = message;
+    if (typeof stack === 'string') {
+      // The stack opens with the message text: swap in the safe one, keep the frames.
+      const at = stack.indexOf(originalMessage);
+      original.stack = maskSecretValues(
+        at >= 0 ? `${stack.slice(0, at)}${message}${stack.slice(at + originalMessage.length)}` : stack,
+        secretValues,
+      );
+    }
+    return original;
+  } catch {
+    // A frozen error cannot be edited: hand back a copy that carries the safe text.
+    const copy = new Error(message);
+    copy.name = original.name;
+    return copy;
+  }
 }
 
 export async function executeMcpToolLocal(
@@ -1856,6 +2099,15 @@ export async function executeMcpToolLocal(
   // back to the real, stored name once, up front, so every downstream check
   // and dispatch below operates on the tool's actual identity.
   const realToolName = resolveMcpToolName(server, toolName);
+
+  // A call may only target a tool the server advertises: the stored tool list
+  // is exactly what `tools/list` is built from (minus disabled tools, with
+  // renames applied), for every source type. A name the upstream happens to
+  // serve but the operator never listed is not callable through this server.
+  // Checked before anything else runs — guardrail, sandbox, upstream.
+  if (!(server.tools ?? []).some((tool) => tool.name === realToolName)) {
+    throw new McpToolInputError('Unknown tool');
+  }
 
   if (!isMcpToolEnabled(server, realToolName)) {
     throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
@@ -1934,12 +2186,18 @@ export async function executeMcpToolLocal(
       await ensureSandboxInstance(server, runner, ref, runnerConfig);
       result = await runner.callTool(ref, runnerConfig, realToolName, effectiveArgs);
     } else {
-      result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs);
+      result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs, { tenantId: server.tenantId });
     }
+    // The server's own upstream credential is never legitimate output: mask it
+    // here, before the result reaches the guardrail, the caller or the log.
+    result = maskSecretValues(result, upstreamCredentialValues(server));
   } catch (error) {
-    // Persist the failure on the record so the monitor can surface it.
-    void markServerError(server, error instanceof Error ? error.message : String(error));
-    throw error;
+    const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
+    const safeError = sanitizeExecutionError(error, secretValues);
+    // A call the caller got wrong says nothing about the server's health.
+    // Anything else is persisted on the record so the monitor can surface it.
+    if (!isMcpToolInputError(safeError)) void markServerError(server, safeError.message, secretValues);
+    throw safeError;
   }
 
   // Guardrail `tool.post` hook.
@@ -1999,6 +2257,10 @@ async function executeCompositeTool(
   const tenantDbName = tenant?.dbName;
   const start = Date.now();
 
+  // The member's log row is scrubbed with the MEMBER's secrets: its credential
+  // and its runtime headers are what its upstream can echo.
+  const memberSecrets = mcpRequestSecretValues(m, runtimeHeaders);
+
   try {
     const { result } = await executeMcpTool(m, tool.origin.realName, args, runtimeHeaders);
     if (tenantDbName) {
@@ -2017,7 +2279,7 @@ async function executeCompositeTool(
         viaServerKey: server.key,
         transport: 'internal',
         sourceType: resolveSourceType(m),
-      }, undefined, { skipUsageEvent: true });
+      }, memberSecrets, { skipUsageEvent: true });
     }
     return result;
   } catch (error) {
@@ -2036,20 +2298,25 @@ async function executeCompositeTool(
         viaServerKey: server.key,
         transport: 'internal',
         sourceType: resolveSourceType(m),
-      }, undefined, { skipUsageEvent: true });
+      }, memberSecrets, { skipUsageEvent: true });
     }
     throw error;
   }
 }
 
-async function markServerError(server: IMcpServer, message: string): Promise<void> {
+async function markServerError(
+  server: IMcpServer,
+  message: string,
+  secretValues?: string[],
+): Promise<void> {
   try {
     if (!server._id) return;
+    const record = lastErrorRecord(server, message, secretValues);
+    // The same failure on every call is one write, not one per call.
+    if (!claimLastErrorWrite(server, record.message)) return;
     const db = await getDatabase();
     // The caller already bound the tenant context for this request.
-    await db.updateMcpServer(String(server._id), {
-      lastError: { message: message.slice(0, 1_000), at: new Date() },
-    });
+    await db.updateMcpServer(String(server._id), { lastError: record });
   } catch {
     // Best-effort only.
   }
@@ -2063,32 +2330,21 @@ async function executeOpenApiTool(
 ): Promise<unknown> {
   const tool = server.tools.find((t) => t.name === toolName);
   if (!tool) {
-    throw new Error(`Tool "${toolName}" not found on MCP server "${server.name}"`);
+    throw new McpToolInputError('Unknown tool');
   }
   if (!tool.httpPath || !tool.httpMethod) {
     throw new Error(`Tool "${toolName}" has no HTTP mapping`);
   }
 
-  // Build URL with path parameters
-  let url = `${server.upstreamBaseUrl}${tool.httpPath}`;
-  const queryParams: Record<string, string> = {};
-  const bodyContent = args.body;
-
-  // Replace path parameters and separate query params
-  for (const [key, value] of Object.entries(args)) {
-    if (key === 'body') continue;
-    if (url.includes(`{${key}}`)) {
-      url = url.replace(`{${key}}`, encodeURIComponent(String(value)));
-    } else {
-      queryParams[key] = String(value);
-    }
-  }
-
-  // Append query params
-  const qp = new URLSearchParams(queryParams);
-  if (qp.toString()) {
-    url += `?${qp.toString()}`;
-  }
+  // Path parameters are filled in the tool's path template only, from the
+  // arguments the tool declares; see `buildOpenApiRequest` for the rules.
+  const request = buildOpenApiRequest({
+    baseUrl: server.upstreamBaseUrl,
+    httpPath: tool.httpPath,
+    inputSchema: tool.inputSchema,
+    declaredNames: specDeclaredParameters(server, tool),
+    args,
+  });
 
   // Build headers with upstream auth (decrypted from the vault)
   const headers: Record<string, string> = {
@@ -2114,15 +2370,22 @@ async function executeOpenApiTool(
     headers,
   };
 
-  if (bodyContent && ['POST', 'PUT', 'PATCH'].includes(tool.httpMethod)) {
-    fetchOptions.body = JSON.stringify(bodyContent);
+  if (request.body && ['POST', 'PUT', 'PATCH'].includes(tool.httpMethod)) {
+    fetchOptions.body = JSON.stringify(request.body);
   }
 
-  const response = await safeFetch(url, fetchOptions);
+  // The configured auth header and the runtime headers hold credentials meant
+  // for this upstream; they do not follow a redirect to another origin.
+  const response = await safeFetch(request.url, fetchOptions, {
+    sensitiveHeaders: [
+      ...(auth?.type === 'header' && auth.headerName ? [auth.headerName] : []),
+      ...Object.keys(runtimeHeaders ?? {}),
+    ],
+  });
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => 'Unknown error');
-    throw new Error(`Upstream API error (${response.status}): ${errorText}`);
+    throw new McpUpstreamError(`Upstream API error (${response.status}): ${errorText}`, response.status);
   }
 
   const contentType = response.headers.get('content-type') || '';

@@ -125,7 +125,7 @@ interface AppConfig {
   smtp: { host; port; secure; user; pass; from };
   gateway: { requestTimeoutMs; retryEnabled; retryMaxAttempts; ... };
   cache: { provider; ttlSeconds; redis: { url; keyPrefix } };
-  rateLimit: { provider; syncIntervalMs };
+  rateLimit: { provider; syncIntervalMs; maxTrackedKeys };
   logging: { level; format; logRequestBody; logResponseBody };
   cors: { enabled; allowedOrigins; maxAge };
   health: { endpointEnabled };

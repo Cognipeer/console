@@ -7,6 +7,7 @@
  */
 
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { McpToolInputError } from '../errors';
 import type {
   InternalMcpInstanceOption,
   InternalMcpProvider,
@@ -16,6 +17,9 @@ import type {
 /** This provider isn't scoped to a per-instance resource (unlike a Knowledge
  *  Base module) — one MCP server covers all agent activity in the project. */
 const INSTANCE_KEY = 'project';
+
+/** Longest piece of a caller-supplied id an error repeats back. */
+const ECHOED_ID_MAX_CHARS = 100;
 
 const TOOL_LIST_AGENTS = 'list_agents';
 const TOOL_LIST_SESSIONS = 'list_sessions';
@@ -151,13 +155,13 @@ export const agentObservabilityProvider: InternalMcpProvider = {
     if (toolName === TOOL_GET_SESSION_DETAIL) {
       const sessionId = optionalString(args.sessionId);
       if (!sessionId) {
-        throw new Error('"sessionId" is required');
+        throw new McpToolInputError('"sessionId" is required');
       }
       const result = await AgentTracingService.getSessionDetail(ctx.tenantDbName, projectId, sessionId, {
         includeEventContent: false,
       });
       if (!result) {
-        throw new Error(`Session ${sessionId} not found`);
+        throw new McpToolInputError(`Session ${sessionId.slice(0, ECHOED_ID_MAX_CHARS)} not found`);
       }
       return { session: result.session, eventCount: result.events.length };
     }
