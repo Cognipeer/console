@@ -44,6 +44,14 @@ export const DEFAULT_FILTERS: InboxFilters = {
   group: 'none',
 };
 
+/** What "clear the filters" resets: everything that narrows the list except the status tab, the sort and the grouping. */
+export const FILTER_RESET = { q: '', severity: '', module: '', ruleId: '', entityKey: '', assignee: '', snoozed: '' } as const satisfies Partial<InboxFilters>;
+
+/** Whether the list is narrowed beyond its status tab (a search, a severity, a module, a rule, an entity, an owner or a snooze state). */
+export function hasActiveFilters(filters: InboxFilters): boolean {
+  return (Object.keys(FILTER_RESET) as Array<keyof typeof FILTER_RESET>).some((key) => (key === 'q' ? filters.q.trim() !== '' : filters[key] !== FILTER_RESET[key]));
+}
+
 /** The keys that make up a view (grouping is presentation, not a filter). */
 const VIEW_KEYS = ['status', 'severity', 'module', 'ruleId', 'entityKey', 'q', 'assignee', 'sort', 'snoozed'] as const;
 

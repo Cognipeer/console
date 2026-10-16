@@ -765,6 +765,11 @@ export const incidentsEn = {
     loading: 'Loading…',
     refresh: 'Refresh',
     searchPlaceholder: 'Search rule, entity or metric…',
+    emptyFiltered: {
+      title: 'No incidents match these filters',
+      description: 'Try a different search, or clear the filters to see every incident in this tab.',
+      clear: 'Clear filters',
+    },
     reopened: 'Reopened {count}×',
     columns: { assignee: 'Assignee' },
     live: {

@@ -233,6 +233,50 @@ describe('IncidentsPage', () => {
     expect(api.to('GET', '/api/alerts/incidents').at(-1)!.query).toMatchObject({ q: 'agent-i2' });
   });
 
+  it('says nothing matches (and offers to clear the filters) when a search leaves the list empty', async () => {
+    nav.search = 'status=open&q=zzz&severity=critical&sort=-severity';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('No incidents match these filters');
+    expect(text()).not.toContain('When alert rules are triggered');
+    await click(buttonByText('Clear filters'));
+    await settle(50);
+    const next = lastReplacedQuery();
+    expect(next.has('q')).toBe(false);
+    expect(next.has('severity')).toBe(false);
+    // the tab and the sort survive
+    expect(next.get('status')).toBe('open');
+    expect(next.get('sort')).toBe('-severity');
+  });
+
+  it('says so in the grouped view too, and keeps the first-run message when nothing is filtered', async () => {
+    nav.search = 'group=rule&assignee=me';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('No incidents match these filters');
+    expect(buttonByText('Clear filters')).toBeDefined();
+    await mounted.unmount();
+
+    nav.search = '';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage));
+    await settle(100);
+    expect(text()).toContain('When alert rules are triggered');
+    expect(buttonByText('Clear filters')).toBeUndefined();
+  });
+
+  it('renders the empty filtered state in Turkish', async () => {
+    nav.search = 'q=zzz';
+    incidentsApi([]);
+    mounted = await mount(createElement(IncidentsPage), 'tr');
+    await settle(100);
+    expect(text()).toContain('Bu filtrelerle eşleşen olay yok');
+    expect(buttonByText('Filtreleri temizle')).toBeDefined();
+    expect(text()).not.toMatch(/(alerts|incidents)\.[a-zA-Z]/);
+  });
+
   it('renders in Turkish without a missing message', async () => {
     incidentsApi();
     mounted = await mount(createElement(IncidentsPage), 'tr');

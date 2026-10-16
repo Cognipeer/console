@@ -766,6 +766,11 @@ export const incidentsTr: typeof incidentsEn = {
     loading: 'Yükleniyor…',
     refresh: 'Yenile',
     searchPlaceholder: 'Kural, varlık veya metrik ara…',
+    emptyFiltered: {
+      title: 'Bu filtrelerle eşleşen olay yok',
+      description: 'Farklı bir arama deneyin ya da bu sekmedeki tüm olayları görmek için filtreleri temizleyin.',
+      clear: 'Filtreleri temizle',
+    },
     reopened: '{count} kez yeniden açıldı',
     columns: { assignee: 'Atanan' },
     live: {

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   BUILTIN_VIEWS,
   DEFAULT_FILTERS,
+  FILTER_RESET,
   activeView,
   changedIds,
   checkUntil,
   filtersToQuery,
   formatDurationMs,
   groupIncidents,
+  hasActiveFilters,
   listQuery,
   loadSavedViews,
   moveFocus,
@@ -73,6 +75,20 @@ describe('inbox filters in the URL', () => {
     expect(params.get('group')).toBeNull();
     expect(params.get('skip')).toBe('50');
     expect(params.get('limit')).toBe('25');
+  });
+
+  it('tells a narrowed list from a plain status tab, and resets exactly what narrows it', () => {
+    expect(hasActiveFilters(DEFAULT_FILTERS)).toBe(false);
+    // the tab, the order and the grouping do not narrow the list
+    expect(hasActiveFilters({ ...DEFAULT_FILTERS, status: 'all', sort: '-severity', group: 'rule' })).toBe(false);
+    expect(hasActiveFilters({ ...DEFAULT_FILTERS, q: '   ' })).toBe(false);
+    for (const narrowed of [{ q: 'x' }, { severity: 'critical' }, { module: 'agents' }, { ruleId: 'r1' }, { entityKey: 'a' }, { assignee: 'me' }, { snoozed: 'true' }] as const) {
+      expect(hasActiveFilters({ ...DEFAULT_FILTERS, ...narrowed })).toBe(true);
+    }
+    const all = { ...DEFAULT_FILTERS, status: 'resolved' as const, severity: 'critical' as const, module: 'agents', ruleId: 'r1', entityKey: 'a', q: 'x', assignee: 'me', snoozed: 'true' as const, sort: '-severity' as const, group: 'rule' as const };
+    const cleared = { ...all, ...FILTER_RESET };
+    expect(hasActiveFilters(cleared)).toBe(false);
+    expect(cleared).toMatchObject({ status: 'resolved', sort: '-severity', group: 'rule' });
   });
 
   it('detects the active view regardless of grouping', () => {

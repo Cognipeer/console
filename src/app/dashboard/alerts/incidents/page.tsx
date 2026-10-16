@@ -12,6 +12,7 @@ import {
   IconBellRinging,
   IconCheck,
   IconEye,
+  IconFilterOff,
   IconKeyboard,
   IconLock,
   IconRefresh,
@@ -62,12 +63,14 @@ import ShortcutsHelp from '@/components/alerts/inbox/ShortcutsHelp';
 import ViewsMenu from '@/components/alerts/inbox/ViewsMenu';
 import {
   BUILTIN_VIEWS,
+  FILTER_RESET,
   INBOX_GROUPS,
   INBOX_SORTS,
   activeView,
   changedIds,
   filtersToQuery,
   groupIncidents,
+  hasActiveFilters,
   listQuery,
   loadSavedViews,
   moveFocus,
@@ -847,11 +850,21 @@ export default function IncidentsPage() {
     </div>
   );
 
-  const emptyState = {
-    icon: <IconShieldCheck size={28} />,
-    title: t('noIncidents'),
-    description: t('noIncidentsDescription'),
-  };
+  // An empty list under a search or a filter says so (and offers the way out) instead of "nothing has fired".
+  const narrowed = hasActiveFilters(filters);
+  const emptyState = narrowed
+    ? {
+        icon: <IconFilterOff size={28} />,
+        title: t('ux.emptyFiltered.title'),
+        description: t('ux.emptyFiltered.description'),
+        primaryAction: { label: t('ux.emptyFiltered.clear'), icon: <IconFilterOff size={14} />, onClick: () => patchFilters(FILTER_RESET) },
+      }
+    : {
+        icon: <IconShieldCheck size={28} />,
+        title: t('noIncidents'),
+        description: t('noIncidentsDescription'),
+        primaryAction: undefined,
+      };
 
   const preview = previewIncident ? (
     <PreviewPane
@@ -998,9 +1011,16 @@ export default function IncidentsPage() {
                 </Text>
               ) : records.length === 0 ? (
                 <div className="ds-empty">
-                  {emptyState.icon}
-                  <div style={{ fontWeight: 600 }}>{emptyState.title}</div>
-                  <div className="ds-muted">{emptyState.description}</div>
+                  <div className="ds-empty-icon">{emptyState.icon}</div>
+                  <div className="ds-h4" style={{ marginBottom: 4 }}>{emptyState.title}</div>
+                  <Text size="sm" c="dimmed" mb="md" maw={440} ta="center">
+                    {emptyState.description}
+                  </Text>
+                  {emptyState.primaryAction ? (
+                    <Button size="sm" color="teal" leftSection={emptyState.primaryAction.icon} onClick={emptyState.primaryAction.onClick}>
+                      {emptyState.primaryAction.label}
+                    </Button>
+                  ) : null}
                 </div>
               ) : (
                 <IncidentGroups
