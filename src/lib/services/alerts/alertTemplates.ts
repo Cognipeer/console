@@ -433,13 +433,9 @@ async function withProcessLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
-let warnedNoClusterLock = false;
-
+/** Every time: adding templates is a rare, person-driven action, and each fallback is worth seeing. */
 function continueWithoutClusterLock(reason: string): null {
-  if (!warnedNoClusterLock) {
-    warnedNoClusterLock = true;
-    log.warn('The cache gives no lock: rule templates are serialised within this process only', { reason });
-  }
+  log.warn('The cache gives no lock: rule templates are serialised within this process only', { reason });
   return null;
 }
 

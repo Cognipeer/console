@@ -420,6 +420,15 @@ describe('the alerts level of a membership is read the way the access engine rea
     expect(warnings[0].meta).toEqual({ error: 'Error' });
     expect(JSON.stringify(h.logLines)).not.toContain('s3cr3t');
   });
+
+  it('does not keep a list read without the instant: the next send reads it again', async () => {
+    h.since.mockRejectedValueOnce(new Error('unavailable'));
+    seed({ users: [...OWNERS, person('x'), person('y')], rows: [noneOf(BEFORE_ENFORCEMENT), membership('y')] });
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('y')]);
+    // the instant is back: the old none no longer counts
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('x'), email('y')]);
+    expect(h.since).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('resolveProjectAdminRecipients', () => {
@@ -610,7 +619,7 @@ describe('EmailAlertChannel with the project_admins audience', () => {
       const results = await new EmailAlertChannel().dispatch(testEvent, channel, withProject);
       expect(MAX_TEST_EMAIL_RECIPIENTS).toBe(5);
       expect(h.sendEmail).toHaveBeenCalledTimes(MAX_TEST_EMAIL_RECIPIENTS);
-      expect(results).toEqual([{ type: 'email', target: '5 recipients', success: true }]);
+      expect(results).toEqual([{ type: 'email', target: '5 of 9 recipients', success: true }]);
     });
 
     it('caps listed addresses too', async () => {

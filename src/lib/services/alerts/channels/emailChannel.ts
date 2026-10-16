@@ -47,7 +47,8 @@ const USER_CACHE_TTL_MS = 30_000;
 const userCache = new Map<string, { at: number; users: Promise<TenantUser[]> }>();
 /** A project's admin memberships, read once per this long for the same reason. */
 const PROJECT_ADMIN_CACHE_TTL_MS = 30_000;
-const projectAdminCache = new Map<string, { at: number; ids: Promise<Set<string>> }>();
+/** `partial`: read without the project levels' activation instant, so the next send reads it again. */
+const projectAdminCache = new Map<string, { at: number; ids: Promise<Set<string>>; partial?: boolean }>();
 
 /** Forget the cached user lists and project admins (tests; a disabled account is otherwise honoured within the TTL). */
 export function resetAlertEmailUserCache(): void {
@@ -91,14 +92,17 @@ async function readProjectAdminIds(tenantDbName: string, projectId: string): Pro
   const now = Date.now();
   let entry = projectAdminCache.get(key);
   if (!entry || now - entry.at > PROJECT_ADMIN_CACHE_TTL_MS) {
-    const ids = (async () => {
+    const fresh: { at: number; ids: Promise<Set<string>>; partial?: boolean } = { at: now, ids: Promise.resolve(new Set()) };
+    fresh.ids = (async () => {
       const db = await getTenantDatabase(tenantDbName);
       const [rows, grants, since] = await Promise.all([
         db.listUserProjectsByProject(projectId),
         db.listGroupProjectsByProject(projectId),
         getProjectLevelsSince(tenantDbName).catch((err): null => {
-          // Mailing someone whose old `none` is out of date beats mailing nobody: use the stored levels.
+          // The stored levels are read as they are then: an old `none` still keeps its admin off
+          // the list (the owner/admin fallback covers a project left with nobody).
           log.warn('Alert project levels lookup failed', { error: err instanceof Error ? err.name : typeof err });
+          fresh.partial = true;
           return null;
         }),
       ]);
@@ -115,11 +119,13 @@ async function readProjectAdminIds(tenantDbName: string, projectId: string): Pro
       for (const member of members.flat()) out.add(String(member.userId));
       return out;
     })();
-    entry = { at: now, ids };
+    entry = fresh;
     projectAdminCache.set(key, entry);
   }
   try {
-    return await entry.ids;
+    const ids = await entry.ids;
+    if (entry.partial && projectAdminCache.get(key) === entry) projectAdminCache.delete(key);
+    return ids;
   } catch (err) {
     projectAdminCache.delete(key);
     log.warn('Alert project admin lookup failed', { error: err instanceof Error ? err.name : typeof err });
@@ -322,9 +328,10 @@ export class EmailAlertChannel implements IAlertDispatcher {
     );
     if (!isTest) return results;
 
-    // The person who tests sees how many were mailed, not who they are.
+    // The person who tests sees how many were mailed (and of how many), not who they are.
     const failure = results.find((result) => !result.success);
-    const target = `${results.length} ${results.length === 1 ? 'recipient' : 'recipients'}`;
+    const noun = resolved.length === 1 ? 'recipient' : 'recipients';
+    const target = resolved.length > results.length ? `${results.length} of ${resolved.length} ${noun}` : `${results.length} ${noun}`;
     return [failure ? { ...failure, target } : { type: 'email', target, success: true }];
   }
 }

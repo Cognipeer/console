@@ -998,7 +998,7 @@ describe('withAlertTemplateLock', () => {
     expect(db.createAlertRule).not.toHaveBeenCalled();
   });
 
-  it('a cache that never grants a lock falls back to the in-process lock, with one warning, and does not hang', async () => {
+  it('a cache that never grants a lock falls back to the in-process lock, with a warning each time, and does not hang', async () => {
     h.cache = { acquireLock: async () => undefined, releaseLock: async () => undefined };
     const rules = useRuleStore(db);
     const [one, two] = await Promise.all([
@@ -1007,12 +1007,11 @@ describe('withAlertTemplateLock', () => {
     ]);
     expect(rules).toHaveLength(5);
     expect(one.created.length + two.created.length).toBe(5);
-    // the warning is logged once per process, not once per apply
+    // each fallback is logged: adding templates is rare, and a cluster without a lock should be visible
     const warnings = () => h.logLines.filter((line) => line.level === 'warn' && line.message.includes('serialised within this process only')).length;
-    const afterFirstBurst = warnings();
-    expect(afterFirstBurst).toBeLessThanOrEqual(1);
+    expect(warnings()).toBe(2);
     await AlertTemplateService.apply(DB_NAME, TENANT_ID, PROJECT_ID, USER_ID);
-    expect(warnings()).toBe(afterFirstBurst);
+    expect(warnings()).toBe(3);
   });
 
   it('a cache whose lock call throws also falls back, and the apply goes through', async () => {
