@@ -35,6 +35,38 @@ export interface RetryOptions {
    * URL. Retryable-by-default when omitted.
    */
   isRetryable?: (err: unknown) => boolean;
+  /**
+   * Milliseconds to wait before the next attempt. `attempt` is the 0-based
+   * index of the attempt that just failed. Defaults to a linear
+   * `initialDelayMs * (attempt + 1)`.
+   */
+  getDelayMs?: (err: unknown, attempt: number) => number;
+  /**
+   * Crawl-cancel signal. Checked before every attempt and before scheduling a
+   * wait, and a pending wait ends the moment it aborts — so a cancel never
+   * sits out a multi-second backoff or fires another attempt.
+   */
+  signal?: AbortSignal;
+}
+
+function abortError(): Error {
+  return new Error('Fetch aborted');
+}
+
+/** Resolves after `ms`; rejects immediately (and clears its timer) on abort. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export async function retry<T>(
@@ -42,16 +74,21 @@ export async function retry<T>(
   attempts: number,
   options: RetryOptions = {},
 ): Promise<T> {
-  const { initialDelayMs = 1000, isRetryable } = options;
+  const { initialDelayMs = 1000, isRetryable, getDelayMs, signal } = options;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) throw abortError();
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
+      // A cancelled crawl is not a transient failure: surface the error now
+      // instead of backing off and trying again.
+      if (signal?.aborted) throw err;
       if (isRetryable && !isRetryable(err)) throw err;
       if (i < attempts - 1) {
-        await new Promise<void>((r) => setTimeout(r, initialDelayMs * (i + 1)));
+        const delay = getDelayMs ? getDelayMs(err, i) : initialDelayMs * (i + 1);
+        await abortableSleep(delay, signal);
       }
     }
   }
@@ -95,4 +132,57 @@ export function isTransientFetchError(err: unknown): boolean {
     if (code >= 400 && code < 500 && code !== 408 && code !== 429) return false;
   }
   return true;
+}
+
+/**
+ * The peer closed or reset the connection before answering (axios/undici and
+ * Chromium spellings). Typical of a firewall/WAF or load balancer shedding
+ * load from a source IP — which is usually a RATE, not a permanent block, so
+ * it can clear if we back off for longer than a normal transient blip.
+ */
+export function isConnectionResetError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    message.includes('econnreset') ||
+    message.includes('err_connection_reset') ||
+    message.includes('err_connection_closed') ||
+    message.includes('err_empty_response') ||
+    message.includes('socket hang up') ||
+    message.includes('other side closed') ||
+    message.includes('epipe')
+  );
+}
+
+// Waits between attempts for a reset host (index = attempt that just failed;
+// the last value repeats). Much longer than the 1s/2s default, which ends
+// well inside a typical rate-limit window.
+const RESET_BACKOFF_MS = [2000, 6000, 15000] as const;
+// Pause before handing a reset host to the other engine, so the browser
+// attempt isn't a second burst straight after the first one.
+const RESET_COOLDOWN_MS = 3000;
+
+/** +/-25% so concurrent fetches of one host don't retry in lockstep. */
+function jitter(ms: number): number {
+  return Math.round(ms * (0.75 + Math.random() * 0.5));
+}
+
+/**
+ * `retry()` delay policy: long jittered backoff for connection resets, the
+ * default linear 1s/2s/... for every other retryable error.
+ */
+export function resetAwareDelayMs(err: unknown, attempt: number): number {
+  if (!isConnectionResetError(err)) return 1000 * (attempt + 1);
+  return jitter(RESET_BACKOFF_MS[Math.min(attempt, RESET_BACKOFF_MS.length - 1)]);
+}
+
+/**
+ * After an engine fails with a connection reset, wait briefly before trying
+ * the other engine on the same host. No pause for any other error. Throws as
+ * soon as the crawl is cancelled (before or during the pause), so the caller
+ * never goes on to start the fallback engine for a cancelled crawl.
+ */
+export async function coolDownAfterReset(err: unknown, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw abortError();
+  if (!isConnectionResetError(err)) return;
+  await abortableSleep(jitter(RESET_COOLDOWN_MS), signal);
 }
