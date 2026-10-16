@@ -54,6 +54,8 @@ const SEGMENT_KEYS: Record<string, string> = {
   tools: 'tools',
   browser: 'browser',
   license: 'license',
+  sso: 'sso',
+  ldap: 'ldap',
   files: 'files',
   docs: 'docs',
   migrations: 'migrations',

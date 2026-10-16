@@ -2547,6 +2547,8 @@ export const tr: typeof en = {
     cost: 'Maliyet ve Optimizasyon',
     resources: 'Kaynaklar',
     portals: 'Portallar',
+    sso: 'Tek Oturum Açma (SSO)',
+    ldap: 'LDAP Dizini',
     iamPeople: 'Kişiler',
     iamGroups: 'Gruplar',
     iamTokens: 'Token’lar',

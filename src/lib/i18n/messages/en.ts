@@ -453,6 +453,8 @@ export const en = {
     tokens: 'API Tokens',
     webhooks: 'Webhooks',
     license: 'License',
+    sso: 'Single Sign-On',
+    ldap: 'LDAP Directory',
     audit: 'Audit Log',
     mcp: 'MCP Servers',
     tools: 'Tools',
