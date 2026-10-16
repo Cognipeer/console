@@ -3,15 +3,16 @@
  *
  * Sends alert notifications through the mailer: `alert-fired.html` for fired,
  * re-notified and test notifications, `alert-resolved.html` for recoveries,
- * `alert-message.html` for generic messages (digests). When the recipient
- * list is empty it falls back to the tenant owner/admin emails.
+ * `alert-message.html` for generic messages (digests). A channel with the
+ * `project_admins` audience also mails the rule's project admins. When that
+ * leaves nobody, it falls back to the tenant owner/admin emails.
  */
 
 import { sendEmail } from '@/lib/email/mailer';
 import { createLogger } from '@/lib/core/logger';
 import { getTenantDatabase } from '@/lib/database';
-import type { IAlertChannel } from '@/lib/database';
-import { isUserDisabled } from '@/lib/services/users/userAuthState';
+import type { AlertEmailAudience, IAlertChannel } from '@/lib/database';
+import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
   describeBreach,
   entityLabel,
@@ -40,10 +41,14 @@ type TenantUser = Awaited<ReturnType<Awaited<ReturnType<typeof getTenantDatabase
 /** A fan-out storm sends hundreds of mails in one sweep; the user list they all consult is read once per this long. */
 const USER_CACHE_TTL_MS = 30_000;
 const userCache = new Map<string, { at: number; users: Promise<TenantUser[]> }>();
+/** A project's admin memberships, read once per this long for the same reason. */
+const PROJECT_ADMIN_CACHE_TTL_MS = 30_000;
+const projectAdminCache = new Map<string, { at: number; ids: Promise<Set<string>> }>();
 
-/** Forget the cached user lists (tests; a disabled account is otherwise honoured within the TTL). */
+/** Forget the cached user lists and project admins (tests; a disabled account is otherwise honoured within the TTL). */
 export function resetAlertEmailUserCache(): void {
   userCache.clear();
+  projectAdminCache.clear();
 }
 
 /**
@@ -70,18 +75,101 @@ async function readUsers(tenantDbName: string): Promise<TenantUser[] | null> {
 }
 
 /**
- * Who an email channel really mails: its explicit recipients (or, when none,
- * the tenant owners and admins) minus disabled accounts, de-duplicated.
- * Shared with the digests, which send their own templates.
+ * Ids of the users who administer the project through a membership: a direct
+ * `project_admin` membership or a group granted `project_admin`, unless that
+ * grant takes their alerts access away. Best effort: `null` when the
+ * memberships can't be read (logged, error name only, never cached).
+ */
+async function readProjectAdminIds(tenantDbName: string, projectId: string): Promise<Set<string> | null> {
+  const key = `${tenantDbName}\u0000${projectId}`;
+  const now = Date.now();
+  let entry = projectAdminCache.get(key);
+  if (!entry || now - entry.at > PROJECT_ADMIN_CACHE_TTL_MS) {
+    const ids = (async () => {
+      const db = await getTenantDatabase(tenantDbName);
+      const [rows, grants] = await Promise.all([
+        db.listUserProjectsByProject(projectId),
+        db.listGroupProjectsByProject(projectId),
+      ]);
+      const out = new Set<string>();
+      for (const row of rows) {
+        if (row.role === 'project_admin' && row.servicePermissions?.alerts !== 'none') out.add(String(row.userId));
+      }
+      const adminGroups = grants.filter((grant) => grant.role === 'project_admin' && grant.servicePermissions?.alerts !== 'none');
+      const members = await Promise.all(adminGroups.map((grant) => db.listGroupMembers(String(grant.groupId))));
+      for (const member of members.flat()) out.add(String(member.userId));
+      return out;
+    })();
+    entry = { at: now, ids };
+    projectAdminCache.set(key, entry);
+  }
+  try {
+    return await entry.ids;
+  } catch (err) {
+    projectAdminCache.delete(key);
+    log.warn('Alert project admin lookup failed', { error: err instanceof Error ? err.name : typeof err });
+    return null;
+  }
+}
+
+/**
+ * The project's admins who can follow an alert: membership admins plus legacy
+ * project admins (tenant role `project_admin` with the project listed), minus
+ * accounts that cannot sign in and portal users.
+ */
+async function projectAdminEmails(tenantDbName: string, projectId: string, users: TenantUser[]): Promise<string[]> {
+  const ids = await readProjectAdminIds(tenantDbName, projectId);
+  return users
+    .filter((user) => {
+      const id = String(user._id);
+      const legacy = user.role === 'project_admin' && (user.projectIds ?? []).map(String).includes(projectId);
+      // A tenant-level `alerts: none` hides alerts everywhere, so it takes them out of the audience too.
+      const noAlerts = user.servicePermissions?.alerts === 'none';
+      return (legacy || ids?.has(id) === true) && user.role !== 'portal_user' && !noAlerts && !isUserLoginBlocked(user);
+    })
+    .map((user) => user.email);
+}
+
+/** The project's admins the `project_admins` audience reaches, de-duplicated (no owner/admin fallback). */
+export async function resolveProjectAdminRecipients(tenantDbName: string, projectId: string): Promise<string[]> {
+  const users = await readUsers(tenantDbName);
+  if (!users) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const email of await projectAdminEmails(tenantDbName, projectId, users)) {
+    const key = (email ?? '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(email.trim());
+  }
+  return out;
+}
+
+export interface AlertEmailAudienceOptions {
+  /** `project_admins` adds the admins of `projectId` to the listed recipients. */
+  audience?: AlertEmailAudience;
+  projectId?: string;
+}
+
+/**
+ * Who an email channel really mails: its explicit recipients plus, with the
+ * `project_admins` audience, the project's admins. When that leaves nobody,
+ * the tenant owners and admins. Disabled accounts are removed and the list is
+ * de-duplicated. Shared with the digests, which send their own templates.
  */
 export async function resolveAlertEmailRecipients(
   tenantDbName: string,
   explicit?: string[] | null,
+  options: AlertEmailAudienceOptions = {},
 ): Promise<string[]> {
   const listed = (explicit ?? []).map((r) => (typeof r === 'string' ? r.trim() : '')).filter(Boolean);
   const users = await readUsers(tenantDbName);
-  const base = listed.length > 0
-    ? listed
+  const audience = options.audience === 'project_admins' && options.projectId && users
+    ? await projectAdminEmails(tenantDbName, options.projectId, users)
+    : [];
+  const named = [...listed, ...audience.map((email) => (email ?? '').trim()).filter(Boolean)];
+  const base = named.length > 0
+    ? named
     : (users ?? [])
         .filter((u) => (u.role === 'owner' || u.role === 'admin') && !isUserDisabled(u))
         .map((u) => u.email);
@@ -186,7 +274,10 @@ export class EmailAlertChannel implements IAlertDispatcher {
   ): Promise<DispatchResult[]> {
     // A disabled account must not keep receiving operational mail, whether it
     // was listed explicitly or picked up by the owner/admin fallback.
-    const recipients = await resolveAlertEmailRecipients(ctx.tenantDbName, channel.recipients);
+    const recipients = await resolveAlertEmailRecipients(ctx.tenantDbName, channel.recipients, {
+      audience: channel.audience,
+      projectId: ctx.projectId,
+    });
     if (recipients.length === 0) {
       return [{ type: 'email', target: '(none)', success: false, error: 'No recipients available' }];
     }

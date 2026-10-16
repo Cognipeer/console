@@ -141,6 +141,7 @@ Health views, alert rules and reports for agents, models, knowledge bases, MCP s
 | `TRACING_STALE_SESSION_MINUTES` | A traced session still `in_progress` this many minutes after its last activity is marked `abandoned` (minimum `5`). An abandoned session is not an error | `360` |
 | `TRACING_FINALIZER_INTERVAL_MS` | How often stale traced sessions are swept (minimum `10000`) | `300000` |
 | `ALERT_CHANNEL_TIMEOUT_MS` | Per-channel timeout when delivering an alert notification: webhook, Slack, Teams and PagerDuty (minimum `1000`) | `10000` |
+| `ALERT_STARTER_RULES_ON_CREATE` | New projects and the Default Project of a new workspace get the five [starter alert rules](../api/alerts.md#starter-rules). `false` turns that default off; a project can still add them from **Alerts → Starter rules**, and a create request that sends `starterAlerts: true` still gets them | `true` |
 
 OTLP sessions are closed earlier than the stale window: one that has been quiet for 10 minutes (or the stale window, whichever is shorter) is finalized as `success` or `error` instead of `abandoned`. The 10 minutes are fixed.
 

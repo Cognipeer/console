@@ -372,6 +372,8 @@ export type {
   IAlertState,
   IAlertDelivery,
   IAlertRuleLastEvaluation,
+  IAlertRuleStarter,
+  AlertEmailAudience,
   AlertDeliveryTrigger,
   AlertDeliveryStatus,
   IAlertStateFilter,

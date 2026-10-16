@@ -29,6 +29,12 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
+// Starter alert rules have their own tests (projects-starter-alerts.test.ts); here they would reach a real tenant DB.
+vi.mock('@/lib/services/alerts/starterAlerts', () => ({
+  seedStarterAlerts: vi.fn().mockResolvedValue(0),
+  starterAlertsOnCreate: () => true,
+}));
+
 import type { FastifyInstance } from 'fastify';
 import type { DatabaseProvider, IUser } from '@/lib/database';
 import { registerDirectoryProjectRulesProvider } from '@/enterprise/external-auth';

@@ -55,6 +55,8 @@ export interface MaskedChannel {
   type: AlertChannelType | 'library';
   libraryId?: string;
   recipients?: string[];
+  /** email: `project_admins` also mails the project's admins, resolved when it sends. */
+  audience?: 'project_admins';
   urlHint?: string;
   hasSecret?: boolean;
   keyHint?: string;
@@ -112,6 +114,8 @@ export interface AlertRuleDto {
   lastTriggeredAt?: string;
   createdAt?: string;
   createdBy?: string;
+  /** Set when the rule was added from the starter set. */
+  starter?: { key: string; version: number } | null;
   runbookUrl?: string | null;
   mutedUntil?: string | null;
   mutedBy?: string | null;

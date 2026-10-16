@@ -24,6 +24,8 @@ import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import { DEFAULT_PROJECT_KEY, generateUniqueProjectKey } from '@/lib/services/projects/projectService';
+import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
+import { seedStarterAlerts } from '@/lib/services/alerts/starterAlerts';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -69,6 +71,15 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: auth.tenantId,
         updatedBy: String(auth.tokenRecord.userId),
       });
+      // Opt-in here: an integration creating projects gets no alert rules it did not ask for.
+      if (body.starterAlerts === true) {
+        const added = await seedStarterAlerts(auth.tenantDbName, auth.tenantId, String(project._id), String(auth.tokenRecord.userId));
+        return reply.code(201).send({
+          project,
+          starterAlerts: added ?? 0,
+          ...(added === null ? { warnings: ['The starter alert rules could not be added.'] } : {}),
+        });
+      }
       return reply.code(201).send({ project });
     } catch (error) {
       logger.error('Client create project error', { error });
@@ -119,6 +130,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       const deleted = await db.deleteProject(projectId);
       if (!deleted) return reply.code(500).send({ error: 'Failed to delete project' });
       await db.deleteUserProjectsByProject(projectId);
+      await removeDeletedProjectAlerts(auth.tenantDbName, auth.tenantId, projectId);
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client delete project error', { error });

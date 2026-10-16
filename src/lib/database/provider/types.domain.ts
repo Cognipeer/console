@@ -1998,9 +1998,16 @@ export interface IAlertRuleEntityScope {
 
 export type AlertRuleSeverity = 'auto' | IncidentSeverity;
 
+/**
+ * Who an email channel mails besides its listed recipients, resolved at send
+ * time from the rule's project: `project_admins` = the project's admins (direct
+ * memberships, admin group grants, legacy project admins).
+ */
+export type AlertEmailAudience = 'project_admins';
+
 /** Stored channel shape. Every channel has a stable id ('ch_' + 12 hex), created server-side if missing. */
 export type IAlertChannel =
-  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'email'; recipients: string[]; audience?: AlertEmailAudience }
   /** sealed = encryptObject({ url, secret? }) */
   | { id?: string; type: 'webhook'; urlHint: string; hasSecret: boolean; sealed: string }
   /** sealed = encryptObject({ url }) */
@@ -2014,7 +2021,7 @@ export type IAlertChannel =
 
 /** Input accepted by the API (plaintext only on write; omit secret fields to keep the stored ones for that channel id). */
 export type AlertChannelInput =
-  | { id?: string; type: 'email'; recipients: string[] }
+  | { id?: string; type: 'email'; recipients: string[]; audience?: AlertEmailAudience }
   | { id?: string; type: 'webhook'; url?: string; secret?: string }
   | { id?: string; type: 'slack'; url?: string }
   | { id?: string; type: 'teams'; url?: string }
@@ -2111,10 +2118,17 @@ export interface IAlertRule {
   runbookUrl?: string | null;
   /** Last evaluation summary (throttled writes) behind the derived "No data" state. */
   lastEvaluation?: IAlertRuleLastEvaluation | null;
+  /** Set on rules added from the starter set: which starter, at which version. Server-owned. */
+  starter?: IAlertRuleStarter | null;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export interface IAlertRuleStarter {
+  key: string;
+  version: number;
 }
 
 export interface IAlertRuleLastEvaluation {

@@ -58,6 +58,7 @@ Reads also return fields that create and update do not set:
 |-------|-------------|
 | `mutedUntil`, `mutedBy`, `muteReason` | Set by [Mute a Rule](#mute-a-rule); `null` or absent when the rule is not muted. A `mutedUntil` in the past means the mute has run out |
 | `lastEvaluation` | `{ at, targets, noDataTargets }`: how many targets the latest evaluation judged and how many of them had no data. Stored when it changes, and otherwise at most every 15 minutes |
+| `starter` | `{ key, version }` when the rule was added from the [starter rules](#starter-rules); absent otherwise. It stays when the rule is edited |
 
 Which metrics are per entity (`source: "entity"` in `meta.catalog`) and what each measures is listed in [Monitoring](/guide/monitoring#metrics).
 
@@ -94,12 +95,19 @@ Leaving `entity` out, or sending `null`, on a per-entity metric means `{ "entity
 
 | `type` | Fields | Notes |
 |--------|--------|-------|
-| `email` | `recipients`: up to 50 addresses | Empty goes to the workspace owners and admins |
+| `email` | `recipients`: up to 50 addresses; optional `audience: "project_admins"` | `project_admins` also mails the admins of the rule's project. With no address and nobody from the audience, it goes to the workspace owners and admins |
 | `webhook` | `url`, optional `secret` | A signed JSON `POST` when a secret is set |
 | `slack` | `url` | A Slack incoming-webhook URL |
 | `teams` | `url` | A Teams workflow or incoming-webhook URL |
 | `pagerduty` | `routingKey` | The 32-character Events API v2 integration key |
 | `library` | `libraryId` | A channel of the workspace's [channel library](#channel-library), referenced by its `id` |
+
+The `project_admins` audience is resolved each time a notification is sent, so it follows the project's members:
+- people with the project admin role on the project;
+- members of a group that holds the project admin role on it;
+- people with the legacy project admin role who have the project assigned.
+
+A project admin whose alerts permission on the project is `none`, a disabled account, an account that cannot sign in and a portal user are left out. When the project has no admin, the channel mails the workspace owners and admins instead; when it has admins, the owners and admins get no copy.
 
 A `library` channel carries no destination of its own: the library entry is read when a notification is sent, so changing the entry changes every rule that references it. A reference whose entry no longer exists is a failed delivery with the reason and error `channel_missing`; the rule's other channels are still notified.
 
@@ -111,7 +119,7 @@ Credentials never leave the server. A read returns each channel masked:
 
 | `type` | Returned |
 |--------|----------|
-| `email` | `id`, `type`, `recipients` |
+| `email` | `id`, `type`, `recipients`, `audience` when set |
 | `webhook` | `id`, `type`, `urlHint` (for example `https://hooks.example.com/…/ab12`), `hasSecret` |
 | `slack`, `teams` | `id`, `type`, `urlHint` |
 | `pagerduty` | `id`, `type`, `keyHint` (the last four characters, `…wxyz`) |
@@ -218,7 +226,9 @@ POST /api/alerts/rules
 }
 ```
 
-Returns `201` with `{ "rule": { ... } }`, channels masked. A baseline rule (Enterprise) replaces the condition:
+Returns `201` with `{ "rule": { ... } }`, channels masked. To save a [starter rule](#starter-rules) you changed first, send its key as `starterKey` (for example `"starterKey": "agent-errors"`): the rule then carries the `starter` mark. An unknown key answers `400` (`invalid_value`).
+
+A baseline rule (Enterprise) replaces the condition:
 
 ```json
 {
@@ -526,6 +536,92 @@ POST /api/alerts/channels/library/:id/test
 ```
 
 No body. Answers like [Test a Channel](#test-a-channel) and shares its limits.
+
+## Starter Rules
+
+Five recommended rules, one per entity module. Each watches the error rate of every entity of its module, so new agents, models and servers are covered as they appear. Each has a 30-minute window, needs at least 20 requests in it, must stay breached for 10 minutes before it fires, then waits 2 hours before it fires again for the same entity. Severity is `auto`. Each mails the project's admins through one email channel with the `project_admins` audience.
+
+| `key` | Metric | Fires above |
+|-------|--------|-------------|
+| `agent-errors` | `agent_error_rate` | 20% |
+| `model-errors` | `model_error_rate` | 20% |
+| `kb-errors` | `kb_error_rate` | 20% |
+| `mcp-errors` | `mcp_server_error_rate` | 30% |
+| `tool-errors` | `tool_error_rate` | 30% |
+
+A project created from the dashboard gets them, enabled, unless the request sends `"starterAlerts": false` (see [Starter rules on new projects](#starter-rules-on-new-projects)). Any project can add them later with the endpoints below. All of them are threshold rules, so no licence is needed.
+
+### List Starter Rules
+
+```
+GET /api/alerts/starters
+```
+
+For the active project:
+
+```json
+{
+  "version": 1,
+  "items": [
+    {
+      "key": "agent-errors",
+      "version": 1,
+      "module": "agents",
+      "metric": "agent_error_rate",
+      "name": "Agent error rate above 20%",
+      "description": "An agent fails more than 20% of its runs over 30 minutes (at least 20 runs).",
+      "threshold": 20,
+      "windowMinutes": 30,
+      "forMinutes": 10,
+      "minSamples": 20,
+      "cooldownMinutes": 120,
+      "state": "added",
+      "rule": { "id": "6713…", "name": "Agent error rate above 20%", "enabled": true },
+      "input": { "name": "Agent error rate above 20%", "module": "agents", "...": "…" }
+    }
+  ],
+  "projectAdminRecipients": 2,
+  "addedToNewProjects": true
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `state` | `added`: a rule of the project came from this starter (`rule` names it, enabled or not). `covered`: another enabled rule already watches the same metric on every entity (`rule` names it). `available`: neither |
+| `input` | The rule this starter creates, in the [create](#create-a-rule) body shape: send it (changed or not) with `starterKey` to save a customised copy |
+| `projectAdminRecipients` | How many people the `project_admins` audience reaches in this project today. `0` means the workspace owners and admins get the notifications |
+| `addedToNewProjects` | Whether new projects get the starter rules in this installation (`ALERT_STARTER_RULES_ON_CREATE`) |
+
+### Add Starter Rules
+
+```
+POST /api/alerts/starters
+```
+
+```json
+{ "keys": ["agent-errors", "model-errors"] }
+```
+
+Adds starter rules to the active project, enabled. Without a body (or without `keys`), it adds every starter that is `available`. With `keys`, it adds those, including `covered` ones. A starter that is already `added` is never added twice.
+
+Returns `201` when it added at least one rule, `200` otherwise:
+
+```json
+{
+  "created": [{ "_id": "…", "name": "Agent error rate above 20%", "starter": { "key": "agent-errors", "version": 1 }, "...": "…" }],
+  "skipped": [{ "key": "kb-errors", "reason": "covered" }]
+}
+```
+
+`reason` is `exists` (already added) or `covered`. `keys` must list 1 to 5 known keys (`400`, `invalid_value`). Like creating a rule, this needs write access to alerts.
+
+### Starter rules on new projects
+
+- `POST /api/projects` (dashboard): the new project gets the five rules unless the body sends `"starterAlerts": false`. Without the field, the installation default applies (`ALERT_STARTER_RULES_ON_CREATE`, on by default). The answer carries `starterAlerts`: how many rules were added. When adding them fails, the project is still created and `warnings` says so.
+- `POST /api/client/v1/projects` (API token): only with `"starterAlerts": true`, so integrations that create projects get no rules they did not ask for.
+- A new workspace gets them on its Default Project (sign-up, the bootstrap organisation and, in Enterprise, CRM provisioning), unless the installation default is off.
+
+Deleting a project deletes its alert rules and closes its open, acknowledged and investigating incidents with a note. Its alert history, closed incidents and delivery log are kept.
 
 ## Alert History
 

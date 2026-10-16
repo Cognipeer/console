@@ -21,6 +21,8 @@ export interface AlertContext {
   tenantId: string;
   tenantSlug: string;
   companyName: string;
+  /** The rule's project: resolves an email channel's `project_admins` audience. */
+  projectId?: string;
   projectName: string;
   dashboardUrl: string;
   incidentUrl?: string;

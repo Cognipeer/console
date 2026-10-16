@@ -6,6 +6,8 @@ import { getProjectLevelsSince, ignoredProjectLevels } from '@/lib/iam/projectLe
 import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
+import { seedStarterAlerts, starterAlertsOnCreate } from '@/lib/services/alerts/starterAlerts';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import { filterManageableTokens, resolveManageableProjectToken } from '@/lib/services/apiTokens/tokenGovernance';
@@ -327,7 +329,16 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         warnings.push('Some people, groups or providers could not be applied; check the project and add them again.');
       }
 
-      return reply.code(201).send({ project, warnings });
+      // Starter alert rules: `starterAlerts` true/false decides, otherwise the installation default. Best effort too.
+      let starterAlerts = 0;
+      const wantStarters = body.starterAlerts === undefined ? starterAlertsOnCreate() : body.starterAlerts === true;
+      if (wantStarters) {
+        const added = await seedStarterAlerts(session.tenantDbName, session.tenantId, String(project._id), session.userId);
+        if (added === null) warnings.push('The starter alert rules could not be added; add them from Alerts → Starter rules.');
+        else starterAlerts = added;
+      }
+
+      return reply.code(201).send({ project, warnings, starterAlerts });
     } catch (error) {
       logger.error('Create project error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
@@ -451,6 +462,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       // Clean up all membership records for this project
       await db.deleteUserProjectsByProject(projectId);
+      await removeDeletedProjectAlerts(session.tenantDbName, session.tenantId, projectId);
 
       return reply.code(200).send({ success: true });
     } catch (error) {

@@ -231,3 +231,14 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   takes filters, a sort and `include=stats`; the incident list takes `q`, `assignee`, `snoozed`, `updatedAfter` and
   `sort` and returns `serverTime`; incidents can be snoozed (`snoozedUntil`), and bulk updates can reopen, assign,
   snooze and unsnooze. See [Alerts API](docs/api/alerts.md) and [Incidents API](docs/api/incidents.md).
+- **Starter alert rules.** Five recommended rules watch the error rates of every agent, model, knowledge base, MCP
+  server and tool of a project (above 20%, or 30% for MCP servers and tools, over 30 minutes with at least 20 requests
+  and a 10-minute hold). A new project gets them enabled unless its creator opts out, and a new workspace gets them on
+  its Default Project; `ALERT_STARTER_RULES_ON_CREATE=false` turns that default off. Any project can add them with
+  `GET`/`POST /api/alerts/starters`; the client API adds them to a project it creates only with
+  `starterAlerts: true`. Rules added this way carry a `starter` mark.
+- **Project admins as recipients.** An email channel can set `audience: "project_admins"`: each notification then also
+  goes to the admins of the rule's project, looked up when it is sent. With no project admin it falls back to the
+  workspace owners and admins. The starter rules use it.
+- **Deleting a project** now deletes its alert rules, so they no longer evaluate and notify under "Unknown Project", and
+  closes its open incidents. Its alert history is kept.

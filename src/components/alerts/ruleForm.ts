@@ -313,7 +313,11 @@ export function duplicateRuleSeed(rule: AlertRuleDto, name: string): { seed: Par
     .map((channel) =>
       channel.type === 'library'
         ? { type: channel.type, libraryId: channel.libraryId }
-        : { type: channel.type, recipients: [...(channel.recipients ?? [])] },
+        : {
+            type: channel.type,
+            recipients: [...(channel.recipients ?? [])],
+            ...(channel.audience === 'project_admins' ? { audience: channel.audience } : {}),
+          },
     );
   return {
     seed: {

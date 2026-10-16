@@ -36,12 +36,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         (id, tenantId, projectId, name, description, module, enabled, metric,
          condition, windowMinutes, cooldownMinutes, scope, entity, severity,
          notifyOnResolve, renotifyMinutes, channels,
-         lastTriggeredAt, mutedUntil, mutedBy, muteReason, runbookUrl, lastEvaluation,
+         lastTriggeredAt, mutedUntil, mutedBy, muteReason, runbookUrl, lastEvaluation, starter,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @name, @description, @module, @enabled, @metric,
          @condition, @windowMinutes, @cooldownMinutes, @scope, @entity, @severity,
          @notifyOnResolve, @renotifyMinutes, @channels,
-         @lastTriggeredAt, @mutedUntil, @mutedBy, @muteReason, @runbookUrl, @lastEvaluation,
+         @lastTriggeredAt, @mutedUntil, @mutedBy, @muteReason, @runbookUrl, @lastEvaluation, @starter,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -67,6 +67,7 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         muteReason: rule.muteReason ?? null,
         runbookUrl: rule.runbookUrl ?? null,
         lastEvaluation: rule.lastEvaluation ? this.toJson(rule.lastEvaluation) : null,
+        starter: rule.starter ? this.toJson(rule.starter) : null,
         createdBy: rule.createdBy,
         updatedBy: rule.updatedBy ?? null,
         createdAt: now,
@@ -110,6 +111,7 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.muteReason !== undefined) { sets.push('muteReason = @muteReason'); params.muteReason = data.muteReason ?? null; }
       if (data.runbookUrl !== undefined) { sets.push('runbookUrl = @runbookUrl'); params.runbookUrl = data.runbookUrl ?? null; }
       if (data.lastEvaluation !== undefined) { sets.push('lastEvaluation = @lastEvaluation'); params.lastEvaluation = data.lastEvaluation ? this.toJson(data.lastEvaluation) : null; }
+      if (data.starter !== undefined) { sets.push('starter = @starter'); params.starter = data.starter ? this.toJson(data.starter) : null; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
@@ -373,6 +375,12 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       };
     }
 
+    protected mapStarter(raw: unknown): IAlertRule['starter'] {
+      const parsed = this.parseJson<Record<string, unknown> | null>(raw, null);
+      if (!parsed || typeof parsed.key !== 'string') return null;
+      return { key: parsed.key, version: Number(parsed.version) || 1 };
+    }
+
     protected mapRuleRow(r: SqliteRow): IAlertRule {
       return {
         _id: r.id as string,
@@ -398,6 +406,7 @@ export function AlertMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(r.muteReason ? { muteReason: r.muteReason as string } : {}),
         ...(r.runbookUrl ? { runbookUrl: r.runbookUrl as string } : {}),
         ...(r.lastEvaluation ? { lastEvaluation: this.mapLastEvaluation(r.lastEvaluation) } : {}),
+        ...(r.starter ? { starter: this.mapStarter(r.starter) } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

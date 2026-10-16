@@ -23,6 +23,7 @@ import { AlertApiError } from '@/lib/services/alerts/alertApiError';
 import { AlertBacktestService } from '@/lib/services/alerts/alertBacktest';
 import { AlertChannelLibraryService } from '@/lib/services/alerts/alertChannelLibrary';
 import { resolveEntityPath } from '@/lib/services/alerts/entityLinks';
+import { getStarterDefinition, StarterAlertService } from '@/lib/services/alerts/starterAlerts';
 import { authz } from '@/lib/iam/routeAuthz';
 import { RULE_SORTS, RULE_STATUS_FILTERS } from '@/lib/services/alerts/ruleInsights';
 import {
@@ -212,7 +213,18 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/alerts/rules', guarded('Create alert rule', async (request, reply) => {
     const { projectId, session } = await requireProjectContextForRequest(request);
-    const body = readObjectBody(request);
+    const { starterKey, ...body } = readObjectBody(request);
+    // A starter customised in the rule form before saving keeps its starter mark.
+    let starter: { key: string; version: number } | undefined;
+    if (starterKey !== undefined) {
+      const def = getStarterDefinition(starterKey);
+      if (!def) throw new AlertApiError(400, 'invalid_value', 'starterKey is not a starter rule');
+      // The mark says which starter the rule stands in for, so it must watch the same metric.
+      if (body.metric !== def.metric) {
+        throw new AlertApiError(400, 'invalid_value', `starterKey "${def.key}" needs the metric ${def.metric}`);
+      }
+      starter = { key: def.key, version: def.version };
+    }
 
     const rule = await AlertService.createRule(
       session.tenantDbName,
@@ -220,9 +232,30 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       projectId,
       session.userId,
       body as never,
+      starter ? { starter } : {},
     );
 
     return reply.code(201).send({ rule });
+  }));
+
+  app.get('/alerts/starters', guarded('List starter alert rules', async (request, reply) => {
+    const { projectId, session } = await requireProjectContextForRequest(request);
+    const list = await StarterAlertService.list(session.tenantDbName, session.tenantId, projectId);
+    return reply.code(200).send(list);
+  }));
+
+  app.post('/alerts/starters', guarded('Add starter alert rules', async (request, reply) => {
+    const { projectId, session } = await requireProjectContextForRequest(request);
+    const empty = request.body === undefined || request.body === null || request.body === '';
+    const body = empty ? {} : readObjectBody(request);
+    const result = await StarterAlertService.apply(
+      session.tenantDbName,
+      session.tenantId,
+      projectId,
+      session.userId,
+      { keys: body.keys },
+    );
+    return reply.code(result.created.length > 0 ? 201 : 200).send(result);
   }));
 
   app.post('/alerts/rules/preview', guarded('Preview alert rule', async (request, reply) => {

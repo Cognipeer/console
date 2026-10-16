@@ -1290,6 +1290,7 @@ export const TENANT_SCHEMA_SQL = `
     muteReason TEXT,
     runbookUrl TEXT,
     lastEvaluation TEXT,
+    starter TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,

@@ -203,6 +203,8 @@ export interface AppConfig {
     tracingFinalizerIntervalMs: number;
     /** Per-channel timeout when delivering an alert notification. */
     alertChannelTimeoutMs: number;
+    /** New projects get the starter alert rules. */
+    starterAlertsOnCreate: boolean;
   };
 
   network: {
@@ -652,6 +654,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       tracingStaleSessionMinutes: Math.max(int(source, 'TRACING_STALE_SESSION_MINUTES', 360), 5),
       tracingFinalizerIntervalMs: Math.max(int(source, 'TRACING_FINALIZER_INTERVAL_MS', 300_000), 10_000),
       alertChannelTimeoutMs: Math.max(int(source, 'ALERT_CHANNEL_TIMEOUT_MS', 10_000), 1_000),
+      starterAlertsOnCreate: bool(source, 'ALERT_STARTER_RULES_ON_CREATE', true),
     },
 
     network: {

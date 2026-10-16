@@ -10,6 +10,7 @@
 
 import { getDatabase, getTenantDatabase } from '@/lib/database';
 import { getConfig } from '@/lib/core/config';
+import { createLogger } from '@/lib/core/logger';
 import type {
   AlertChannelInput,
   AlertConditionMode,
@@ -25,9 +26,12 @@ import type {
   IAlertEvent,
   IAlertRule,
   IAlertRuleEntityScope,
+  IAlertRuleStarter,
   IAlertSloConfig,
   IAlertState,
   IAlertDelivery,
+  IIncident,
+  IncidentStatus,
 } from '@/lib/database';
 import { ENTITY_LATENCY_BUCKET_UPPER_MS } from '@/lib/database/provider/types.base';
 import { listActiveEntityKeys } from '@/lib/services/entityMetrics/entityHealthService';
@@ -362,7 +366,10 @@ export function normalizeChannelInput(raw: unknown, index: number, existing: IAl
         }
         if (!recipients.includes(email)) recipients.push(email);
       }
-      return { ...(id ? { id } : {}), type, recipients };
+      if (raw.audience !== undefined && raw.audience !== null && raw.audience !== 'project_admins') {
+        throw bad('invalid_channel', `channels[${index}].audience must be "project_admins"`);
+      }
+      return { ...(id ? { id } : {}), type, recipients, ...(raw.audience === 'project_admins' ? { audience: 'project_admins' as const } : {}) };
     }
     case 'webhook': {
       const url = optionalSecret(raw.url, `channels[${index}].url`, MAX_CHANNEL_URL_LENGTH)?.trim();
@@ -614,6 +621,16 @@ export interface RuleScopeOptions {
   projectId?: string;
 }
 
+export interface CreateRuleOptions {
+  /** Marks the rule as added from the starter set (server-side callers only, never the request body). */
+  starter?: IAlertRuleStarter;
+}
+
+/** Statuses a person still has to act on; a deleted project's incidents in them are closed. */
+const ACTIONABLE_INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating'];
+/** Upper bound on the incidents closed for one deleted project (pages of 200). */
+const MAX_PROJECT_INCIDENTS_CLOSED = 5_000;
+
 export interface RulePreviewTarget {
   entityKey: string;
   value: number | null;
@@ -632,6 +649,7 @@ export class AlertService {
     projectId: string,
     userId: string,
     input: CreateAlertRuleInput,
+    options: CreateRuleOptions = {},
   ): Promise<IAlertRule> {
     const rule = validateRuleInput(input, { mode: 'create' });
     await assertModeAvailable(tenantId, rule.condition);
@@ -657,6 +675,7 @@ export class AlertService {
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
       ...(rule.runbookUrl ? { runbookUrl: rule.runbookUrl } : {}),
+      ...(options.starter ? { starter: { key: options.starter.key, version: options.starter.version } } : {}),
       channels,
       createdBy: userId,
     });
@@ -724,6 +743,51 @@ export class AlertService {
       : await db.deleteAlertRule(ruleId, options.projectId);
     if (deleted) await AlertService.retireStates(tenantDbName, ruleId, 'Rule deleted', { keepCooldown: true });
     return deleted;
+  }
+
+  /**
+   * A project is being deleted: its rules go (so nothing evaluates or notifies
+   * for it any more) and the incidents someone still had to act on are closed
+   * with a note. Alert history, closed incidents and delivery logs stay.
+   */
+  static async removeProjectAlerts(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+  ): Promise<{ rulesDeleted: number; incidentsClosed: number }> {
+    const db = await getTenantDatabase(tenantDbName);
+    let rulesDeleted = 0;
+    for (const rule of await db.listAlertRules(tenantId, { projectId })) {
+      if (await AlertService.deleteRule(tenantDbName, String(rule._id), { projectId })) rulesDeleted += 1;
+    }
+
+    let incidentsClosed = 0;
+    for (const status of ACTIONABLE_INCIDENT_STATUSES) {
+      // Closing moves an incident out of this status, so the first page is read again until it is empty.
+      while (incidentsClosed < MAX_PROJECT_INCIDENTS_CLOSED) {
+        const page = await IncidentService.listIncidents(tenantDbName, tenantId, { projectId, status, limit: 200 });
+        if (page.length === 0) break;
+        let progressed = false;
+        for (const incident of page) {
+          const id = String(incident._id);
+          let closed: IIncident | null = null;
+          try {
+            closed = await IncidentService.updateStatus(tenantDbName, id, 'closed', 'system', { projectId });
+          } catch (error) {
+            // Closed or resolved by someone in the meantime: nothing left to do for this one.
+            if (!(error instanceof AlertApiError && error.code === 'invalid_transition')) throw error;
+          }
+          if (!closed) continue;
+          progressed = true;
+          incidentsClosed += 1;
+          try {
+            await IncidentService.addSystemNote(tenantDbName, id, 'Closed: the project was deleted');
+          } catch { /* the note is informational */ }
+        }
+        if (!progressed) break;
+      }
+    }
+    return { rulesDeleted, incidentsClosed };
   }
 
   static async getRule(
@@ -1097,6 +1161,7 @@ export class AlertService {
       tenantId: session.tenantId,
       tenantSlug: session.tenantSlug,
       companyName,
+      projectId: scope.projectId,
       projectName: scope.projectName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     });
@@ -1164,6 +1229,24 @@ export class AlertService {
   ): Promise<number> {
     const db = await getTenantDatabase(tenantDbName);
     return db.countActiveAlerts(tenantId, projectId);
+  }
+}
+
+const cleanupLog = createLogger('alerts:project-cleanup');
+
+/**
+ * After a project is deleted: its alert rules stop evaluating and its open
+ * incidents are closed. Best effort: the project is already gone, so a failure
+ * is only logged.
+ */
+export async function removeDeletedProjectAlerts(tenantDbName: string, tenantId: string, projectId: string): Promise<void> {
+  try {
+    await AlertService.removeProjectAlerts(tenantDbName, tenantId, projectId);
+  } catch (error) {
+    cleanupLog.error('Removing the alerts of a deleted project failed', {
+      projectId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

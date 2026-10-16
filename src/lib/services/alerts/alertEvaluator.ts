@@ -659,6 +659,7 @@ function channelContext(runtime: RuleRuntime, projectName: string, incidentId?: 
     tenantId: runtime.ctx.tenantId,
     tenantSlug: runtime.ctx.tenantSlug,
     companyName: runtime.ctx.companyName,
+    projectId: runtime.rule.projectId,
     projectName,
     dashboardUrl: `${appUrl}/dashboard/alerts/incidents`,
     incidentUrl: incidentId ? `${appUrl}/dashboard/alerts/incidents?highlight=${incidentId}` : undefined,

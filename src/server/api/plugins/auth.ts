@@ -26,6 +26,7 @@ import {
   DEFAULT_PROJECT_KEY,
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
+import { seedStarterAlerts, starterAlertsOnCreate } from '@/lib/services/alerts/starterAlerts';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { authz } from '@/lib/iam/routeAuthz';
 import { computeSessionEffectivePermissions } from '@/lib/iam/effective';
@@ -616,6 +617,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           typeof defaultProject._id === 'string'
             ? defaultProject._id
             : defaultProject._id?.toString();
+        // A new workspace starts with the starter alert rules on its default project (best effort).
+        if (defaultProjectId && starterAlertsOnCreate()) {
+          await seedStarterAlerts(dbName, tenantIdStr, defaultProjectId, userIdStr);
+        }
 
         await db.updateTenant(tenantIdStr, { ownerId: userIdStr });
 
