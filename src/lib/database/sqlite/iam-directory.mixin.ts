@@ -89,6 +89,10 @@ function userFilter(query: IamUserFilter, params: Record<string, unknown>, ident
     const pending = `((canLogin IS NULL OR canLogin != 0) AND (status IS NULL OR status != 'disabled') AND invitedBy IS NOT NULL AND invitedBy != '' AND inviteAcceptedAt IS NULL)`;
     where.push(query.invited ? pending : `NOT ${pending}`);
   }
+  if (query.accessRequested !== undefined) {
+    const asked = `(accessRequest IS NOT NULL AND accessRequest != '' AND accessRequest != 'null')`;
+    where.push(query.accessRequested ? asked : `NOT ${asked}`);
+  }
   if (query.groupId) {
     params.memberGroupId = query.groupId;
     where.push(`id IN (SELECT userId FROM ${TABLES.groupMembers} WHERE tenantId = @tenantId AND groupId = @memberGroupId)`);

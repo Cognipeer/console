@@ -217,10 +217,30 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           loadProjectStats(db, session.tenantId, projects),
           listDirectoryProjectRules(session.tenantId),
         ]);
+        // Which projects the caller administers (the list's "I manage" filter): every project for a
+        // tenant owner/admin, otherwise the ones where they (or a group of theirs) are project_admin.
+        const managed = new Set<string>();
+        if (user.role !== 'owner' && user.role !== 'admin') {
+          const [direct, groupMemberships] = await Promise.all([
+            db.listUserProjectsByUser(session.userId),
+            db.listGroupMembersByUser(session.userId),
+          ]);
+          for (const row of direct) {
+            if (row.role === 'project_admin') managed.add(String(row.projectId));
+          }
+          const grants = await Promise.all(
+            groupMemberships.map((m) => db.listGroupProjectsByGroup(String(m.groupId))),
+          );
+          for (const grant of grants.flat()) {
+            if (grant.role === 'project_admin') managed.add(String(grant.projectId));
+          }
+        }
+        const adminsAll = user.role === 'owner' || user.role === 'admin';
         const enriched = projects.map((project) => {
           const id = String(project._id);
           return {
             ...project,
+            canManage: adminsAll || managed.has(id),
             stats: stats.get(id),
             directoryDefault: directoryDefaultsFor(rules, id),
           };

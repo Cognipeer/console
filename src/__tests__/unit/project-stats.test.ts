@@ -50,6 +50,21 @@ describe('buildProjectStats', () => {
     });
   });
 
+  it('counts legacy projectIds memberships like the members list: not owners/admins, not twice, joined with groups', () => {
+    const stats = buildProjectStats(['p1', 'p2'], {
+      ...data,
+      users: [
+        { _id: 'u1', role: 'user', projectIds: ['p1', 'p2'] }, // has a row on both: not counted again
+        { _id: 'u6', role: 'user', projectIds: ['p1', 'p1', 'gone'] }, // legacy only; duplicate id counted once
+        { _id: 'u3', role: 'project_admin', projectIds: ['p1'] }, // legacy, also reaches p1 through g1: one person
+        { _id: 'u7', role: 'admin', projectIds: ['p1'] }, // implicit access: never a counted member
+        { _id: 'u8', role: 'user' },
+      ],
+    });
+    expect(stats.get('p1')).toMatchObject({ members: 4, groups: 1, people: 5 });
+    expect(stats.get('p2')).toMatchObject({ members: 1, people: 2 });
+  });
+
   it('groups providers by domain, honouring legacy projectId and ignoring unassigned ones', () => {
     const stats = buildProjectStats(['p1', 'p2'], data);
     expect(stats.get('p1')).toMatchObject({ providers: 3, providersByDomain: { model: 2, vector: 1 } });

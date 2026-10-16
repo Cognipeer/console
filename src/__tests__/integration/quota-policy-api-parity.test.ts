@@ -161,7 +161,7 @@ describeForEachProvider('quota policy API, end to end', (getDb) => {
     expect(await policiesOf()).toEqual([]);
   });
 
-  it('keeps the project Quotas tab\'s own limit working next to group limits', async () => {
+  it('keeps the project-scoped limit (the old project Quotas form) working next to group limits', async () => {
     const group = await db.createGroup({ tenantId, name: 'Staff', createdBy: 'test', source: 'local' } as never);
     const alice = await db.createUser({ tenantId, email: 'alice@x.io', name: 'Alice', password: '$2b$10$x', role: 'user', licenseId: 'FREE', features: [] });
     await db.addGroupMember({ groupId: String(group._id), userId: String(alice._id), tenantId, role: 'member' });

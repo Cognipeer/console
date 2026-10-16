@@ -91,3 +91,35 @@
     grid-column: 1 / -1;
   }
 }
+
+.jumpBar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 4px;
+  background: var(--ds-bg, var(--mantine-color-body));
+  border-bottom: 1px solid var(--ds-border, var(--mantine-color-default-border));
+}
+
+.jumpLink {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ds-text-muted, var(--mantine-color-dimmed));
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.jumpLink:hover {
+  background: var(--ds-surface-hover, var(--mantine-color-default-hover));
+}
+
+.jumpLink[data-active='true'] {
+  color: var(--mantine-color-teal-7);
+  background: var(--mantine-color-teal-light);
+}

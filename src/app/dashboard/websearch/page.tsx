@@ -266,6 +266,8 @@ export default function WebSearchListPage() {
       />
 
       <ProviderConfigModal
+        hideProjects
+        skipAssignStep
         opened={configOpen}
         onClose={() => {
           setConfigOpen(false);

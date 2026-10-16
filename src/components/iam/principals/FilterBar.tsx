@@ -130,6 +130,16 @@ export default function FilterBar({ type, state, onChange, onReset, projects, ow
             />
           </div>
           {projectFilter(190)}
+          <Button
+            size="xs"
+            variant={state.access === 'requested' ? 'light' : 'default'}
+            color={state.access === 'requested' ? 'orange' : undefined}
+            aria-pressed={state.access === 'requested'}
+            onClick={() => onChange({ access: state.access === 'requested' ? '' : 'requested' })}
+            data-testid="requested-access-filter"
+          >
+            {t('filters.requestedAccess')}
+          </Button>
           <Group gap={4} wrap="nowrap">
             <Select
               {...compact}

@@ -111,6 +111,8 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
       }
       if (query.invited === true) and.push(PENDING_INVITE);
       else if (query.invited === false) and.push({ $nor: [PENDING_INVITE] });
+      if (query.accessRequested === true) and.push({ accessRequest: { $exists: true, $ne: null } });
+      else if (query.accessRequested === false) and.push({ $or: [{ accessRequest: { $exists: false } }, { accessRequest: null }] });
       if (query.groupId) {
         const members = await db
           .collection(COLLECTIONS.groupMembers)

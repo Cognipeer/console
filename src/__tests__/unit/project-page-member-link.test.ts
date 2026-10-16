@@ -1,34 +1,31 @@
 // @vitest-environment jsdom
 /**
- * `/dashboard/projects/<id>?member=<userId>` (where the Access check sends you
- * from a "Project limit" reason) opens that member's project permission editor,
- * once: the link is dropped from the address so a refresh does not reopen it.
+ * The project page's tab routing. `/dashboard/projects/<id>?member=<userId>` (where the Access
+ * check sends you from a "Project limit" reason) lands on the Members tab, which opens that
+ * member's permission editor itself; the old `?tab=users` / `?tab=quotas` spellings still work.
  */
 
 import { createElement, Suspense } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { installApiMock, installDomStubs, mount, settle, text, type Mounted } from '../helpers/iamCenterUi';
 
-const nav = vi.hoisted(() => ({ search: '' }));
+const nav = vi.hoisted(() => ({ search: '', replace: undefined as unknown as ReturnType<typeof vi.fn> }));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(nav.search),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn(), back: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: nav.replace ?? vi.fn(), prefetch: vi.fn(), back: vi.fn(), refresh: vi.fn() }),
   usePathname: () => '/dashboard/projects/proj-a',
 }));
 
-// The tabs are other components with their own tests; here only what the page hands to the members tab matters.
-vi.mock('@/components/projects/ProjectMembersManager', async () => {
+// The tabs are other components with their own tests; here only which one the page shows matters.
+const stub = vi.hoisted(() => (label: string) => async () => {
   const { createElement: h } = await import('react');
-  return { default: (p: { projectId: string; openMemberId?: string | null }) => h('div', null, `members project=${p.projectId} open=${p.openMemberId ?? 'none'}`) };
+  return { default: (p: { projectId: string }) => h('div', null, `${label} project=${p.projectId}`) };
 });
-vi.mock('@/components/projects/ProjectProvidersManager', async () => {
-  const { createElement: h } = await import('react');
-  return { default: () => h('div', null, 'providers') };
-});
-vi.mock('@/components/settings/QuotaManagement', async () => {
-  const { createElement: h } = await import('react');
-  return { default: () => h('div', null, 'quotas') };
-});
+vi.mock('@/components/projects/detail/OverviewTab', stub('overview'));
+vi.mock('@/components/projects/detail/MembersTab', stub('members'));
+vi.mock('@/components/projects/detail/TokensTab', stub('tokens'));
+vi.mock('@/components/projects/detail/LimitsTab', stub('limits'));
+vi.mock('@/components/projects/ProjectProvidersManager', stub('providers'));
 
 import ProjectDetailPage from '@/app/dashboard/projects/[projectId]/page';
 
@@ -41,16 +38,21 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.history.replaceState(null, '', '/');
+  try {
+    sessionStorage.clear();
+  } catch {
+    /* no storage */
+  }
 });
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-async function renderPage(search: string) {
+async function renderPage(search: string, role = 'admin') {
   nav.search = search;
   window.history.replaceState(null, '', `/dashboard/projects/proj-a${search ? `?${search}` : ''}`);
   installApiMock([
     ['GET', '/api/projects', () => ({ projects: [{ _id: 'proj-a', name: 'Alpha', key: 'alpha' }], activeProjectId: 'proj-a' })],
-    ['GET', '/api/auth/session', () => ({ authenticated: true, role: 'admin' })],
+    ['GET', '/api/auth/session', () => ({ authenticated: true, role })],
   ]);
   mounted = await mount(
     createElement(Suspense, { fallback: null }, createElement(ProjectDetailPage, { params: Promise.resolve({ projectId: 'proj-a' }) })),
@@ -59,20 +61,28 @@ async function renderPage(search: string) {
 }
 
 describe('the project page', () => {
-  it('hands the member of the link to the members tab and removes the link from the address', async () => {
-    await renderPage('member=u-ann');
-    expect(text()).toContain('members project=proj-a open=u-ann');
-    expect(window.location.search).toBe('');
-  });
-
-  it('keeps the other parameters of the address', async () => {
-    await renderPage('member=u-ann&tab=users');
-    expect(text()).toContain('open=u-ann');
-    expect(window.location.search).toBe('?tab=users');
-  });
-
-  it('opens no editor without a link', async () => {
+  it('opens on the overview', async () => {
     await renderPage('');
-    expect(text()).toContain('members project=proj-a open=none');
+    expect(text()).toContain('overview project=proj-a');
+    expect(text()).not.toContain('members project=');
+  });
+
+  it('lands the member link on the Members tab', async () => {
+    await renderPage('member=u-ann');
+    expect(text()).toContain('members project=proj-a');
+  });
+
+  it('keeps the old tab spellings working', async () => {
+    await renderPage('tab=users');
+    expect(text()).toContain('members project=proj-a');
+    await mounted.unmount();
+    await renderPage('tab=quotas');
+    expect(text()).toContain('limits project=proj-a');
+  });
+
+  it('shows the Limits tab to tenant admins only', async () => {
+    await renderPage('tab=limits', 'member');
+    expect(text()).not.toContain('limits project=');
+    expect(text()).toContain('overview project=proj-a');
   });
 });

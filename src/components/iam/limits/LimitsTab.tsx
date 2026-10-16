@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { Alert, Button, Group, SimpleGrid, Stack, Switch, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -91,6 +91,8 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
   const tDomains = useTranslations('settings.quotaSection.domains');
   const tConfirm = useTranslations('common.confirm.qos');
   const searchParams = useSearchParams()!;
+  const router = useRouter();
+  const pathname = usePathname();
   const deleteResource = useDeleteResource();
 
   const { rows, loading, refreshing, error, forbidden, saving, reload, save, setEnabled, remove } = useLimits();
@@ -101,6 +103,17 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
   // Searched here, not by the table's own box: that one lower-cases with the plain mapping, which cannot
   // tell "İstanbul" from "istanbul" (see searchFold).
   const [query, setQuery] = useState('');
+  // The project filter lives in the address (`?projectId=`), so the project's Limits tab can link here.
+  const projectFilter = searchParams.get('projectId') ?? '';
+  const setProjectFilter = useCallback(
+    (value: string) => {
+      const next = new URLSearchParams(searchParams.toString());
+      if (value) next.set('projectId', value);
+      else next.delete('projectId');
+      router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<LimitRow | null>(null);
   const [seed, setSeed] = useState<Partial<QuotaPolicyFormData> | null>(null);
@@ -120,10 +133,10 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
 
   const stats = useMemo(() => limitStats(rows), [rows]);
   const filtered = useMemo(
-    () => sortLimitRows(filterLimitRows(rows, { scope: scopeFilter, domain: domainFilter, query })),
-    [rows, scopeFilter, domainFilter, query],
+    () => sortLimitRows(filterLimitRows(rows, { scope: scopeFilter, domain: domainFilter, query, projectId: projectFilter })),
+    [rows, scopeFilter, domainFilter, query, projectFilter],
   );
-  const grid = useTableControls(filtered, { filterKey: `${scopeFilter}|${domainFilter}|${query}` });
+  const grid = useTableControls(filtered, { filterKey: `${scopeFilter}|${domainFilter}|${query}|${projectFilter}` });
 
   const openNew = useCallback(() => {
     setEditing(null);
@@ -476,6 +489,20 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
             options: [
               { value: 'all', label: t('filters.allDomains') },
               ...QUOTA_DOMAINS.map((domain) => ({ value: domain, label: tDomains(domain) })),
+            ],
+          },
+          {
+            value: projectFilter,
+            onChange: setProjectFilter,
+            ariaLabel: t('filters.project'),
+            width: 200,
+            options: [
+              { value: '', label: t('filters.allProjects') },
+              ...projectOptions,
+              // A project in the address that the list does not know (not visible to this person) stays selectable.
+              ...(projectFilter && !projectOptions.some((o) => o.value === projectFilter)
+                ? [{ value: projectFilter, label: projectFilter }]
+                : []),
             ],
           },
         ]}

@@ -172,8 +172,8 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
 
       const fields = pickQuotaPolicyFields(body as Record<string, unknown>);
       const existing = await getQuotaPolicyRow(session.tenantDbName, session.tenantId, id);
-      // `?projectId=` asserts which project the policy is in (the project
-      // Quotas tab sends it); a mismatch is a 404, as it always was.
+      // `?projectId=` asserts which project the policy is in (IAM → Limits
+      // sends it); a mismatch is a 404, as it always was.
       if (!existing || (query.projectId && String(existing.projectId ?? '') !== query.projectId)) {
         return reply.code(404).send({ error: 'Policy not found' });
       }

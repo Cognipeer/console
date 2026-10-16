@@ -2,7 +2,7 @@
  * /api/quota/policies — what changed for group limits and agent-run limits:
  * write-time validation, the group mode, project moves, the opt-in target
  * resolution of the Limits table, and that the long-standing project-bound
- * flow (the project Quotas tab) still behaves as before.
+ * flow (the old project Quotas form) still behaves as before.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
@@ -239,7 +239,7 @@ describe('quota policy API', () => {
       expect(parseJsonBody<{ code: string }>(res.body).code).toBe('group_mode_requires_group_scope');
     });
 
-    it('still serves the project Quotas tab: PATCH with ?projectId and the whole payload', async () => {
+    it('still serves the legacy project-scoped flow: PATCH with ?projectId and the whole payload', async () => {
       db.listQuotaPolicies.mockResolvedValue([stored({ domain: 'global' })] as never);
       const res = await patch(
         'pol-1',

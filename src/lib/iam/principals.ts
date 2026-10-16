@@ -422,6 +422,9 @@ export interface PrincipalProject {
   name: string;
   role: 'project_admin' | 'member' | null;
   via: 'direct' | 'group' | 'legacy' | 'implicit';
+  /** A direct membership the directory (SSO / LDAP default project) made; absent = made by hand. */
+  source?: 'directory';
+  groupId?: string;
   groupName?: string;
 }
 
@@ -476,7 +479,15 @@ async function userProjects(
     out.set(id, { id, name: name(id), role: user.role === 'project_admin' ? 'project_admin' : 'member', via: 'legacy' });
   }
   for (const m of await db.listUserProjectsByUser(String(user._id))) {
-    if (m.projectId) out.set(String(m.projectId), { id: String(m.projectId), name: name(String(m.projectId)), role: m.role, via: 'direct' });
+    if (m.projectId) {
+      out.set(String(m.projectId), {
+        id: String(m.projectId),
+        name: name(String(m.projectId)),
+        role: m.role,
+        via: 'direct',
+        ...(m.source === 'directory' ? { source: 'directory' as const } : {}),
+      });
+    }
   }
   const groupRows = await Promise.all(groupList.map((group) => db.listGroupProjectsByGroup(group.id)));
   groupList.forEach((group, i) => {
@@ -485,7 +496,7 @@ async function userProjects(
       const existing = out.get(id);
       // a direct membership already says everything; otherwise a group can add or upgrade
       if (existing && (existing.via === 'direct' || existing.role === 'project_admin')) continue;
-      out.set(id, { id, name: name(id), role: gp.role, via: 'group', groupName: group.name });
+      out.set(id, { id, name: name(id), role: gp.role, via: 'group', groupId: group.id, groupName: group.name });
     }
   });
   return [...out.values()];

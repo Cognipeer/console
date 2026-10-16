@@ -446,6 +446,19 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const payload = sanitizeUpdatePayload(body);
       payload.updatedBy = session.userId;
 
+      // Assignment edits (the Projects tab / assign step) may only name projects of the caller's tenant.
+      if (payload.projectIds !== undefined) {
+        const { projectIds, unknown } = await resolveTenantProjectIds(
+          session.tenantDbName,
+          session.tenantId,
+          payload.projectIds,
+        );
+        if (unknown.length > 0) {
+          return reply.code(400).send({ error: `Unknown project(s): ${unknown.join(', ')}` });
+        }
+        payload.projectIds = projectIds;
+      }
+
       if (query.scope === 'tenant') {
         if (!isProviderAdmin(session.userRole)) {
           return reply.code(403).send({ error: 'Forbidden' });

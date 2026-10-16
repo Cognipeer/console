@@ -818,7 +818,8 @@ export interface IProviderRecord
   settings: Record<string, unknown>;
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
-  lastTest?: IProviderLastTest;
+  /** `null` = cleared (the connection changed since the last test). */
+  lastTest?: IProviderLastTest | null;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

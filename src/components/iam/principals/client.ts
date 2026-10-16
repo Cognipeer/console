@@ -106,6 +106,18 @@ export interface PrincipalTarget {
   summary?: PrincipalSummary | null;
 }
 
+/** A person's request for access to a project, as the directory reports it. */
+export interface AccessRequest {
+  at: string;
+  message: string | null;
+}
+
+export function parseAccessRequest(raw: unknown): AccessRequest | null {
+  const r = asRecord(raw);
+  const at = asString(r.at);
+  return at ? { at, message: asString(r.message) } : null;
+}
+
 export interface PrincipalSummary extends PrincipalRef {
   sublabel: string | null;
   role: string | null;
@@ -128,6 +140,8 @@ export interface PrincipalSummary extends PrincipalRef {
   roleManaged?: boolean;
   createdAt?: string;
   invitedAt?: string;
+  /** Users: the last "I need access" request (the list shows it only while the person still has no project). */
+  accessRequest?: AccessRequest | null;
   /** Groups: local or ldap (a directory group). */
   source?: string;
   /** Groups: the workspace role every member gets. */
@@ -180,6 +194,8 @@ export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType
     summary.roleManaged = asBool(r.roleManaged);
     summary.createdAt = optString(r.createdAt);
     summary.invitedAt = optString(r.invitedAt);
+    const asked = parseAccessRequest(r.accessRequest);
+    if (asked) summary.accessRequest = asked;
   } else if (type === 'group') {
     summary.source = optString(r.source);
     summary.tenantRole = optString(r.tenantRole);
@@ -384,6 +400,9 @@ export interface ProjectRef {
   role: string | null;
   /** How the principal got into the project: direct, group, legacy or implicit (owners and admins reach every project). */
   via: string | null;
+  /** A direct membership made by the directory (an SSO / LDAP default project) rather than by hand. */
+  source?: string;
+  groupId?: string;
   groupName: string | null;
   /** A direct (or legacy) membership: it can be changed or removed from here. `undefined` = the server did not say. */
   removable?: boolean;
@@ -421,6 +440,8 @@ function parseProjects(raw: unknown): ProjectRef[] {
       name: asString(r.name) ?? asString(r.label) ?? id,
       role: asString(r.role),
       via: asString(r.via),
+      source: optString(r.source),
+      groupId: optString(r.groupId),
       groupName: asString(r.groupName),
       removable: asBool(r.removable),
     });

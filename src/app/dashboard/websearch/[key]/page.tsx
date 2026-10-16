@@ -1068,6 +1068,8 @@ export default function WebSearchInstancePage() {
       ) : null}
 
       <ProviderConfigModal
+        hideProjects
+        skipAssignStep
         opened={editOpen}
         onClose={() => setEditOpen(false)}
         mode="edit"

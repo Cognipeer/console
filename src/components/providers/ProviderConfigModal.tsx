@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Center, Loader, TextInput, Textarea } from '@mantine/core';
+import { Alert, Button, Center, Loader, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconAlertCircle, IconPlug } from '@tabler/icons-react';
+import { IconAlertCircle, IconCheck, IconPlayerPlay, IconPlug, IconX } from '@tabler/icons-react';
 import type {
   ProviderDescriptor,
   ProviderFormField,
@@ -13,6 +13,14 @@ import type {
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderFormRenderer from './ProviderFormRenderer';
+import ProviderAssignStep, { ProjectPicker, useTenantProjects } from './ProviderAssignStep';
+import { useTranslations } from '@/lib/i18n';
+import {
+  foundCount,
+  formatLatency,
+  testState,
+  type ProviderTestResult,
+} from './providerAccessModel';
 import {
   SERVICE_CATALOG,
   DOMAIN_LABELS,
@@ -54,7 +62,12 @@ export type ProviderConfigModalSubmitPayload = {
     settings: Record<string, unknown>;
     metadata: Record<string, unknown>;
   };
+  /** Projects picked in the Projects section (create mode). */
+  projectIds: string[];
 };
+
+/** What a create `onSubmit` may hand back so the modal can offer the assign step. */
+export type CreatedProviderSummary = { id: string; name: string; domain: string; key?: string };
 
 export type ProviderConfigModalProps = {
   opened: boolean;
@@ -67,7 +80,18 @@ export type ProviderConfigModalProps = {
   domain?: ProviderDomain | null;
   /** Called when the user picks a domain in create mode. Parent should load drivers. */
   onDomainChange?: (domain: ProviderDomain) => void;
-  onSubmit: (options: ProviderConfigModalSubmitPayload) => Promise<void>;
+  /** Create mode may resolve with the created provider; the modal then runs the assign step. */
+  onSubmit: (
+    options: ProviderConfigModalSubmitPayload,
+  ) => Promise<void | CreatedProviderSummary>;
+  /** Projects preselected in the Projects section (create mode). */
+  initialProjectIds?: string[];
+  /** Called once a provider was created (before the assign step, if any). */
+  onCreated?: (provider: { id: string; name: string; domain: string }) => void;
+  /** When true, never show the post-create assign step. */
+  skipAssignStep?: boolean;
+  /** Hide the Projects section (callers whose create call already fixes the project). */
+  hideProjects?: boolean;
 };
 
 type FieldBuckets = {
@@ -134,7 +158,12 @@ export default function ProviderConfigModal({
   domain,
   onDomainChange,
   onSubmit,
+  initialProjectIds,
+  onCreated,
+  skipAssignStep = false,
+  hideProjects = false,
 }: ProviderConfigModalProps) {
+  const t = useTranslations('providerAccess');
   const [schema, setSchema] = useState<ProviderFormSchema | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
@@ -145,6 +174,12 @@ export default function ProviderConfigModal({
   const [selectedDriver, setSelectedDriver] = useState<string>(
     provider?.driver ?? drivers[0]?.id ?? '',
   );
+
+  const [projectIds, setProjectIds] = useState<Set<string>>(new Set(initialProjectIds ?? []));
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [assignTarget, setAssignTarget] = useState<CreatedProviderSummary | null>(null);
 
   const filteredServices = useMemo(
     () =>
@@ -173,6 +208,9 @@ export default function ProviderConfigModal({
 
   useEffect(() => {
     if (!opened) return;
+    setProjectIds(new Set(initialProjectIds ?? []));
+    setTestResult(null);
+    setTestError(null);
     setSelectedDriver(provider?.driver ?? '');
     form.setValues({
       key: provider?.key ?? '',
@@ -204,6 +242,12 @@ export default function ProviderConfigModal({
     // them to pick the service twice. Initialization only happens on open/provider.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, provider]);
+
+  // A result belongs to the driver it was run for.
+  useEffect(() => {
+    setTestResult(null);
+    setTestError(null);
+  }, [selectedDriver]);
 
   const handlePickService = (service: ServiceCatalogEntry) => {
     setSelectedService(service);
@@ -284,6 +328,10 @@ export default function ProviderConfigModal({
   );
 
   const isCreate = mode === 'create';
+  const showProjects = isCreate && !hideProjects;
+  const { projects: tenantProjects, loading: projectsLoading, error: projectsError } =
+    useTenantProjects(opened && showProjects);
+  const effectiveDomain = (domain ?? selectedService?.domains[0] ?? null) as ProviderDomain | null;
   const validService = !isCreate || Boolean(selectedService);
   const validDriver = Boolean(selectedDriver);
   const validIdentity = Boolean(form.values.key && form.values.label);
@@ -300,6 +348,44 @@ export default function ProviderConfigModal({
       done: validConfig && schema !== null,
     },
   ];
+
+  const handleTest = async () => {
+    if (!selectedDriver || !effectiveDomain) {
+      setTestError(t('test.needService'));
+      return;
+    }
+    const buckets = partitionValues(schema, form.getValues());
+    setTesting(true);
+    setTestError(null);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/providers/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: effectiveDomain,
+          driver: selectedDriver,
+          credentials: buckets.credentials,
+          settings: buckets.settings,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || t('test.requestFailed'));
+      setTestResult(body as ProviderTestResult);
+    } catch (error) {
+      setTestError(error instanceof Error ? error.message : t('test.requestFailed'));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const finish = () => {
+    setAssignTarget(null);
+    onClose();
+    form.reset();
+    setSchema(null);
+    setTestResult(null);
+  };
 
   const handleSubmit = async () => {
     const validation = form.validate();
@@ -325,7 +411,8 @@ export default function ProviderConfigModal({
         ...(selectedService ? { serviceCatalogId: selectedService.id } : {}),
       };
 
-      await onSubmit({
+      const created = await onSubmit({
+        projectIds: [...projectIds],
         providerId: provider?._id as string | undefined,
         driver: selectedDriver,
         values: {
@@ -340,9 +427,14 @@ export default function ProviderConfigModal({
           metadata,
         },
       });
-      onClose();
-      form.reset();
-      setSchema(null);
+      if (isCreate && created && typeof created === 'object' && 'id' in created) {
+        onCreated?.({ id: created.id, name: created.name, domain: created.domain });
+        if (projectIds.size === 0 && !skipAssignStep) {
+          setAssignTarget({ ...created, key: created.key ?? values.key });
+          return;
+        }
+      }
+      finish();
     } catch (error) {
       console.error(error);
       notifications.show({
@@ -410,6 +502,15 @@ export default function ProviderConfigModal({
         />
       </SummaryGroup>
 
+      {showProjects ? (
+        <SummaryGroup title={t('projects.sectionTitle')}>
+          <SummaryKV
+            label={t('projects.sectionTitle')}
+            value={t('projects.selected', { count: projectIds.size })}
+          />
+        </SummaryGroup>
+      ) : null}
+
       <SummaryGroup title="Pre-flight">
         <Checklist items={checklist} />
       </SummaryGroup>
@@ -424,9 +525,15 @@ export default function ProviderConfigModal({
     validDriver &&
     validIdentity;
 
+  const configEnd = (isCreate ? 3 : 2) + (schema?.sections.length ?? 0);
+  const found = testResult ? foundCount(testResult.details) : undefined;
+  const foundIsDeployments = Boolean(testResult?.details?.deployments);
+  const state = testResult ? testState(testResult) : null;
+
   return (
+    <>
     <FormShell
-      open={opened}
+      open={opened && !assignTarget}
       onClose={onClose}
       icon={<IconPlug size={16} />}
       title={title}
@@ -591,6 +698,121 @@ export default function ProviderConfigModal({
           sectionStart={isCreate ? 3 : 2}
         />
       ) : null}
+
+      {isCreate ? (
+        <FormSection
+          number={configEnd}
+          title={t('test.sectionTitle')}
+          description={t('test.sectionDescription')}
+        >
+          <div className="ds-row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Button
+              variant="default"
+              size="sm"
+              leftSection={<IconPlayerPlay size={14} stroke={1.7} />}
+              loading={testing}
+              disabled={!selectedDriver || schemaLoading || Boolean(schemaError)}
+              onClick={() => void handleTest()}
+            >
+              {testing ? t('test.running') : t('test.button')}
+            </Button>
+            {testResult && state ? (
+              <div
+                className="ds-row"
+                style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
+                role="status"
+              >
+                <span
+                  className={`ds-badge ${
+                    state === 'ok' ? 'ds-badge-ok' : state === 'failed' ? 'ds-badge-err' : 'ds-badge-warn'
+                  }`}
+                >
+                  {state === 'ok' ? (
+                    <IconCheck size={11} stroke={2} />
+                  ) : state === 'failed' ? (
+                    <IconX size={11} stroke={2} />
+                  ) : null}{' '}
+                  {t(`test.${state}`)}
+                </span>
+                {state !== 'unsupported' ? (
+                  <span className="ds-faint" style={{ fontSize: 12 }}>
+                    {t('test.latency', { value: formatLatency(testResult.latencyMs) })}
+                  </span>
+                ) : null}
+                {found !== undefined ? (
+                  <span className="ds-faint" style={{ fontSize: 12 }}>
+                    {t(foundIsDeployments ? 'test.foundDeployments' : 'test.foundModels', {
+                      count: found,
+                    })}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {testResult?.message ? (
+            <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+              {testResult.message}
+            </div>
+          ) : null}
+          {testError ? (
+            <Alert
+              mt="sm"
+              icon={<IconAlertCircle size={16} />}
+              color="red"
+              title={t('test.requestFailed')}
+            >
+              {testError}
+            </Alert>
+          ) : null}
+        </FormSection>
+      ) : null}
+
+      {showProjects ? (
+        <FormSection
+          number={configEnd + 1}
+          title={t('projects.sectionTitle')}
+          description={t('projects.sectionDescription')}
+          done={projectIds.size > 0}
+        >
+          {projectsLoading ? (
+            <Center py="md">
+              <Loader size="sm" color="teal" />
+            </Center>
+          ) : projectsError ? (
+            <Alert
+              icon={<IconAlertCircle size={16} />}
+              color="red"
+              title={t('projects.loadFailed')}
+            >
+              {projectsError}
+            </Alert>
+          ) : (
+            <>
+              <ProjectPicker
+                projects={tenantProjects}
+                domain={effectiveDomain ?? 'model'}
+                selected={projectIds}
+                onChange={setProjectIds}
+              />
+              {projectIds.size === 0 ? (
+                <div className="ds-faint" style={{ fontSize: 12, marginTop: 8 }}>
+                  {t('projects.noneSelectedHint')}
+                </div>
+              ) : null}
+            </>
+          )}
+        </FormSection>
+      ) : null}
     </FormShell>
+    {assignTarget ? (
+      <ProviderAssignStep
+        opened
+        variant="created"
+        provider={assignTarget}
+        foundDeployments={testResult?.details?.deployments}
+        onClose={finish}
+      />
+    ) : null}
+    </>
   );
 }

@@ -16,12 +16,16 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import AccountTypeCards, { type AccountKind } from './AccountTypeCards';
 import { directoryApi, type InviteResult } from './directoryApi';
+import ExternalPersonShell from './ExternalPersonShell';
+import ProjectRolesField from './ProjectRolesField';
+import { toGrants, type ProjectSelection } from './projectGrantModel';
 import { FormError } from './errors';
 import { overrideCount, readDraft, toPermissions, type MatrixDraft } from './permissionModel';
 import ServicePermissionMatrix from './ServicePermissionMatrix';
 
-export type InviteMode = 'person' | 'service';
+export type InviteMode = AccountKind;
 
 interface InvitePersonShellProps {
   open: boolean;
@@ -68,7 +72,9 @@ export default function InvitePersonShell({
 }: InvitePersonShellProps) {
   const t = useTranslations('iamDirectory');
   const tCommon = useTranslations('common');
-  const service = mode === 'service';
+  const [kind, setKind] = useState<AccountKind>(mode);
+  const service = kind === 'service';
+  const [projectPicks, setProjectPicks] = useState<ProjectSelection>([]);
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -80,7 +86,11 @@ export default function InvitePersonShell({
   const [created, setCreated] = useState<InviteResult | null>(null);
 
   useEffect(() => {
-    if (open) return;
+    if (open) {
+      setKind(mode);
+      setProjectPicks(projectId ? [{ projectId, role: 'member' }] : []);
+      return;
+    }
     setName('');
     setEmail('');
     setRole('user');
@@ -89,7 +99,7 @@ export default function InvitePersonShell({
     setSaving(false);
     setError(null);
     setCreated(null);
-  }, [open]);
+  }, [open, mode, projectId]);
 
   const roles = useMemo(() => ROLE_ORDER.filter((r) => assignableRoles.includes(r)), [assignableRoles]);
   // Keep the pick inside what the signed-in person may hand out.
@@ -120,7 +130,8 @@ export default function InvitePersonShell({
         canLogin: !service,
         sendInvite: !service && sendInvite,
         servicePermissions: toPermissions(draft),
-        ...(projectId ? { projectId } : {}),
+        // An admin reaches every project already: nothing to assign.
+        ...(role !== 'admin' && projectPicks.length > 0 ? { projects: toGrants(projectPicks) } : {}),
       });
       setCreated(result);
       onCreated(result);
@@ -279,6 +290,10 @@ export default function InvitePersonShell({
     );
   }
 
+  if (kind === 'external') {
+    return <ExternalPersonShell open={open} kind={kind} onKind={setKind} onCreated={onCreated} onClose={onClose} />;
+  }
+
   // ── the form ─────────────────────────────────────────────────────────────
   const summary = (
     <>
@@ -332,7 +347,11 @@ export default function InvitePersonShell({
         </Alert>
       ) : null}
 
-      <FormSection number={1} title={t('invite.form.name')} description={t(service ? 'invite.sections.identityService' : 'invite.sections.identity')} done={validName && validEmail}>
+      <FormSection number={1} title={t('invite.kinds.title')} description={t('invite.kinds.hint')} done>
+        <AccountTypeCards value={kind} onChange={setKind} disabled={saving} />
+      </FormSection>
+
+      <FormSection number={2} title={t('invite.form.name')} description={t(service ? 'invite.sections.identityService' : 'invite.sections.identity')} done={validName && validEmail}>
         <FormRow cols={2}>
           <FormField label={t('invite.form.name')} required>
             <TextInput
@@ -355,7 +374,7 @@ export default function InvitePersonShell({
         </FormRow>
       </FormSection>
 
-      <FormSection number={2} title={t('invite.form.role')} description={t('invite.sections.role')} done={validRole}>
+      <FormSection number={3} title={t('invite.form.role')} description={t('invite.sections.role')} done={validRole}>
         {roles.length === 0 ? (
           <Text size="sm" c="dimmed">
             {t('invite.noRoles')}
@@ -379,8 +398,14 @@ export default function InvitePersonShell({
         )}
       </FormSection>
 
+      {role !== 'admin' ? (
+        <FormSection number={4} title={t('invite.projects.title')} description={t('invite.projects.hint')} done={projectPicks.length > 0} collapsible defaultOpen={projectPicks.length > 0}>
+          <ProjectRolesField value={projectPicks} onChange={setProjectPicks} disabled={saving} />
+        </FormSection>
+      ) : null}
+
       {!service ? (
-        <FormSection number={3} title={t('invite.sections.deliveryTitle')} description={t('invite.sections.delivery')} done>
+        <FormSection number={5} title={t('invite.sections.deliveryTitle')} description={t('invite.sections.delivery')} done>
           <ToggleList>
             <ToggleRow
               label={t('invite.form.sendInvite')}
@@ -393,7 +418,7 @@ export default function InvitePersonShell({
       ) : null}
 
       <FormSection
-        number={service ? 3 : 4}
+        number={service ? 5 : 6}
         title={t('invite.sections.accessTitle')}
         description={t('invite.sections.access')}
         done

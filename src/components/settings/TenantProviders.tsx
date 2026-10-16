@@ -8,8 +8,15 @@ import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { AssignProviderShell } from '@/components/providers/ProviderAssignStep';
+import {
+  effectiveProjectIds,
+  isProviderUnassigned,
+} from '@/components/providers/providerAccessModel';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconEdit,
+  IconFolderPlus,
   IconEye,
   IconPlug,
   IconPlus,
@@ -56,6 +63,8 @@ function statusVariant(status: string) {
 
 export default function TenantProviders() {
   const router = useRouter();
+  const t = useTranslations('providerAccess.list');
+  const [assignTarget, setAssignTarget] = useState<Provider | null>(null);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
@@ -208,15 +217,23 @@ export default function TenantProviders() {
     {
       key: 'status',
       label: 'Status',
-      render: (p) => <StatusBadge status={statusVariant(p.status)} label={p.status} />,
+      render: (p) => (
+        <span className="ds-row" style={{ gap: 6, flexWrap: 'wrap' }}>
+          <StatusBadge status={statusVariant(p.status)} label={p.status} />
+          {isProviderUnassigned(p) ? (
+            <span title={t('unassignedTip')}>
+              <StatusBadge status="warn" label={t('unassigned')} />
+            </span>
+          ) : null}
+        </span>
+      ),
     },
     {
       key: 'projects',
       label: 'Projects',
       align: 'right',
       render: (p) => {
-        const legacy = p.projectId ? 1 : 0;
-        const count = (p.projectIds?.length ?? 0) + legacy;
+        const count = effectiveProjectIds(p).length;
         return (
           <span
             className="ds-mono"
@@ -342,6 +359,12 @@ export default function TenantProviders() {
             icon: <IconEdit size={14} />,
             onClick: () => void openEditModal(p._id),
           },
+          {
+            id: 'assign',
+            label: t('assign'),
+            icon: <IconFolderPlus size={14} />,
+            onClick: () => setAssignTarget(p),
+          },
         ]}
       />
 
@@ -352,6 +375,7 @@ export default function TenantProviders() {
           setSelectedDomain(null);
           setDrivers([]);
           setEditingProvider(null);
+          void fetchProviders();
         }}
         mode={editingProvider ? 'edit' : 'create'}
         provider={editingProvider ?? undefined}
@@ -416,6 +440,7 @@ export default function TenantProviders() {
               credentials: options.values.credentials,
               settings: options.values.settings,
               metadata: options.values.metadata,
+              projectIds: options.projectIds,
             };
 
             const res = await fetch('/api/providers?scope=tenant', {
@@ -434,6 +459,14 @@ export default function TenantProviders() {
               message: 'Provider created',
               color: 'green',
             });
+            await fetchProviders();
+            // The modal closes itself (after the assign step, when one is needed).
+            return {
+              id: String(body?.provider?._id),
+              name: String(body?.provider?.label ?? options.values.base.label),
+              domain: String(body?.provider?.type ?? selectedDomain),
+              key: String(body?.provider?.key ?? options.values.base.key),
+            };
           }
 
           setConfigOpen(false);
@@ -443,6 +476,23 @@ export default function TenantProviders() {
           await fetchProviders();
         }}
       />
+
+      {assignTarget ? (
+        <AssignProviderShell
+          opened
+          provider={{
+            id: assignTarget._id,
+            name: assignTarget.label,
+            key: assignTarget.key,
+            domain: assignTarget.type,
+          }}
+          initialProjectIds={effectiveProjectIds(assignTarget)}
+          onClose={() => {
+            setAssignTarget(null);
+            void fetchProviders();
+          }}
+        />
+      ) : null}
     </>
   );
 }

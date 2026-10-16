@@ -14,6 +14,7 @@ import type {
   IGroupProject,
   IProject,
   IProviderRecord,
+  IUser,
   IUserProject,
 } from '@/lib/database';
 import type { DirectoryProjectRule } from '@/enterprise/external-auth';
@@ -46,6 +47,11 @@ export interface TenantProjectData {
   providers: Pick<IProviderRecord, 'type' | 'projectId' | 'projectIds'>[];
   agents: Pick<IAgent, 'projectId'>[];
   tokens: Pick<IApiToken, 'projectId'>[];
+  /**
+   * The workspace's own people (no external accounts), for the legacy `IUser.projectIds` memberships:
+   * GET /projects/:id/members lists those people as members, so the counters must count them too.
+   */
+  users?: Pick<IUser, '_id' | 'role' | 'projectIds'>[];
 }
 
 /** Ids of the projects a provider record is assigned to (legacy single `projectId` + `projectIds`). */
@@ -92,6 +98,22 @@ export function buildProjectStats(
     people.get(id)!.add(String(row.userId));
   }
 
+  // Legacy memberships (a project id on the account, no IUserProject row), counted as the members list shows
+  // them: not for owners/admins (their access is implicit) and not twice for someone who also has a row.
+  if (data.users && data.users.length > 0) {
+    const directPairs = new Set(data.userProjects.map((row) => `${row.projectId}\u0000${row.userId}`));
+    for (const user of data.users) {
+      if (user.role === 'owner' || user.role === 'admin') continue;
+      const userId = String(user._id);
+      for (const projectId of new Set((user.projectIds ?? []).map(String))) {
+        const entry = stats.get(projectId);
+        if (!entry || directPairs.has(`${projectId}\u0000${userId}`)) continue;
+        entry.members += 1;
+        people.get(projectId)!.add(userId);
+      }
+    }
+  }
+
   const membersByGroup = new Map<string, string[]>();
   for (const row of data.groupMembers) {
     const key = String(row.groupId);
@@ -136,15 +158,16 @@ export async function loadTenantProjectData(
   db: DatabaseProvider,
   tenantId: string,
 ): Promise<TenantProjectData> {
-  const [userProjects, groupProjects, groupMembers, providers, agents, tokens] = await Promise.all([
+  const [userProjects, groupProjects, groupMembers, providers, agents, tokens, users] = await Promise.all([
     db.listUserProjectsByTenant(tenantId),
     db.listGroupProjectsByTenant(tenantId),
     db.listGroupMembersByTenant(tenantId),
     db.listProviders(tenantId),
     db.listAgents(),
     db.listTenantApiTokens(tenantId),
+    db.listUsers(),
   ]);
-  return { userProjects, groupProjects, groupMembers, providers, agents, tokens };
+  return { userProjects, groupProjects, groupMembers, providers, agents, tokens, users };
 }
 
 export async function loadProjectStats(

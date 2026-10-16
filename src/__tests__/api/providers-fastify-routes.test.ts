@@ -17,6 +17,7 @@ const hoisted = vi.hoisted(() => ({
   resolveTenantProjectIds: vi.fn(),
   testProviderConnection: vi.fn(),
   getProviderUsage: vi.fn(),
+  updateProviderConfig: vi.fn(),
 }));
 
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
@@ -40,6 +41,7 @@ vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
     loadProviderRuntimeData: hoisted.loadProviderRuntimeData,
     recordProviderTest: hoisted.recordProviderTest,
     resolveTenantProjectIds: hoisted.resolveTenantProjectIds,
+    updateProviderConfig: hoisted.updateProviderConfig,
     listProviderConfigs: vi.fn(),
   };
 });
@@ -235,6 +237,37 @@ describe('GET /api/providers/:id/usage', () => {
     hoisted.session.userRole = 'user';
     expect((await app.inject({ method: 'GET', url: '/api/providers/prov-1/usage' })).statusCode).toBe(403);
     expect(hoisted.getProviderUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /api/providers/:id?scope=tenant - projectIds', () => {
+  const patch = (payload: unknown) =>
+    app.inject({ method: 'PATCH', url: '/api/providers/prov-1?scope=tenant', payload: payload as never });
+
+  it('applies a validated, deduped assignment', async () => {
+    hoisted.updateProviderConfig.mockResolvedValue({ _id: 'prov-1', projectIds: ['p1', 'p2'] });
+    const res = await patch({ projectIds: ['p1', 'p2', 'p1'] });
+    expect(res.statusCode).toBe(200);
+    expect(hoisted.resolveTenantProjectIds).toHaveBeenCalledWith('tenant_acme', 'tenant-1', ['p1', 'p2', 'p1']);
+    expect(hoisted.updateProviderConfig).toHaveBeenCalledWith(
+      'tenant_acme',
+      'prov-1',
+      expect.objectContaining({ projectIds: ['p1', 'p2'] }),
+    );
+  });
+
+  it('refuses a project that is not of the tenant and changes nothing', async () => {
+    const res = await patch({ projectIds: ['p1', 'ghost'] });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Unknown project(s): ghost');
+    expect(hoisted.updateProviderConfig).not.toHaveBeenCalled();
+  });
+
+  it('leaves the assignment alone when projectIds is absent', async () => {
+    hoisted.updateProviderConfig.mockResolvedValue({ _id: 'prov-1' });
+    const res = await patch({ label: 'Renamed' });
+    expect(res.statusCode).toBe(200);
+    expect(hoisted.resolveTenantProjectIds).not.toHaveBeenCalled();
   });
 });
 

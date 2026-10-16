@@ -190,6 +190,19 @@ export async function createProviderConfig(
   return sanitize(record);
 }
 
+/** Order-insensitive deep equality for JSON-shaped values (settings, credentials). */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a as Record<string, unknown>);
+  const keysB = Object.keys(b as Record<string, unknown>);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(
+    (key) => sameJson((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+  );
+}
+
 export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
@@ -199,13 +212,26 @@ export async function updateProviderConfig(
   const db = await withTenantDb(tenantDbName);
   const updates: Partial<IProviderRecord> = {};
 
+  // The stored "last test" describes the connection as it was tested: once the connection settings or
+  // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
+  let connectionChanged = false;
+
   if (payload.settings !== undefined || payload.credentials !== undefined) {
     const target = await db.findProviderById(providerId);
     await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
+    if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
+      connectionChanged = true;
+    }
   }
 
   if (payload.projectIds !== undefined) {
     updates.projectIds = payload.projectIds;
+    // `projectIds` is the whole assignment: a legacy single `projectId` is folded into it (callers send the
+    // effective set), otherwise a project dropped from the list would stay assigned through the old field.
+    const target = await db.findProviderById(providerId);
+    if (target?.projectId) {
+      updates.projectId = null as unknown as undefined;
+    }
   }
 
   if (payload.label !== undefined) {
@@ -274,7 +300,14 @@ export async function updateProviderConfig(
       }
       merged[field] = value;
     }
+    if (!existing?.credentialsEnc || !sameJson(merged, current)) {
+      connectionChanged = true;
+    }
     updates.credentialsEnc = encryptObject(merged);
+  }
+
+  if (connectionChanged) {
+    updates.lastTest = null;
   }
 
   if (payload.updatedBy) {
