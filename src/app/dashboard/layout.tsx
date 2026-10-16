@@ -48,7 +48,15 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     | 'owner'
     | 'admin'
     | 'project_admin'
-    | 'user';
+    | 'user'
+    | 'portal_user';
+
+  // A portal user signs in only to use portals: the dashboard is not theirs. `/p` shows the
+  // portals open to them (or goes straight to the only one). Every service is also 'none' for
+  // this role, so a direct API call is refused regardless of this redirect.
+  if (role === 'portal_user') {
+    redirect('/p');
+  }
 
   // If a non-admin user has no assigned projects, do not render the dashboard at all.
   // A project counts however it was given: directly, in the legacy list, or through a group

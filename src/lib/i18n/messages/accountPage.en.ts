@@ -15,6 +15,7 @@ export const accountPageEn = {
     admin: 'Admin',
     project_admin: 'Project admin',
     user: 'User',
+    portal_user: 'Portal user',
   },
   providers: {
     local: 'Local account',

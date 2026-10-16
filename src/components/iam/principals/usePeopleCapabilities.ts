@@ -15,7 +15,7 @@ import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { isAbortError } from './client';
 import { DirectoryApiError, directoryApi, NO_CAPABILITIES, type DirectoryCapabilities } from './directoryApi';
 
-export const ALL_ASSIGNABLE_ROLES = ['admin', 'project_admin', 'user'] as const;
+export const ALL_ASSIGNABLE_ROLES = ['admin', 'project_admin', 'user', 'portal_user'] as const;
 
 export interface PeopleCapabilities extends DirectoryCapabilities {
   /** True once the server has answered (before that, the role-based guess is shown). */

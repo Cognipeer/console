@@ -60,7 +60,7 @@ export type PermissionService =
  * project_admin is kept for backward compatibility with existing records.
  * New code should use IUserProject.role for project-level role assignment.
  */
-export type UserRole = 'owner' | 'admin' | 'project_admin' | 'user';
+export type UserRole = 'owner' | 'admin' | 'project_admin' | 'user' | 'portal_user';
 
 /** Project-scoped role stored on IUserProject. */
 export type ProjectRole = 'project_admin' | 'member';

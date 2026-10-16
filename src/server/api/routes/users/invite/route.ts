@@ -50,9 +50,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Role validation
-    if (!['user', 'admin', 'project_admin'].includes(role)) {
+    if (!['user', 'admin', 'project_admin', 'portal_user'].includes(role)) {
       return NextResponse.json(
-        { error: 'Invalid role. Must be user, project_admin, or admin' },
+        { error: 'Invalid role. Must be user, project_admin, portal_user, or admin' },
         { status: 400 },
       );
     }
@@ -131,7 +131,7 @@ export async function POST(request: NextRequest) {
       password: hashedPassword,
       name,
       tenantId,
-      role: role as 'user' | 'admin' | 'project_admin',
+      role: role as 'user' | 'admin' | 'project_admin' | 'portal_user',
       projectIds: initialProjectIds,
       licenseId: tenant.licenseType,
       features: [], // Will inherit from tenant

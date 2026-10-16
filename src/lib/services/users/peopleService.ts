@@ -56,7 +56,7 @@ export async function findUserByIdSafe(
 export interface PersonPatch {
   name?: string;
   email?: string;
-  role?: 'admin' | 'project_admin' | 'user';
+  role?: 'admin' | 'project_admin' | 'user' | 'portal_user';
 }
 
 export interface PersonUpdateContext {
@@ -81,6 +81,8 @@ export async function updatePerson(
   if (patch.name !== undefined) data.name = patch.name;
   if (patch.email !== undefined) data.email = patch.email;
   if (patch.role !== undefined) data.role = patch.role;
+  // A portal user holds no service permission: whatever overrides the account carried as another role go.
+  if (patch.role === 'portal_user') data.servicePermissions = {};
   if (Object.keys(data).length === 0) return before;
 
   const updated = await runWithTenantScope(context.tenantDbName, (db) => db.updateUser(userId, data));

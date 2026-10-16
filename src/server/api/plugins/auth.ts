@@ -178,7 +178,7 @@ export async function issueSessionForAuthenticatedUser(
 
     let activeProjectId = request.cookies.active_project_id;
 
-    if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
+    if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin' || authenticatedUser.role === 'portal_user') {
       const allowed = await collectAccessibleProjectIds(
         db,
         userIdStr,
