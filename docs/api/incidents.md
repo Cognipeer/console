@@ -27,7 +27,7 @@ GET /api/alerts/incidents
 | `updatedAfter` | string | No | ISO 8601: only incidents changed after this time (for polling, below) |
 | `sort` | string | No | `-firedAt` (default, newest first), `firedAt`, `-updatedAt`, `updatedAt`, `-severity` (critical first) or `severity` (info first). Within a severity, newest first |
 | `limit` | number | No | Page size (default: 50, max: 100) |
-| `skip` | number | No | Pagination offset (default: 0) |
+| `skip` | number | No | Pagination offset (default: 0, at most 100,000; a larger value counts as 100,000) |
 
 A value outside the allowed list, or an `updatedAfter` that is not a date, answers `400` with `code: "invalid_filter"`.
 
@@ -212,7 +212,7 @@ GET /api/alerts/incidents/:incidentId
 PATCH /api/alerts/incidents/:incidentId
 ```
 
-Change the status, the assignee, the snooze, or several of them in one call. At least one of `status`, `assignedTo` and `snoozedUntil` is required. The assignee and the snooze time are checked before anything is written, and the changes are then applied in that order.
+Change the status, the assignee, the snooze, or several of them in one call. At least one of `status`, `assignedTo` and `snoozedUntil` is required. The whole change is checked before anything is written: the status move, the assignee, and the snooze against the status the incident will have afterwards. If any part fails, nothing changes; a `snoozedUntil` sent together with `resolved` or `closed`, for example, answers `409` (`invalid_transition`). The changes are then applied in that order.
 
 ### Request
 
@@ -428,6 +428,8 @@ POST /api/alerts/incidents/:incidentId/notes
 
 Returns the updated incident with the new note appended.
 
+An incident takes at most 100 notes from people; past that the answer is `409` with `code: "too_many_notes"`. The notes the console adds itself (an automatic resolve, a rule change) are always added. Each person can add 30 notes per minute; beyond that the answer is `429` (`rate_limited`) with a `Retry-After` header.
+
 ## Severity Levels
 
 Severity comes from the rule. A rule set to `info`, `warning` or `critical` gives every incident that severity. A rule with severity `auto` (the default) derives it when the alert fires:
@@ -449,5 +451,6 @@ Errors are `{ "error": "<message>" }`; the ones that carry a `code` also have `c
 | 401 | Not authenticated |
 | 403 | The caller lacks the `alerts` permission |
 | 404 | Incident not found |
-| 409 | The status change, reopening or snooze is not allowed from the current status (`invalid_transition`) |
+| 409 | The status change, reopening or snooze is not allowed from the current status (`invalid_transition`), or the incident already has 100 notes from people (`too_many_notes`) |
+| 429 | Too many notes from one person (`rate_limited`, with a `Retry-After` header) |
 | 500 | Internal server error |

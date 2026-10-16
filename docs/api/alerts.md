@@ -538,7 +538,7 @@ GET /api/alerts/history
 | `status` | string | No | `fired`, `acknowledged` or `resolved` |
 | `ruleId` | string | No | Only the events of this rule |
 | `limit` | number | No | Default `50`, at most `100` |
-| `skip` | number | No | Pagination offset (default `0`) |
+| `skip` | number | No | Pagination offset (default `0`, at most 100,000; a larger value counts as 100,000) |
 
 ```json
 {
