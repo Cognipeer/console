@@ -56,6 +56,8 @@ Every service that opts into the queue follows the same shape:
 
 This pattern is in place for: `agentConsumer`, `mcpConsumer`, `browserConsumer`.
 
+An MCP call routed to another node travels as a small job: the tenant and server ids, the tool name and arguments, and the caller's runtime headers when the server passes any on. The node that runs the job loads the server record itself and runs that record. A node on this release also reads the previous job shape, which carried the whole server record. A node on the previous release cannot read the new shape, so during a rolling upgrade update the nodes that run assigned MCP servers before the nodes that receive the calls.
+
 ## Instance assignments
 
 The assignable entity types today are:

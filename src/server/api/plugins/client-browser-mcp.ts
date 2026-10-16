@@ -10,9 +10,6 @@
  *   POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=…  (JSON-RPC)
  */
 
-import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -21,20 +18,19 @@ import {
   createBrowserSession,
   resolveBrowser,
 } from '@/lib/services/browser';
-import {
-  createSseSession,
-  encodeSseEndpointEvent,
-  getSseSession,
-  removeSseSession,
-  sendSseResponse,
-} from '@/lib/services/mcp/sseSessionManager';
+import { getSseSession, sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import { describeMcpTools } from '@/lib/services/mcp/toolAnnotations';
 import { toolInputJsonSchema } from '@/lib/services/browser/toolSchema';
 import {
   getApiTokenContextForRequest,
-  readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import {
+  lookupMessageSession,
+  readJsonRpcRequest,
+  sendSessionNotFound,
+  startMcpSseResponse,
+} from '../mcpTransport';
 
 const logger = createLogger('api:client-browser-mcp');
 
@@ -46,7 +42,10 @@ const SERVER_INFO = {
 };
 
 // In-memory map: MCP sessionId -> backing browser session key.
-// One MCP session owns exactly one browser session for its lifetime.
+// One MCP session owns exactly one browser session for its lifetime. Entries
+// are only ever created for an MCP session that is open and belongs to the
+// caller (see the binding check in the message handler), and are removed —
+// closing the browser session — when that stream ends.
 const mcpToBrowserSession = new Map<string, string>();
 
 /**
@@ -113,6 +112,25 @@ const BROWSER_TOOL_LIST = describeMcpTools(
   }),
 );
 
+/**
+ * Close the browser session an MCP session backed, if it had opened one.
+ * Best effort: the stream is already gone, so there is no caller to tell.
+ */
+function closeBackingBrowserSession(
+  scope: { tenantDbName: string; tenantId: string; projectId?: string },
+  mcpSessionId: string,
+  browserKey: string,
+): void {
+  const sessionKey = mcpToBrowserSession.get(mcpSessionId);
+  if (!sessionKey) return;
+  mcpToBrowserSession.delete(mcpSessionId);
+  logger.info('Browser MCP session closed', { browserKey, session: mcpSessionId.slice(0, 8) });
+  void closeBrowserSession(scope, sessionKey).catch((err) => logger.warn(
+    'Failed to close backing browser session on SSE close',
+    { error: err instanceof Error ? err.message : String(err) },
+  ));
+}
+
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
 }
@@ -130,29 +148,31 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { browserKey } = request.params as { browserKey: string };
-      const query = (request.query ?? {}) as { sessionId?: string };
-      const mcpSessionId = query.sessionId;
-      const sseSession = mcpSessionId ? getSseSession(mcpSessionId) : null;
+      // A message that names an SSE session is delivered into that stream —
+      // only when this token opened it, for this browser.
+      const lookup = lookupMessageSession(request, {
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        serverKey: `browser:${browserKey}`,
+        principal: tokenSsePrincipal(ctx.tokenRecord._id?.toString()),
+      });
+      if (lookup.kind === 'unknown') return sendSessionNotFound(reply);
+      const sseSession = lookup.kind === 'session' ? lookup.session : null;
+      const mcpSessionId = lookup.kind === 'session' ? lookup.sessionId : undefined;
 
-      let body: {
-        id?: string | number | null;
-        jsonrpc?: string;
-        method?: string;
-        params?: Record<string, unknown>;
-      };
-      try {
-        body = readJsonBody(request);
-      } catch {
-        const errorPayload = jsonRpcError(null, -32700, 'Parse error');
+      const parsed = readJsonRpcRequest(request);
+      if (!parsed.ok) {
+        const errorPayload = jsonRpcError(null, parsed.code, parsed.message);
         if (sseSession && mcpSessionId) {
           sendSseResponse(mcpSessionId, errorPayload);
           return reply.code(202).send();
         }
         return reply.code(400).send(errorPayload);
       }
+      const body = parsed.body;
 
       const { id = null, method } = body;
-      if (!method) {
+      if (typeof method !== 'string' || method === '') {
         const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
         if (sseSession && mcpSessionId) {
           sendSseResponse(mcpSessionId, errorPayload);
@@ -211,7 +231,7 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
         }
         const descriptor = BROWSER_TOOL_DESCRIPTORS.find((t) => t.name === toolName);
         if (!descriptor) {
-          return respond(jsonRpcError(id, -32601, `Tool not found: ${toolName}`));
+          return respond(jsonRpcError(id, -32601, `Tool not found: ${toolName.slice(0, 100)}`));
         }
         if (!mcpSessionId) {
           return respond(jsonRpcError(id, -32600, 'Missing sessionId; open SSE first'));
@@ -230,13 +250,26 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
               },
             );
             sessionKey = created.sessionKey;
+            if (!getSseSession(mcpSessionId)) {
+              // The stream ended while the browser session was opening: nothing
+              // would ever close it.
+              void closeBrowserSession(
+                { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+                sessionKey,
+              ).catch((closeError) => logger.warn('Failed to close orphaned browser session', {
+                error: closeError instanceof Error ? closeError.message : String(closeError),
+              }));
+              return sendSessionNotFound(reply);
+            }
             mcpToBrowserSession.set(mcpSessionId, sessionKey);
             logger.info('Browser MCP session backed by new browser session', {
-              browserKey, mcpSessionId, sessionKey,
+              browserKey, session: mcpSessionId.slice(0, 8), sessionKey,
             });
           } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to create browser session';
-            logger.error('Browser MCP session create failed', { browserKey, mcpSessionId, error: message });
+            logger.error('Browser MCP session create failed', {
+              browserKey, session: mcpSessionId.slice(0, 8), error: message,
+            });
             return respond(jsonRpcOk(id, {
               content: [{ text: message, type: 'text' }],
               isError: true,
@@ -253,7 +286,7 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
         const tool = tools.find((t) => t.name === toolName);
         if (!tool) {
-          return respond(jsonRpcError(id, -32601, `Tool runtime missing: ${toolName}`));
+          return respond(jsonRpcError(id, -32601, `Tool runtime missing: ${toolName.slice(0, 100)}`));
         }
 
         try {
@@ -272,7 +305,7 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Tool execution failed';
           logger.error('Browser MCP tool call failed', {
-            browserKey, mcpSessionId, tool: toolName, error: message,
+            browserKey, session: mcpSessionId.slice(0, 8), tool: toolName, error: message,
           });
           return respond(jsonRpcOk(id, {
             content: [{ text: message, type: 'text' }],
@@ -281,14 +314,16 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
-      return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+      return respond(jsonRpcError(id, -32601, `Method not found: ${method.slice(0, 100)}`));
     } catch (error) {
       logger.error('Browser MCP message handler error', { error });
       return reply.code(500).send(jsonRpcError(null, -32603, 'Internal error'));
     }
   }));
 
-  app.get('/client/v1/browser/:browserKey/mcp/sse', withClientApiRequestContext(async (request, reply) => {
+  // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
+  // session) it would never read.
+  app.get('/client/v1/browser/:browserKey/mcp/sse', { exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { browserKey } = request.params as { browserKey: string };
@@ -303,62 +338,28 @@ export const clientBrowserMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'Browser is disabled' });
       }
 
-      const mcpSessionId = randomUUID();
-      const forwardedProto = request.headers['x-forwarded-proto'];
-      const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
-        ? forwardedProto
-        : 'http';
-      const host = typeof request.headers.host === 'string' && request.headers.host.length > 0
-        ? request.headers.host
-        : 'localhost';
-      const messageEndpoint = `${protocol}://${host}/api/client/v1/browser/${browserKey}/mcp/message?sessionId=${mcpSessionId}`;
-
-      const stream = new ReadableStream<Uint8Array>({
-        cancel() {
-          logger.info('Browser MCP SSE session closed', { browserKey, mcpSessionId });
-          // Best-effort: close any backing browser session
-          const sessionKey = mcpToBrowserSession.get(mcpSessionId);
-          if (sessionKey) {
-            mcpToBrowserSession.delete(mcpSessionId);
-            void closeBrowserSession(
-              { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-              sessionKey,
-            ).catch((err) => logger.warn('Failed to close backing browser session on SSE cancel', {
-              error: err instanceof Error ? err.message : String(err),
-            }));
-          }
-          removeSseSession(mcpSessionId);
+      const tokenId = ctx.tokenRecord._id?.toString();
+      return startMcpSseResponse(request, reply, {
+        messagePath: `/api/client/v1/browser/${encodeURIComponent(browserKey)}/mcp/message`,
+        session: {
+          principal: tokenSsePrincipal(tokenId),
+          projectId: ctx.projectId,
+          serverKey: `browser:${browserKey}`,
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          tokenId,
+          // Runs however the stream ends: close the browser session it backs.
+          onClose: (mcpSessionId) => closeBackingBrowserSession(
+            { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+            mcpSessionId,
+            browserKey,
+          ),
         },
-        start(controller) {
-          createSseSession(mcpSessionId, {
-            controller,
-            projectId: ctx.projectId,
-            serverKey: `browser:${browserKey}`,
-            tenantDbName: ctx.tenantDbName,
-            tenantId: ctx.tenantId,
-            tokenId: ctx.tokenRecord._id?.toString(),
-          });
-          controller.enqueue(encodeSseEndpointEvent(messageEndpoint));
-        },
+        logFields: { browserKey, tenantId: ctx.tenantId },
       });
-
-      logger.info('Browser MCP SSE session opened', {
-        browserKey, mcpSessionId, tenantId: ctx.tenantId,
-      });
-
-      reply.raw.setHeader('Content-Type', 'text/event-stream');
-      reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-      reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Mcp-Session-Id', mcpSessionId);
-
-      return reply.send(
-        Readable.fromWeb(stream as unknown as NodeReadableStream<Uint8Array>),
-      );
     } catch (error) {
       logger.error('Browser MCP SSE error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return reply.code(500).send({ error: 'Internal error' });
     }
   }));
 };

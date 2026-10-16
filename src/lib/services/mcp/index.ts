@@ -32,7 +32,9 @@ export {
   DEFAULT_MCP_EXPOSURE,
 } from './mcpService';
 
-export type { McpServerMonitorEntry } from './mcpService';
+export type { McpServerMonitorEntry, McpRequestClientInfo } from './mcpService';
+
+export { McpToolInputError, McpUpstreamError, isMcpToolInputError, isMcpUpstreamError } from './errors';
 
 export {
   defaultAnnotationsForSource,

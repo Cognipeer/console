@@ -10,6 +10,7 @@
 
 import { AgentTracingService } from '@/lib/services/agentTracing';
 import { describeMcpTools } from '@/lib/services/mcp/toolAnnotations';
+import type { PermissionService } from '@/lib/security/rbac';
 
 export interface ConsoleToolContext {
   tenantDbName: string;
@@ -19,6 +20,12 @@ export interface ConsoleToolContext {
 export interface ConsoleToolDefinition {
   name: string;
   description: string;
+  /**
+   * The console service whose data the tool reads. A caller whose token is not
+   * allowed that service does not see the tool and cannot call it, whatever the
+   * `mcp` permission the token holds.
+   */
+  service: PermissionService;
   inputSchema: Record<string, unknown>;
   handler: (
     args: Record<string, unknown>,
@@ -42,6 +49,7 @@ const optionalPositiveInt = (
 export const CONSOLE_MCP_TOOLS: ConsoleToolDefinition[] = [
   {
     name: 'list_recent_sessions',
+    service: 'tracing',
     description:
       'List recent agent tracing sessions for the current project. '
       + 'Supports optional filters by status, agent name, and a free-text '
@@ -92,6 +100,7 @@ export const CONSOLE_MCP_TOOLS: ConsoleToolDefinition[] = [
   },
   {
     name: 'get_session',
+    service: 'tracing',
     description:
       'Fetch a single agent tracing session by sessionId. Returns the '
       + 'session summary (without per-event payloads) for the current project.',
@@ -128,6 +137,7 @@ export const CONSOLE_MCP_TOOLS: ConsoleToolDefinition[] = [
   },
   {
     name: 'get_dashboard_overview',
+    service: 'tracing',
     description:
       'Return aggregate agent observability metrics for the current '
       + 'project (totals, per-status counts, top agents, daily trends). '
@@ -175,9 +185,23 @@ export function getConsoleTool(name: string): ConsoleToolDefinition | undefined 
   return TOOL_INDEX.get(name);
 }
 
-export function listConsoleToolDescriptors() {
+/** The console services the built-in tools read; a caller's access to each decides which tools it sees. */
+export function consoleToolServices(): PermissionService[] {
+  return [...new Set(CONSOLE_MCP_TOOLS.map((tool) => tool.service))];
+}
+
+/**
+ * The descriptors a caller may see. `isServiceAllowed` answers, for one console
+ * service, whether the caller may use it; without it every tool is listed.
+ */
+export function listConsoleToolDescriptors(
+  isServiceAllowed?: (service: PermissionService) => boolean,
+) {
+  const tools = isServiceAllowed
+    ? CONSOLE_MCP_TOOLS.filter((tool) => isServiceAllowed(tool.service))
+    : CONSOLE_MCP_TOOLS;
   // Every built-in tool is reporting-only over console-local data.
-  return describeMcpTools(CONSOLE_MCP_TOOLS, {
+  return describeMcpTools(tools, {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,

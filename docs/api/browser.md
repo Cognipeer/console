@@ -176,13 +176,21 @@ GET /api/client/v1/browser/:browserKey/mcp/sse
 The stream returns:
 
 - `X-Mcp-Session-Id` response header
-- an `endpoint` SSE event containing the browser-scoped message URL
+- an `endpoint` SSE event containing the browser-scoped message path (a path, not an absolute URL: clients resolve it against the URL the stream was opened on)
+
+A stream belongs to the token that opened it. The browser session it drives is opened by the first
+`tools/call` and closed when the stream ends (the client hangs up, or the gateway closes an idle
+stream — 30 minutes without a message by default) or when `browser_close` runs. A gateway at its
+limit of open streams answers `429` or `503` with a `Retry-After` header.
 
 ### Send JSON-RPC Message
 
 ```http
 POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=<id>
 ```
+
+`sessionId` must be one issued to the same token for the same browser; any other value is answered
+`404` (JSON-RPC error `-32001`, `Session not found`). `tools/call` requires it.
 
 Supported methods:
 

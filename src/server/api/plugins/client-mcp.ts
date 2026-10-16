@@ -1,6 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type {
   IMcpAuthConfig,
@@ -12,12 +9,15 @@ import type {
   McpAuthType,
 } from '@/lib/database';
 import type { SpecFormatHint } from '@/lib/services/specImport';
+import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import { maskSecretValues } from '@/lib/services/logRedaction';
 import {
   createMcpServer,
   deleteMcpServer,
   executeMcpTool,
   getMcpServerByKey,
+  isMcpToolInputError,
   listEnabledMcpTools,
   listMcpToolDescriptors,
   logMcpRequest,
@@ -29,13 +29,7 @@ import {
   updateMcpServer,
 } from '@/lib/services/mcp';
 import type { McpAuditContext, UpdateMcpServerInput } from '@/lib/services/mcp';
-import {
-  createSseSession,
-  encodeSseEndpointEvent,
-  getSseSession,
-  removeSseSession,
-  sendSseResponse,
-} from '@/lib/services/mcp/sseSessionManager';
+import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import {
   buildRuntimeContextFromRequest,
   describeRuntimeAuth,
@@ -52,6 +46,13 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import {
+  lookupMessageSession,
+  readJsonObjectBody,
+  readJsonRpcRequest,
+  sendSessionNotFound,
+  startMcpSseResponse,
+} from '../mcpTransport';
 
 const logger = createLogger('api:client-mcp');
 
@@ -242,7 +243,11 @@ async function runToolCall(
     sessionId?: string;
     runtimeContext?: AgentRuntimeContext;
   },
-): Promise<{ ok: true; result: unknown; latencyMs: number } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; result: unknown; latencyMs: number }
+  /** `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing. */
+  | { ok: false; error: string; inputError: boolean }
+> {
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
   const runtimeAuth = describeRuntimeAuth(log.runtimeContext, runtimeHeaders);
@@ -298,7 +303,13 @@ async function runToolCall(
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
     }, secretValues);
-    return { ok: false, error: errorMessage };
+    return {
+      ok: false,
+      // The executors mask what they throw; this is the same scrub once more on
+      // the way out, for errors that did not come through them.
+      error: maskSecretValues(errorMessage, secretValues, { maxChars: getConfig().mcp.errorMessageMaxChars }),
+      inputError: isMcpToolInputError(error),
+    };
   }
 }
 
@@ -315,29 +326,31 @@ async function runToolCall(
 async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyReply) {
   const ctx = await getApiTokenContextForRequest(request);
   const { serverKey } = request.params as { serverKey: string };
-  const query = (request.query ?? {}) as { sessionId?: string };
-  const sessionId = query.sessionId;
-  const session = sessionId ? getSseSession(sessionId) : null;
+  // A message that names an SSE session is delivered into that stream — only
+  // when this token opened it, on this server.
+  const lookup = lookupMessageSession(request, {
+    tenantId: ctx.tenantId,
+    projectId: ctx.projectId,
+    serverKey,
+    principal: tokenSsePrincipal(ctx.tokenRecord._id?.toString()),
+  });
+  if (lookup.kind === 'unknown') return sendSessionNotFound(reply);
+  const session = lookup.kind === 'session' ? lookup.session : null;
+  const sessionId = lookup.kind === 'session' ? lookup.sessionId : undefined;
 
-  let body: {
-    id?: string | number | null;
-    jsonrpc?: string;
-    method?: string;
-    params?: Record<string, unknown>;
-  };
-  try {
-    body = readJsonBody(request);
-  } catch {
-    const errorPayload = jsonRpcError(null, -32700, 'Parse error');
+  const parsed = readJsonRpcRequest(request);
+  if (!parsed.ok) {
+    const errorPayload = jsonRpcError(null, parsed.code, parsed.message);
     if (session && sessionId) {
       sendSseResponse(sessionId, errorPayload);
       return reply.code(202).send();
     }
     return reply.code(400).send(errorPayload);
   }
+  const body = parsed.body;
 
   const { id = null, method } = body;
-  if (!method) {
+  if (typeof method !== 'string' || method === '') {
     const errorPayload = jsonRpcError(id, -32600, 'Invalid Request: method is required');
     if (session && sessionId) {
       sendSseResponse(sessionId, errorPayload);
@@ -448,6 +461,10 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         isError: false,
       }));
     }
+    // An unknown tool or a bad argument is a malformed call, not a failed one.
+    if (outcome.inputError) {
+      return respond(jsonRpcError(id, -32602, outcome.error));
+    }
     return respond(jsonRpcOk(id, {
       content: [
         {
@@ -459,7 +476,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     }));
   }
 
-  return respond(jsonRpcError(id, -32601, `Method not found: ${method}`));
+  return respond(jsonRpcError(id, -32601, `Method not found: ${method.slice(0, 100)}`));
 }
 
 export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
@@ -481,7 +498,10 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'HTTP access is disabled for this MCP server' });
       }
 
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
+      if (!body) {
+        return reply.code(400).send({ error: 'A JSON object body is required' });
+      }
       if (typeof body.tool !== 'string' || body.tool.trim() === '') {
         return reply.code(400).send({ error: '"tool" is required' });
       }
@@ -507,7 +527,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       if (!outcome.ok) {
-        return reply.code(502).send({ error: outcome.error });
+        return reply.code(outcome.inputError ? 400 : 502).send({ error: outcome.error });
       }
 
       return reply.code(200).send({
@@ -570,7 +590,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/client/v1/mcp/:serverKey/sse', withClientApiRequestContext(async (request, reply) => {
+  // `exposeHeadRoute: false`: a HEAD request must not open a stream (and so a
+  // session) it would never read.
+  app.get('/client/v1/mcp/:serverKey/sse', { exposeHeadRoute: false }, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { serverKey } = request.params as { serverKey: string };
@@ -586,54 +608,22 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'SSE access is disabled for this MCP server' });
       }
 
-      const sessionId = randomUUID();
-      const forwardedProto = request.headers['x-forwarded-proto'];
-      const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
-        ? forwardedProto
-        : 'http';
-      const host = typeof request.headers.host === 'string' && request.headers.host.length > 0
-        ? request.headers.host
-        : 'localhost';
-      const messageEndpoint = `${protocol}://${host}/api/client/v1/mcp/${serverKey}/message?sessionId=${sessionId}`;
-
-      const stream = new ReadableStream<Uint8Array>({
-        cancel() {
-          logger.info('Client MCP SSE session closed', { serverKey, sessionId });
-          removeSseSession(sessionId);
+      const tokenId = ctx.tokenRecord._id?.toString();
+      return startMcpSseResponse(request, reply, {
+        messagePath: `/api/client/v1/mcp/${encodeURIComponent(serverKey)}/message`,
+        session: {
+          principal: tokenSsePrincipal(tokenId),
+          projectId: ctx.projectId,
+          serverKey,
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          tokenId,
         },
-        start(controller) {
-          createSseSession(sessionId, {
-            controller,
-            projectId: ctx.projectId,
-            serverKey,
-            tenantDbName: ctx.tenantDbName,
-            tenantId: ctx.tenantId,
-            tokenId: ctx.tokenRecord._id?.toString(),
-          });
-
-          controller.enqueue(encodeSseEndpointEvent(messageEndpoint));
-        },
+        logFields: { serverKey, tenantId: ctx.tenantId },
       });
-
-      logger.info('Client MCP SSE session opened', {
-        serverKey,
-        sessionId,
-        tenantId: ctx.tenantId,
-      });
-
-      reply.raw.setHeader('Content-Type', 'text/event-stream');
-      reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-      reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Mcp-Session-Id', sessionId);
-
-      return reply.send(
-        Readable.fromWeb(stream as unknown as NodeReadableStream<Uint8Array>),
-      );
     } catch (error) {
       logger.error('Client MCP SSE error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal error',
-      });
+      return reply.code(500).send({ error: 'Internal error' });
     }
   }));
 

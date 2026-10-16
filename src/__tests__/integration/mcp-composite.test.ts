@@ -29,6 +29,7 @@ import {
   listMcpRequestLogs,
 } from '@/lib/services/mcp';
 import { executeMcpToolLocal } from '@/lib/services/mcp/mcpService';
+import { McpToolInputError } from '@/lib/services/mcp/errors';
 
 const TENANT_DB_NAME = 'mcp_composite_tenant';
 const USER_ID = 'user-1';
@@ -265,8 +266,19 @@ describe('composite execution — real routed call, member-scoped log, self-refe
     })).rejects.toThrow(/itself/i);
   });
 
-  it('rejects an unknown tool name (no origin mapping)', async () => {
+  it('rejects a tool name the composite does not advertise', async () => {
     await expect(executeMcpToolLocal(composite, 'not_a_real_tool', {}))
+      .rejects.toThrow(McpToolInputError);
+    await expect(executeMcpToolLocal(composite, 'not_a_real_tool', {}))
+      .rejects.toThrow(/unknown tool/i);
+  });
+
+  it('still reports a snapshot entry that has no member mapping', async () => {
+    const orphaned = {
+      ...composite,
+      tools: [{ name: 'orphan_tool', description: 'no origin', inputSchema: { type: 'object', properties: {} } }],
+    };
+    await expect(executeMcpToolLocal(orphaned, 'orphan_tool', {}))
       .rejects.toThrow(/no member mapping/i);
   });
 });

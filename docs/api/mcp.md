@@ -71,6 +71,10 @@ Execute a specific tool on the MCP server.
 | `tool` | string | Yes | Name of the tool to execute |
 | `arguments` | object | No | Tool arguments (default: `{}`) |
 
+`tool` must be a tool the server lists — a name from `tools/list`, or the tool's original name if it has been renamed. Any other name is rejected, and so is a tool the server has disabled. After a server's upstream adds tools, refresh the server's tools so they are listed.
+
+For servers built from an OpenAPI spec, the arguments are matched against the operation. Only parameters the operation declares are sent upstream; other argument names are ignored. Path parameters are required, must be non-empty strings or numbers, and cannot be relative path segments (`.` or `..`, also when percent-encoded) or contain control characters. The request always goes to the configured upstream base URL, under the operation's path.
+
 #### Response
 
 ```json
@@ -98,7 +102,7 @@ The gateway implements the MCP protocol specification (version `2024-11-05`) ove
 GET /api/client/v1/mcp/:serverKey/sse
 ```
 
-Opens a Server-Sent Events stream. The server sends an `endpoint` event containing the URL the client should POST JSON-RPC messages to.
+Opens a Server-Sent Events stream. The server sends an `endpoint` event containing the path the client should POST JSON-RPC messages to.
 
 #### Response Headers
 
@@ -112,8 +116,17 @@ X-Mcp-Session-Id: <session-id>
 
 ```
 event: endpoint
-data: https://gateway.example.com/api/client/v1/mcp/tavily-search/message?sessionId=abc-123
+data: /api/client/v1/mcp/tavily-search/message?sessionId=abc-123
 ```
+
+`data` is always a path, never an absolute URL. MCP clients resolve it against the URL they opened the
+stream on, so it is right whatever hostname they used to reach the gateway; it does not depend on
+`APP_URL` or on the request's `Host` and `X-Forwarded-*` headers.
+
+By default the gateway keeps a stream open with a `: keepalive` comment every 25 seconds, closes one that has
+received no message for 30 minutes, and refuses a new one — `429` or `503`, with a `Retry-After`
+header and a JSON body — when its limits on open streams are reached (see
+[configuration](../guide/configuration.md#mcp-gateway)).
 
 ### Send JSON-RPC Message
 
@@ -122,6 +135,11 @@ POST /api/client/v1/mcp/:serverKey/message?sessionId=<id>
 ```
 
 Send MCP JSON-RPC messages. Responses are pushed through the SSE stream when a session is active, or returned directly in the HTTP body for stateless mode.
+
+A `sessionId` must be one the gateway issued to the same API token for the same server. Any other
+value — an unknown id, one whose stream has ended, one another token opened — is answered `404` with
+JSON-RPC error `-32001` (`Session not found`). The body must be a JSON object; anything else is
+answered `400` with `-32600` (or `-32700` when it is not JSON at all).
 
 #### Supported Methods
 
@@ -251,6 +269,10 @@ the tools REST endpoints and agents that use this server.
 }
 ```
 
+A call that fails upstream is answered with a result whose `isError` is `true` and whose text says
+what failed. A call the gateway rejects as malformed — a tool the server does not list, a missing
+or invalid argument — is answered with JSON-RPC error `-32602` instead.
+
 ### Error Codes
 
 | Code | Meaning |
@@ -259,7 +281,7 @@ the tools REST endpoints and agents that use this server.
 | -32600 | Invalid request (missing method) |
 | -32601 | Method not found |
 | -32602 | Invalid params |
-| -32001 | MCP server not found |
+| -32001 | MCP server not found, or (message endpoint) session not found |
 | -32002 | MCP server disabled |
 | -32603 | Internal error |
 
@@ -278,9 +300,10 @@ curl -X POST https://gateway.example.com/api/client/v1/mcp/tavily-search/message
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing `tool` field or invalid JSON-RPC |
+| 400 | Missing `tool` field, a body that is not a JSON object, a tool the server does not list, invalid arguments, or invalid JSON-RPC |
 | 401 | Invalid API token |
 | 403 | MCP server is disabled |
-| 404 | MCP server not found |
+| 404 | MCP server not found, or unknown session |
+| 429 / 503 | Too many open SSE streams (`GET …/sse`); retry after the `Retry-After` interval |
 | 500 | Internal server error |
 | 502 | Upstream tool execution failed |

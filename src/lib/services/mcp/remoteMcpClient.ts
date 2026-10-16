@@ -9,6 +9,7 @@
  */
 
 import { safeFetch } from '@/lib/security/outboundFetch';
+import { McpUpstreamError } from './errors';
 import type { IMcpAuthConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
 
 const JSONRPC_VERSION = '2.0';
@@ -43,11 +44,12 @@ async function rpcCall(
   method: string,
   params?: Record<string, unknown>,
 ): Promise<unknown> {
+  const authHeaders = buildUpstreamAuthHeaders(target.auth);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     // Streamable HTTP servers may respond with JSON or an SSE stream.
     Accept: 'application/json, text/event-stream',
-    ...buildUpstreamAuthHeaders(target.auth),
+    ...authHeaders,
     ...(target.extraHeaders ?? {}),
   };
 
@@ -60,11 +62,15 @@ async function rpcCall(
       method,
       ...(params !== undefined ? { params } : {}),
     }),
+  }, {
+    // Credentials injected for this upstream do not follow a redirect to
+    // another origin.
+    sensitiveHeaders: [...Object.keys(authHeaders), ...Object.keys(target.extraHeaders ?? {})],
   });
 
   if (!response.ok) {
     const errText = await response.text().catch(() => 'Unknown error');
-    throw new Error(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`);
+    throw new McpUpstreamError(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`, response.status);
   }
 
   const contentType = response.headers.get('content-type') ?? '';
