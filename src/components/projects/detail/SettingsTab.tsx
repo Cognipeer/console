@@ -158,6 +158,8 @@ export default function SettingsTab({ project, canManage, backHref, onSaved }: S
               color="red"
               variant="light"
               size="xs"
+              // The page theme paints every light button in the accent colour; a destructive one keeps red.
+              style={{ background: 'var(--mantine-color-red-light)', color: 'var(--ds-err-text)' }}
               leftSection={<IconTrash size={13} stroke={1.7} />}
               onClick={() => {
                 setTyped('');
