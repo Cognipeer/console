@@ -71,7 +71,13 @@ export default function DeliveryTimeline({ incidentId, refreshKey }: Props) {
             <div key={group.key}>
               <div className="ds-row-between" style={{ marginBottom: 6, gap: 8 }}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>
-                  {group.name ?? kindLabel(group.kind)} <span className="ds-faint" style={{ fontWeight: 400 }}>· {kindLabel(group.kind)}</span>
+                  {group.name ?? kindLabel(group.kind)}
+                  {group.name ? (
+                    <>
+                      {' '}
+                      <span className="ds-faint" style={{ fontWeight: 400 }}>· {kindLabel(group.kind)}</span>
+                    </>
+                  ) : null}
                 </span>
                 <span className="ds-faint" style={{ fontSize: 12 }}>
                   {t('ux.deliveries.summary', { sent: group.sent, failed: group.failed, suppressed: group.suppressed })}

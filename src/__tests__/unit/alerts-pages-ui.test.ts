@@ -33,6 +33,7 @@ vi.mock('next/navigation', () => ({
 
 import AlertsPage from '@/app/dashboard/alerts/page';
 import IncidentDetailPage from '@/app/dashboard/alerts/incidents/[incidentId]/page';
+import DeliveryTimeline from '@/components/alerts/incident/DeliveryTimeline';
 import { ALERT_METRIC_CATALOG } from '@/lib/services/alerts/metricCatalog';
 import type { AlertMeta, AlertRuleDto, IncidentDto } from '@/components/alerts/alertTypes';
 
@@ -267,6 +268,28 @@ function detailApi(incident: IncidentDto = INCIDENT) {
     ['POST', '/api/alerts/incidents/i1/notes', () => ({ incident: { ...incident, notes: [...incident.notes, { userId: 'u2', userName: 'Bob', content: 'fixed', createdAt: '2026-10-15T10:20:00.000Z' }] } })],
   ]);
 }
+
+describe('DeliveryTimeline', () => {
+  it('names a shared channel with its kind, and an unnamed one by its kind alone', async () => {
+    api = installApiMock([
+      [
+        'GET',
+        '/api/alerts/incidents/i1/deliveries',
+        () => ({
+          deliveries: [
+            { _id: 'd1', channelId: 'ch_a', channelKind: 'email', channelName: null, trigger: 'fire', status: 'failed', error: 'SMTP is down', attemptAt: '2026-10-15T10:00:00.000Z' },
+            { _id: 'd2', channelId: 'lib1', channelKind: 'slack', channelName: 'On-call Slack', trigger: 'fire', status: 'sent', attemptAt: '2026-10-15T10:00:05.000Z' },
+          ],
+        }),
+      ],
+    ]);
+    mounted = await mount(createElement(DeliveryTimeline, { incidentId: 'i1', refreshKey: 'x' }));
+    await settle(100);
+    expect(text()).toContain('On-call Slack · Slack');
+    expect(text()).toContain('SMTP is down');
+    expect(text()).not.toContain('Email · Email');
+  });
+});
 
 describe('IncidentDetailPage', () => {
   it('shows the detection facts, the context and the activity timeline', async () => {
