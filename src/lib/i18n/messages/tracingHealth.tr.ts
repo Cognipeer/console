@@ -18,7 +18,8 @@ export const tracingHealthTr: typeof tracingHealthEn = {
     abandoned: 'Yarıda kaldı',
     partial: 'Kısmi',
     cancelled: 'İptal edildi',
-    paused: 'Duraklatıldı',
+    paused: 'Bir kişiyi bekliyor',
+    expired: 'Süresi doldu',
     unknown: 'Bilinmiyor',
   },
   health: {

@@ -22,7 +22,8 @@ export const tracingHealthEn = {
     abandoned: 'Abandoned',
     partial: 'Partial',
     cancelled: 'Cancelled',
-    paused: 'Paused',
+    paused: 'Waiting on a person',
+    expired: 'Expired',
     unknown: 'Unknown',
   },
   health: {
