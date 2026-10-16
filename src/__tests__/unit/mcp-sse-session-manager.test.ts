@@ -289,6 +289,8 @@ describe('cleanup', () => {
 describe('idle timeout', () => {
   it('closes a session that received no message within the timeout', async () => {
     setTestConfig({ MCP_SSE_IDLE_TIMEOUT_MS: '1000', MCP_SSE_KEEPALIVE_MS: '0' });
+    // frozen clock: a slow runner cannot move "now" between opening the session and sweeping it
+    vi.useFakeTimers();
     const s = open();
     await s.next();
     sweepSseSessions(Date.now() + 999);
