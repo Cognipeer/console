@@ -101,7 +101,7 @@ Leaving `entity` out, or sending `null`, on a per-entity metric means `{ "entity
 | `pagerduty` | `routingKey` | The 32-character Events API v2 integration key |
 | `library` | `libraryId` | A channel of the workspace's [channel library](#channel-library), referenced by its `id` |
 
-A `library` channel carries no destination of its own: the library entry is read when a notification is sent, so changing the entry changes every rule that references it. A reference whose entry no longer exists is a failed delivery with the error `channel_missing`; the rule's other channels are still notified.
+A `library` channel carries no destination of its own: the library entry is read when a notification is sent, so changing the entry changes every rule that references it. A reference whose entry no longer exists is a failed delivery with the reason and error `channel_missing`; the rule's other channels are still notified.
 
 Webhook, Slack and Teams URLs are at most 2,048 characters, a webhook `secret` at most 512, and a PagerDuty `routingKey` is exactly 32 letters or digits. Webhook, Slack and Teams URLs must use `https`, must not contain credentials and must resolve to a public address; this is checked when the rule is saved and again on every delivery.
 

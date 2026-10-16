@@ -379,9 +379,10 @@ Every notification attempt for the incident, one row per channel and attempt, ne
 |-------|-------------|
 | `trigger` | `fire`, `resolve` or `renotify` (a reminder) |
 | `status` | `sent`, `failed` or `suppressed` |
-| `reason` | Why a `suppressed` row was not sent: `rule_muted` or `incident_snoozed`. `null` on the other rows |
-| `error` | The delivery error of a `failed` row, at most 500 characters. A library channel that no longer exists fails with `channel_missing` |
-| `channelName` | The name of a [library channel](./alerts#channel-library), else `null` |
+| `reason` | Why a `suppressed` row was not sent (`rule_muted` or `incident_snoozed`), or the cause of a `failed` row that has one: `channel_missing` when the library channel no longer exists. Otherwise `null` |
+| `error` | The delivery error of a `failed` row, at most 500 characters (`channel_missing` for a library channel that no longer exists) |
+| `channelKind` | `email`, `webhook`, `slack`, `teams` or `pagerduty`; `library` for a library channel that no longer exists |
+| `channelName` | The name of the [library channel](./alerts#channel-library) the row went through, else `null` (also when that channel no longer exists) |
 
 ## Similar Incidents
 
