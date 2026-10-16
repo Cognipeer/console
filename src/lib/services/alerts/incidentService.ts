@@ -437,6 +437,31 @@ export class IncidentService {
     return db.updateIncident(incidentId, { notes }, scope.projectId);
   }
 
+  /**
+   * The assignee as it is stored: a user id of this tenant, or null (unassign).
+   * Anything else is a 400, so an assignment never points at a stranger.
+   */
+  static async resolveAssignee(tenantDbName: string, assignedTo: string | null): Promise<string | null> {
+    const value = typeof assignedTo === 'string' && assignedTo.trim() ? assignedTo.trim() : null;
+    if (!value) return null;
+    const db = await getTenantDatabase(tenantDbName);
+    const user = await db.findUserById(value).catch(() => null);
+    if (!user) throw new AlertApiError(400, 'invalid_assignee', 'assignedTo is not a user of this tenant');
+    return value;
+  }
+
+  /** A snooze must end in the future and at most 30 days ahead. */
+  static assertSnoozeWindow(until: Date): void {
+    const ms = until instanceof Date ? until.getTime() : NaN;
+    const nowMs = Date.now();
+    if (!Number.isFinite(ms) || ms <= nowMs) {
+      throw new AlertApiError(400, 'invalid_snooze', 'snooze must end in the future');
+    }
+    if (ms > nowMs + MAX_SNOOZE_MS) {
+      throw new AlertApiError(400, 'invalid_snooze', 'snooze can be at most 30 days');
+    }
+  }
+
   /** Assign (or unassign with null / empty) an incident. */
   static async assign(
     tenantDbName: string,
@@ -500,13 +525,7 @@ export class IncidentService {
     if (until === null) {
       return db.updateIncident(incidentId, { snoozedUntil: null, snoozedBy: null }, scope.projectId);
     }
-    const nowMs = Date.now();
-    if (!(until.getTime() > nowMs)) {
-      throw new AlertApiError(400, 'invalid_snooze', 'snooze must end in the future');
-    }
-    if (until.getTime() > nowMs + MAX_SNOOZE_MS) {
-      throw new AlertApiError(400, 'invalid_snooze', 'snooze can be at most 30 days');
-    }
+    IncidentService.assertSnoozeWindow(until);
     if (!SNOOZABLE_STATUSES.includes(incident.status)) {
       throw new AlertApiError(409, 'invalid_transition', `Cannot snooze an incident that is "${incident.status}"`);
     }
@@ -532,24 +551,13 @@ export class IncidentService {
     if (unique.length === 0 || unique.length > MAX_BULK_INCIDENTS) {
       throw new AlertApiError(400, 'invalid_ids', `ids must contain 1 to ${MAX_BULK_INCIDENTS} incident ids`);
     }
-    if (action === 'snooze') {
-      const ms = params.until instanceof Date ? params.until.getTime() : NaN;
-      if (!Number.isFinite(ms) || ms <= Date.now() || ms > Date.now() + MAX_SNOOZE_MS) {
-        throw new AlertApiError(400, 'invalid_snooze', 'until must be a time in the future, at most 30 days ahead');
-      }
-    }
+    if (action === 'snooze') IncidentService.assertSnoozeWindow(params.until as Date);
     let assignee: string | null = null;
     if (action === 'assign') {
       if (params.assignedTo === undefined) {
         throw new AlertApiError(400, 'invalid_assignee', 'assignedTo (a user id, "me" or null) is required');
       }
-      assignee = typeof params.assignedTo === 'string' && params.assignedTo.trim() ? params.assignedTo.trim() : null;
-      if (assignee) {
-        // The id must be a user of this tenant (tenant DB), not any string the client sent.
-        const db = await getTenantDatabase(tenantDbName);
-        const user = await db.findUserById(assignee).catch(() => null);
-        if (!user) throw new AlertApiError(400, 'invalid_assignee', 'assignedTo is not a user of this tenant');
-      }
+      assignee = await IncidentService.resolveAssignee(tenantDbName, params.assignedTo);
     }
 
     let updated = 0;

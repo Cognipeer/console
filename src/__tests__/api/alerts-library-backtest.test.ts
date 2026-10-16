@@ -248,12 +248,17 @@ describe('channel library routes', () => {
     expect(byLibrary.status).toBe(403);
     expect(byLibrary.body.code).toBe('forbidden');
     expect((await call('POST', '/alerts/channels/test', { ruleId: rule.body.rule._id, channelId })).status).toBe(403);
+    const inline = await call('POST', '/alerts/channels/test', { channel: { type: 'library', libraryId: entry.id } });
+    expect(inline.status).toBe(403);
+    expect(inline.body.code).toBe('forbidden');
     expect(delivered).toHaveLength(0);
 
+    resetRateLimitStore(); // one tester, six sends: stay under the per-user test limit
     currentUserRole = 'admin';
     expect((await call('POST', '/alerts/channels/test', { libraryChannelId: entry.id })).status).toBe(200);
     expect((await call('POST', '/alerts/channels/test', { ruleId: rule.body.rule._id, channelId })).status).toBe(200);
-    expect(delivered).toHaveLength(2);
+    expect((await call('POST', '/alerts/channels/test', { channel: { type: 'library', libraryId: entry.id } })).status).toBe(200);
+    expect(delivered).toHaveLength(3);
   });
 
   it('tests a library channel through its resolved credentials', async () => {
@@ -503,8 +508,37 @@ describe('POST /alerts/entities/links', () => {
     });
   });
 
+  it('resolves in the incident\'s project for an owner or admin, and 404s another project for a member', async () => {
+    const db = await getTenantDatabase(TENANT_DB_NAME);
+    const other = await db.createProject({ tenantId: TENANT_ID, key: 'links-other', name: 'Links Other', createdBy: 'x' });
+    const otherId = String(other._id);
+    const tool = await db.createTool({
+      tenantId: TENANT_ID, projectId: otherId, key: 'other-tool', name: 'Other tool', type: 'openapi', status: 'active',
+      actions: [], createdBy: 'x',
+    });
+    const entities = [{ type: 'tool', key: 'other-tool' }];
+
+    expect((await call('POST', '/alerts/entities/links', { entities })).body.links).toEqual({ 'tool:other-tool': null });
+    const inOther = await call('POST', '/alerts/entities/links', { projectId: otherId, entities });
+    expect(inOther.status).toBe(200);
+    expect(inOther.body.links).toEqual({ 'tool:other-tool': `/dashboard/agents/tools/${String(tool._id)}` });
+    // the active project named explicitly is the same as leaving it out
+    expect((await call('POST', '/alerts/entities/links', { projectId: PROJECT_A, entities })).body.links).toEqual({ 'tool:other-tool': null });
+
+    currentUserRole = 'admin';
+    expect((await call('POST', '/alerts/entities/links', { projectId: otherId, entities })).status).toBe(200);
+    expect((await call('POST', '/alerts/entities/links', { projectId: 'no-such-project', entities })).status).toBe(404);
+
+    currentUserRole = 'member';
+    const member = await call('POST', '/alerts/entities/links', { projectId: otherId, entities });
+    expect(member.status).toBe(404);
+    expect(JSON.stringify(member.body)).not.toContain(String(tool._id));
+    expect((await call('POST', '/alerts/entities/links', { projectId: PROJECT_A, entities })).status).toBe(200);
+  });
+
   it('rejects malformed requests', async () => {
     expect((await call('POST', '/alerts/entities/links', {})).status).toBe(400);
+    expect((await call('POST', '/alerts/entities/links', { projectId: 5, entities: [] })).status).toBe(400);
     expect((await call('POST', '/alerts/entities/links', { entities: [{ type: 'robot', key: 'x' }] })).status).toBe(400);
     expect((await call('POST', '/alerts/entities/links', { entities: [{ type: 'kb' }] })).status).toBe(400);
     expect((await call('POST', '/alerts/entities/links', { entities: Array.from({ length: 101 }, (_, i) => ({ type: 'kb', key: `k${i}` })) })).status).toBe(400);

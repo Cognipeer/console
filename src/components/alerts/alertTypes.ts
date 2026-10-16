@@ -203,6 +203,8 @@ export interface IncidentContextDto {
 
 export interface IncidentDto {
   _id: string;
+  /** The project the incident belongs to (an owner or admin may open one outside the active project). */
+  projectId?: string;
   ruleName: string;
   ruleId: string;
   alertEventId: string;

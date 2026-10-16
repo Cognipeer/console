@@ -63,9 +63,13 @@ const BACKTEST_PROJECT_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds
 type ProjectScoped = Awaited<ReturnType<typeof requireProjectContextForRequest>>;
 
 /** The channel library is tenant-wide, so only owners and admins change it. */
-function canManageLibrary(context: ProjectScoped): boolean {
+function isOwnerOrAdmin(context: ProjectScoped): boolean {
   const role = context.user?.role;
   return role === 'owner' || role === 'admin';
+}
+
+function canManageLibrary(context: ProjectScoped): boolean {
+  return isOwnerOrAdmin(context);
 }
 
 function libraryForbidden(reply: FastifyReply) {
@@ -82,8 +86,7 @@ function libraryForbidden(reply: FastifyReply) {
  * the tenant-wide reach the project resolver already grants them.
  */
 function recordScope(context: ProjectScoped): { projectId?: string } {
-  const role = context.user?.role;
-  if (role === 'owner' || role === 'admin') return {};
+  if (isOwnerOrAdmin(context)) return {};
   return { projectId: context.projectId };
 }
 
@@ -286,12 +289,25 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Lookup only (writes nothing): a reader may batch-resolve the pages of the entities on screen.
   app.post('/alerts/entities/links', { config: { ...authz.service('alerts', 'read'), skipAuditOnSuccess: true } }, guarded('Resolve entity links', async (request, reply) => {
-    const { projectId, session } = await requireProjectContextForRequest(request);
+    const context = await requireProjectContextForRequest(request);
+    const { session } = context;
     const body = readObjectBody(request);
     if (!Array.isArray(body.entities) || body.entities.length > MAX_ENTITY_LINKS) {
       throw new AlertApiError(400, 'invalid_entities', `entities must be an array of at most ${MAX_ENTITY_LINKS} items`);
     }
+    if (body.projectId !== undefined && (typeof body.projectId !== 'string' || !body.projectId)) {
+      throw new AlertApiError(400, 'invalid_project', 'projectId must be a project id');
+    }
     const db = await getTenantDatabase(session.tenantDbName);
+    // An owner or admin may open an incident of another project; its entities live in that project.
+    let projectId = context.projectId;
+    if (typeof body.projectId === 'string' && body.projectId !== projectId) {
+      const project = isOwnerOrAdmin(context) ? await db.findProjectById(body.projectId).catch(() => null) : null;
+      if (!project || String(project.tenantId) !== String(session.tenantId)) {
+        throw new AlertApiError(404, 'project_not_found', 'Project not found');
+      }
+      projectId = body.projectId;
+    }
     const links: Record<string, string | null> = {};
     for (const raw of body.entities as Array<{ type?: unknown; key?: unknown }>) {
       const type = raw?.type;
@@ -690,6 +706,14 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
     const snoozeUntil = hasSnooze && body.snoozedUntil !== null
       ? dateValue(body.snoozedUntil, 'snoozedUntil', 'invalid_snooze')
       : null;
+    // Validate every field before writing any, so a bad one never leaves a half-applied change.
+    if (snoozeUntil) IncidentService.assertSnoozeWindow(snoozeUntil);
+    const assignee = hasAssignee
+      ? await IncidentService.resolveAssignee(
+        session.tenantDbName,
+        body.assignedTo === 'me' ? session.userId : (body.assignedTo as string | null),
+      )
+      : null;
 
     if (hasStatus) {
       const updated = await IncidentService.updateStatus(
@@ -703,7 +727,6 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       incident = updated;
     }
     if (hasAssignee) {
-      const assignee = body.assignedTo === 'me' ? session.userId : (body.assignedTo as string | null);
       const updated = await IncidentService.assign(session.tenantDbName, incidentId, assignee, scope);
       if (!updated) return reply.code(404).send({ error: 'Incident not found' });
       incident = updated;

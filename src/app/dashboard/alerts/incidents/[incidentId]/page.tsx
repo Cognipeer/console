@@ -107,7 +107,7 @@ export default function IncidentDetailPage() {
     for (const entry of incident?.context?.correlations ?? []) list.push({ type: entry.entityType, key: entry.entityKey });
     return list;
   }, [incident]);
-  const entityLinks = useEntityLinks(linkEntities);
+  const entityLinks = useEntityLinks(linkEntities, incident?.projectId);
 
   const controllerRef = useRef<AbortController | null>(null);
   const load = useCallback(

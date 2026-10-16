@@ -629,8 +629,8 @@ describe('GET /alerts/incidents', () => {
     const detail = await call('GET', `/alerts/incidents/${id}`);
     expect(detail.body.incident).toMatchObject({ acknowledgedByName: 'Tester', assignedToName: 'Ada Lovelace', resolvedByName: 'Tester' });
 
-    // 'system' (automatic resolution) and unknown ids have no name.
-    await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: 'user-gone' });
+    // 'system' (automatic resolution) and unknown ids (a user removed later) have no name.
+    await db.updateIncident(id, { assignedTo: 'user-gone' });
     const unknown = await call('GET', `/alerts/incidents/${id}`);
     expect(unknown.body.incident).toMatchObject({ assignedTo: 'user-gone', assignedToName: null });
     const fresh = await seedIncident(PROJECT_A, { ruleId: 'rule-names-2' });
@@ -703,13 +703,31 @@ describe('/alerts/incidents/:incidentId', () => {
   });
 
   it('PATCH assigns to a user id, to "me", and clears with null', async () => {
+    const db = await getTenantDatabase(TENANT_DB_NAME);
+    const teammate = await db.createUser({
+      tenantId: TENANT_ID, email: 'grace@example.com', name: 'Grace Hopper', password: '$2b$10$x',
+      role: 'user', licenseId: 'FREE', features: [],
+    });
     const id = await seedIncident(PROJECT_A);
     expect((await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: 'me' })).body.incident.assignedTo).toBe(USER_ID);
-    expect((await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: 'user-9' })).body.incident.assignedTo).toBe('user-9');
+    expect((await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: String(teammate._id) })).body.incident.assignedTo).toBe(String(teammate._id));
     const cleared = await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: null });
     expect(cleared.status).toBe(200);
     expect(cleared.body.incident.assignedTo ?? null).toBeNull();
     expect((await call('PATCH', `/alerts/incidents/${id}`, { assignedTo: 5 })).status).toBe(400);
+  });
+
+  it('PATCH refuses an assignee who is not a user of the tenant, before changing anything', async () => {
+    const id = await seedIncident(PROJECT_A);
+    const stranger = await call('PATCH', `/alerts/incidents/${id}`, { status: 'acknowledged', assignedTo: 'user-9' });
+    expect(stranger.status).toBe(400);
+    expect(stranger.body.code).toBe('invalid_assignee');
+    const pastSnooze = await call('PATCH', `/alerts/incidents/${id}`, { status: 'acknowledged', snoozedUntil: '2000-01-01T00:00:00Z' });
+    expect(pastSnooze.status).toBe(400);
+    expect(pastSnooze.body.code).toBe('invalid_snooze');
+    const after = (await call('GET', `/alerts/incidents/${id}`)).body.incident;
+    expect(after.status).toBe('open');
+    expect(after.assignedTo ?? null).toBeNull();
   });
 
   it('PATCH 404s an unknown incident and leaves another project untouched for a member', async () => {

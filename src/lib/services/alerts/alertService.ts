@@ -1033,6 +1033,8 @@ export class AlertService {
 
     if (body.channel !== undefined) {
       const input = normalizeChannelInput(body.channel, 0, null);
+      // a library reference sends on the shared entry, same as testing it by id
+      if (input.type === 'library' && !scope.canTestLibrary) throw libraryTestForbidden();
       if (input.type === 'email' && (input.recipients?.length ?? 0) > MAX_TEST_EMAIL_RECIPIENTS) {
         // An unsaved channel is mailed as typed; a long list would make the test a mass mailer.
         throw bad('too_many_recipients', `Send the test to at most ${MAX_TEST_EMAIL_RECIPIENTS} addresses (save the channel to test a longer list)`);
