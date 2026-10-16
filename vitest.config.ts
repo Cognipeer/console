@@ -11,6 +11,12 @@ export default defineConfig({
     setupFiles: ['src/__tests__/setup.ts'],
     include: ['src/__tests__/**/*.test.ts'],
     pool: 'forks',
+    // Many tests import a slice of the server (or build the Fastify app) inside
+    // the test body. Cold, that import alone can take more than the 5 s default
+    // on the CI runners, so a passing test failed on time. A hung test now
+    // takes 30 s to fail instead of 5 s.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     server: {
       deps: {
         // to-markdown's ESM build does `import { fromBuffer } from 'file-type'`
