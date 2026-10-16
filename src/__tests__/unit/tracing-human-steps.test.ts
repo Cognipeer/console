@@ -7,6 +7,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+const metrics = vi.hoisted(() => ({ recordAgentSessionOutcome: vi.fn<(params: unknown) => Promise<null>>(async () => null) }));
+vi.mock('@/lib/services/tracing/traceEntityMetrics', () => metrics);
+
 import { buildSessionModel, flattenTree, humanOutcomeText, stepCategory, type TraceEventInput } from '@/components/tracing/sessionModel';
 import { humanStep } from '@/lib/shared/tracingSections';
 import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/services/tracingContinuation';
@@ -149,7 +152,7 @@ describe('closePausedTrace', () => {
 
   function fakeDb(status: string) {
     return {
-      findAgentTracingSessionById: vi.fn().mockResolvedValue({ sessionId: 's1', status, startedAt: new Date(at(0)), totalEvents: 3, eventCounts: { ai_call: 1, tool_approval: 1 } }),
+      findAgentTracingSessionById: vi.fn().mockResolvedValue({ sessionId: 's1', agentName: 'mailer', status, startedAt: new Date(at(0)), totalEvents: 3, eventCounts: { ai_call: 1, tool_approval: 1 }, totalInputTokens: 10, totalOutputTokens: 5 }),
       createAgentTracingEvent: vi.fn().mockResolvedValue(undefined),
       updateAgentTracingSession: vi.fn().mockResolvedValue(undefined),
     };
@@ -171,6 +174,25 @@ describe('closePausedTrace', () => {
       totalEvents: 4,
       eventCounts: { ai_call: 1, tool_approval: 2 },
     });
+  });
+
+  it('books the run once it is closed, as it will never resume', async () => {
+    metrics.recordAgentSessionOutcome.mockClear();
+    const db = { ...fakeDb('paused'), getCurrentTenantDbName: vi.fn(() => 'tenant_scoped') };
+    await closePausedTrace(db as never, {
+      projectId: 'p1', tenantId: 'tn', pausedCtx, closure: { outcome: 'expired', resolvedBy: 'system:timeout', actions: [action as never] },
+    });
+    expect(metrics.recordAgentSessionOutcome).toHaveBeenCalledTimes(1);
+    expect(metrics.recordAgentSessionOutcome.mock.calls[0][0]).toMatchObject({
+      tenantDbName: 'tenant_scoped', tenantId: 'tn', projectId: 'p1', source: 'hosted',
+      session: { sessionId: 's1', agentName: 'mailer', status: 'expired', totalInputTokens: 10, totalOutputTokens: 5 },
+    });
+
+    metrics.recordAgentSessionOutcome.mockClear();
+    await closePausedTrace(fakeDb('paused') as never, {
+      projectId: 'p1', tenantId: 'tn', tenantDbName: 'tenant_given', pausedCtx, closure: { outcome: 'cancelled', actions: [action as never] },
+    });
+    expect(metrics.recordAgentSessionOutcome.mock.calls[0][0]).toMatchObject({ tenantDbName: 'tenant_given', session: { status: 'cancelled' } });
   });
 
   it('leaves a session a resume already finished, and a run with no continuation', async () => {

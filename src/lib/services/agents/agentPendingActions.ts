@@ -506,7 +506,7 @@ export async function cancelPendingForNewMessage(
 export async function dropPausedSnapshot(
     db: Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState'> & Partial<PausedTraceDb>,
     conversationId: string,
-    closure?: PausedTraceClosure & { projectId: string; tenantId: string },
+    closure?: PausedTraceClosure & { projectId: string; tenantId: string; tenantDbName?: string },
 ): Promise<void> {
     try {
         const stored = await db.findAgentConversationState(conversationId);
@@ -516,6 +516,7 @@ export async function dropPausedSnapshot(
             await closePausedTrace(db as PausedTraceDb, {
                 projectId: closure.projectId,
                 tenantId: closure.tenantId,
+                tenantDbName: closure.tenantDbName,
                 pausedCtx: (paused?.state as { ctx?: unknown } | undefined)?.ctx,
                 closure,
             });
