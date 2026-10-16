@@ -657,6 +657,10 @@ describe('GET /alerts/incidents', () => {
     const next = await call('GET', '/alerts/incidents?limit=1&skip=1');
     expect(next.body.incidents).toHaveLength(1);
     expect(next.body.incidents[0]._id).not.toBe(page.body.incidents[0]._id);
+    const far = await call('GET', '/alerts/incidents?skip=100000000000000000000');
+    expect(far.status).toBe(200);
+    expect(far.body.incidents).toEqual([]);
+    expect((await call('GET', '/alerts/history?skip=100000000000000000000')).status).toBe(200);
   });
 
   it('filters by severity, rule and status, and 400s unknown enum values', async () => {
@@ -725,6 +729,8 @@ describe('/alerts/incidents/:incidentId', () => {
     const pastSnooze = await call('PATCH', `/alerts/incidents/${id}`, { status: 'acknowledged', snoozedUntil: '2000-01-01T00:00:00Z' });
     expect(pastSnooze.status).toBe(400);
     expect(pastSnooze.body.code).toBe('invalid_snooze');
+    const resolveAndSnooze = await call('PATCH', `/alerts/incidents/${id}`, { status: 'resolved', snoozedUntil: new Date(Date.now() + 3_600_000).toISOString() });
+    expect(resolveAndSnooze.status).toBe(409);
     const after = (await call('GET', `/alerts/incidents/${id}`)).body.incident;
     expect(after.status).toBe('open');
     expect(after.assignedTo ?? null).toBeNull();
@@ -757,6 +763,16 @@ describe('POST /alerts/incidents/:incidentId/notes', () => {
     const foreign = await seedIncident(PROJECT_B);
     currentUserRole = 'member';
     expect((await call('POST', `/alerts/incidents/${foreign}/notes`, { content: 'hi' })).status).toBe(404);
+  });
+
+  it('throttles notes per person', async () => {
+    const id = await seedIncident(PROJECT_A);
+    for (let i = 0; i < 30; i += 1) {
+      expect((await call('POST', `/alerts/incidents/${id}/notes`, { content: `note ${i}` })).status).toBe(200);
+    }
+    const limited = await call('POST', `/alerts/incidents/${id}/notes`, { content: 'one too many' });
+    expect(limited.status).toBe(429);
+    expect(limited.body.code).toBe('rate_limited');
   });
 });
 

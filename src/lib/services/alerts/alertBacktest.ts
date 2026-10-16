@@ -325,11 +325,26 @@ function buildSteps(buckets: Map<number, EntityMetricCounters> | undefined, buil
     }
     return { counters: acc ?? EMPTY, present: acc !== null };
   };
-  const requestsIn = (fromMs: number, toMs: number): number => {
-    let total = 0;
-    if (buckets) {
-      for (let t = fromMs; t < toMs; t += ENTITY_METRIC_BUCKET_MS) total += buckets.get(t)?.requests ?? 0;
+  // Running request totals over the bucket grid from the start of the lookback: an absence
+  // history (up to a week of buckets, read at every step) is two reads instead of a loop.
+  const gridFrom = startMs - lookbackMs;
+  const running: number[] = [0];
+  if (mode === 'absence' && lookbackMs > 0 && buckets) {
+    for (let t = gridFrom; t < endMs; t += ENTITY_METRIC_BUCKET_MS) {
+      running.push(running[running.length - 1] + (buckets.get(t)?.requests ?? 0));
     }
+  }
+  const requestsIn = (fromMs: number, toMs: number): number => {
+    if (!buckets) return 0;
+    const offset = fromMs - gridFrom;
+    if (running.length > 1 && offset >= 0 && offset % ENTITY_METRIC_BUCKET_MS === 0) {
+      const last = running.length - 1;
+      const from = Math.min(offset / ENTITY_METRIC_BUCKET_MS, last);
+      const to = Math.min(Math.max(Math.ceil((toMs - gridFrom) / ENTITY_METRIC_BUCKET_MS), from), last);
+      return running[to] - running[from];
+    }
+    let total = 0;
+    for (let t = fromMs; t < toMs; t += ENTITY_METRIC_BUCKET_MS) total += buckets.get(t)?.requests ?? 0;
     return total;
   };
 

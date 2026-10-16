@@ -37,6 +37,13 @@ const STATUS_TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
 };
 
 export const INCIDENT_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'investigating', 'resolved', 'closed'];
+
+function assertTransition(from: IncidentStatus, to: IncidentStatus): void {
+  const allowed = STATUS_TRANSITIONS[from];
+  if (!allowed.includes(to)) {
+    throw new AlertApiError(409, 'invalid_transition', `Cannot transition from "${from}" to "${to}". Allowed: ${allowed.join(', ')}`);
+  }
+}
 export const INCIDENT_SEVERITIES: IncidentSeverity[] = ['critical', 'warning', 'info'];
 
 /** How far past the threshold a breach is, as a ratio >= 1 when breached (operator-aware). */
@@ -182,6 +189,9 @@ export const SNOOZABLE_STATUSES: IncidentStatus[] = ['open', 'acknowledged', 'in
 
 /** A snooze lasts at most this long. */
 export const MAX_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** People's notes per incident (system notes are never refused, so the evaluator can always resolve). */
+export const MAX_INCIDENT_NOTES = 100;
 
 export type IncidentStatsRange = '24h' | '7d' | '30d';
 export const INCIDENT_STATS_RANGE_MS: Record<IncidentStatsRange, number> = {
@@ -340,14 +350,7 @@ export class IncidentService {
       throw new AlertApiError(400, 'invalid_status', `Invalid status. Must be one of: ${INCIDENT_STATUSES.join(', ')}`);
     }
 
-    const allowed = STATUS_TRANSITIONS[incident.status];
-    if (!allowed.includes(newStatus)) {
-      throw new AlertApiError(
-        409,
-        'invalid_transition',
-        `Cannot transition from "${incident.status}" to "${newStatus}". Allowed: ${allowed.join(', ')}`,
-      );
-    }
+    assertTransition(incident.status, newStatus);
 
     const updateData: Partial<IIncident> = { status: newStatus };
 
@@ -425,6 +428,9 @@ export class IncidentService {
     const db = await getTenantDatabase(tenantDbName);
     const incident = await db.findIncidentById(incidentId, scope.projectId);
     if (!incident) return null;
+    if (userId !== 'system' && (incident.notes ?? []).filter((n) => n.userId !== 'system').length >= MAX_INCIDENT_NOTES) {
+      throw new AlertApiError(409, 'too_many_notes', `An incident takes at most ${MAX_INCIDENT_NOTES} notes`);
+    }
 
     const note: IIncidentNote = {
       userId,
@@ -448,6 +454,18 @@ export class IncidentService {
     const user = await db.findUserById(value).catch(() => null);
     if (!user) throw new AlertApiError(400, 'invalid_assignee', 'assignedTo is not a user of this tenant');
     return value;
+  }
+
+  /**
+   * What a PATCH must pass before it writes anything: the status change is allowed from the
+   * current status, and a snooze lands on a status that can still be snoozed.
+   */
+  static assertPatchable(incident: IIncident, change: { status?: IncidentStatus; snoozeUntil?: Date | null }): void {
+    if (change.status !== undefined) assertTransition(incident.status, change.status);
+    const status = change.status ?? incident.status;
+    if (change.snoozeUntil && !SNOOZABLE_STATUSES.includes(status)) {
+      throw new AlertApiError(409, 'invalid_transition', `Cannot snooze an incident that is "${status}"`);
+    }
   }
 
   /** A snooze must end in the future and at most 30 days ahead. */

@@ -10,6 +10,7 @@ import { getTenantDatabase } from '@/lib/database';
 import {
   IncidentService,
   MAX_BULK_INCIDENTS,
+  MAX_INCIDENT_NOTES,
   deriveRuleSeverity,
   deriveSeverity,
 } from '@/lib/services/alerts/incidentService';
@@ -269,6 +270,26 @@ describe('IncidentService', () => {
     it('returns null for a missing or foreign incident', async () => {
       db.findIncidentById.mockResolvedValue(null);
       expect(await IncidentService.addNote('d', 'x', 'u', 'U', 'hi', { projectId: 'other' })).toBeNull();
+    });
+
+    it('refuses a person\'s note past the cap, but never a system note', async () => {
+      const full = Array.from({ length: MAX_INCIDENT_NOTES }, (_, i) => ({ userId: 'u1', content: `n${i}` }));
+      db.findIncidentById.mockResolvedValue(incident('open', { notes: [...full, { userId: 'system', content: 'auto' }] }));
+      await expect(IncidentService.addNote('d', 'i1', 'u1', 'Ada', 'one more')).rejects.toMatchObject({ status: 409, code: 'too_many_notes' });
+      expect(db.updateIncident).not.toHaveBeenCalled();
+      await IncidentService.addSystemNote('d', 'i1', 'Rule disabled');
+      expect(db.updateIncident).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('assertPatchable', () => {
+    it('checks the transition and that a snooze lands on a live status', () => {
+      const open = incident('open') as never;
+      expect(() => IncidentService.assertPatchable(open, { status: 'acknowledged', snoozeUntil: new Date() })).not.toThrow();
+      expect(() => IncidentService.assertPatchable(open, { status: 'resolved', snoozeUntil: new Date() })).toThrow(/Cannot snooze/);
+      expect(() => IncidentService.assertPatchable(incident('resolved') as never, { status: 'acknowledged' })).toThrow(/Cannot transition/);
+      expect(() => IncidentService.assertPatchable(incident('resolved') as never, { snoozeUntil: new Date() })).toThrow(/Cannot snooze/);
+      expect(() => IncidentService.assertPatchable(incident('resolved') as never, { snoozeUntil: null })).not.toThrow();
     });
   });
 

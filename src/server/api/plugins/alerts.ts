@@ -49,12 +49,17 @@ const DEFAULT_PAGE_SIZE = 50;
 /** One more than this is fetched to learn whether another page exists, and the stores clamp at 200. */
 const MAX_PAGE_SIZE = 100;
 const MAX_NOTE_LENGTH = 4000;
+/** The most rows a list skips: deeper pages are not a real use, and a huge offset breaks the stores. */
+const MAX_SKIP = 100_000;
 const MAX_ENTITY_SEARCH_LENGTH = 200;
 const MAX_ENTITY_LINKS = 100;
 const ENTITY_LINK_TYPES: EntityMetricType[] = ['agent', 'model', 'kb', 'mcp', 'tool'];
 /** A test notification mails / posts to the outside, so it is throttled per person and per project. */
 const CHANNEL_TEST_USER_LIMIT: RateLimitConfig = { maxAttempts: 5, windowSeconds: 60 };
 const CHANNEL_TEST_PROJECT_LIMIT: RateLimitConfig = { maxAttempts: 20, windowSeconds: 60 };
+
+/** Notes are stored on the incident and returned with it: throttled per person. */
+const NOTE_USER_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds: 60 };
 
 /** Backtests read up to a week of rollups: throttled per person and per project. */
 const BACKTEST_USER_LIMIT: RateLimitConfig = { maxAttempts: 10, windowSeconds: 60 };
@@ -131,7 +136,7 @@ function parsePage(query: { limit?: string; skip?: string }): { limit: number; s
   const skip = Number.parseInt(query.skip ?? '0', 10);
   return {
     limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE,
-    skip: Number.isFinite(skip) ? Math.max(skip, 0) : 0,
+    skip: Number.isFinite(skip) ? Math.min(Math.max(skip, 0), MAX_SKIP) : 0,
   };
 }
 
@@ -708,6 +713,10 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
       : null;
     // Validate every field before writing any, so a bad one never leaves a half-applied change.
     if (snoozeUntil) IncidentService.assertSnoozeWindow(snoozeUntil);
+    IncidentService.assertPatchable(incident, {
+      status: hasStatus ? (body.status as IncidentStatus) : undefined,
+      snoozeUntil,
+    });
     const assignee = hasAssignee
       ? await IncidentService.resolveAssignee(
         session.tenantDbName,
@@ -751,6 +760,11 @@ export const alertsApiPlugin: FastifyPluginAsync = async (app) => {
     }
     if (body.content.length > MAX_NOTE_LENGTH) {
       return reply.code(400).send({ error: `Note content must be at most ${MAX_NOTE_LENGTH} characters` });
+    }
+    const noteLimit = checkRateLimit(`alerts:note:user:${session.tenantDbName}:${session.userId}`, NOTE_USER_LIMIT);
+    if (!noteLimit.allowed) {
+      reply.header('Retry-After', String(Math.max(1, noteLimit.retryAfterSeconds)));
+      throw new AlertApiError(429, 'rate_limited', 'Too many notes. Wait a moment and try again.');
     }
 
     const incident = await IncidentService.addNote(
