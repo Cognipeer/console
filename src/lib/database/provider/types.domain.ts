@@ -2118,15 +2118,15 @@ export interface IAlertRule {
   runbookUrl?: string | null;
   /** Last evaluation summary (throttled writes) behind the derived "No data" state. */
   lastEvaluation?: IAlertRuleLastEvaluation | null;
-  /** Set on rules added from the starter set: which starter, at which version. Server-owned. */
-  starter?: IAlertRuleStarter | null;
+  /** Set on rules added from a rule template: which template, at which version. Server-owned; cleared when the rule's metric or module changes. */
+  template?: IAlertRuleTemplateRef | null;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
-export interface IAlertRuleStarter {
+export interface IAlertRuleTemplateRef {
   key: string;
   version: number;
 }

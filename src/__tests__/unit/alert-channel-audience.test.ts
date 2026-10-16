@@ -52,7 +52,7 @@ describe('normalizeChannelInput: audience', () => {
       .toEqual({ type: 'email', recipients: ['ops@acme.com'], audience: 'project_admins' });
   });
 
-  it('accepts it with no listed recipient (the starter rules do exactly that)', () => {
+  it('accepts it with no listed recipient (the default alert rules do exactly that)', () => {
     expect(normalizeChannelInput({ type: 'email', recipients: [], audience: 'project_admins' }, 0, null))
       .toEqual({ type: 'email', recipients: [], audience: 'project_admins' });
   });
@@ -249,7 +249,7 @@ describe('the rule form channel model: audience', () => {
         { id: 'ch_cccccccccccc', type: 'library', libraryId: 'lib-1' },
         { id: 'ch_dddddddddddd', type: 'slack', urlHint: 'https://hooks.slack.com/…/ABCD' },
       ],
-      starter: { key: 'agent-errors', version: 1 },
+      template: { key: 'agent-errors', version: 1 },
     };
 
     it('keeps the audience of an email channel in the copy', () => {
@@ -264,9 +264,9 @@ describe('the rule form channel model: audience', () => {
       expect(droppedChannels).toBe(1);
     });
 
-    it('does not pass the starter marker on: a copy is a customised rule of its own', () => {
+    it('does not pass the template marker on: a copy is a customised rule of its own', () => {
       const { seed } = duplicateRuleSeed(rule, 'Copy');
-      expect(seed).not.toHaveProperty('starter');
+      expect(seed).not.toHaveProperty("template");
       expect(seed).toMatchObject({ name: 'Copy', metric: 'agent_error_rate', entity: { entityType: 'agent', mode: 'all' } });
     });
   });

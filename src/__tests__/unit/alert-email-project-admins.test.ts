@@ -16,6 +16,8 @@ const h = vi.hoisted(() => {
   };
   return {
     db,
+    /** The instant from which a workspace's project levels are enforced (see `iam/projectLevels`). */
+    since: vi.fn(async () => 1_000_000),
     getTenantDatabase: vi.fn(async () => db),
     sendEmail: vi.fn(),
     logLines: [] as Array<{ level: string; message: string; meta: unknown }>,
@@ -24,6 +26,10 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/lib/email/mailer', () => ({ sendEmail: h.sendEmail }));
 vi.mock('@/lib/database', () => ({ getTenantDatabase: h.getTenantDatabase }));
+vi.mock('@/lib/iam/projectLevels', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/iam/projectLevels')>()),
+  getProjectLevelsSince: h.since,
+}));
 vi.mock('@/lib/core/logger', () => {
   const write = (level: string) => (message: string, meta?: unknown) => { h.logLines.push({ level, message, meta }); };
   const logger = { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
@@ -32,6 +38,7 @@ vi.mock('@/lib/core/logger', () => {
 
 import {
   EmailAlertChannel,
+  MAX_TEST_EMAIL_RECIPIENTS,
   resetAlertEmailUserCache,
   resolveAlertEmailRecipients,
   resolveProjectAdminRecipients,
@@ -74,10 +81,15 @@ const audienceOf = (projectId: string = PROJECT): AlertEmailAudienceOptions => (
 
 const sorted = (values: string[]) => [...values].sort();
 
+/** A membership row saved before / after the project levels were enforced (`since` is 1,000,000 ms). */
+const BEFORE_ENFORCEMENT = new Date(500_000);
+const AFTER_ENFORCEMENT = new Date(2_000_000);
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.logLines.length = 0;
   resetAlertEmailUserCache();
+  h.since.mockResolvedValue(1_000_000);
   h.sendEmail.mockResolvedValue(true);
   h.getTenantDatabase.mockImplementation(async () => h.db);
   seed({});
@@ -167,8 +179,8 @@ describe('the project_admins audience: who is reached', () => {
       ['a disabled legacy project admin', { users: [person('x', { status: 'disabled', role: 'project_admin', projectIds: [PROJECT] })] }],
       ['an account that cannot sign in (canLogin false)', { users: [person('x', { canLogin: false })], rows: [membership('x')] }],
       ['an external account', { users: [person('x', { kind: 'external' })], rows: [membership('x')] }],
-      ['an admin membership whose alerts access is none', { users: [person('x')], rows: [membership('x', { servicePermissions: { alerts: 'none' } })] }],
-      ['an admin group grant whose alerts access is none', { users: [person('x')], grants: [grant('g', { servicePermissions: { alerts: 'none' } })], members: { g: [{ userId: 'x' }] } }],
+      ['an admin membership whose alerts access is none', { users: [person('x')], rows: [membership('x', { servicePermissions: { alerts: 'none' }, updatedAt: AFTER_ENFORCEMENT })] }],
+      ['an admin group grant whose alerts access is none', { users: [person('x')], grants: [grant('g', { servicePermissions: { alerts: 'none' }, updatedAt: AFTER_ENFORCEMENT })], members: { g: [{ userId: 'x' }] } }],
       ['a project admin whose workspace-level alerts access is none', { users: [person('x', { servicePermissions: { alerts: 'none' } })], rows: [membership('x')] }],
       ['a legacy project admin of another project', { users: [person('x', { role: 'project_admin', projectIds: [OTHER_PROJECT] })] }],
       ['a legacy project admin without any project', { users: [person('x', { role: 'project_admin' })] }],
@@ -362,6 +374,54 @@ describe('when the memberships cannot be read', () => {
   });
 });
 
+describe('the alerts level of a membership is read the way the access engine reads it', () => {
+  const noneOf = (updatedAt: Date | undefined): Row => membership('x', { servicePermissions: { alerts: 'none' }, ...(updatedAt ? { updatedAt } : {}) });
+
+  it('honours a none saved after the levels were enforced', async () => {
+    seed({ users: [...OWNERS, person('x')], rows: [noneOf(AFTER_ENFORCEMENT)] });
+    expect(sorted(await resolveAlertEmailRecipients(DB, [], audienceOf()))).toEqual([email('admin'), email('owner')]);
+  });
+
+  it('reads a none saved before that as not set: the admin is mailed', async () => {
+    seed({ users: [...OWNERS, person('x')], rows: [noneOf(BEFORE_ENFORCEMENT)] });
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('x')]);
+  });
+
+  it('reads a none of a row without a date as not set', async () => {
+    seed({ users: [...OWNERS, person('x')], rows: [noneOf(undefined)] });
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('x')]);
+  });
+
+  it('does the same for an admin group grant', async () => {
+    const grantOf = (updatedAt: Date) => grant('g', { servicePermissions: { alerts: 'none' }, updatedAt });
+    seed({ users: [...OWNERS, person('x')], grants: [grantOf(BEFORE_ENFORCEMENT)], members: { g: [{ userId: 'x' }] } });
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('x')]);
+
+    resetAlertEmailUserCache();
+    seed({ users: [...OWNERS, person('x')], grants: [grantOf(AFTER_ENFORCEMENT)], members: { g: [{ userId: 'x' }] } });
+    expect(sorted(await resolveAlertEmailRecipients(DB, [], audienceOf()))).toEqual([email('admin'), email('owner')]);
+  });
+
+  it('asks for the activation instant of the workspace once per lookup', async () => {
+    seed({ users: [...OWNERS, person('x')], rows: [noneOf(AFTER_ENFORCEMENT)] });
+    await resolveAlertEmailRecipients(DB, [], audienceOf());
+    await resolveAlertEmailRecipients(DB, [], audienceOf());
+    expect(h.since).toHaveBeenCalledTimes(1);
+    expect(h.since).toHaveBeenCalledWith(DB);
+  });
+
+  it('falls back to the stored levels, and logs the error name only, when the instant cannot be read', async () => {
+    h.since.mockRejectedValue(new Error('connect mongodb://svc:s3cr3t@db.internal:27017 refused'));
+    seed({ users: [...OWNERS, person('x'), person('y')], rows: [noneOf(BEFORE_ENFORCEMENT), membership('y')] });
+    // the stored none still counts, and the notification is not failed
+    expect(await resolveAlertEmailRecipients(DB, [], audienceOf())).toEqual([email('y')]);
+    const warnings = h.logLines.filter((line) => line.level === 'warn');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].meta).toEqual({ error: 'Error' });
+    expect(JSON.stringify(h.logLines)).not.toContain('s3cr3t');
+  });
+});
+
 describe('resolveProjectAdminRecipients', () => {
   it('lists the admins of the project, de-duplicated by address and trimmed', async () => {
     seed({
@@ -538,6 +598,59 @@ describe('EmailAlertChannel with the project_admins audience', () => {
       { type: 'email', target: '(none)', success: false, error: 'No recipients available' },
     ]);
     expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  describe('a test notification', () => {
+    const testEvent = { ...(event as object), kind: 'test' } as never;
+    const many = (count: number) => Array.from({ length: count }, (_, i) => person(`m${String(i).padStart(2, '0')}`));
+
+    it('is capped at MAX_TEST_EMAIL_RECIPIENTS of the resolved recipients, however many the audience reaches', async () => {
+      const people = many(9);
+      seed({ users: [...OWNERS, ...people], rows: people.map((p) => membership(String(p._id))) });
+      const results = await new EmailAlertChannel().dispatch(testEvent, channel, withProject);
+      expect(MAX_TEST_EMAIL_RECIPIENTS).toBe(5);
+      expect(h.sendEmail).toHaveBeenCalledTimes(MAX_TEST_EMAIL_RECIPIENTS);
+      expect(results).toEqual([{ type: 'email', target: '5 recipients', success: true }]);
+    });
+
+    it('caps listed addresses too', async () => {
+      seed({ users: [...OWNERS], rows: [] });
+      const listed = Array.from({ length: 8 }, (_, i) => `l${i}@else.test`);
+      await new EmailAlertChannel().dispatch(testEvent, { type: 'email', recipients: listed } as never, withProject);
+      expect(h.sendEmail).toHaveBeenCalledTimes(5);
+      expect(h.sendEmail.mock.calls.map((call) => call[0])).toEqual(listed.slice(0, 5));
+    });
+
+    it('reports the number of recipients, singular for one, never an address', async () => {
+      const [result] = await new EmailAlertChannel().dispatch(testEvent, { type: 'email', recipients: ['only@else.test'] } as never, withProject);
+      expect(result).toEqual({ type: 'email', target: '1 recipient', success: true });
+    });
+
+    it('reports a failure as one result with the count and the error', async () => {
+      h.sendEmail.mockImplementation(async (to: string) => to !== email('ada'));
+      const results = await new EmailAlertChannel().dispatch(testEvent, channel, withProject);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ type: 'email', target: '2 recipients', success: false });
+      expect(results[0].error).toContain('mail server');
+    });
+
+    it('still reports "no recipients" as before', async () => {
+      seed({ users: [], rows: [] });
+      expect(await new EmailAlertChannel().dispatch(testEvent, channel, withProject)).toEqual([
+        { type: 'email', target: '(none)', success: false, error: 'No recipients available' },
+      ]);
+    });
+
+    it('does not cap a real notification or a digest, and keeps their per-address results', async () => {
+      const people = many(9);
+      seed({ users: [...OWNERS, ...people], rows: people.map((p) => membership(String(p._id))) });
+      const fired = await new EmailAlertChannel().dispatch(event, channel, withProject);
+      expect(fired).toHaveLength(9);
+      expect(fired.map((result) => result.target)).toEqual(people.map((p) => String(p.email)));
+      h.sendEmail.mockClear();
+      await new EmailAlertChannel().sendMessage({ title: 'Digest', summary: 's', fields: [] } as never, channel, withProject);
+      expect(h.sendEmail).toHaveBeenCalledTimes(9);
+    });
   });
 
   it('applies to the generic messages (digests) the same way', async () => {

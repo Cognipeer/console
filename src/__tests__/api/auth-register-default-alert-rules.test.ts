@@ -1,15 +1,15 @@
 /**
- * POST /api/auth/register and the starter alert rules: a new workspace starts with the five starter rules on its
+ * POST /api/auth/register and the default alert rules: a new workspace starts with the five default alert rules on its
  * Default Project (unless the installation default is off), and adding them never decides whether the sign-up works.
- * The seeding itself is covered in unit/alert-starter-rules.test.ts; here it is a hoisted plain mock, so the arguments
+ * The seeding itself is covered in unit/alert-templates.test.ts; here it is a hoisted plain mock, so the arguments
  * and the order of the calls can be asserted.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
 const h = vi.hoisted(() => ({
-  seedStarterAlerts: vi.fn(),
-  starterAlertsOnCreate: vi.fn(),
+  seedDefaultAlertRules: vi.fn(),
+  defaultAlertRulesOnCreate: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
@@ -35,9 +35,9 @@ vi.mock('@/lib/email/mailer', () => ({
 vi.mock('@/lib/services/projects/projectService', () => ({
   ensureDefaultProject: vi.fn().mockResolvedValue({ _id: 'proj-1', key: '__default__' }),
 }));
-vi.mock('@/lib/services/alerts/starterAlerts', () => ({
-  seedStarterAlerts: h.seedStarterAlerts,
-  starterAlertsOnCreate: h.starterAlertsOnCreate,
+vi.mock('@/lib/services/alerts/alertTemplates', () => ({
+  seedDefaultAlertRules: h.seedDefaultAlertRules,
+  defaultAlertRulesOnCreate: h.defaultAlertRulesOnCreate,
 }));
 
 import { getDatabase } from '@/lib/database';
@@ -45,7 +45,7 @@ import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { authApiPlugin } from '@/server/api/plugins/auth';
 import { createFastifyApiTestApp, hasSetCookie, parseJsonBody } from '../helpers/fastify-api';
 
-describe('POST /api/auth/register: starter alert rules', () => {
+describe('POST /api/auth/register: default alert rules', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
   let db: ReturnType<typeof createMockDb>;
 
@@ -76,8 +76,8 @@ describe('POST /api/auth/register: starter alert rules', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    h.seedStarterAlerts.mockResolvedValue(5);
-    h.starterAlertsOnCreate.mockReturnValue(true);
+    h.seedDefaultAlertRules.mockResolvedValue(5);
+    h.defaultAlertRulesOnCreate.mockReturnValue(true);
     (ensureDefaultProject as ReturnType<typeof vi.fn>).mockResolvedValue({ _id: 'proj-1', key: '__default__' });
     db = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
@@ -99,18 +99,18 @@ describe('POST /api/auth/register: starter alert rules', () => {
     payload: JSON.stringify(body),
   });
 
-  it('adds the starter rules to the Default Project of the new workspace, as its owner', async () => {
+  it('adds the default alert rules to the Default Project of the new workspace, as its owner', async () => {
     const res = await register();
 
     expect(res.statusCode).toBe(201);
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
     // tenant database, tenant, the default project, the new owner
-    expect(h.seedStarterAlerts).toHaveBeenCalledWith('tenant_new-co', 'tenant-new', 'proj-1', 'user-new');
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledWith('tenant_new-co', 'tenant-new', 'proj-1', 'user-new');
     expect((ensureDefaultProject as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
-      .toBeLessThan(h.seedStarterAlerts.mock.invocationCallOrder[0]);
+      .toBeLessThan(h.seedDefaultAlertRules.mock.invocationCallOrder[0]);
   });
 
-  it('answers the sign-up as before: the starter rules are not part of its answer', async () => {
+  it('answers the sign-up as before: the default alert rules are not part of its answer', async () => {
     const res = await register();
     const body = parseJsonBody<Record<string, unknown>>(res.body);
     expect(body.message).toMatch(/registered successfully/i);
@@ -119,14 +119,14 @@ describe('POST /api/auth/register: starter alert rules', () => {
   });
 
   it('adds nothing when the installation default is off', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(false);
+    h.defaultAlertRulesOnCreate.mockReturnValue(false);
     const res = await register();
     expect(res.statusCode).toBe(201);
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 
   it('still signs the person up when the rules could not be added', async () => {
-    h.seedStarterAlerts.mockResolvedValue(null);
+    h.seedDefaultAlertRules.mockResolvedValue(null);
     const res = await register();
 
     expect(res.statusCode).toBe(201);
@@ -138,7 +138,7 @@ describe('POST /api/auth/register: starter alert rules', () => {
     (ensureDefaultProject as ReturnType<typeof vi.fn>).mockResolvedValue({ key: '__default__' });
     const res = await register();
     expect(res.statusCode).toBe(201);
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 
   it('adds nothing to a sign-up that is refused', async () => {
@@ -149,6 +149,6 @@ describe('POST /api/auth/register: starter alert rules', () => {
     expect((await register()).statusCode).toBe(409);
 
     expect(db.createTenant).not.toHaveBeenCalled();
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 });

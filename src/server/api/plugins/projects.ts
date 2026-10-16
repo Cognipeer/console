@@ -7,7 +7,7 @@ import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
-import { seedStarterAlerts, starterAlertsOnCreate } from '@/lib/services/alerts/starterAlerts';
+import { defaultAlertRulesOnCreate, seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import { filterManageableTokens, resolveManageableProjectToken } from '@/lib/services/apiTokens/tokenGovernance';
@@ -270,6 +270,9 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof name !== 'string' || name.trim().length < 2) {
         return reply.code(400).send({ error: 'name is required' });
       }
+      if (body.defaultAlertRules !== undefined && typeof body.defaultAlertRules !== 'boolean') {
+        return reply.code(400).send({ error: 'defaultAlertRules must be a boolean' });
+      }
 
       const projectKey = await generateUniqueProjectKey(
         session.tenantDbName,
@@ -329,16 +332,16 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         warnings.push('Some people, groups or providers could not be applied; check the project and add them again.');
       }
 
-      // Starter alert rules: `starterAlerts` true/false decides, otherwise the installation default. Best effort too.
-      let starterAlerts = 0;
-      const wantStarters = body.starterAlerts === undefined ? starterAlertsOnCreate() : body.starterAlerts === true;
-      if (wantStarters) {
-        const added = await seedStarterAlerts(session.tenantDbName, session.tenantId, String(project._id), session.userId);
-        if (added === null) warnings.push('The starter alert rules could not be added; add them from Alerts → Starter rules.');
-        else starterAlerts = added;
+      // Default alert rules: `defaultAlertRules` true/false decides, otherwise the installation default. Best effort too.
+      let defaultAlertRules = 0;
+      const wantDefaultRules = body.defaultAlertRules === undefined ? defaultAlertRulesOnCreate() : body.defaultAlertRules === true;
+      if (wantDefaultRules) {
+        const added = await seedDefaultAlertRules(session.tenantDbName, session.tenantId, String(project._id), session.userId);
+        if (added === null) warnings.push('The default alert rules could not be added; add them from Alerts → Templates.');
+        else defaultAlertRules = added;
       }
 
-      return reply.code(201).send({ project, warnings, starterAlerts });
+      return reply.code(201).send({ project, warnings, defaultAlertRules });
     } catch (error) {
       logger.error('Create project error', { error });
       return reply.code(500).send({ error: 'Internal server error' });

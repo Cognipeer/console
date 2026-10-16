@@ -58,7 +58,7 @@ Reads also return fields that create and update do not set:
 |-------|-------------|
 | `mutedUntil`, `mutedBy`, `muteReason` | Set by [Mute a Rule](#mute-a-rule); `null` or absent when the rule is not muted. A `mutedUntil` in the past means the mute has run out |
 | `lastEvaluation` | `{ at, targets, noDataTargets }`: how many targets the latest evaluation judged and how many of them had no data. Stored when it changes, and otherwise at most every 15 minutes |
-| `starter` | `{ key, version }` when the rule was added from the [starter rules](#starter-rules); absent otherwise. It stays when the rule is edited |
+| `template` | `{ key, version }` when the rule was added from a [rule template](#the-template-field); absent otherwise. It stays when the rule is edited and is cleared when its metric or module changes |
 
 Which metrics are per entity (`source: "entity"` in `meta.catalog`) and what each measures is listed in [Monitoring](/guide/monitoring#metrics).
 
@@ -226,7 +226,7 @@ POST /api/alerts/rules
 }
 ```
 
-Returns `201` with `{ "rule": { ... } }`, channels masked. To save a [starter rule](#starter-rules) you changed first, send its key as `starterKey` (for example `"starterKey": "agent-errors"`): the rule then carries the `starter` mark. An unknown key answers `400` (`invalid_value`).
+Returns `201` with `{ "rule": { ... } }`, channels masked. To save a [rule template](#rule-templates) you changed first, send its key as `templateKey` (for example `"templateKey": "agent-errors"`): the rule then carries the `template` mark. An unknown key answers `400` (`invalid_value`), and a template the project already has answers `409` (`template_exists`); see [Create from a template](#create-from-a-template).
 
 A baseline rule (Enterprise) replaces the condition:
 
@@ -462,7 +462,7 @@ Sends a clearly labelled test notification on one channel. Send a channel as typ
 
 A library channel is tested only by workspace owners and admins, whether it is named by `libraryChannelId`, is the rule's channel that `channelId` names, or is sent as a `channel` of type `library`; anyone else gets `403` with `code: "forbidden"`. A channel typed into a rule can be tested by everyone who may change alerts.
 
-`target` names the destination without its credential: the recipient address, the URL hint, or `pagerduty …wxyz`. A failed delivery is still a `200` with `success: false` and an `error` message in `result`. An unsaved email channel can be tested against at most 5 recipients (`too_many_recipients`). Tests are limited to 5 per minute per user and 20 per minute per project; beyond that the answer is `429` with a `Retry-After` header. A test through a PagerDuty channel opens and immediately resolves its own throw-away incident.
+`target` names the destination without its credential: the URL hint, or `pagerduty …wxyz`. For an email channel it is a count (`"1 recipient"`, `"5 recipients"`): a test is mailed to at most 5 of the addresses the channel resolves to (its recipients, the `project_admins` audience and the owner/admin fallback). A failed delivery is still a `200` with `success: false` and an `error` message in `result`. An unsaved email channel can be tested against at most 5 recipients (`too_many_recipients`). Tests are limited to 5 per minute per user and 20 per minute per project; beyond that the answer is `429` with a `Retry-After` header. A test through a PagerDuty channel opens and immediately resolves its own throw-away incident.
 
 ## Channel Library
 
@@ -537,27 +537,56 @@ POST /api/alerts/channels/library/:id/test
 
 No body. Answers like [Test a Channel](#test-a-channel) and shares its limits.
 
-## Starter Rules
+## Rule Templates
 
-Five recommended rules, one per entity module. Each watches the error rate of every entity of its module, so new agents, models and servers are covered as they appear. Each has a 30-minute window, needs at least 20 requests in it, must stay breached for 10 minutes before it fires, then waits 2 hours before it fires again for the same entity. Severity is `auto`. Each mails the project's admins through one email channel with the `project_admins` audience.
+A rule template is a recommended rule: a metric, a condition, a window and notification settings that suit most projects. The catalog has 26 of them, in six categories (`errors`, `latency`, `traffic`, `cost`, `quality`, `safety`). A person browses the catalog, adds the templates they want to the active project, and can customise one in the rule form before saving it. Every template creates an enabled rule with severity `auto`, resolve notifications on, and one email channel with the `project_admins` audience, so the project's admins are mailed (the workspace owners and admins when the project has none).
 
-| `key` | Metric | Fires above |
-|-------|--------|-------------|
-| `agent-errors` | `agent_error_rate` | 20% |
-| `model-errors` | `model_error_rate` | 20% |
-| `kb-errors` | `kb_error_rate` | 20% |
-| `mcp-errors` | `mcp_server_error_rate` | 30% |
-| `tool-errors` | `tool_error_rate` | 30% |
+Inference servers and the AI App Gateway have no templates: the first are shared by the whole workspace, and the gateway does not filter its numbers by project yet, so a rule of one project would watch every project.
 
-A project created from the dashboard gets them, enabled, unless the request sends `"starterAlerts": false` (see [Starter rules on new projects](#starter-rules-on-new-projects)). Any project can add them later with the endpoints below. All of them are threshold rules, so no licence is needed.
+### The default set
 
-### List Starter Rules
+Five templates are the **default set**. A new project gets them automatically (see [Default rules on new projects](#default-rules-on-new-projects)). Each is a threshold rule on the error rate of every entity of its module, so new agents, models and servers are covered as they appear. Each has a 30-minute window, needs at least 20 requests in it, must stay breached for 10 minutes before it fires, then waits 2 hours before it fires again for the same entity.
+
+### The catalog
+
+Entity metrics watch every entity of the module (`entity.mode: "all"`); the others watch the whole project. A template marked Enterprise uses the `baseline` or `slo_burn` condition mode: it needs an Enterprise build and licence, and is `unavailable` without them.
+
+| `key` | Module | Category | Condition | Default | Enterprise |
+|-------|--------|----------|-----------|---------|------------|
+| `agent-errors` | `agents` | `errors` | `agent_error_rate` above 20% | yes | |
+| `model-errors` | `models` | `errors` | `model_error_rate` above 20% | yes | |
+| `kb-errors` | `rag` | `errors` | `kb_error_rate` above 20% | yes | |
+| `mcp-errors` | `mcp` | `errors` | `mcp_server_error_rate` above 30% | yes | |
+| `tool-errors` | `tools` | `errors` | `tool_error_rate` above 30% | yes | |
+| `agent-tool-errors` | `agents` | `errors` | `agent_tool_error_rate` above 25% | | |
+| `agent-model-errors` | `agents` | `errors` | `agent_ai_error_rate` above 10% | | |
+| `kb-ingestion-failures` | `rag` | `errors` | `rag_failed_documents` above 0, over 60 minutes | | |
+| `agent-error-budget` | `agents` | `errors` | `agent_error_rate` burning a 99% / 30-day budget 14.4 times too fast (1 hour and 5 minutes) | | yes |
+| `model-error-budget` | `models` | `errors` | `model_error_rate`, same budget burn | | yes |
+| `agent-slow-runs` | `agents` | `latency` | `agent_p95_duration_ms` above 2 minutes, over 1 hour | | |
+| `model-latency` | `models` | `latency` | `model_p95_latency_ms` above 20 seconds | | |
+| `kb-latency` | `rag` | `latency` | `kb_p95_latency_ms` above 5 seconds | | |
+| `mcp-latency` | `mcp` | `latency` | `mcp_server_p95_latency_ms` above 10 seconds | | |
+| `tool-latency` | `tools` | `latency` | `tool_p95_latency_ms` above 10 seconds | | |
+| `agent-traffic-stopped` | `agents` | `traffic` | `agent_sessions` absent for an hour after 5 or more an hour over the last day | | |
+| `model-traffic-stopped` | `models` | `traffic` | `model_requests` absent for an hour after 10 or more an hour over the last day | | |
+| `agent-daily-spend` | `agents` | `cost` | `agent_cost` above $50 over 24 hours | | |
+| `model-daily-spend` | `models` | `cost` | `model_cost` above $100 over 24 hours | | |
+| `agent-cost-spike` | `agents` | `cost` | `agent_cost` above twice its usual amount for the hour of day (14 days) and at least $1 more | | yes |
+| `model-cost-spike` | `models` | `cost` | `model_cost`, same spike | | yes |
+| `agent-abandoned` | `agents` | `quality` | `agent_abandoned_rate` above 30%, over 1 hour | | |
+| `kb-empty-results` | `rag` | `quality` | `kb_empty_result_rate` above 30%, over 1 hour | | |
+| `evaluation-pass-rate` | `evaluation` | `quality` | `evaluation_pass_rate` below 80% over 24 hours | | |
+| `guardrail-blocks` | `guardrails` | `safety` | `guardrail_block_rate` above 20%, over 1 hour | | |
+| `redteam-attack-success` | `redteam` | `safety` | `redteam_attack_success_rate` above 10% over 24 hours | | |
+
+### List Templates
 
 ```
-GET /api/alerts/starters
+GET /api/alerts/templates
 ```
 
-For the active project:
+For the active project, in catalog order:
 
 ```json
 {
@@ -566,60 +595,71 @@ For the active project:
     {
       "key": "agent-errors",
       "version": 1,
+      "category": "errors",
       "module": "agents",
       "metric": "agent_error_rate",
+      "mode": "threshold",
+      "default": true,
       "name": "Agent error rate above 20%",
       "description": "An agent fails more than 20% of its runs over 30 minutes (at least 20 runs).",
-      "threshold": 20,
-      "windowMinutes": 30,
-      "forMinutes": 10,
-      "minSamples": 20,
-      "cooldownMinutes": 120,
       "state": "added",
       "rule": { "id": "6713…", "name": "Agent error rate above 20%", "enabled": true },
+      "availability": { "available": true },
       "input": { "name": "Agent error rate above 20%", "module": "agents", "...": "…" }
     }
   ],
   "projectAdminRecipients": 2,
-  "addedToNewProjects": true
+  "defaultRulesOnNewProjects": true
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `state` | `added`: a rule of the project came from this starter (`rule` names it, enabled or not). `covered`: another enabled rule already watches the same metric on every entity (`rule` names it). `available`: neither |
-| `input` | The rule this starter creates, in the [create](#create-a-rule) body shape: send it (changed or not) with `starterKey` to save a customised copy |
+| `state` | `added`: a rule of the project came from this template and still watches its metric (`rule` names it, enabled or not). `covered`: not added, but another enabled rule already watches the same metric in the same condition mode on every entity, or on the whole project for a metric without entities (`rule` names it). `available`: neither |
+| `availability` | Whether this build and licence can run the rule, apart from its `state`: `{ "available": true }`, or `{ "available": false, "reason": "not_enterprise_build" }` / `"license_required"` (the `baseline` and `slo_burn` modes, and metrics whose collector is not in this build) |
+| `input` | The rule this template creates, in the [create](#create-a-rule) body shape: send it (changed or not) with `templateKey` to save a customised copy |
 | `projectAdminRecipients` | How many people the `project_admins` audience reaches in this project today. `0` means the workspace owners and admins get the notifications |
-| `addedToNewProjects` | Whether new projects get the starter rules in this installation (`ALERT_STARTER_RULES_ON_CREATE`) |
+| `defaultRulesOnNewProjects` | Whether new projects get the default set in this installation (`ALERT_DEFAULT_RULES_ON_CREATE`) |
 
-### Add Starter Rules
+### Add Templates
 
 ```
-POST /api/alerts/starters
+POST /api/alerts/templates
 ```
 
 ```json
-{ "keys": ["agent-errors", "model-errors"] }
+{ "keys": ["agent-errors", "agent-slow-runs"] }
 ```
 
-Adds starter rules to the active project, enabled. Without a body (or without `keys`), it adds every starter that is `available`. With `keys`, it adds those, including `covered` ones. A starter that is already `added` is never added twice.
+Adds template rules to the active project, enabled. The body can be empty.
+
+- Without `keys`, it adds the [default set](#the-default-set), skipping the templates that are already `added` (`exists`), `covered` (`covered`) or not `available` here (`unavailable`).
+- With `keys` (1 to 26 known keys, duplicates ignored), it adds those templates, including `covered` ones because the person picked them. It still skips templates that are already `added` (`exists`) and `unavailable` ones. A template is never added twice to a project.
 
 Returns `201` when it added at least one rule, `200` otherwise:
 
 ```json
 {
-  "created": [{ "_id": "…", "name": "Agent error rate above 20%", "starter": { "key": "agent-errors", "version": 1 }, "...": "…" }],
+  "created": [{ "_id": "…", "name": "Agent error rate above 20%", "template": { "key": "agent-errors", "version": 1 }, "...": "…" }],
   "skipped": [{ "key": "kb-errors", "reason": "covered" }]
 }
 ```
 
-`reason` is `exists` (already added) or `covered`. `keys` must list 1 to 5 known keys (`400`, `invalid_value`). Like creating a rule, this needs write access to alerts.
+`keys` that is not a list, is empty, is too long or names an unknown template answers `400` (`invalid_value`; "Unknown template key: …"). Requests for one project are handled one at a time; one that waits more than 5 seconds for another to finish answers `409` with `code: "busy"`, and can be sent again. Like creating a rule, this needs write access to alerts.
 
-### Starter rules on new projects
+### The `template` field
 
-- `POST /api/projects` (dashboard): the new project gets the five rules unless the body sends `"starterAlerts": false`. Without the field, the installation default applies (`ALERT_STARTER_RULES_ON_CREATE`, on by default). The answer carries `starterAlerts`: how many rules were added. When adding them fails, the project is still created and `warnings` says so.
-- `POST /api/client/v1/projects` (API token): only with `"starterAlerts": true`, so integrations that create projects get no rules they did not ask for.
-- A new workspace gets them on its Default Project (sign-up, the bootstrap organisation and, in Enterprise, CRM provisioning), unless the installation default is off.
+A rule added from a template carries `template: { key, version }`: the template and the version of it the rule was created at. It is set by the server only (it is never read from a create or update body) and stays when the rule is edited. It is cleared when an update changes the rule's `metric` or `module`, because the rule then no longer is that template's rule. Other rules keep no `template` field.
+
+### Create from a template
+
+To save a template you changed first, send the rule to [Create a Rule](#create-a-rule) with the template's key as `templateKey` (for example `"templateKey": "agent-errors"`): the rule then carries the `template` mark. An unknown key, or a rule whose `metric` is not the template's, answers `400` (`invalid_value`). A project holds each template once: when it is already `added`, the answer is `409` with `code: "template_exists"`.
+
+### Default rules on new projects
+
+- `POST /api/projects` (dashboard): the new project gets the default set unless the body sends `"defaultAlertRules": false` (anything other than a boolean answers `400`). Without the field, the installation default applies (`ALERT_DEFAULT_RULES_ON_CREATE`, on by default). The answer carries `defaultAlertRules`: how many rules were added. When adding them fails, the project is still created and `warnings` says so.
+- `POST /api/client/v1/projects` (API token): only with `"defaultAlertRules": true`, so integrations that create projects get no rules they did not ask for. The answer then carries `defaultAlertRules`.
+- A new workspace gets the default set on its Default Project (sign-up, the bootstrap organisation and, in Enterprise, CRM provisioning), unless the installation default is off.
 
 Deleting a project deletes its alert rules and closes its open, acknowledged and investigating incidents with a note. Its alert history, closed incidents and delivery log are kept.
 
@@ -683,6 +723,6 @@ Errors are `{ "error": "<message>", "code": "<code>", "message": "<message>" }`.
 | 402 | The `baseline` or `slo_burn` condition mode is not available: `code` is `not_enterprise_build` (the build does not include it) or `license_required` (no active Enterprise licence), and the body carries `requiresEnterprise: true`, `module: "alerts-advanced"` and `error: "Payment Required"` |
 | 403 | The caller lacks the `alerts` permission, or changes or tests a library channel without being a workspace owner or admin (`forbidden`) |
 | 404 | Rule, event or channel not found in the project, or a project that is not found for entity links (`project_not_found`) |
-| 409 | A library channel name in use (`name_taken`), or a library channel that rules still reference (`channel_in_use`) |
+| 409 | A library channel name in use (`name_taken`), a library channel that rules still reference (`channel_in_use`), a [template](#create-from-a-template) the project already has (`template_exists`), or [templates](#add-templates) being added by another request (`busy`) |
 | 429 | Too many channel tests or backtests (`rate_limited`, with a `Retry-After` header) |
 | 500 | Internal server error |

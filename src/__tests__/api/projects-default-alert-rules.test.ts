@@ -1,12 +1,12 @@
 /**
- * Starter alert rules and the alert cleanup on the two project surfaces: the dashboard plugin and the token-authenticated
- * client API. What the rules are and how they are added is covered in unit/alert-starter-rules.test.ts and
- * unit/alert-project-cleanup.test.ts (and against the live alerts plugin in api/alerts-starters.test.ts); this pins
+ * Default alert rules and the alert cleanup on the two project surfaces: the dashboard plugin and the token-authenticated
+ * client API. What the rules are and how they are added is covered in unit/alert-templates.test.ts and
+ * unit/alert-project-cleanup.test.ts (and against the live alerts plugin in api/alerts-templates.test.ts); this pins
  * WHEN the project routes call them and what they answer:
  *
- *   POST   /api/projects                    seeds unless `starterAlerts: false`; omitted follows the installation default
+ *   POST   /api/projects                    seeds unless `defaultAlertRules: false`; omitted follows the installation default
  *   DELETE /api/projects/:projectId         removes the project's alerts after the delete
- *   POST   /api/client/v1/projects          seeds only with `starterAlerts: true`
+ *   POST   /api/client/v1/projects          seeds only with `defaultAlertRules: true`
  *   DELETE /api/client/v1/projects/:projectId
  *
  * The two alert services are replaced by hoisted plain mocks (a sync factory: an async one that calls importActual does
@@ -16,8 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
 const h = vi.hoisted(() => ({
-  seedStarterAlerts: vi.fn(),
-  starterAlertsOnCreate: vi.fn(),
+  seedDefaultAlertRules: vi.fn(),
+  defaultAlertRulesOnCreate: vi.fn(),
   removeDeletedProjectAlerts: vi.fn(),
 }));
 
@@ -42,9 +42,9 @@ vi.mock('@/lib/database', () => {
 });
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 vi.mock('@/lib/quota/quotaGuard', () => ({ checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }) }));
-vi.mock('@/lib/services/alerts/starterAlerts', () => ({
-  seedStarterAlerts: h.seedStarterAlerts,
-  starterAlertsOnCreate: h.starterAlertsOnCreate,
+vi.mock('@/lib/services/alerts/alertTemplates', () => ({
+  seedDefaultAlertRules: h.seedDefaultAlertRules,
+  defaultAlertRulesOnCreate: h.defaultAlertRulesOnCreate,
 }));
 vi.mock('@/lib/services/alerts/alertService', () => ({
   removeDeletedProjectAlerts: h.removeDeletedProjectAlerts,
@@ -105,8 +105,8 @@ function primeDb(db: MockDb): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  h.seedStarterAlerts.mockResolvedValue(5);
-  h.starterAlertsOnCreate.mockReturnValue(true);
+  h.seedDefaultAlertRules.mockResolvedValue(5);
+  h.defaultAlertRulesOnCreate.mockReturnValue(true);
   h.removeDeletedProjectAlerts.mockResolvedValue(undefined);
 });
 
@@ -133,102 +133,113 @@ describe('dashboard: POST /api/projects', () => {
     payload: JSON.stringify(payload),
   });
 
-  it('seeds the starter rules by default, for the new project, and says how many it added', async () => {
+  it('seeds the default alert rules by default, for the new project, and says how many it added', async () => {
     const res = await create({ name: 'New project' });
 
     expect(res.statusCode).toBe(201);
     const body = parseJsonBody<Json>(res.body);
-    expect(body).toMatchObject({ project: { _id: NEW_PROJECT, name: 'New project' }, warnings: [], starterAlerts: 5 });
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
+    expect(body).toMatchObject({ project: { _id: NEW_PROJECT, name: 'New project' }, warnings: [], defaultAlertRules: 5 });
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
     // tenant database, tenant, the NEW project, the person who creates it
-    expect(h.seedStarterAlerts).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
   });
 
   it('seeds after the project exists', async () => {
     await create({ name: 'New project' });
-    expect(db.createProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedStarterAlerts.mock.invocationCallOrder[0]);
+    expect(db.createProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedDefaultAlertRules.mock.invocationCallOrder[0]);
   });
 
   it('answers how many rules were added, whatever the number: 0 when the project already has them', async () => {
-    h.seedStarterAlerts.mockResolvedValue(0);
+    h.seedDefaultAlertRules.mockResolvedValue(0);
     const res = await create({ name: 'New project' });
     expect(res.statusCode).toBe(201);
-    expect(parseJsonBody<Json>(res.body)).toMatchObject({ warnings: [], starterAlerts: 0 });
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ warnings: [], defaultAlertRules: 0 });
   });
 
-  it('skips them with starterAlerts: false, even when the installation default is on', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(true);
-    const res = await create({ name: 'Quiet project', starterAlerts: false });
+  it('skips them with defaultAlertRules: false, even when the installation default is on', async () => {
+    h.defaultAlertRulesOnCreate.mockReturnValue(true);
+    const res = await create({ name: 'Quiet project', defaultAlertRules: false });
 
     expect(res.statusCode).toBe(201);
-    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT }, warnings: [], starterAlerts: 0 });
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT }, warnings: [], defaultAlertRules: 0 });
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
     // an explicit answer does not ask for the default
-    expect(h.starterAlertsOnCreate).not.toHaveBeenCalled();
+    expect(h.defaultAlertRulesOnCreate).not.toHaveBeenCalled();
   });
 
   it('follows the installation default when the field is omitted: off skips', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(false);
+    h.defaultAlertRulesOnCreate.mockReturnValue(false);
     const res = await create({ name: 'Default off' });
 
     expect(res.statusCode).toBe(201);
-    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT }, warnings: [], starterAlerts: 0 });
-    expect(h.starterAlertsOnCreate).toHaveBeenCalledTimes(1);
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT }, warnings: [], defaultAlertRules: 0 });
+    expect(h.defaultAlertRulesOnCreate).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 
   it('follows the installation default when the field is omitted: on seeds', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(true);
+    h.defaultAlertRulesOnCreate.mockReturnValue(true);
     await create({ name: 'Default on' });
-    expect(h.starterAlertsOnCreate).toHaveBeenCalledTimes(1);
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
+    expect(h.defaultAlertRulesOnCreate).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
   });
 
-  it('seeds with starterAlerts: true even when the installation default is off', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(false);
-    const res = await create({ name: 'Asked for them', starterAlerts: true });
+  it('seeds with defaultAlertRules: true even when the installation default is off', async () => {
+    h.defaultAlertRulesOnCreate.mockReturnValue(false);
+    const res = await create({ name: 'Asked for them', defaultAlertRules: true });
 
     expect(res.statusCode).toBe(201);
-    expect(parseJsonBody<Json>(res.body)).toMatchObject({ starterAlerts: 5 });
-    expect(h.seedStarterAlerts).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
-    expect(h.starterAlertsOnCreate).not.toHaveBeenCalled();
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ defaultAlertRules: 5 });
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
+    expect(h.defaultAlertRulesOnCreate).not.toHaveBeenCalled();
   });
 
   it('still answers 201 and warns when the rules could not be added', async () => {
-    h.seedStarterAlerts.mockResolvedValue(null);
+    h.seedDefaultAlertRules.mockResolvedValue(null);
     const res = await create({ name: 'No rules this time' });
 
     expect(res.statusCode).toBe(201);
     const body = parseJsonBody<Json>(res.body);
     expect(body.project).toMatchObject({ _id: NEW_PROJECT });
-    expect(body.starterAlerts).toBe(0);
-    expect(body.warnings).toEqual(['The starter alert rules could not be added; add them from Alerts → Starter rules.']);
+    expect(body.defaultAlertRules).toBe(0);
+    expect(body.warnings).toEqual(['The default alert rules could not be added; add them from Alerts → Templates.']);
   });
 
-  it('keeps the other warnings of the create next to the starter one', async () => {
-    h.seedStarterAlerts.mockResolvedValue(null);
+  it('keeps the other warnings of the create next to the default-rules one', async () => {
+    h.seedDefaultAlertRules.mockResolvedValue(null);
     const res = await create({ name: 'Mixed', members: [{ userId: 'nobody', role: 'member' }] });
 
     expect(res.statusCode).toBe(201);
     const { warnings } = parseJsonBody<Json>(res.body);
     expect(warnings.length).toBeGreaterThanOrEqual(2);
-    expect(warnings[0]).not.toContain('starter alert rules');
-    expect(warnings[warnings.length - 1]).toContain('starter alert rules');
+    expect(warnings[0]).not.toContain('default alert rules');
+    expect(warnings[warnings.length - 1]).toContain('default alert rules');
   });
 
   it('does not seed a project that was refused: name missing, or a caller who cannot create projects', async () => {
     expect((await create({ name: 'x' })).statusCode).toBe(400);
     expect((await create({ name: 'Not allowed' }, 'user-1')).statusCode).toBe(403);
     expect(db.createProject).not.toHaveBeenCalled();
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
+
+  it.each([['a string', 'false'], ['a number', 0], ['null', null], ['a list', [true]]])(
+    'answers 400 for defaultAlertRules that is %s, and creates nothing',
+    async (_label, value) => {
+      const res = await create({ name: 'Bad flag', defaultAlertRules: value });
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<Json>(res.body)).toEqual({ error: 'defaultAlertRules must be a boolean' });
+      expect(db.createProject).not.toHaveBeenCalled();
+      expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not seed when the project cannot be created', async () => {
     db.createProject.mockRejectedValue(new Error('db down'));
     const res = await create({ name: 'Broken' });
     expect(res.statusCode).toBe(500);
     expect(parseJsonBody<Json>(res.body)).toEqual({ error: 'Internal server error' });
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 });
 
@@ -324,81 +335,81 @@ describe('client API: POST /api/client/v1/projects', () => {
     payload: JSON.stringify(payload),
   });
 
-  it('seeds the starter rules with starterAlerts: true, as the token owner', async () => {
-    const res = await create({ name: 'Integration project', starterAlerts: true });
+  it('seeds the default alert rules with defaultAlertRules: true, as the token owner', async () => {
+    const res = await create({ name: 'Integration project', defaultAlertRules: true });
 
     expect(res.statusCode).toBe(201);
-    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT, name: 'Integration project' }, starterAlerts: 5 });
+    expect(parseJsonBody<Json>(res.body)).toMatchObject({ project: { _id: NEW_PROJECT, name: 'Integration project' }, defaultAlertRules: 5 });
     expect(parseJsonBody<Json>(res.body).warnings).toBeUndefined();
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
-    expect(h.seedStarterAlerts).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
-    expect(db.createProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedStarterAlerts.mock.invocationCallOrder[0]);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledWith(TENANT_DB, TENANT, NEW_PROJECT, 'owner-1');
+    expect(db.createProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedDefaultAlertRules.mock.invocationCallOrder[0]);
   });
 
   it('adds no rules without the opt-in, whatever the installation default is', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(true);
+    h.defaultAlertRulesOnCreate.mockReturnValue(true);
     const res = await create({ name: 'Integration project' });
 
     expect(res.statusCode).toBe(201);
     const body = parseJsonBody<Json>(res.body);
     expect(body.project).toMatchObject({ _id: NEW_PROJECT });
-    // the answer keeps its old shape: nothing about starter rules
-    expect(body).not.toHaveProperty('starterAlerts');
+    // the answer keeps its old shape: nothing about default alert rules
+    expect(body).not.toHaveProperty('defaultAlertRules');
     expect(body).not.toHaveProperty('warnings');
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
-    expect(h.starterAlertsOnCreate).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
+    expect(h.defaultAlertRulesOnCreate).not.toHaveBeenCalled();
   });
 
-  it('adds no rules with starterAlerts: false', async () => {
-    const res = await create({ name: 'Integration project', starterAlerts: false });
+  it('adds no rules with defaultAlertRules: false', async () => {
+    const res = await create({ name: 'Integration project', defaultAlertRules: false });
     expect(res.statusCode).toBe(201);
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 
   it.each([['the string "true"', 'true'], ['the number 1', 1], ['a string', 'yes']])(
     'adds no rules for %s: only a real true opts in',
     async (_label, value) => {
-      const res = await create({ name: 'Integration project', starterAlerts: value });
+      const res = await create({ name: 'Integration project', defaultAlertRules: value });
       expect(res.statusCode).toBe(201);
-      expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+      expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
     },
   );
 
   it('opts in even when the installation default is off', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(false);
-    const res = await create({ name: 'Integration project', starterAlerts: true });
+    h.defaultAlertRulesOnCreate.mockReturnValue(false);
+    const res = await create({ name: 'Integration project', defaultAlertRules: true });
     expect(res.statusCode).toBe(201);
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
   });
 
   it('still answers 201 and warns when the rules could not be added', async () => {
-    h.seedStarterAlerts.mockResolvedValue(null);
-    const res = await create({ name: 'Integration project', starterAlerts: true });
+    h.seedDefaultAlertRules.mockResolvedValue(null);
+    const res = await create({ name: 'Integration project', defaultAlertRules: true });
 
     expect(res.statusCode).toBe(201);
     expect(parseJsonBody<Json>(res.body)).toMatchObject({
       project: { _id: NEW_PROJECT },
-      starterAlerts: 0,
-      warnings: ['The starter alert rules could not be added.'],
+      defaultAlertRules: 0,
+      warnings: ['The default alert rules could not be added.'],
     });
   });
 
   it('answers 0 and no warning when it added nothing because the rules were there', async () => {
-    h.seedStarterAlerts.mockResolvedValue(0);
-    const res = await create({ name: 'Integration project', starterAlerts: true });
+    h.seedDefaultAlertRules.mockResolvedValue(0);
+    const res = await create({ name: 'Integration project', defaultAlertRules: true });
     const body = parseJsonBody<Json>(res.body);
-    expect(body.starterAlerts).toBe(0);
+    expect(body.defaultAlertRules).toBe(0);
     expect(body.warnings).toBeUndefined();
   });
 
   it('seeds nothing for a refused request: a name that is too short, or a token owner who is not an admin', async () => {
-    expect((await create({ name: 'x', starterAlerts: true })).statusCode).toBe(400);
+    expect((await create({ name: 'x', defaultAlertRules: true })).statusCode).toBe(400);
 
     (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(tokenContext(PLAIN_USER));
-    expect((await create({ name: 'Integration project', starterAlerts: true })).statusCode).toBe(403);
+    expect((await create({ name: 'Integration project', defaultAlertRules: true })).statusCode).toBe(403);
 
     expect(db.createProject).not.toHaveBeenCalled();
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 });
 

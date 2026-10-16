@@ -11,6 +11,7 @@
 import { sendEmail } from '@/lib/email/mailer';
 import { createLogger } from '@/lib/core/logger';
 import { getTenantDatabase } from '@/lib/database';
+import { effectiveProjectLevels, getProjectLevelsSince } from '@/lib/iam/projectLevels';
 import type { AlertEmailAudience, IAlertChannel } from '@/lib/database';
 import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
@@ -35,6 +36,9 @@ import type {
 
 const log = createLogger('alert-channels');
 const MAX_ERROR_SIGNATURES = 3;
+
+/** Most addresses a test notification is mailed to, however many its channel resolves to. */
+export const MAX_TEST_EMAIL_RECIPIENTS = 5;
 
 type TenantUser = Awaited<ReturnType<Awaited<ReturnType<typeof getTenantDatabase>>['listUsers']>>[number];
 
@@ -77,7 +81,9 @@ async function readUsers(tenantDbName: string): Promise<TenantUser[] | null> {
 /**
  * Ids of the users who administer the project through a membership: a direct
  * `project_admin` membership or a group granted `project_admin`, unless that
- * grant takes their alerts access away. Best effort: `null` when the
+ * grant takes their alerts access away (read the way the access engine reads it,
+ * so a `none` saved before the project levels were enforced does not count).
+ * Best effort: `null` when the
  * memberships can't be read (logged, error name only, never cached).
  */
 async function readProjectAdminIds(tenantDbName: string, projectId: string): Promise<Set<string> | null> {
@@ -87,15 +93,24 @@ async function readProjectAdminIds(tenantDbName: string, projectId: string): Pro
   if (!entry || now - entry.at > PROJECT_ADMIN_CACHE_TTL_MS) {
     const ids = (async () => {
       const db = await getTenantDatabase(tenantDbName);
-      const [rows, grants] = await Promise.all([
+      const [rows, grants, since] = await Promise.all([
         db.listUserProjectsByProject(projectId),
         db.listGroupProjectsByProject(projectId),
+        getProjectLevelsSince(tenantDbName).catch((err): null => {
+          // Mailing someone whose old `none` is out of date beats mailing nobody: use the stored levels.
+          log.warn('Alert project levels lookup failed', { error: err instanceof Error ? err.name : typeof err });
+          return null;
+        }),
       ]);
+      const alertsLevel = (row: { servicePermissions?: unknown; updatedAt?: Date | string | number | null }) =>
+        since === null
+          ? (row.servicePermissions as { alerts?: string } | undefined)?.alerts
+          : effectiveProjectLevels(row, since).alerts;
       const out = new Set<string>();
       for (const row of rows) {
-        if (row.role === 'project_admin' && row.servicePermissions?.alerts !== 'none') out.add(String(row.userId));
+        if (row.role === 'project_admin' && alertsLevel(row) !== 'none') out.add(String(row.userId));
       }
-      const adminGroups = grants.filter((grant) => grant.role === 'project_admin' && grant.servicePermissions?.alerts !== 'none');
+      const adminGroups = grants.filter((grant) => grant.role === 'project_admin' && alertsLevel(grant) !== 'none');
       const members = await Promise.all(adminGroups.map((grant) => db.listGroupMembers(String(grant.groupId))));
       for (const member of members.flat()) out.add(String(member.userId));
       return out;
@@ -247,7 +262,7 @@ export class EmailAlertChannel implements IAlertDispatcher {
   async dispatch(n: AlertNotification, channel: IAlertChannel, ctx: AlertContext): Promise<DispatchResult[]> {
     if (channel.type !== 'email') return [];
     const templateName = n.kind === 'resolved' ? 'alert-resolved' : 'alert-fired';
-    return this.sendToRecipients(channel, ctx, templateName, buildAlertEmailData(n, ctx));
+    return this.sendToRecipients(channel, ctx, templateName, buildAlertEmailData(n, ctx), n.kind === 'test');
   }
 
   async sendMessage(message: ChannelMessage, channel: IAlertChannel, ctx: AlertContext): Promise<DispatchResult[]> {
@@ -271,18 +286,21 @@ export class EmailAlertChannel implements IAlertDispatcher {
     ctx: AlertContext,
     templateName: string,
     data: Record<string, unknown>,
+    isTest = false,
   ): Promise<DispatchResult[]> {
     // A disabled account must not keep receiving operational mail, whether it
     // was listed explicitly or picked up by the owner/admin fallback.
-    const recipients = await resolveAlertEmailRecipients(ctx.tenantDbName, channel.recipients, {
+    const resolved = await resolveAlertEmailRecipients(ctx.tenantDbName, channel.recipients, {
       audience: channel.audience,
       projectId: ctx.projectId,
     });
-    if (recipients.length === 0) {
+    if (resolved.length === 0) {
       return [{ type: 'email', target: '(none)', success: false, error: 'No recipients available' }];
     }
+    // An audience can resolve to many people: a test must not become a mass mailer.
+    const recipients = isTest ? resolved.slice(0, MAX_TEST_EMAIL_RECIPIENTS) : resolved;
 
-    return Promise.all(
+    const results = await Promise.all(
       recipients.map(async (recipient): Promise<DispatchResult> => {
         try {
           // sendEmail reports failure through its return value (it never throws)
@@ -302,5 +320,11 @@ export class EmailAlertChannel implements IAlertDispatcher {
         }
       }),
     );
+    if (!isTest) return results;
+
+    // The person who tests sees how many were mailed, not who they are.
+    const failure = results.find((result) => !result.success);
+    const target = `${results.length} ${results.length === 1 ? 'recipient' : 'recipients'}`;
+    return [failure ? { ...failure, target } : { type: 'email', target, success: true }];
   }
 }

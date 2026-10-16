@@ -1,15 +1,15 @@
 /**
- * The on-prem bootstrap organization and the starter alert rules: the one workspace created from BOOTSTRAP_* starts
- * with the starter rules on its Default Project (unless the installation default is off), and adding them never stops
- * the rest of the bootstrap. The seeding itself is covered in unit/alert-starter-rules.test.ts; here it is a hoisted
+ * The on-prem bootstrap organization and the default alert rules: the one workspace created from BOOTSTRAP_* starts
+ * with the default alert rules on its Default Project (unless the installation default is off), and adding them never stops
+ * the rest of the bootstrap. The seeding itself is covered in unit/alert-templates.test.ts; here it is a hoisted
  * plain mock, so the arguments and the order of the calls can be asserted.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
 const h = vi.hoisted(() => ({
-  seedStarterAlerts: vi.fn(),
-  starterAlertsOnCreate: vi.fn(),
+  seedDefaultAlertRules: vi.fn(),
+  defaultAlertRulesOnCreate: vi.fn(),
   ensureDefaultProject: vi.fn(),
 }));
 
@@ -23,9 +23,9 @@ vi.mock('@/lib/license/license-manager', () => ({
   LicenseType: {},
 }));
 vi.mock('@/lib/services/projects/projectService', () => ({ ensureDefaultProject: h.ensureDefaultProject }));
-vi.mock('@/lib/services/alerts/starterAlerts', () => ({
-  seedStarterAlerts: h.seedStarterAlerts,
-  starterAlertsOnCreate: h.starterAlertsOnCreate,
+vi.mock('@/lib/services/alerts/alertTemplates', () => ({
+  seedDefaultAlertRules: h.seedDefaultAlertRules,
+  defaultAlertRulesOnCreate: h.defaultAlertRulesOnCreate,
 }));
 
 import { reloadConfig } from '@/lib/core/config';
@@ -43,8 +43,8 @@ beforeEach(() => {
   process.env.BOOTSTRAP_ADMIN_PASSWORD = 'Securepassword123!';
   reloadConfig();
 
-  h.seedStarterAlerts.mockResolvedValue(5);
-  h.starterAlertsOnCreate.mockReturnValue(true);
+  h.seedDefaultAlertRules.mockResolvedValue(5);
+  h.defaultAlertRulesOnCreate.mockReturnValue(true);
   h.ensureDefaultProject.mockResolvedValue({ _id: 'proj-1', key: '__default__' });
 
   db = createMockDb();
@@ -70,28 +70,28 @@ afterEach(() => {
   reloadConfig();
 });
 
-describe('ensureBootstrapOrganization: starter alert rules', () => {
-  it('adds the starter rules to the Default Project of the new organization, as its owner', async () => {
+describe('ensureBootstrapOrganization: default alert rules', () => {
+  it('adds the default alert rules to the Default Project of the new organization, as its owner', async () => {
     await ensureBootstrapOrganization();
 
     expect(h.ensureDefaultProject).toHaveBeenCalledWith('tenant_acme-corp', 'tenant-1', 'user-1');
-    expect(h.seedStarterAlerts).toHaveBeenCalledTimes(1);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledTimes(1);
     // tenant database, tenant, the default project, the owner
-    expect(h.seedStarterAlerts).toHaveBeenCalledWith('tenant_acme-corp', 'tenant-1', 'proj-1', 'user-1');
-    expect(h.ensureDefaultProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedStarterAlerts.mock.invocationCallOrder[0]);
+    expect(h.seedDefaultAlertRules).toHaveBeenCalledWith('tenant_acme-corp', 'tenant-1', 'proj-1', 'user-1');
+    expect(h.ensureDefaultProject.mock.invocationCallOrder[0]).toBeLessThan(h.seedDefaultAlertRules.mock.invocationCallOrder[0]);
   });
 
   it('adds nothing when the installation default is off, and still finishes the bootstrap', async () => {
-    h.starterAlertsOnCreate.mockReturnValue(false);
+    h.defaultAlertRulesOnCreate.mockReturnValue(false);
     await ensureBootstrapOrganization();
 
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
     expect(db.updateTenant).toHaveBeenCalledWith('tenant-1', { ownerId: 'user-1' });
     expect(db.registerUserInDirectory).toHaveBeenCalledTimes(1);
   });
 
   it('finishes the bootstrap when the rules could not be added', async () => {
-    h.seedStarterAlerts.mockResolvedValue(null);
+    h.seedDefaultAlertRules.mockResolvedValue(null);
     await ensureBootstrapOrganization();
 
     expect(db.updateTenant).toHaveBeenCalledWith('tenant-1', { ownerId: 'user-1' });
@@ -101,7 +101,7 @@ describe('ensureBootstrapOrganization: starter alert rules', () => {
   it('adds nothing when the default project has no id', async () => {
     h.ensureDefaultProject.mockResolvedValue({ key: '__default__' });
     await ensureBootstrapOrganization();
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
     expect(db.updateTenant).toHaveBeenCalledTimes(1);
   });
 
@@ -118,7 +118,7 @@ describe('ensureBootstrapOrganization: starter alert rules', () => {
     await ensureBootstrapOrganization();
     expect(db.createTenant).not.toHaveBeenCalled();
 
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 
   it('adds nothing when the password is refused and no organization is created', async () => {
@@ -126,6 +126,6 @@ describe('ensureBootstrapOrganization: starter alert rules', () => {
     reloadConfig();
     await ensureBootstrapOrganization();
     expect(db.createTenant).not.toHaveBeenCalled();
-    expect(h.seedStarterAlerts).not.toHaveBeenCalled();
+    expect(h.seedDefaultAlertRules).not.toHaveBeenCalled();
   });
 });

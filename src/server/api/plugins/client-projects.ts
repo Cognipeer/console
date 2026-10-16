@@ -25,7 +25,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import { DEFAULT_PROJECT_KEY, generateUniqueProjectKey } from '@/lib/services/projects/projectService';
 import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
-import { seedStarterAlerts } from '@/lib/services/alerts/starterAlerts';
+import { seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -72,12 +72,12 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
         updatedBy: String(auth.tokenRecord.userId),
       });
       // Opt-in here: an integration creating projects gets no alert rules it did not ask for.
-      if (body.starterAlerts === true) {
-        const added = await seedStarterAlerts(auth.tenantDbName, auth.tenantId, String(project._id), String(auth.tokenRecord.userId));
+      if (body.defaultAlertRules === true) {
+        const added = await seedDefaultAlertRules(auth.tenantDbName, auth.tenantId, String(project._id), String(auth.tokenRecord.userId));
         return reply.code(201).send({
           project,
-          starterAlerts: added ?? 0,
-          ...(added === null ? { warnings: ['The starter alert rules could not be added.'] } : {}),
+          defaultAlertRules: added ?? 0,
+          ...(added === null ? { warnings: ['The default alert rules could not be added.'] } : {}),
         });
       }
       return reply.code(201).send({ project });

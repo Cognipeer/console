@@ -222,7 +222,8 @@ describe('a test notification', () => {
   it('on an unsaved project_admins channel goes to the admins of the project it is sent from', async () => {
     const result = await AlertService.testChannel('tenant_acme', session, scope, { channel: { type: 'email', recipients: [], audience: 'project_admins' } });
 
-    expect(result).toMatchObject({ type: 'email', target: email('pat'), success: true });
+    // the person who tests sees how many were mailed, not their addresses
+    expect(result).toMatchObject({ type: 'email', target: '1 recipient', success: true });
     expect(mailed()).toEqual([['alert-fired', email('pat')]]);
   });
 
@@ -231,9 +232,32 @@ describe('a test notification', () => {
     expect(mailed()).toEqual([['alert-fired', email('quinn')]]);
   });
 
-  it('on a stored channel of a rule reaches the admins of the project the test is made in', async () => {
+  it('on a stored channel of a rule reaches the admins of the rule\'s project', async () => {
     rules = [ruleOf('proj-1')];
     await AlertService.testChannel('tenant_acme', session, { ...scope, ruleScopeProjectId: 'proj-1' }, { ruleId: 'rule-proj-1', channelId: 'ch_000000000001' });
+    expect(mailed()).toEqual([['alert-fired', email('pat')]]);
+  });
+
+  it('on a stored channel of a rule of another project reaches that project\'s admins, not the caller\'s, and names that project', async () => {
+    // a workspace owner testing from proj-1 a rule that lives in proj-2 (no project scope on the rule lookup)
+    rules = [ruleOf('proj-2')];
+    const result = await AlertService.testChannel('tenant_acme', session, scope, { ruleId: 'rule-proj-2', channelId: 'ch_000000000001' });
+    expect(result).toMatchObject({ success: true, target: '1 recipient' });
+    expect(mailed()).toEqual([['alert-fired', email('quinn')]]);
+    expect(h.sendEmail.mock.calls[0][2]).toMatchObject({ projectName: 'Project proj-2' });
+  });
+
+  it('falls back to the caller\'s project name when the rule\'s project cannot be read', async () => {
+    rules = [ruleOf('proj-2')];
+    db.findProjectById.mockRejectedValue(new Error('db down'));
+    await AlertService.testChannel('tenant_acme', session, scope, { ruleId: 'rule-proj-2', channelId: 'ch_000000000001' });
+    expect(mailed()).toEqual([['alert-fired', email('quinn')]]);
+    expect(h.sendEmail.mock.calls[0][2]).toMatchObject({ projectName: 'Project proj-1' });
+  });
+
+  it('only the stored-channel branch follows the rule: a typed channel keeps the caller\'s project', async () => {
+    rules = [ruleOf('proj-2')];
+    await AlertService.testChannel('tenant_acme', session, scope, { channel: { type: 'email', recipients: [], audience: 'project_admins' } });
     expect(mailed()).toEqual([['alert-fired', email('pat')]]);
   });
 

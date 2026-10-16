@@ -26,7 +26,7 @@ import type {
   IAlertEvent,
   IAlertRule,
   IAlertRuleEntityScope,
-  IAlertRuleStarter,
+  IAlertRuleTemplateRef,
   IAlertSloConfig,
   IAlertState,
   IAlertDelivery,
@@ -54,6 +54,7 @@ import {
 import { maskChannels, sealChannels } from './channels/channelSecrets';
 import { assertPublicChannelUrl, ChannelUrlError, isValidPagerDutyRoutingKey, MAX_CHANNEL_URL_LENGTH } from './channels/channelUrl';
 import { dispatchNotification } from './channels';
+import { MAX_TEST_EMAIL_RECIPIENTS } from './channels/emailChannel';
 import type { AlertNotification, DispatchResult } from './channels';
 
 export { AlertApiError } from './alertApiError';
@@ -613,17 +614,14 @@ function maskRule<T extends IAlertRule | null>(rule: T): T {
   return { ...rule, channels: maskChannels(rule.channels) };
 }
 
-/** Most addresses one unsaved email channel is tested against. */
-const MAX_TEST_EMAIL_RECIPIENTS = 5;
-
 export interface RuleScopeOptions {
   /** When set, a rule of another project reads as missing. */
   projectId?: string;
 }
 
 export interface CreateRuleOptions {
-  /** Marks the rule as added from the starter set (server-side callers only, never the request body). */
-  starter?: IAlertRuleStarter;
+  /** Marks the rule as added from a rule template (server-side callers only, never the request body). */
+  template?: IAlertRuleTemplateRef;
 }
 
 /** Statuses a person still has to act on; a deleted project's incidents in them are closed. */
@@ -675,7 +673,7 @@ export class AlertService {
       notifyOnResolve: rule.notifyOnResolve,
       renotifyMinutes: rule.renotifyMinutes,
       ...(rule.runbookUrl ? { runbookUrl: rule.runbookUrl } : {}),
-      ...(options.starter ? { starter: { key: options.starter.key, version: options.starter.version } } : {}),
+      ...(options.template ? { template: { key: options.template.key, version: options.template.version } } : {}),
       channels,
       createdBy: userId,
     });
@@ -720,6 +718,8 @@ export class AlertService {
     };
     if (rule.channels) patch.channels = await sealChannels(rule.channels, existing.channels ?? []);
     if (updatedBy) patch.updatedBy = updatedBy;
+    // Retargeted to another metric or module: it no longer is that template's rule (`null` clears it in both providers).
+    if (existing.template && (rule.metric !== existing.metric || rule.module !== existing.module)) patch.template = null;
 
     const updated = await db.updateAlertRule(ruleId, patch, options.projectId);
     if (!updated) return null;
@@ -1094,6 +1094,9 @@ export class AlertService {
     let ruleDef = getMetricDef('agent_error_rate');
     let alertModule: AlertModule = 'agents';
     let metric: AlertMetric = 'agent_error_rate';
+    // The project the notification is about: the caller's, or the stored rule's own.
+    let notifyProjectId = scope.projectId;
+    let notifyProjectName = scope.projectName;
 
     if (body.channel !== undefined) {
       const input = normalizeChannelInput(body.channel, 0, null);
@@ -1123,6 +1126,14 @@ export class AlertService {
       ruleDef = getMetricDef(rule.metric);
       alertModule = rule.module;
       metric = rule.metric;
+      // A `project_admins` channel mails the admins of the rule's project, not those of the caller's active project.
+      notifyProjectId = rule.projectId;
+      if (rule.projectId !== scope.projectId) {
+        try {
+          const project = await db.findProjectById(rule.projectId);
+          if (project?.name) notifyProjectName = project.name;
+        } catch { /* the caller's project name is a fine fallback */ }
+      }
     } else {
       throw bad('invalid_body', 'Send either { channel } or { ruleId, channelId }');
     }
@@ -1151,7 +1162,7 @@ export class AlertService {
       value: null,
       severity: 'info',
       firedAt: now,
-      projectName: scope.projectName,
+      projectName: notifyProjectName,
       companyName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     };
@@ -1161,8 +1172,8 @@ export class AlertService {
       tenantId: session.tenantId,
       tenantSlug: session.tenantSlug,
       companyName,
-      projectId: scope.projectId,
-      projectName: scope.projectName,
+      projectId: notifyProjectId,
+      projectName: notifyProjectName,
       dashboardUrl: `${appUrl}/dashboard/alerts`,
     });
     if (results.length === 0) return { type: stored.type, target: stored.type, success: false, error: 'No delivery attempted' };

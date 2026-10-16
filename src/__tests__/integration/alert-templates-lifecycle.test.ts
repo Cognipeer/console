@@ -1,6 +1,6 @@
 /**
- * Starter alert rules over real databases, run against BOTH providers, through the real project routes: creating a
- * project adds the starter rules (dashboard: by default, client API: on request), and deleting one removes its alert
+ * Default alert rules over real databases, run against BOTH providers, through the real project routes: creating a
+ * project adds the default alert rules (dashboard: by default, client API: on request), and deleting one removes its alert
  * rules and closes the incidents someone still had to act on, in pages, leaving everything of other projects and the
  * history alone. The unit and API tests pin the decisions with mocks; this proves the pieces work together on SQLite
  * and MongoDB (rule store, incident paging and closing, the marks, the channel audience).
@@ -37,7 +37,8 @@ vi.mock('@/lib/quota/quotaGuard', () => ({ checkResourceQuota: vi.fn().mockResol
 
 import { reloadConfig } from '@/lib/core/config';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
-import { STARTER_ALERT_KEYS, STARTER_ALERTS, seedStarterAlerts } from '@/lib/services/alerts/starterAlerts';
+import { ALERT_TEMPLATES, DEFAULT_ALERT_TEMPLATE_KEYS, seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
+import { getMetricDef } from '@/lib/services/alerts/metricCatalog';
 import { clientProjectsApiPlugin } from '@/server/api/plugins/client-projects';
 import { projectsApiPlugin } from '@/server/api/plugins/projects';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -53,7 +54,7 @@ const apiUnderTest: FastifyPluginAsync = async (app) => {
 const uid = (): string => Math.random().toString(36).slice(2, 10);
 const CLOSING_NOTE = 'Closed: the project was deleted';
 
-describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
+describeForEachProvider('Default alert rules and project cleanup', (getDb) => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
   let tenantId = '';
   let tenantDbName = '';
@@ -67,7 +68,7 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
     const suffix = uid();
     tenantDbName = `tenant_sal_${suffix}`;
     const tenant = await db.createTenant({
-      companyName: 'Starter Lifecycle Co',
+      companyName: 'Templates Lifecycle Co',
       slug: `sal-${suffix}`,
       dbName: tenantDbName,
       licenseType: 'enterprise',
@@ -104,13 +105,13 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
   });
 
   afterAll(() => {
-    delete process.env.ALERT_STARTER_RULES_ON_CREATE;
+    delete process.env.ALERT_DEFAULT_RULES_ON_CREATE;
     reloadConfig();
   });
 
   beforeEach(async () => {
     await getDb().switchToTenant(tenantDbName);
-    delete process.env.ALERT_STARTER_RULES_ON_CREATE;
+    delete process.env.ALERT_DEFAULT_RULES_ON_CREATE;
     reloadConfig();
   });
 
@@ -143,8 +144,8 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
 
   const rulesOf = (projectId: string) => getDb().listAlertRules(tenantId, { projectId });
 
-  /** A project with the starter rules (made the way a person does it), and the rules' ids. */
-  async function projectWithStarters(name: string): Promise<{ projectId: string; ruleIds: string[] }> {
+  /** A project with the default alert rules (made the way a person does it), and the rules' ids. */
+  async function projectWithDefaultRules(name: string): Promise<{ projectId: string; ruleIds: string[] }> {
     const res = await createViaDashboard({ name });
     expect(res.statusCode).toBe(201);
     const projectId = String(parseJsonBody<Json>(res.body).project._id);
@@ -178,17 +179,17 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
   // ── creating a project ─────────────────────────────────────────────────────
 
   describe('creating a project', () => {
-    it('adds the five starter rules, enabled and marked, to a project created from the dashboard', async () => {
-      const res = await createViaDashboard({ name: 'Alpha Starters' });
+    it('adds the five default alert rules, enabled and marked, to a project created from the dashboard', async () => {
+      const res = await createViaDashboard({ name: 'Alpha Defaults' });
 
       expect(res.statusCode).toBe(201);
       const body = parseJsonBody<Json>(res.body);
-      expect(body).toMatchObject({ warnings: [], starterAlerts: 5 });
+      expect(body).toMatchObject({ warnings: [], defaultAlertRules: 5 });
 
       const rules = await rulesOf(String(body.project._id));
-      expect(rules.map((rule) => rule.starter?.key).sort()).toEqual([...STARTER_ALERT_KEYS].sort());
+      expect(rules.map((rule) => rule.template?.key).sort()).toEqual([...DEFAULT_ALERT_TEMPLATE_KEYS].sort());
       for (const rule of rules) {
-        const def = STARTER_ALERTS.find((d) => d.key === rule.starter?.key)!;
+        const def = ALERT_TEMPLATES.find((d) => d.key === rule.template?.key)!;
         expect(rule).toMatchObject({
           tenantId,
           projectId: String(body.project._id),
@@ -198,9 +199,9 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
           enabled: true,
           windowMinutes: 30,
           cooldownMinutes: 120,
-          condition: { mode: 'threshold', operator: 'gt', threshold: def.threshold, forMinutes: 10, minSamples: 20 },
-          entity: { entityType: def.entityType, mode: 'all' },
-          starter: { key: def.key, version: 1 },
+          condition: { mode: 'threshold', operator: 'gt', threshold: def.condition.threshold, forMinutes: 10, minSamples: 20 },
+          entity: { entityType: getMetricDef(def.metric)?.entityType, mode: 'all' },
+          template: { key: def.key, version: 1 },
           createdBy: String(owner._id),
         });
         expect(rule.channels).toEqual([
@@ -209,24 +210,24 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
       }
     });
 
-    it('adds none with starterAlerts: false', async () => {
-      const res = await createViaDashboard({ name: 'Quiet Project', starterAlerts: false });
+    it('adds none with defaultAlertRules: false', async () => {
+      const res = await createViaDashboard({ name: 'Quiet Project', defaultAlertRules: false });
       expect(res.statusCode).toBe(201);
       const body = parseJsonBody<Json>(res.body);
-      expect(body.starterAlerts).toBe(0);
+      expect(body.defaultAlertRules).toBe(0);
       expect(await rulesOf(String(body.project._id))).toEqual([]);
     });
 
     it('follows the installation default when the request does not say, and the request when it does', async () => {
-      process.env.ALERT_STARTER_RULES_ON_CREATE = 'false';
+      process.env.ALERT_DEFAULT_RULES_ON_CREATE = 'false';
       reloadConfig();
 
       const off = parseJsonBody<Json>((await createViaDashboard({ name: 'Default Off' })).body);
-      expect(off.starterAlerts).toBe(0);
+      expect(off.defaultAlertRules).toBe(0);
       expect(await rulesOf(String(off.project._id))).toEqual([]);
 
-      const asked = parseJsonBody<Json>((await createViaDashboard({ name: 'Asked For Them', starterAlerts: true })).body);
-      expect(asked.starterAlerts).toBe(5);
+      const asked = parseJsonBody<Json>((await createViaDashboard({ name: 'Asked For Them', defaultAlertRules: true })).body);
+      expect(asked.defaultAlertRules).toBe(5);
       expect(await rulesOf(String(asked.project._id))).toHaveLength(5);
     });
 
@@ -234,27 +235,27 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
       const plain = await createViaClientApi({ name: 'Integration Plain' });
       expect(plain.statusCode).toBe(201);
       const plainBody = parseJsonBody<Json>(plain.body);
-      expect(plainBody).not.toHaveProperty('starterAlerts');
+      expect(plainBody).not.toHaveProperty('defaultAlertRules');
       expect(await rulesOf(String(plainBody.project._id))).toEqual([]);
 
-      const asked = await createViaClientApi({ name: 'Integration With Rules', starterAlerts: true });
+      const asked = await createViaClientApi({ name: 'Integration With Rules', defaultAlertRules: true });
       expect(asked.statusCode).toBe(201);
       const askedBody = parseJsonBody<Json>(asked.body);
-      expect(askedBody.starterAlerts).toBe(5);
+      expect(askedBody.defaultAlertRules).toBe(5);
       const rules = await rulesOf(String(askedBody.project._id));
       expect(rules).toHaveLength(5);
-      expect(rules.every((rule) => rule.createdBy === String(owner._id) && rule.starter?.version === 1)).toBe(true);
+      expect(rules.every((rule) => rule.createdBy === String(owner._id) && rule.template?.version === 1)).toBe(true);
     });
 
     it('adds nothing a second time: the rules of a project are never doubled', async () => {
-      const { projectId } = await projectWithStarters('Seeded Once');
-      expect(await seedStarterAlerts(tenantDbName, tenantId, projectId, String(owner._id))).toBe(0);
+      const { projectId } = await projectWithDefaultRules('Seeded Once');
+      expect(await seedDefaultAlertRules(tenantDbName, tenantId, projectId, String(owner._id))).toBe(0);
       expect(await rulesOf(projectId)).toHaveLength(5);
     });
 
     it('adds the rules to the project it creates and to no other', async () => {
       const before = await rulesOf(homeProjectId);
-      const { projectId } = await projectWithStarters('Only Here');
+      const { projectId } = await projectWithDefaultRules('Only Here');
       expect(await rulesOf(homeProjectId)).toHaveLength(before.length);
       expect(await rulesOf(projectId)).toHaveLength(5);
     });
@@ -269,8 +270,8 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
 
   describe.each(surfaces)('deleting a project: %s', (_label, remove) => {
     it('removes its rules and closes its open, acknowledged and investigating incidents, and nothing else', async () => {
-      const doomed = await projectWithStarters(`Doomed ${uid()}`);
-      const kept = await projectWithStarters(`Kept ${uid()}`);
+      const doomed = await projectWithDefaultRules(`Doomed ${uid()}`);
+      const kept = await projectWithDefaultRules(`Kept ${uid()}`);
       const [ruleId] = doomed.ruleIds;
 
       const open = await addIncident(doomed.projectId, ruleId, 'open', { snoozedUntil: new Date(Date.now() + 3_600_000), snoozedBy: 'someone' });
@@ -331,7 +332,7 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
     });
 
     it('closes more incidents than fit in a page', async () => {
-      const doomed = await projectWithStarters(`Busy ${uid()}`);
+      const doomed = await projectWithDefaultRules(`Busy ${uid()}`);
       const [ruleId] = doomed.ruleIds;
       const ids: string[] = [];
       for (let i = 0; i < 230; i += 1) {
@@ -348,7 +349,7 @@ describeForEachProvider('Starter alert rules and project cleanup', (getDb) => {
     });
 
     it('is a plain delete for a project that never had rules or incidents', async () => {
-      const created = await createViaDashboard({ name: `Bare ${uid()}`, starterAlerts: false });
+      const created = await createViaDashboard({ name: `Bare ${uid()}`, defaultAlertRules: false });
       const projectId = String(parseJsonBody<Json>(created.body).project._id);
       expect((await remove(projectId)).statusCode).toBe(200);
       expect(await getDb().findProjectById(projectId)).toBeNull();

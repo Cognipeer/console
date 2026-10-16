@@ -372,7 +372,7 @@ export type {
   IAlertState,
   IAlertDelivery,
   IAlertRuleLastEvaluation,
-  IAlertRuleStarter,
+  IAlertRuleTemplateRef,
   AlertEmailAudience,
   AlertDeliveryTrigger,
   AlertDeliveryStatus,
