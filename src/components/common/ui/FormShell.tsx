@@ -91,10 +91,15 @@ export default function FormShell({
   useEffect(() => {
     if (!open || disableEscape) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      // Escape closes an open dropdown (a Select's list, a menu) before it closes the form: Mantine marks
+      // the control while its list is open, which is what its own modals look at too.
+      if (e.target instanceof Element && e.target.closest('[data-mantine-stop-propagation="true"]')) return;
+      onClose();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // Capture phase: the dropdown's own handler runs later and closes the list, which drops the mark.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [open, onClose, disableEscape]);
 
   useEffect(() => {
