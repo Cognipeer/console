@@ -33,6 +33,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 vi.mock('@/lib/services/alerts/alertTemplates', () => ({
   seedDefaultAlertRules: vi.fn().mockResolvedValue(0),
   defaultAlertRulesOnCreate: () => true,
+  defaultSetProgress: () => ({ done: 0, total: 6 }),
 }));
 
 import type { FastifyInstance } from 'fastify';
@@ -331,6 +332,7 @@ describeForEachProvider('projects access api', (getDb) => {
       hasProjectAdmin: true,
       hasLimits: false,
     });
+    expect(body.defaultAlerts).toEqual({ done: 0, total: 6 });
     expect(body.admins.map((a: any) => a.kind).sort()).toEqual(['project_admin', 'tenant_admin', 'tenant_owner']);
     expect(body.directory.rules).toEqual([
       { source: 'ldap', label: 'Corp', mode: 'always', applyOn: 'first_sign_in', projects: [{ projectId: alphaId, role: 'member' }] },
