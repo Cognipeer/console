@@ -49,10 +49,14 @@ const USERS: Record<string, Record<string, unknown>> = {
   // An admin the owner restricted: audit is off for them.
   'admin-1': { _id: 'admin-1', role: 'admin', tenantId: TENANT, servicePermissions: { audit: 'none' } },
   'pa-1': { _id: 'pa-1', role: 'project_admin', tenantId: TENANT },
-  'user-1': { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true },
+  'user-1': { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true, projectIds: ['proj-1'] },
   'svc-1': { _id: 'svc-1', role: 'user', tenantId: TENANT, canLogin: false, email: '' },
   // A person of a host application whose identity a trusted issuer vouched for: no sign-in, no tokens.
   'ext-1': { _id: 'ext-1', role: 'user', tenantId: TENANT, canLogin: false, kind: 'external', email: 'v@host.example.com' },
+  // Can log in, but is a member of a different project only.
+  'other-1': { _id: 'other-1', role: 'user', tenantId: TENANT, canLogin: true, projectIds: ['proj-2'] },
+  'grp-1': { _id: 'grp-1', role: 'user', tenantId: TENANT, canLogin: true },
+  'row-1': { _id: 'row-1', role: 'user', tenantId: TENANT, canLogin: true },
 };
 
 function sessionHeaders(userId: string) {
@@ -159,6 +163,54 @@ describe('POST /api/tokens for another user', () => {
       expect(parseJsonBody<{ code: string }>(res.body).code).toBe('external_user');
     }
     expect(db.createApiToken).not.toHaveBeenCalled();
+  });
+
+  describe('project access of the token owner', () => {
+    it('refuses a login-capable user who cannot access the project', async () => {
+      const res = await mint('owner-1', { userId: 'other-1' });
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toBe('User does not have access to this project');
+      expect(db.createApiToken).not.toHaveBeenCalled();
+    });
+
+    it('refuses for an admin minter as well', async () => {
+      const res = await mint('admin-1', { userId: 'other-1' });
+      expect(res.statusCode).toBe(400);
+      expect(db.createApiToken).not.toHaveBeenCalled();
+    });
+
+    it('mints for a user whose access is on the legacy project list', async () => {
+      const res = await mint('owner-1', { userId: 'user-1' });
+      expect(res.statusCode).toBe(201);
+      expect(db.createApiToken).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-1', projectId: 'proj-1' }));
+    });
+
+    it('mints for a user with a project membership row', async () => {
+      db.findUserProject.mockImplementation(async (userId: string, projectId: string) => (
+        userId === 'row-1' && projectId === 'proj-1' ? ({ userId, projectId, role: 'member' } as never) : null
+      ));
+      const res = await mint('owner-1', { userId: 'row-1' });
+      expect(res.statusCode).toBe(201);
+    });
+
+    it('mints for a user who reaches the project through a group', async () => {
+      db.listGroupMembersByUser.mockImplementation(async (userId: string) => (
+        userId === 'grp-1' ? ([{ groupId: 'g1', userId }] as never) : []
+      ));
+      db.listGroupProjectsByProject.mockResolvedValue([{ groupId: 'g1', projectId: 'proj-1', role: 'member' }] as never);
+      const res = await mint('owner-1', { userId: 'grp-1' });
+      expect(res.statusCode).toBe(201);
+    });
+
+    it('mints for an owner or admin, who reach every project', async () => {
+      expect((await mint('owner-1', { userId: 'admin-1' })).statusCode).toBe(201);
+    });
+
+    it('mints for a login-disabled service account that has no membership', async () => {
+      const res = await mint('owner-1', { userId: 'svc-1' });
+      expect(res.statusCode).toBe(201);
+      expect(db.createApiToken).toHaveBeenCalledWith(expect.objectContaining({ userId: 'svc-1', projectId: 'proj-1' }));
+    });
   });
 
   it('keeps self-service minting as it was', async () => {

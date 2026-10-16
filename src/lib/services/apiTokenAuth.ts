@@ -7,6 +7,7 @@ import { LicenseManager } from '@/lib/license/license-manager';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import { hasIpRestriction, isIpAllowed, TOKEN_IP_NOT_ALLOWED } from '@/lib/services/apiTokens/ipAllowlist';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
+import { canTokenOwnerAccessProject } from '@/lib/services/projects/projectAccess';
 
 const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
@@ -107,6 +108,30 @@ export async function invalidateApiTokenAuthCache(tokenHash: string | undefined)
     await cache.del(apiAuthCacheKey(tokenHash));
   } catch (error) {
     logger.warn('Failed to invalidate api-auth cache', { error });
+  }
+}
+
+/**
+ * The owner of a token must be able to work in the project the token is bound
+ * to, by the same rule the dashboard applies (see `projectAccess`). Like the
+ * owner record, access is resolved against live data on every request and never
+ * cached with the token, so a membership change applies on the very next call
+ * on every replica. Fails closed: an unreadable answer means no access.
+ */
+async function assertOwnerProjectAccess(
+  tenantDbName: string,
+  owner: IUser,
+  projectId: string,
+): Promise<void> {
+  let allowed: boolean;
+  try {
+    allowed = await runWithTenantScope(tenantDbName, (d) => canTokenOwnerAccessProject(d, owner, projectId));
+  } catch (error) {
+    logger.warn('Unable to verify project access for API token', { error });
+    throw new ApiTokenAuthError('Unable to verify API token project access', 503);
+  }
+  if (!allowed) {
+    throw new ApiTokenAuthError('API token owner has no access to the token project', 403);
   }
 }
 
@@ -229,12 +254,6 @@ export async function requireApiTokenFromHeader(
     throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
   }
 
-  // Non-critical last-used timestamp update — fire and forget
-  fireAndForget('token-last-used', async () => {
-    const bgDb = await getDatabase();
-    await bgDb.updateTokenLastUsedByHash(tokenHash);
-  });
-
   const defaultProject = await ensureDefaultProject(
     tenant.dbName,
     tokenRecord.tenantId,
@@ -245,6 +264,16 @@ export async function requireApiTokenFromHeader(
   if (!projectId) {
     throw new ApiTokenAuthError('Token project context is missing', 400);
   }
+
+  // A token without a project works in the default project, under the same rule.
+  await assertOwnerProjectAccess(tenant.dbName, user, projectId);
+
+  // Non-critical last-used timestamp update — fire and forget. Only for
+  // requests that were accepted.
+  fireAndForget('token-last-used', async () => {
+    const bgDb = await getDatabase();
+    await bgDb.updateTokenLastUsedByHash(tokenHash);
+  });
 
   return {
     token,

@@ -42,6 +42,7 @@ import {
 } from '@/lib/services/apiTokens/tokenPolicy';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { inviteGrantsOf, loadTenantProjects, unknownProjectIds } from '@/lib/services/users/projectGrants';
+import { canTokenOwnerAccessProject } from '@/lib/services/projects/projectAccess';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { canActOnTokensOf, EXTERNAL_TOKEN_OWNER_REFUSAL } from '@/lib/services/apiTokens/tokenGovernance';
@@ -235,6 +236,12 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
       // External accounts (a host application's people) hold no API tokens at all.
       if (targetUser.kind === 'external') {
         return reply.code(400).send(EXTERNAL_TOKEN_OWNER_REFUSAL);
+      }
+
+      // The minted token authorises as the target inside this token's project,
+      // so the target must be able to work there.
+      if (!(await canTokenOwnerAccessProject(db, targetUser, auth.projectId))) {
+        return reply.code(400).send({ error: 'User does not have access to this project' });
       }
 
       // The target's profile is not a trustworthy ceiling on its own: this

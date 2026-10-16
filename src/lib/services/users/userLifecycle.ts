@@ -11,7 +11,7 @@
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
-import type { IUser } from '@/lib/database';
+import type { IApiToken, IUser } from '@/lib/database';
 import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { PermissionService } from '@/lib/security/rbac';
 import { recordAuditLog } from '@/lib/services/audit/auditService';
@@ -200,14 +200,14 @@ export async function setUserStatus(input: SetUserStatusInput): Promise<SetUserS
 /* ------------------------------------------------------------------ */
 
 /**
- * Delete every API token a user owns and evict their auth-cache entries.
- * Without this a deleted user's tokens were orphaned and — until the owner
- * lookup became strict — kept authenticating. Best effort per token: one
- * failure is logged and the rest are still revoked.
+ * Delete the API tokens of a user that `matches` selects and evict their
+ * auth-cache entries. Best effort per token: one failure is logged and the
+ * rest are still revoked.
  */
-export async function revokeUserApiTokens(
+async function revokeUserApiTokensMatching(
   tenantDbName: string,
   userId: string,
+  matches: (token: IApiToken) => boolean,
 ): Promise<{ revoked: number; failed: number; revokedIds: string[] }> {
   const tokens = await runWithTenantScope(tenantDbName, (db) => db.listApiTokens(userId));
 
@@ -215,6 +215,7 @@ export async function revokeUserApiTokens(
   let failed = 0;
   const revokedIds: string[] = [];
   for (const token of tokens) {
+    if (!matches(token)) continue;
     const tokenId = String(token._id);
     try {
       const deleted = await runWithTenantScope(tenantDbName, (db) => db.deleteApiToken(tokenId, userId));
@@ -242,6 +243,35 @@ export interface DeletedUserCleanup {
   failedTokens: number;
   removedGroupMemberships: number;
   removedProjectMemberships: number;
+}
+
+/**
+ * Delete every API token a user owns and evict their auth-cache entries.
+ * Without this a deleted user's tokens were orphaned and — until the owner
+ * lookup became strict — kept authenticating.
+ */
+export async function revokeUserApiTokens(
+  tenantDbName: string,
+  userId: string,
+): Promise<{ revoked: number; failed: number; revokedIds: string[] }> {
+  return revokeUserApiTokensMatching(tenantDbName, userId, () => true);
+}
+
+/**
+ * Delete the API tokens a user owns that are bound to one project and evict
+ * their auth-cache entries. Used when an account that has no other path into
+ * the project is removed from it.
+ */
+export async function revokeUserApiTokensInProject(
+  tenantDbName: string,
+  userId: string,
+  projectId: string,
+): Promise<{ revoked: number; failed: number; revokedIds: string[] }> {
+  return revokeUserApiTokensMatching(
+    tenantDbName,
+    userId,
+    (token) => String(token.projectId ?? '') === String(projectId),
+  );
 }
 
 /**

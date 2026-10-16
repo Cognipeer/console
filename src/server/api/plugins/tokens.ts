@@ -6,6 +6,7 @@ import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
 import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
+import { canTokenOwnerAccessProject } from '@/lib/services/projects/projectAccess';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
@@ -484,6 +485,12 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         // later re-enable; make the admin enable the user first.
         if (isUserDisabled(targetUser)) {
           return reply.code(400).send({ error: 'User is disabled' });
+        }
+        // A token authorises as its owner inside the project it is bound to, so
+        // the owner must be able to work in that project (same rule the
+        // request-time check applies).
+        if (!(await canTokenOwnerAccessProject(db, targetUser, projectId))) {
+          return reply.code(400).send({ error: 'User does not have access to this project' });
         }
         ownerUserId = body.userId;
 

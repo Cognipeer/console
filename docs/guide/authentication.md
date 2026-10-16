@@ -124,16 +124,33 @@ export async function POST(request: NextRequest) {
 ### Token Validation Flow
 
 1. Extract Bearer token from `Authorization` header
-2. Check cache (SHA-256 hash key, 60s TTL)
+2. Check cache (SHA-256 hash key, 60s TTL) — it holds the token record and tenant only
 3. On cache miss: query database, resolve tenant
 4. Reject an expired token (`401`)
 5. Reject a call from outside the token's IP allowlist (`403`, `ip_not_allowed`)
 6. Switch to tenant database
 7. Resolve the token owner fresh on every request and reject a missing or disabled owner (`401`)
-8. Fire-and-forget: update `lastUsed` timestamp
-9. Ensure default project exists
-10. Return `ApiTokenContext`
-11. The route's authorization gate decides what the token's owner, scope and project allow (see [Authorization](/guide/authorization))
+8. Ensure default project exists and resolve the token's project (the default project when the token has none)
+9. Check that the owner can access that project (every request, never cached); otherwise `403`
+10. Fire-and-forget: update `lastUsed` timestamp
+11. Return `ApiTokenContext`
+12. The route's authorization gate decides what the token's owner, scope and project allow (see [Authorization](/guide/authorization))
+
+### Project Access
+
+A token is bound to a project and authorises as its owner inside it, so the owner has to be able to work in that project. The rule is the one the dashboard uses:
+
+| Token owner | Access to the token's project |
+|-------------|-------------------------------|
+| `owner`, `admin` | Every project |
+| `project_admin`, `user` | Projects they are a member of: a project membership, an entry in the user's legacy project list, or a group assigned to the project |
+| Login-disabled (programmatic) user | The token is the grant: it was minted for that project by an administrator, so no membership is consulted |
+
+A token without a project works in the default project and is checked against it.
+
+The check reads live data on every request and is not part of the auth cache, so adding or removing a member, or changing a group's project assignment, applies to that user's tokens on the next call. Add the member back and the same token works again.
+
+Minting a token for another user (`POST /api/tokens` with `userId`, `POST /api/client/v1/users/{id}/tokens`) is refused with `400` when that user can log in but cannot access the project. Because no membership is consulted for a login-disabled user, removing such a user from a project it is a member of deletes the tokens it holds for that project instead; a token minted for an account that is not a member is revoked by deleting the token.
 
 ### Token Properties
 
@@ -142,7 +159,7 @@ export async function POST(request: NextRequest) {
 | `token` | The raw token string |
 | `userId` | Owning user |
 | `tenantId` | Owning tenant |
-| `projectId` | Scoped project (optional) |
+| `projectId` | Scoped project (optional); the owner must have access to it, see [Project Access](#project-access) |
 | `servicePermissions` | Least-privilege scope that caps the owner's permissions, group grants included (optional) |
 | `expiresAt` | Expiration date (optional) |
 | `allowedIpRanges` | CIDR ranges the token may be used from (optional, see below) |
