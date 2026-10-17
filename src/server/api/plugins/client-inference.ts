@@ -35,7 +35,7 @@ import {
   readIdempotencyKey,
   refuseStreamAdmission,
   resolveInvocationConfig,
-  resolveInvocationInputs,
+  resolveInvocationVariables,
   resolveInvocationLimits,
   resolveInvocationVersion,
   sendInvocationFailure,
@@ -230,13 +230,13 @@ async function runAgentChat(input: {
     return chatFail(reply, 400, reasoningRequest.error, 'invalid_reasoning', { param: 'reasoning_effort' });
   }
 
-  // `response_format` (the answer comes back as a JSON string in `message.content`), the `inputs` extension and
+  // `response_format` (the answer comes back as a JSON string in `message.content`), the `variables` extension and
   // `metadata`: all refused here, before a run exists, in OpenAI's envelope.
   const responseFormat = parseInvocationResponseFormat(reply, 'openai', body.response_format, 'response_format');
   if (!responseFormat) return reply;
   const runConfig = await resolveInvocationConfig(auth, target);
-  const runInputs = resolveInvocationInputs(reply, 'openai', runConfig, body.inputs);
-  if (!runInputs) return reply;
+  const runVariables = resolveInvocationVariables(reply, 'openai', runConfig, body.variables);
+  if (!runVariables) return reply;
   const metadata = parseRunMetadata(body.metadata);
   if (!metadata.ok) return chatFail(reply, 400, metadata.message, 'invalid_metadata', { param: 'metadata' });
   // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class, waited on like a plain call.
@@ -253,7 +253,7 @@ async function runAgentChat(input: {
   if (!answeringToolCalls) {
     userInput = parseInvocationInput(reply, 'openai', agent, messages, { allowEmpty: true });
     if (!userInput) return reply;
-    if (!userInput.userMessage && userInput.userInput.files.length === 0 && !runInputs.inputs) {
+    if (!userInput.userMessage && userInput.userInput.files.length === 0 && !runVariables.variables) {
       return chatFail(reply, 400, 'messages must contain at least one user message', 'missing_messages', { param: 'messages' });
     }
   }
@@ -357,7 +357,7 @@ async function runAgentChat(input: {
     ...(modelChoice ? { modelChoice } : {}),
     ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     ...(responseFormat.format ? { responseFormat: responseFormat.format } : {}),
-    ...(runInputs.inputs ? { inputs: runInputs.inputs } : {}),
+    ...(runVariables.variables ? { variables: runVariables.variables } : {}),
     runClass,
     metadata: metadata.metadata,
     ...(idempotency.key ? { idempotencyKey: idempotency.key, idempotencyConversationScope } : {}),

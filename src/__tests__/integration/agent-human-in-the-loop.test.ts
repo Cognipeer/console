@@ -1218,15 +1218,15 @@ describe('background runs', () => {
     const SECRET = 'NORTHPOLE7';
     const systemTexts = (model: ScriptedModel) => model.seen.flatMap((messages) => messages.filter((m) => m.role === 'system').map((m) => String(m.content)));
     const triggerAgent = () => createAgent({
-      systemPrompt: 'Serve region {{input.region}}.',
-      inputs: [{ name: 'region', type: 'string' }],
+      systemPrompt: 'Serve region {{variables.region}}.',
+      variables: [{ name: 'region', type: 'string' }],
       humanInTheLoop: { ...HITL_ON, unattended: 'pause' },
     });
     const startPaused = async (id: string, external: boolean) => {
       const created = await queueAgentRun({
         tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
         conversationId: id, userMessage: 'list files', userId: 'system:trigger:trg1', actorType: 'system',
-        channel: 'trigger', triggerId: 'trg1', trigger: 'manual', unattended: true, inputs: { region: SECRET },
+        channel: 'trigger', triggerId: 'trg1', trigger: 'manual', unattended: true, variables: { region: SECRET },
         ...(external ? { externalContent: true } : {}),
       });
       if (created.kind !== 'accepted') throw new Error(created.kind);
@@ -1256,8 +1256,8 @@ describe('background runs', () => {
       // The stored paused state remembers the flag; take it out so only the run row's mark is left to carry it.
       const stored = (await db.findAgentConversationState(id))!;
       const envelope = JSON.parse(stored.pausedSnapshot!);
-      expect(envelope.turn.inputsAsPromptVariables).toBe(false);
-      delete envelope.turn.inputsAsPromptVariables;
+      expect(envelope.turn.variablesInPrompt).toBe(false);
+      delete envelope.turn.variablesInPrompt;
       await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
       expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.externalContent).toBe(true);
 

@@ -71,7 +71,7 @@ import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
-import AgentInputsEditor from './studio/AgentInputsEditor';
+import AgentVariablesEditor from './studio/AgentVariablesEditor';
 import AgentFilesPanel from './studio/AgentFilesPanel';
 import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
@@ -223,7 +223,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   feedback: { top: 'feedback' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
-  inputs: { top: 'configure', sub: 'inputs' },
+  variables: { top: 'configure', sub: 'variables' },
   deploy: { top: 'deploy' },
   versions: { top: 'deploy', sub: 'versions' },
   publish: { top: 'deploy', sub: 'publish' },
@@ -295,7 +295,7 @@ export default function AgentDetailPage() {
   // config it had before these sections existed.
   const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
-  const [inputsConfig, setInputsConfig] = useState<IAgentConfig['inputs']>(undefined);
+  const [variablesConfig, setVariablesConfig] = useState<IAgentConfig['variables']>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
@@ -415,7 +415,7 @@ export default function AgentDetailPage() {
         setShowReasoning(migrated.showReasoning !== false);
         setRuntimeConfig(migrated.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
-        setInputsConfig(cfg.inputs);
+        setVariablesConfig(cfg.variables);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
         setSkills(cfg.skills ?? []);
@@ -672,7 +672,7 @@ export default function AgentDetailPage() {
     // and would start showing up in every manifest and diff for no reason.
     nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
-    nextConfig.inputs = inputsConfig && inputsConfig.length > 0 ? inputsConfig : undefined;
+    nextConfig.variables = variablesConfig && variablesConfig.length > 0 ? variablesConfig : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
     nextConfig.skills = skills.length > 0 ? skills : undefined;
@@ -1437,11 +1437,11 @@ export default function AgentDetailPage() {
               />,
             )}
             {buildSection(
-              'inputs',
-              t('inputs.sectionDescription'),
-              <AgentInputsEditor value={inputsConfig} onChange={setInputsConfig} />,
-              inputsConfig?.length ? (
-                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('inputs.badge', { count: inputsConfig.length })}</Badge>
+              'variables',
+              t('variables.sectionDescription'),
+              <AgentVariablesEditor value={variablesConfig} onChange={setVariablesConfig} />,
+              variablesConfig?.length ? (
+                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('variables.badge', { count: variablesConfig.length })}</Badge>
               ) : null,
             )}
             {buildSection(
@@ -1696,7 +1696,7 @@ export default function AgentDetailPage() {
                 <AgentTriggersPanel
                   agentId={agentId}
                   agentName={agent.name}
-                  declaredInputs={agent.config?.inputs}
+                  declaredVariables={agent.config?.variables}
                   versions={versions.map((version) => version.version)}
                   onShowRuns={(trigger) => {
                     setRunsTrigger(trigger);

@@ -674,7 +674,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             // so the reviewer can retry instead of getting 409 not_pending.
             let invoking = false;
             let resumed: AgentResumeResult;
-            // A person answered, so the continuation runs attended — but inputs that came
+            // A person answered, so the continuation runs attended — but variables that came
             // from an external payload stay out of the system prompt (§2.4a).
             // A Stop on the conversation ends the continuation like any other turn.
             const watch = reservation
@@ -699,7 +699,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.embedded ? { embedded: input.embedded } : {}),
                     ...(input.unattended ? { unattended: true } : {}),
                     ...(input.answersClientTools ? { answersClientTools: true } : {}),
-                    ...(pausedRun?.externalContent ? { inputsAsPromptVariables: false } : {}),
+                    ...(pausedRun?.externalContent ? { variablesInPrompt: false } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),

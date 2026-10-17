@@ -394,7 +394,7 @@ interface DryRun {
     event: string | null;
     delivery_id: string | null;
     prompt: string | null;
-    inputs: Record<string, unknown> | null;
+    variables: Record<string, unknown> | null;
     errors: Array<{ field: string; message: string }>;
 }
 
@@ -461,7 +461,7 @@ export function WebhookTestPanel({ agentId, triggerId, preset }: { agentId: stri
                         </Group>
                         {result.reason ? <Text size="xs" c="dimmed">{result.reason}</Text> : null}
                         {result.errors.map((issue) => <Text key={`${issue.field}:${issue.message}`} size="xs" c="red">{issue.field}: {issue.message}</Text>)}
-                        {result.inputs ? <Code block>{JSON.stringify(result.inputs, null, 2)}</Code> : null}
+                        {result.variables ? <Code block>{JSON.stringify(result.variables, null, 2)}</Code> : null}
                         {result.prompt !== null ? <Code block style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{result.prompt}</Code> : null}
                     </Stack>
                 </Card>

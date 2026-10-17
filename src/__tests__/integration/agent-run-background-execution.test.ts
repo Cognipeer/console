@@ -804,11 +804,11 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
     expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(paused._id)))?.status).toBe('canceled');
   });
 
-  it('resuming a paused run requeues the same row with its class, channel, metadata, format and inputs, under a new generation', async () => {
+  it('resuming a paused run requeues the same row with its class, channel, metadata, format and variables, under a new generation', async () => {
     const run = await startQueued('conv-resume', {
       metadata: { order: '42' },
       responseFormat: { type: 'json_object' },
-      inputs: { locale: 'tr' },
+      variables: { locale: 'tr' },
     });
     await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
     await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
@@ -833,7 +833,7 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       channel: 'runs',
       metadata: { order: '42' },
       responseFormat: { type: 'json_object' },
-      inputs: { locale: 'tr' },
+      variables: { locale: 'tr' },
       queueGeneration: 2,
     });
     const jobs = runJobs(AGENT_RUN_QUEUE);
@@ -842,20 +842,20 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
     expect(jobs[0][3]).toMatchObject({ dedupKey: `ar_${String(run._id)}_2` });
   });
 
-  describe('a trigger run with external content (§2.4a): its inputs never reach the system prompt', () => {
-    const triggerRun = { userId: 'system:trigger:trg1', actorType: 'system' as const, channel: 'trigger' as const, triggerId: 'trg1', trigger: 'schedule' as const, unattended: true, externalContent: true, inputs: { region: 'eu' } };
+  describe('a trigger run with external content (§2.4a): its variables never reach the system prompt', () => {
+    const triggerRun = { userId: 'system:trigger:trg1', actorType: 'system' as const, channel: 'trigger' as const, triggerId: 'trg1', trigger: 'schedule' as const, unattended: true, externalContent: true, variables: { region: 'eu' } };
     const jobOf = (runId: string) => hoisted.publish.mock.calls.find(([, name, payload]) => (name === 'run' || name === 'resume') && (payload as { runId: string }).runId === runId)?.[2] as Parameters<typeof runAgentJobLocal>[0];
 
-    it('the first turn runs unattended with inputs kept out of the prompt variables', async () => {
+    it('the first turn runs unattended with its variables kept out of the system prompt', async () => {
       hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_first'));
       const run = await startQueued('conv-ext-first', triggerRun);
       await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
       expect(hoisted.executeAgentChatLocal).toHaveBeenCalledWith(expect.objectContaining({
-        unattended: true, externalContent: true, inputsAsPromptVariables: false, inputs: { region: 'eu' },
+        unattended: true, externalContent: true, variablesInPrompt: false, variables: { region: 'eu' },
       }));
     });
 
-    it('a paused one resumed by the worker continues with inputsAsPromptVariables false', async () => {
+    it('a paused one resumed by the worker continues with variablesInPrompt false', async () => {
       const run = await startQueued('conv-ext-resume', triggerRun);
       await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
       await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
@@ -872,10 +872,10 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       await runAgentJobLocal(jobOf(String(run._id)));
 
       expect(hoisted.executeAgentResumeLocal).toHaveBeenCalledTimes(1);
-      expect(hoisted.executeAgentResumeLocal.mock.calls[0][0]).toMatchObject({ inputsAsPromptVariables: false, unattended: true, inputs: { region: 'eu' } });
+      expect(hoisted.executeAgentResumeLocal.mock.calls[0][0]).toMatchObject({ variablesInPrompt: false, unattended: true, variables: { region: 'eu' } });
     });
 
-    it('a budget continuation (no paused run) copies the trigger, flags and inputs from the session\'s last run', async () => {
+    it('a budget continuation (no paused run) copies the trigger, flags and variables from the session\'s last run', async () => {
       hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_budget_first'));
       const run = await startQueued('conv-ext-continue', triggerRun);
       await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
@@ -888,19 +888,19 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       expect(outcome.kind).toBe('queued');
       if (outcome.kind !== 'queued') return;
       expect(String(outcome.run._id)).not.toBe(String(run._id));
-      expect(outcome.run).toMatchObject({ triggerId: 'trg1', channel: 'trigger', trigger: 'schedule', unattended: true, externalContent: true, inputs: { region: 'eu' } });
+      expect(outcome.run).toMatchObject({ triggerId: 'trg1', channel: 'trigger', trigger: 'schedule', unattended: true, externalContent: true, variables: { region: 'eu' } });
       await runAgentJobLocal(jobOf(String(outcome.run._id)));
 
       expect(hoisted.executeAgentContinueLocal).toHaveBeenCalledTimes(1);
-      expect(hoisted.executeAgentContinueLocal.mock.calls[0][0]).toMatchObject({ inputsAsPromptVariables: false, unattended: true, inputs: { region: 'eu' } });
+      expect(hoisted.executeAgentContinueLocal.mock.calls[0][0]).toMatchObject({ variablesInPrompt: false, unattended: true, variables: { region: 'eu' } });
     });
 
-    it('an ordinary run keeps its inputs as prompt variables (nothing is turned off by default)', async () => {
+    it('an ordinary run keeps its variables in the prompt (nothing is turned off by default)', async () => {
       hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_plain'));
-      const run = await startQueued('conv-plain-inputs', { inputs: { region: 'eu' } });
+      const run = await startQueued('conv-plain-variables', { variables: { region: 'eu' } });
       await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
       const request = hoisted.executeAgentChatLocal.mock.calls[0][0];
-      expect(request.inputsAsPromptVariables).toBeUndefined();
+      expect(request.variablesInPrompt).toBeUndefined();
       expect(request.unattended).toBeUndefined();
     });
   });

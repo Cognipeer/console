@@ -45,6 +45,8 @@ function templateVariables(template: string): string[] {
 }
 
 const BUILT_IN_VARIABLES = ['agent', 'now', 'user'];
+/** `{{variables.<name>}}`: the agent's declared variables (Configure → Variables), not something the caller's metadata fills. */
+const DECLARED_VARIABLES_ROOT = 'variables';
 
 export interface PromptOption {
     _id: string;
@@ -137,7 +139,7 @@ export default function AgentPromptPanel({
 
     const activeTemplate = mode === 'prompt' ? (selectedPrompt?.template ?? '') : systemPrompt;
     const referenced = useMemo(() => templateVariables(activeTemplate), [activeTemplate]);
-    const customVariables = referenced.filter((name) => !BUILT_IN_VARIABLES.includes(name));
+    const customVariables = referenced.filter((name) => !BUILT_IN_VARIABLES.includes(name) && name !== DECLARED_VARIABLES_ROOT);
 
     const savePrompt = async () => {
         if (!selectedPrompt) return;
@@ -299,8 +301,9 @@ export default function AgentPromptPanel({
                     <Stack gap={6}>
                         <Text size="xs">
                             <strong>{'agent'}</strong>, <strong>{'now'}</strong> and <strong>{'user'}</strong> resolve
-                            automatically. Anything else this template references is filled from the caller&apos;s
-                            <code> runtimeContext.metadata</code> — a schedule&apos;s variables, an A2A caller, or an
+                            automatically, and the variables declared under Configure → Variables are read as
+                            <code>{' {{variables.name}}'}</code>. Anything else this template references is filled
+                            from the caller&apos;s <code>runtimeContext.metadata</code> — an A2A caller or an
                             API request — and renders empty when nobody supplies it.
                         </Text>
                         {customVariables.length > 0 ? (

@@ -20,7 +20,7 @@ import {
   parseMetadataLines,
   triggerBodyFromForm,
   toLocalInputValue,
-  webhookInputValue,
+  webhookVariableValue,
   type TriggerRow,
 } from '@/components/agents/studio/triggerForm';
 import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/agentTriggerWebhookAuth';
@@ -32,7 +32,7 @@ const base = () => ({ ...emptyTriggerForm('Europe/Istanbul', now), name: 'Digest
 /** What every stored trigger carries besides its type and the settings object of that type. */
 const rest = {
   id: 'trg1', object: 'agent.trigger' as const, agent: 'report-bot', name: 'Digest', description: null, enabled: true,
-  prompt: 'Summarise.', inputs: { region: 'eu' },
+  prompt: 'Summarise.', variables: { region: 'eu' },
   version: 2, class: 'deferred' as const, metadata: { team: 'ops' }, callback: { url: 'https://example.com/hook', signed: true },
   response_format: { type: 'json_object' }, next_fire_at: null, last_fire_at: null, last_run_id: null, last_status: null, last_error: null,
   created_at: null, updated_at: null,
@@ -48,7 +48,7 @@ describe('triggerBodyFromForm', () => {
     const built = triggerBodyFromForm({ ...base(), metadataText: 'team=ops\n\nticket = OPS-1', runClass: 'deferred', version: 3 }, [], null, now);
     expect(built).toEqual({ ok: true, body: expect.objectContaining({
       name: 'Digest', enabled: true, prompt: 'Summarise.', version: 3, class: 'deferred', metadata: { team: 'ops', ticket: 'OPS-1' },
-      callback: null, response_format: null, inputs: null, type: 'schedule', schedule: { cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' },
+      callback: null, response_format: null, variables: null, type: 'schedule', schedule: { cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' },
     }) });
   });
 
@@ -76,10 +76,10 @@ describe('triggerBodyFromForm', () => {
     expect(triggerBodyFromForm({ ...base(), responseFormatText: '{oops' }, [], null, now)).toMatchObject({ ok: false, problem: { field: 'responseFormatText' } });
   });
 
-  it('sends only the inputs the agent declares that were given', () => {
+  it('sends only the variables the agent declares that were given', () => {
     const declared = [{ name: 'region', type: 'string' as const }, { name: 'days', type: 'integer' as const }];
-    const built = triggerBodyFromForm({ ...base(), inputs: { region: 'eu', days: undefined, stale: 'x' } }, declared, null, now);
-    expect(built.ok && built.body.inputs).toEqual({ region: 'eu' });
+    const built = triggerBodyFromForm({ ...base(), variables: { region: 'eu', days: undefined, stale: 'x' } }, declared, null, now);
+    expect(built.ok && built.body.variables).toEqual({ region: 'eu' });
   });
 
   it('the callback secret is sent only when one was typed', () => {
@@ -172,12 +172,12 @@ describe('webhook trigger', () => {
   });
 
   it('a mapping field keeps a template as text and brings a literal to the declared type', () => {
-    expect(webhookInputValue({ name: 'n', type: 'integer' }, '{{payload.number}}')).toBe('{{payload.number}}');
-    expect(webhookInputValue({ name: 'n', type: 'integer' }, '7')).toBe(7);
-    expect(webhookInputValue({ name: 'n', type: 'number' }, '1.')).toBe('1.');
-    expect(webhookInputValue({ name: 'b', type: 'boolean' }, 'false')).toBe(false);
-    expect(webhookInputValue({ name: 'j', type: 'json' }, '{"a":1}')).toEqual({ a: 1 });
-    expect(webhookInputValue({ name: 's', type: 'string' }, '42')).toBe('42');
+    expect(webhookVariableValue({ name: 'n', type: 'integer' }, '{{payload.number}}')).toBe('{{payload.number}}');
+    expect(webhookVariableValue({ name: 'n', type: 'integer' }, '7')).toBe(7);
+    expect(webhookVariableValue({ name: 'n', type: 'number' }, '1.')).toBe('1.');
+    expect(webhookVariableValue({ name: 'b', type: 'boolean' }, 'false')).toBe(false);
+    expect(webhookVariableValue({ name: 'j', type: 'json' }, '{"a":1}')).toEqual({ a: 1 });
+    expect(webhookVariableValue({ name: 's', type: 'string' }, '42')).toBe('42');
   });
 });
 
@@ -185,7 +185,7 @@ describe('formFromTrigger', () => {
   it('fills the form from a stored trigger (never a secret)', () => {
     const form = formFromTrigger(stored(), 'UTC');
     expect(form).toMatchObject({
-      name: 'Digest', type: 'schedule', cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul', inputs: { region: 'eu' },
+      name: 'Digest', type: 'schedule', cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul', variables: { region: 'eu' },
       version: 2, runClass: 'deferred', metadataText: 'team=ops', callbackUrl: 'https://example.com/hook', callbackSigned: true, callbackSecret: '',
     });
     expect(JSON.parse(form.responseFormatText)).toEqual({ type: 'json_object' });

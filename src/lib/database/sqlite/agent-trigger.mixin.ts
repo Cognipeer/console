@@ -44,7 +44,7 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
       if (record.prompt !== undefined) out.prompt = record.prompt;
       if (record.version !== undefined) out.version = record.version ?? null;
       if (record.runClass !== undefined) out.runClass = record.runClass;
-      for (const key of ['inputs', 'metadata', 'callback', 'responseFormat'] as const) {
+      for (const key of ['variables', 'metadata', 'callback', 'responseFormat'] as const) {
         if (record[key] !== undefined) out[key] = record[key] === null ? null : this.toJson(record[key]);
       }
       for (const key of ['nextFireAt', 'lastFireAt'] as const) {
@@ -69,7 +69,7 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
         createdAt: now,
         updatedAt: now,
         // Defaults for the optional columns a new trigger leaves out.
-        description: null, version: null, inputs: null, metadata: null, callback: null, responseFormat: null,
+        description: null, version: null, variables: null, metadata: null, callback: null, responseFormat: null,
         nextFireAt: null, lastFireAt: null, lastRunId: null, lastStatus: null, lastError: null, updatedBy: null, hookId: null,
         ...this.triggerColumns(record),
       };
@@ -257,7 +257,7 @@ export function AgentTriggerMixin<TBase extends Constructor<SQLiteProviderBase>>
         description: (row.description as string) ?? null,
         enabled: this.fromBoolInt(row.enabled),
         prompt: (row.prompt as string) ?? '',
-        inputs: row.inputs ? this.parseJson(row.inputs, null as Record<string, unknown> | null) : null,
+        variables: row.variables ? this.parseJson(row.variables, null as Record<string, unknown> | null) : null,
         version: row.version === null || row.version === undefined ? null : Number(row.version),
         runClass: (row.runClass as IAgentTrigger['runClass']) ?? 'default',
         metadata: row.metadata ? this.parseJson(row.metadata, null as Record<string, string> | null) : null,

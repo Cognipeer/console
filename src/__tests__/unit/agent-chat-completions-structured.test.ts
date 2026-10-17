@@ -1,5 +1,5 @@
 /**
- * `response_format` and the `inputs` extension on the agent chat-completions
+ * `response_format` and the `variables` extension on the agent chat-completions
  * bridge (`model` = an agent): validated before anything runs (OpenAI-shaped
  * 400), handed to the run, and the answer of a structured turn comes back as a
  * JSON string in `message.content`.
@@ -142,32 +142,32 @@ describe('chat completions response_format on an agent', () => {
   });
 });
 
-describe('chat completions inputs extension on an agent', () => {
+describe('chat completions variables extension on an agent', () => {
   const declare = () => {
-    AGENT = { ...AGENT, config: { modelKey: 'gpt-4o', inputs: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }] } };
+    AGENT = { ...AGENT, config: { modelKey: 'gpt-4o', variables: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }] } };
   };
 
-  it('validates against the agent declaration and hands the validated inputs (defaults applied) to the run', async () => {
+  it('validates against the agent declaration and hands the validated variables (defaults applied) to the run', async () => {
     declare();
-    const res = await app.inject(chat({ inputs: { customer_id: 'c-1' } }));
+    const res = await app.inject(chat({ variables: { customer_id: 'c-1' } }));
     expect(res.statusCode).toBe(200);
-    expect(lastRun().inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(lastRun().variables).toEqual({ customer_id: 'c-1', priority: 'low' });
   });
 
   it('refuses a missing required input, a wrong type and an unknown name with errors[]', async () => {
     declare();
     hoisted.runAgentCompletion.mockClear();
-    const missing = await app.inject(chat({ inputs: {} }));
+    const missing = await app.inject(chat({ variables: {} }));
     expect(missing.statusCode).toBe(400);
-    expect(error(missing.body)).toMatchObject({ code: 'invalid_inputs', param: 'inputs', errors: [{ field: 'customer_id', message: 'Required' }] });
-    const wrong = await app.inject(chat({ inputs: { customer_id: 4, nope: true } }));
+    expect(error(missing.body)).toMatchObject({ code: 'invalid_variables', param: 'variables', errors: [{ field: 'customer_id', message: 'Required' }] });
+    const wrong = await app.inject(chat({ variables: { customer_id: 4, nope: true } }));
     expect((error(wrong.body).errors as Array<{ field: string }>).map((e) => e.field).sort()).toEqual(['customer_id', 'nope']);
     expect(hoisted.runAgentCompletion).not.toHaveBeenCalled();
   });
 
-  it('an agent without declared inputs takes none', async () => {
-    const res = await app.inject(chat({ inputs: { a: 1 } }));
+  it('an agent without declared variables takes none', async () => {
+    const res = await app.inject(chat({ variables: { a: 1 } }));
     expect(res.statusCode).toBe(400);
-    expect(error(res.body).code).toBe('invalid_inputs');
+    expect(error(res.body).code).toBe('invalid_variables');
   });
 });

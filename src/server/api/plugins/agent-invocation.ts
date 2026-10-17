@@ -47,7 +47,7 @@ import {
 import { AgentQuotaExceededError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { peekAgentRunQuota } from '@/lib/services/agents/agentQuota';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
-import { resolveRunInputs } from '@/lib/services/agents/agentInputs';
+import { resolveRunVariables } from '@/lib/services/agents/agentVariables';
 import { resolveResponseFormatSchema } from '@/lib/services/agents/agentRuntimeConfig';
 import {
   InputContentPartError,
@@ -447,7 +447,7 @@ export function resolveInvocationLimits(ctx: ApiTokenContext): Promise<AgentRunL
   });
 }
 
-// ── Idempotency, callback, metadata, format, inputs ──────────────────────
+// ── Idempotency, callback, metadata, format, variables ───────────────────
 
 /**
  * The `Idempotency-Key` header (every mode keeps its run, so it works on waited calls too).
@@ -575,39 +575,39 @@ export async function resolveInvocationConfig(ctx: ApiTokenContext, target: Reso
 }
 
 /**
- * The agent inputs of a request, checked against the declaration of the config
+ * The agent variables of a request, checked against the declaration of the config
  * that runs: shape, then required / type / enum / unknown names, defaults applied.
- * `invalid_inputs` carries every problem in `errors: [{ field, message }]`.
+ * `invalid_variables` carries every problem in `errors: [{ field, message }]`.
  */
-export function resolveInvocationInputs(
+export function resolveInvocationVariables(
   reply: FastifyReply,
   dialect: InvocationDialect,
-  config: Pick<IAgentConfig, 'inputs'>,
+  config: Pick<IAgentConfig, 'variables'>,
   value: unknown,
-  param = 'inputs',
-): { inputs: Record<string, unknown> | null } | null {
-  const shaped = parseRunInputs(value);
-  if (!shaped.ok) return fail(reply, dialect, invalid(shaped.message, 'invalid_inputs', param));
-  const resolved = resolveRunInputs(config.inputs, shaped.inputs);
+  param = 'variables',
+): { variables: Record<string, unknown> | null } | null {
+  const shaped = parseRunVariables(value);
+  if (!shaped.ok) return fail(reply, dialect, invalid(shaped.message, 'invalid_variables', param));
+  const resolved = resolveRunVariables(config.variables, shaped.variables);
   if (!resolved.ok) {
     const summary = resolved.errors.slice(0, 5).map((e) => `${e.field}: ${e.message}`).join('; ');
-    return fail(reply, dialect, { ...invalid(`Invalid inputs - ${summary}`, 'invalid_inputs', param), extra: { errors: resolved.errors } });
+    return fail(reply, dialect, { ...invalid(`Invalid variables - ${summary}`, 'invalid_variables', param), extra: { errors: resolved.errors } });
   }
-  return { inputs: resolved.inputs };
+  return { variables: resolved.variables };
 }
 
-export const RUN_INPUTS_MAX_KEYS = 32;
-const INPUT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+export const RUN_VARIABLES_MAX_KEYS = 32;
+const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
-/** `inputs`: the agent's declared input values, an object of ≤32 named values. Shape only here. */
-export function parseRunInputs(value: unknown): { ok: true; inputs: Record<string, unknown> | null } | { ok: false; message: string } {
-  if (value === undefined || value === null) return { ok: true, inputs: null };
-  if (!isPlainObject(value)) return { ok: false, message: 'inputs must be an object of named values' };
+/** `variables`: the agent's declared variable values, an object of ≤32 named values. Shape only here. */
+export function parseRunVariables(value: unknown): { ok: true; variables: Record<string, unknown> | null } | { ok: false; message: string } {
+  if (value === undefined || value === null) return { ok: true, variables: null };
+  if (!isPlainObject(value)) return { ok: false, message: 'variables must be an object of named values' };
   const keys = Object.keys(value);
-  if (keys.length > RUN_INPUTS_MAX_KEYS) return { ok: false, message: `inputs can hold at most ${RUN_INPUTS_MAX_KEYS} values` };
-  const bad = keys.find((key) => !INPUT_NAME_RE.test(key));
-  if (bad !== undefined) return { ok: false, message: `inputs.${bad} is not a valid input name` };
-  return { ok: true, inputs: keys.length > 0 ? value : null };
+  if (keys.length > RUN_VARIABLES_MAX_KEYS) return { ok: false, message: `variables can hold at most ${RUN_VARIABLES_MAX_KEYS} values` };
+  const bad = keys.find((key) => !VARIABLE_NAME_RE.test(key));
+  if (bad !== undefined) return { ok: false, message: `variables.${bad} is not a valid variable name` };
+  return { ok: true, variables: keys.length > 0 ? value : null };
 }
 
 // ── The session the run executes on ──────────────────────────────────────

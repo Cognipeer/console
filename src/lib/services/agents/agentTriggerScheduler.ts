@@ -19,7 +19,7 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { DatabaseProvider, IAgentTrigger } from '@/lib/database';
-import { fireTrigger, resolveTriggerInputs, triggerAgentConfig, type TriggerTenant } from './agentTriggers';
+import { fireTrigger, resolveTriggerVariables, triggerAgentConfig, type TriggerTenant } from './agentTriggers';
 import { planDueTrigger } from './agentTriggerSchedule';
 
 const logger = createLogger('agent-trigger-scheduler');
@@ -73,18 +73,18 @@ async function fireDueTrigger(
   }
 
   const config = await triggerAgentConfig(tenant.tenantDbName, trigger);
-  const inputs = resolveTriggerInputs(config, trigger);
-  if (!inputs.ok) {
+  const variables = resolveTriggerVariables(config, trigger);
+  if (!variables.ok) {
     result.skipped += 1;
-    await db.setTriggerFireResult(triggerId, { fireAt: plan.fireAt, status: 'failed', error: inputs.reason });
-    logger.warn('Trigger slot skipped: its inputs no longer match the agent', { triggerId, reason: inputs.reason });
+    await db.setTriggerFireResult(triggerId, { fireAt: plan.fireAt, status: 'failed', error: variables.reason });
+    logger.warn('Trigger slot skipped: its variables no longer match the agent', { triggerId, reason: variables.reason });
     return;
   }
 
   const fired = await fireTrigger(trigger, tenant, {
     trigger: trigger.type === 'once' ? 'once' : 'schedule',
     message: trigger.prompt,
-    inputs: inputs.inputs,
+    variables: variables.variables,
     idempotencyKey: key,
     fireAt: plan.fireAt,
   });

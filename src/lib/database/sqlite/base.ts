@@ -1128,13 +1128,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
     // Run engine: class (absent = default), scheduled start, detached inline runs,
     // caller labels, origin surface, trigger link, per-request structured output,
-    // validated inputs, queue generation (job dedup) and last publish time. All
+    // validated variables, queue generation (job dedup) and last publish time. All
     // nullable; old rows read back as absent. (`runTrigger` because TRIGGER is an SQL keyword.)
     for (const [column, type] of [
       ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
       ['channel', 'TEXT'], ['triggerId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
-      ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
-      // Trigger runs: unattended (no one to ask) and external content (inputs stay out of the system prompt).
+      ['variables', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+      // Trigger runs: unattended (no one to ask) and external content (variables stay out of the system prompt).
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],

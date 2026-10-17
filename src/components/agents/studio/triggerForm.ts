@@ -5,7 +5,7 @@
  * without rendering.
  */
 
-import type { IAgentInputField } from '@/lib/database/provider/types.domain';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
 import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 
@@ -45,7 +45,7 @@ export interface WebhookFilterRow {
 }
 
 /**
- * The variables the editor offers for a prompt template / input mapping. A subset of the roots the server accepts
+ * The template tags the editor offers for a prompt template / variable mapping. A subset of the roots the server accepts
  * (agentTriggerWebhookView WEBHOOK_CONTEXT_ROOTS): `received_at` is valid in a template but is not offered as an example.
  */
 export const WEBHOOK_TEMPLATE_VARIABLES = [
@@ -219,8 +219,8 @@ export interface TriggerForm {
     delayAmount: number;
     delayUnit: DelayUnit;
     prompt: string;
-    /** Declared input name → value; absent = not set (the default applies). */
-    inputs: Record<string, unknown>;
+    /** Declared variable name → value; absent = not set (the default applies). */
+    variables: Record<string, unknown>;
     /** null = the published version. */
     version: number | null;
     runClass: 'default' | 'deferred';
@@ -290,7 +290,7 @@ export function emptyTriggerForm(timezone = browserTimezone(), now = new Date())
         delayAmount: 30,
         delayUnit: 'minutes',
         prompt: '',
-        inputs: {},
+        variables: {},
         version: null,
         runClass: 'default',
         metadataText: '',
@@ -309,8 +309,8 @@ export function emptyTriggerForm(timezone = browserTimezone(), now = new Date())
     };
 }
 
-/** A stored input value as the webhook mapping's text field shows it. */
-export function webhookInputText(value: unknown): string {
+/** A stored variable value as the webhook mapping's text field shows it. */
+export function webhookVariableText(value: unknown): string {
     if (value === undefined || value === null) return '';
     return typeof value === 'string' ? value : JSON.stringify(value);
 }
@@ -318,9 +318,9 @@ export function webhookInputText(value: unknown): string {
 /**
  * A webhook mapping field's text → the value to store: text with a `{{tag}}`
  * stays a template (the server renders it per delivery); anything else is a
- * literal brought to the declared type, as a request's inputs would be.
+ * literal brought to the declared type, as a request's variables would be.
  */
-export function webhookInputValue(field: IAgentInputField | undefined, text: string): unknown {
+export function webhookVariableValue(field: IAgentVariable | undefined, text: string): unknown {
     if (text.includes('{{')) return text;
     const trimmed = text.trim();
     switch (field?.type) {
@@ -447,7 +447,7 @@ export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserT
         ...(trigger.type === 'schedule' ? { cron: trigger.schedule.cron ?? base.cron, timezone: trigger.schedule.timezone ?? base.timezone } : {}),
         ...(trigger.type === 'once' && trigger.once.run_at ? { onceMode: 'at' as const, runAtLocal: toLocalInputValue(new Date(trigger.once.run_at)) } : {}),
         prompt: trigger.prompt ?? '',
-        inputs: { ...(trigger.inputs ?? {}) },
+        variables: { ...(trigger.variables ?? {}) },
         version: trigger.version ?? null,
         runClass: trigger.class === 'deferred' ? 'deferred' : 'default',
         metadataText: formatMetadataLines(trigger.metadata),
@@ -508,7 +508,7 @@ export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: tru
  */
 export function triggerBodyFromForm(
     form: TriggerForm,
-    declared: IAgentInputField[] | undefined,
+    declared: IAgentVariable[] | undefined,
     stored?: TriggerRow | null,
     now = new Date(),
 ): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
@@ -524,7 +524,7 @@ export function triggerBodyFromForm(
         }
     }
     const declaredNames = new Set((declared ?? []).map((field) => field.name));
-    const inputs = Object.fromEntries(Object.entries(form.inputs).filter(([name, value]) => declaredNames.has(name) && value !== undefined && value !== ''));
+    const variables = Object.fromEntries(Object.entries(form.variables).filter(([name, value]) => declaredNames.has(name) && value !== undefined && value !== ''));
     // Standard Webhooks: the sender generates the secret, so a trigger that does not have one yet needs it pasted in.
     const storedStandard = stored?.type === 'webhook' && (stored.webhook as { auth?: string }).auth === 'standard_webhooks';
     if (form.type === 'webhook' && form.webhookAuth === 'standard_webhooks' && !storedStandard && !form.webhookSecret.trim()) {
@@ -536,7 +536,7 @@ export function triggerBodyFromForm(
         description: form.description.trim() || null,
         enabled: form.enabled,
         prompt: form.prompt,
-        inputs: Object.keys(inputs).length > 0 ? inputs : null,
+        variables: Object.keys(variables).length > 0 ? variables : null,
         version: form.version,
         class: form.runClass,
         metadata: Object.keys(metadata).length > 0 ? metadata : null,

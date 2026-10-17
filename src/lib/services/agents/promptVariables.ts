@@ -10,7 +10,10 @@
  *
  *   1. `config.promptVariables` — static defaults set on the agent
  *   2. `runtimeContext.metadata` — per-call values from the caller
- *   3. `input` — the validated agent inputs (`config.inputs`), as `{{input.<name>}}`
+ *   3. `variables` — the validated agent variables (`config.variables`), as
+ *      `{{variables.<name>}}`; a metadata object of the same name (a realtime
+ *      session forwards its variables that way) is read through the same root,
+ *      the agent's own values winning where a name appears in both
  *   4. built-ins (`agent`, `now`, `user`) — written last, so a caller cannot
  *      forge the agent's own identity into the prompt
  *
@@ -25,7 +28,7 @@ import Mustache from 'mustache';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
-import { inputPromptValues } from './agentInputs';
+import { variablePromptValues } from './agentVariables';
 
 /** Reserved top-level names the caller cannot override. */
 export const BUILT_IN_PROMPT_VARIABLES = ['agent', 'now', 'user'] as const;
@@ -39,14 +42,14 @@ export interface PromptVariableInput {
     version?: number | null;
     runtimeContext?: AgentRuntimeContext;
     userId?: string;
-    /** Validated agent inputs of this turn, exposed as `{{input.<name>}}`. */
-    inputs?: Record<string, unknown> | null;
+    /** Validated agent variables of this turn, exposed as `{{variables.<name>}}`. */
+    variables?: Record<string, unknown> | null;
     /**
-     * False keeps the inputs out of the prompt template (they came from outside
+     * False keeps the variables out of the prompt template (they came from outside
      * the platform's own callers and are delivered only in the user message).
      * Default true.
      */
-    inputsAsPromptVariables?: boolean;
+    variablesInPrompt?: boolean;
 }
 
 export interface ResolvedPromptVariables {
@@ -95,14 +98,23 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
         fromCaller.push(key);
     }
 
-    // `input` is the agent's own declared namespace: a caller's metadata key of the
-    // same name does not get to shape it. Defaults come from the declaration, so a
-    // turn that supplied nothing still renders them.
-    if (input.inputsAsPromptVariables === false) {
-        delete values.input;
+    // `variables` is the agent's own declared namespace: a caller's metadata key of
+    // the same name does not get to shape it for external content, which never
+    // fills the prompt (it reaches the model in the user message only). Defaults come
+    // from the declaration, so a turn that supplied nothing still renders them. A
+    // metadata object of the same name (a realtime session forwards its variables
+    // that way) stays readable next to them; the agent's own values win, name by name.
+    if (input.variablesInPrompt === false) {
+        delete values.variables;
     } else {
-        const inputValues = inputPromptValues(input.config.inputs, input.inputs);
-        if (inputValues) values.input = inputValues;
+        const variableValues = variablePromptValues(input.config.variables, input.variables);
+        if (variableValues) {
+            const fromMetadata = values.variables;
+            values.variables = {
+                ...(typeof fromMetadata === 'object' && fromMetadata !== null && !Array.isArray(fromMetadata) ? fromMetadata : {}),
+                ...variableValues,
+            };
+        }
     }
 
     const now = new Date();
@@ -172,8 +184,8 @@ export function renderPromptTemplate(
  */
 export function shouldRenderInlinePrompt(config: IAgentConfig, template?: string): boolean {
     if (Object.keys(config.promptVariables ?? {}).length > 0) return true;
-    // Declared inputs are `{{input.<name>}}` placeholders.
-    if ((config.inputs?.length ?? 0) > 0) return true;
+    // Declared variables are `{{variables.<name>}}` placeholders.
+    if ((config.variables?.length ?? 0) > 0) return true;
     if (!template) return false;
     const referenced = collectTemplateVariables(template);
     return referenced.some((name) => BUILT_INS.has(name));

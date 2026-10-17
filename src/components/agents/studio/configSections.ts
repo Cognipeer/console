@@ -21,7 +21,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     hitl: 'Approvals & questions',
     clienttools: 'Client tools',
     advanced: 'Runtime',
-    inputs: 'Inputs',
+    variables: 'Variables',
     output: 'Structured output',
 };
 
@@ -34,7 +34,7 @@ export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
     files: 'attachments.sectionTitle',
     hitl: 'hitl.sectionTitle',
     clienttools: 'clientTools.sectionTitle',
-    inputs: 'inputs.sectionTitle',
+    variables: 'variables.sectionTitle',
 };
 
 /** A section's heading in the viewer's language — `translate` is `useTranslations('agents')`. */
@@ -55,7 +55,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     hitl: ['humanInTheLoop'],
     clienttools: ['clientTools'],
     advanced: ['runtime'],
-    inputs: ['inputs'],
+    variables: ['variables'],
     output: ['structuredOutput'],
 };
 

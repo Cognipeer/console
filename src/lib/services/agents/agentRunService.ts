@@ -523,8 +523,8 @@ export interface StartAgentRunInput {
    */
   unattended?: boolean;
   /**
-   * The message / inputs came from an external payload: inputs stay out of the
-   * system prompt and the Inputs block is closed (agentInputs.ts). Kept on the row.
+   * The message / variables came from an external payload: variables stay out of the
+   * system prompt and the Variables block is closed (agentVariables.ts). Kept on the row.
    */
   externalContent?: boolean;
   /** The request asked for `background: true`: kept on the row (a stream runs inline, yet reads back as background). */
@@ -532,7 +532,7 @@ export interface StartAgentRunInput {
   /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
   answersClientTools?: boolean;
   responseFormat?: AgentResponseFormat | null;
-  inputs?: Record<string, unknown> | null;
+  variables?: Record<string, unknown> | null;
   /** Default `default`. A `deferred` run is always queued. */
   runClass?: AgentRunClass;
   channel?: IAgentRun['channel'];
@@ -733,7 +733,7 @@ export async function agentRunCapacityPrecheck(input: {
 /**
  * Starts an agent turn as a run — the one way API callers, triggers and the
  * runs API start one (§4.1). The dialect has already resolved and validated
- * the agent, session, files, budget, model and inputs.
+ * the agent, session, files, budget, model and variables.
  *
  * Order: idempotency (a replay must never be newly refused by the other
  * checks) → the insert itself (conversation slot + unique idempotency key) →
@@ -838,7 +838,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       triggerId: input.triggerId ?? null,
       trigger: input.trigger ?? 'request',
       responseFormat: input.responseFormat ?? null,
-      inputs: input.inputs ?? null,
+      variables: input.variables ?? null,
       ...(input.unattended ? { unattended: true } : {}),
       ...(input.externalContent ? { externalContent: true } : {}),
       ...(input.background ? { background: true } : {}),
@@ -1086,7 +1086,7 @@ function executeInlineRun(
     ...runFlags(run),
     ...(input.answersClientTools ? { answersClientTools: true } : {}),
     ...(input.responseFormat ? { responseFormat: input.responseFormat } : {}),
-    ...(input.inputs ? { inputs: input.inputs } : {}),
+    ...(input.variables ? { variables: input.variables } : {}),
     ...(execution.stream?.onTextChunk ? { onTextChunk: execution.stream.onTextChunk } : {}),
     ...(execution.stream?.onReasoningChunk ? { onReasoningChunk: execution.stream.onReasoningChunk } : {}),
     runId,
@@ -1282,7 +1282,7 @@ export async function findPausedOwnerRun(
  * Queues a run that continues a paused turn (every action it waited on is
  * answered). The paused run that owns the pause (`ownerRunId`, the run the
  * actions were raised by) is put back in the queue under its own id, keeping
- * its class, channel, labels, response format and inputs (a new queue
+ * its class, channel, labels, response format and variables (a new queue
  * generation, so its job is not mistaken for the first one) and recording
  * what continues it (`trigger`) and who answered; a turn that paused inside a
  * dashboard call has no run, so a new `background` one of the default class
@@ -1326,7 +1326,7 @@ export async function queueAgentRunResume(input: {
     }
     if (!run) {
       // The turn this continues: the paused run, else the session's latest run (a
-      // budget continuation) — its trigger, flags and inputs carry over (§2.4a).
+      // budget continuation) — its trigger, flags and variables carry over (§2.4a).
       const [source] = paused ? [paused] : await db.listAgentRuns({
         tenantId: input.tenantId,
         projectId: input.projectId,
@@ -1362,7 +1362,7 @@ export async function queueAgentRunResume(input: {
         ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
         ...(source?.unattended ? { unattended: true } : {}),
         ...(source?.externalContent ? { externalContent: true } : {}),
-        ...(source?.inputs ? { inputs: source.inputs } : {}),
+        ...(source?.variables ? { variables: source.variables } : {}),
         ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
         queueGeneration: 1,
         callbackAttempts: 0,
@@ -1630,12 +1630,12 @@ export async function requestAgentRunCancellation(
 /**
  * What a run's row says about how its turns run — the same for its first turn,
  * a resume and a continuation (§2.4a): nobody to ask (`unattended`), and for
- * external content inputs that never fill the system prompt.
+ * external content, variables that never fill the system prompt.
  */
-function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent'>): Pick<AgentChatRequest, 'unattended' | 'inputsAsPromptVariables' | 'externalContent'> {
+function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent'> {
   return {
     ...(run.unattended === true ? { unattended: true } : {}),
-    ...(run.externalContent === true ? { inputsAsPromptVariables: false, externalContent: true } : {}),
+    ...(run.externalContent === true ? { variablesInPrompt: false, externalContent: true } : {}),
   };
 }
 
@@ -1654,7 +1654,7 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     usePublished: run.usePublished,
     runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
     ...(run.responseFormat ? { responseFormat: run.responseFormat } : {}),
-    ...(run.inputs ? { inputs: run.inputs } : {}),
+    ...(run.variables ? { variables: run.variables } : {}),
     ...runFlags(run),
     cancellationCell,
     runId: String(run._id),
@@ -1950,8 +1950,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             runId,
             runtimeContext: request.runtimeContext,
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
-            ...(request.inputs ? { inputs: request.inputs } : {}),
-            ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+            ...(request.variables ? { variables: request.variables } : {}),
+            ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
             continuation: {
@@ -1974,8 +1974,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             runId,
             runtimeContext: request.runtimeContext,
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
-            ...(request.inputs ? { inputs: request.inputs } : {}),
-            ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+            ...(request.variables ? { variables: request.variables } : {}),
+            ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
           }).then((resumed) => resumed.response)

@@ -2,7 +2,7 @@
  * What a trigger's webhook reads from a delivery: one bounded view of
  * it (filters, the `events` check and the prompt template all see the same
  * copy), the filter rules over that view, the Mustache prompt template and the
- * mapping of declared inputs.
+ * mapping of declared variables.
  *
  * The view is a deep copy with null prototypes and caps on size (arrays,
  * strings, depth, node count), so a lookup only ever reaches data the sender
@@ -13,8 +13,8 @@
  */
 
 import Mustache from 'mustache';
-import type { AgentTriggerWebhookFilterRule, IAgentInputField } from '@/lib/database';
-import { resolveRunInputs, type InputIssue } from './agentInputs';
+import type { AgentTriggerWebhookFilterRule, IAgentVariable } from '@/lib/database';
+import { resolveRunVariables, type VariableIssue } from './agentVariables';
 
 // ── Bounds ───────────────────────────────────────────────────────────────
 
@@ -187,11 +187,11 @@ const isScalar = (value: unknown): value is string | number | boolean =>
   typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)) || typeof value === 'boolean';
 
 /** Filter rules from a request body (save time) → the rules to store, or the problems (`field` relative to the rules). */
-export function parseFilterRules(value: unknown): { ok: true; rules: AgentTriggerWebhookFilterRule[] } | { ok: false; errors: InputIssue[] } {
+export function parseFilterRules(value: unknown): { ok: true; rules: AgentTriggerWebhookFilterRule[] } | { ok: false; errors: VariableIssue[] } {
   if (value === null || value === undefined) return { ok: true, rules: [] };
   if (!Array.isArray(value)) return { ok: false, errors: [{ field: 'filter', message: 'filter must be a list of rules { path, op, value? }' }] };
   if (value.length > FILTER_MAX_RULES) return { ok: false, errors: [{ field: 'filter', message: `filter can have at most ${FILTER_MAX_RULES} rules` }] };
-  const errors: InputIssue[] = [];
+  const errors: VariableIssue[] = [];
   const rules: AgentTriggerWebhookFilterRule[] = [];
   value.forEach((raw, index) => {
     const at = `filter[${index}]`;
@@ -413,7 +413,7 @@ export function capRendered(text: string): string {
   return text.length > RENDERED_MAX_LENGTH ? `${text.slice(0, RENDERED_MAX_LENGTH)}\n…[truncated]` : text;
 }
 
-// ── Inputs ───────────────────────────────────────────────────────────────
+// ── Variables ────────────────────────────────────────────────────────────
 
 const EXACT_TAG_RE = /^\{\{\s*([^{}#^/!>&=\s][^{}\s]*)\s*\}\}$/;
 
@@ -426,22 +426,22 @@ function exactTagPath(value: unknown): string | null {
 const looksLikeTemplate = (value: unknown): value is string => typeof value === 'string' && value.includes('{{');
 
 /**
- * Save-time check of a webhook trigger's input mapping: every name is declared;
+ * Save-time check of a webhook trigger's variable mapping: every name is declared;
  * a string with tags is a valid template (no `*`); any other value has the
- * declared type; a required input without a default is mapped or given.
+ * declared type; a required variable without a default is mapped or given.
  */
-export function inputMappingProblems(
-  declared: ReadonlyArray<IAgentInputField> | undefined,
+export function variableMappingProblems(
+  declared: ReadonlyArray<IAgentVariable> | undefined,
   mapping: Record<string, unknown> | null | undefined,
-): InputIssue[] {
+): VariableIssue[] {
   const fields = declared ?? [];
   const given = mapping ?? {};
-  const issues: InputIssue[] = [];
+  const issues: VariableIssue[] = [];
   const literals: Record<string, unknown> = {};
   const byName = new Map(fields.map((field) => [field.name, field]));
   for (const [name, value] of Object.entries(given)) {
     if (!byName.has(name)) {
-      issues.push({ field: name, message: fields.length === 0 ? 'This agent declares no inputs' : 'Not an input of this agent' });
+      issues.push({ field: name, message: fields.length === 0 ? 'This agent declares no variables' : 'Not a variable of this agent' });
     } else if (looksLikeTemplate(value)) {
       const problem = templateProblem(value);
       if (problem) issues.push({ field: name, message: problem });
@@ -450,15 +450,15 @@ export function inputMappingProblems(
     }
   }
   if (issues.length > 0) return issues;
-  // Literals are checked as a request's inputs would be; a mapped name counts as given for `required`.
+  // Literals are checked as a request's variables would be; a mapped name counts as given for `required`.
   const mapped = new Set(Object.keys(given).filter((name) => looksLikeTemplate(given[name])));
   const relaxed = fields.map((field) => (mapped.has(field.name) ? { ...field, required: false } : field));
-  const resolved = resolveRunInputs(relaxed, Object.keys(literals).length > 0 ? literals : null);
+  const resolved = resolveRunVariables(relaxed, Object.keys(literals).length > 0 ? literals : null);
   return resolved.ok ? [] : resolved.errors;
 }
 
 /** A string brought to the declared type (number, integer, boolean, json); other types and failures stay as they are. */
-function coerce(type: IAgentInputField['type'] | undefined, value: unknown): { ok: true; value: unknown } | { ok: false; message: string } {
+function coerce(type: IAgentVariable['type'] | undefined, value: unknown): { ok: true; value: unknown } | { ok: false; message: string } {
   if (typeof value !== 'string' || !type || type === 'string') return { ok: true, value };
   const text = value.trim();
   switch (type) {
@@ -479,22 +479,22 @@ function coerce(type: IAgentInputField['type'] | undefined, value: unknown): { o
 }
 
 /**
- * The run's inputs from the trigger's mapping over the view: a value that is
+ * The run's variables from the trigger's mapping over the view: a value that is
  * exactly one tag takes the value at that path (its type kept); other strings
  * with tags are rendered (values as JSON); anything else is used as is. Then
  * strings are brought to the declared type, `overrides` (a Run now's literal
  * values, never rendered) go on top, and the result is checked like a
- * request's inputs. Throws `WebhookTemplateError` for a render that fails.
+ * request's variables. Throws `WebhookTemplateError` for a render that fails.
  */
-export function mapWebhookInputs(
-  declared: ReadonlyArray<IAgentInputField> | undefined,
+export function mapWebhookVariables(
+  declared: ReadonlyArray<IAgentVariable> | undefined,
   mapping: Record<string, unknown> | null | undefined,
   view: unknown,
   overrides?: Record<string, unknown> | null,
-): { ok: true; inputs: Record<string, unknown> | null } | { ok: false; errors: InputIssue[]; reason: string } {
+): { ok: true; variables: Record<string, unknown> | null } | { ok: false; errors: VariableIssue[]; reason: string } {
   const byName = new Map((declared ?? []).map((field) => [field.name, field]));
   const values: Record<string, unknown> = {};
-  const errors: InputIssue[] = [];
+  const errors: VariableIssue[] = [];
   for (const [name, spec] of Object.entries(mapping ?? {})) {
     let value: unknown;
     const path = exactTagPath(spec);
@@ -512,9 +512,9 @@ export function mapWebhookInputs(
     else values[name] = coerced.value;
   }
   if (errors.length === 0) {
-    const resolved = resolveRunInputs(declared, { ...values, ...(overrides ?? {}) });
-    if (resolved.ok) return { ok: true, inputs: resolved.inputs };
+    const resolved = resolveRunVariables(declared, { ...values, ...(overrides ?? {}) });
+    if (resolved.ok) return { ok: true, variables: resolved.variables };
     errors.push(...resolved.errors);
   }
-  return { ok: false, errors, reason: `invalid inputs: ${errors[0].field}: ${errors[0].message}` };
+  return { ok: false, errors, reason: `invalid variables: ${errors[0].field}: ${errors[0].message}` };
 }

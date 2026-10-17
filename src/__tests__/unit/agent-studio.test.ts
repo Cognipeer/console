@@ -223,13 +223,13 @@ describe('agent manifest', () => {
         expect(issues).toContain('duplicate sub-agent name "dup"');
     });
 
-    it('carries the declared inputs on export and refuses a malformed list on import', () => {
-        const inputs = [{ name: 'customer_id', type: 'string' as const, required: true }];
-        const manifest = buildAgentManifest(AGENT, { modelKey: 'm', inputs }, 1);
-        expect((manifest.spec as IAgentConfig).inputs).toEqual(inputs);
+    it('carries the declared variables on export and refuses a malformed list on import', () => {
+        const variables = [{ name: 'customer_id', type: 'string' as const, required: true }];
+        const manifest = buildAgentManifest(AGENT, { modelKey: 'm', variables }, 1);
+        expect((manifest.spec as IAgentConfig).variables).toEqual(variables);
         expect(validateAgentManifest(manifest)).toEqual([]);
-        const broken = { ...manifest, spec: { ...manifest.spec, inputs: [{ name: 'x y', type: 'string' }] } };
-        expect(validateAgentManifest(broken).join('\n')).toContain('spec.inputs[0].name');
+        const broken = { ...manifest, spec: { ...manifest.spec, variables: [{ name: 'x y', type: 'string' }] } };
+        expect(validateAgentManifest(broken).join('\n')).toContain('spec.variables[0].name');
     });
 
     it('reports a parse failure as a manifest error, not a crash', () => {

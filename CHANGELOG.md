@@ -97,9 +97,18 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   continues a session now covers file and image references and the OpenAI `user` field, and continues a session only when
   exactly one of the owner's sessions matches (an ambiguous transcript starts a new session).
 - `attachments.accepts_images` on `GET /agents/{key}` is `false` while uploads are off or the bucket is unusable.
-- **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact), and agents
-  that declare `config.inputs` take typed `inputs`. `GET /agents/{key}` returns `input_schema` and `output_schema`.
-  Studio: Configure → Inputs and Output.
+- **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact).
+  `GET /agents/{key}` returns `variables_schema` and `output_schema`. Studio: Configure → Variables and Output.
+- **Variables.** An agent can declare typed variables (`config.variables`: a name, a type of text, number, integer,
+  yes/no or JSON, required or optional, allowed values, a default) that a caller sends next to the message as
+  `variables` (runs API, `/responses`, `/chat/completions`, A2A `data` parts, triggers). They are checked before the model
+  is called: a missing required value or a wrong type is `400 invalid_variables` and nothing is spent. The prompt reads
+  them as `{{variables.<name>}}` and the model also gets them as a `Variables` JSON block in the user message. They suit
+  runs a program starts. Chat clients cannot send them, so a required variable without a default refuses every chat
+  message that arrives through the API: on an agent that is also used in chat, keep variables optional or give them a
+  default. Values belong to the request that carries them: a session does not remember them, the prompt is rendered
+  again on every turn, and the block stays in the history of each turn that sent one. Studio explains this in
+  Configure → Variables and warns next to a required variable that has no default.
 
 ### A2A
 
@@ -116,7 +125,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - **Public A2A** (`/api/public/a2a/...`): a task and its session are bound to the caller that created them. Ids are
   `run_<runId>.<nonce>` and `<sessionId>.<nonce>` and must be handed back whole; without the right nonce `tasks/get`,
   `tasks/cancel` and `tasks/resubscribe` answer `-32001` and a `contextId` answers `-32602` (`unknown contextId`).
-  Public conversations created before this change can no longer be reached from the public route. The inputs of a
+  Public conversations created before this change can no longer be reached from the public route. The variables of a
   public caller's `data` part are external content and never reach the system prompt.
 
 ### Triggers and incoming webhooks
@@ -132,7 +141,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - **Incoming webhooks**: a trigger of type `webhook` starts when something posts to
   `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). Presets for
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
-  event-derived inputs, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
+  event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
   with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
   the message, marked as external data, never in the system prompt.
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across

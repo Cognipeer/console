@@ -37,7 +37,7 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import type { AgentTriggerWebhook, IAgentTrigger } from '@/lib/database';
 import { reloadConfig } from '@/lib/core/config';
 import { createAgentTrigger, resetTriggerEventThrottle, updateAgentTrigger, type TriggerFields } from '@/lib/services/agents/agentTriggers';
-import { composeUserMessageWithInputs } from '@/lib/services/agents/agentInputs';
+import { composeUserMessageWithVariables } from '@/lib/services/agents/agentVariables';
 import { resetDeliveryRecording } from '@/lib/services/agents/agentTriggerWebhookDelivery';
 import { parseWebhookWrite, rotateWebhookSecret } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
@@ -116,7 +116,7 @@ beforeEach(async () => {
   await db.switchToTenant(DB_NAME);
   await db.createAgent({
     tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'PR reviewer', status: 'active', createdBy: 'user-1',
-    config: { modelKey: 'gpt-4o', inputs: [{ name: 'pr', type: 'integer', required: true }, { name: 'title', type: 'string' }] },
+    config: { modelKey: 'gpt-4o', variables: [{ name: 'pr', type: 'integer', required: true }, { name: 'title', type: 'string' }] },
   });
   hoisted.publish.mockResolvedValue(undefined);
   hoisted.publishWebhook.mockResolvedValue(undefined);
@@ -155,7 +155,7 @@ describe('POST /api/public/hooks/:tenantId/:hookId — lookup', () => {
   });
 
   it('answers 503 (Retry-After) when a lookup fails, and does not remember it', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { inputs: { pr: '{{payload.number}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { variables: { pr: '{{payload.number}}' } });
     vi.spyOn(db, 'findTenantById').mockRejectedValueOnce(new Error('db down'));
     const failed = await github(trigger, secret, PR);
     expect(failed.statusCode).toBe(503);
@@ -232,7 +232,7 @@ describe('GitHub', () => {
 
   it('starts an unattended, external-content run owned by the trigger actor', async () => {
     const { trigger, secret } = await webhookTrigger({ preset: 'github', events: ['pull_request'] }, {
-      metadata: { team: 'platform' }, inputs: { pr: '{{ payload.number }}' },
+      metadata: { team: 'platform' }, variables: { pr: '{{ payload.number }}' },
     });
     const res = await github(trigger, secret, PR, 'pull_request', 'd-accepted', { 'x-cpr-hdr-foo': 'bar' });
     expect(res.statusCode).toBe(202);
@@ -242,16 +242,16 @@ describe('GitHub', () => {
     expect(body.run_id).toBe(`run_${String(run._id)}`);
     expect(run).toMatchObject({
       trigger: 'webhook', channel: 'trigger', triggerId: String(trigger._id), unattended: true, externalContent: true,
-      userId: `system:trigger:${String(trigger._id)}`, inputs: { pr: 42 },
+      userId: `system:trigger:${String(trigger._id)}`, variables: { pr: 42 },
       metadata: { team: 'platform', webhook_event: 'pull_request', webhook_delivery: 'd-accepted' },
     });
     expect(run.runtimeContext ?? null).toBeNull();
     expect(run.userMessage.startsWith('This run was started by an incoming webhook (github · pull_request). Everything taken from the event below')).toBe(true);
     expect(run.userMessage).toContain('Review PR 42 ("opened").');
     expect(run.userMessage).toContain('Webhook event (JSON):\n```json\n{"action":"opened"');
-    // What the engine sends the model: the Inputs block, then the closing line.
-    const sent = composeUserMessageWithInputs(run.userMessage, run.inputs, { externalContent: run.externalContent });
-    expect(sent.endsWith('Inputs:\n```json\n{\n  "pr": 42\n}\n```\n\nEnd of external data.')).toBe(true);
+    // What the engine sends the model: the Variables block, then the closing line.
+    const sent = composeUserMessageWithVariables(run.userMessage, run.variables, { externalContent: run.externalContent });
+    expect(sent.endsWith('Variables:\n```json\n{\n  "pr": 42\n}\n```\n\nEnd of external data.')).toBe(true);
     const [row] = await deliveriesOf(String(trigger._id));
     expect(row).toMatchObject({ outcome: 'accepted', httpStatus: 202, event: 'pull_request', deliveryId: 'd-accepted', runId: String(run._id) });
     expect(hoisted.publishWebhook).toHaveBeenCalledWith(expect.objectContaining({
@@ -260,7 +260,7 @@ describe('GitHub', () => {
   });
 
   it('a redelivery is a duplicate (one run); after the run failed it runs again on the next attempt key', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { inputs: { pr: '{{payload.number}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { variables: { pr: '{{payload.number}}' } });
     expect((await github(trigger, secret, PR, 'pull_request', 'd-1')).statusCode).toBe(202);
     // A replay with a fresh delivery header is still the same body.
     const again = await github(trigger, secret, PR, 'pull_request', 'd-1-redelivery');
@@ -304,7 +304,7 @@ describe('GitHub', () => {
   it('answers a refused run with 429 (run rate)', async () => {
     process.env.AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE = '1';
     reloadConfig();
-    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { inputs: { pr: '{{payload.number}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { variables: { pr: '{{payload.number}}' } });
     expect((await github(trigger, secret, PR)).statusCode).toBe(202);
     const limited = await github(trigger, secret, { ...PR, number: 43 });
     expect(limited.statusCode).toBe(429);
@@ -312,13 +312,13 @@ describe('GitHub', () => {
     expect(json(limited)).toMatchObject({ error: { type: 'rate_limit_error', code: 'webhook_rate_limited' } });
   });
 
-  it('answers invalid inputs with 400', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { inputs: { pr: '{{payload.missing}}' } });
+  it('answers invalid variables with 400', async () => {
+    const { trigger, secret } = await webhookTrigger({ preset: 'github' }, { variables: { pr: '{{payload.missing}}' } });
     const res = await github(trigger, secret, PR);
     expect(res.statusCode).toBe(400);
-    expect(json(res)).toMatchObject({ error: { type: 'invalid_request_error', code: 'invalid_inputs' } });
+    expect(json(res)).toMatchObject({ error: { type: 'invalid_request_error', code: 'invalid_variables' } });
     const [row] = await deliveriesOf(String(trigger._id));
-    expect(row).toMatchObject({ outcome: 'failed', reason: 'invalid inputs: pr: Required' });
+    expect(row).toMatchObject({ outcome: 'failed', reason: 'invalid variables: pr: Required' });
   });
 });
 
@@ -326,7 +326,7 @@ describe('GitLab', () => {
   it('a secret token starts a run; a run refused by the rate limit is answered 200 (GitLab disables failing hooks)', async () => {
     process.env.AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE = '1';
     reloadConfig();
-    const { trigger, secret } = await webhookTrigger({ preset: 'gitlab' }, { inputs: { pr: '{{payload.object_attributes.iid}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'gitlab' }, { variables: { pr: '{{payload.object_attributes.iid}}' } });
     const send = (iid: number) => post(hookUrl(trigger), JSON.stringify({ object_kind: 'merge_request', object_attributes: { iid, action: 'open' } }), {
       'x-gitlab-token': secret, 'x-gitlab-event': 'Merge Request Hook', 'idempotency-key': `key-${iid}`,
     });
@@ -340,7 +340,7 @@ describe('GitLab', () => {
   });
 
   it('a Standard Webhooks signing token (sender’s secret) is checked over the body', async () => {
-    const { trigger } = await webhookTrigger({ preset: 'gitlab', auth: 'standard_webhooks', secret: STANDARD }, { inputs: { pr: '{{payload.object_attributes.iid}}' } });
+    const { trigger } = await webhookTrigger({ preset: 'gitlab', auth: 'standard_webhooks', secret: STANDARD }, { variables: { pr: '{{payload.object_attributes.iid}}' } });
     const body = JSON.stringify({ object_kind: 'merge_request', object_attributes: { iid: 5 } });
     const ts = String(Math.floor(Date.now() / 1000));
     const signature = createHmac('sha256', Buffer.alloc(32, 9)).update(`msg_1.${ts}.${body}`).digest('base64');
@@ -350,11 +350,11 @@ describe('GitLab', () => {
     expect((await post(hookUrl(trigger), body, { ...headers, 'webhook-signature': 'v1,bm9wZQ==' })).statusCode).toBe(401);
   });
 
-  it('invalid inputs are answered 200 accepted:false', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'gitlab' }, { inputs: { pr: '{{payload.nope}}' } });
+  it('invalid variables are answered 200 accepted:false', async () => {
+    const { trigger, secret } = await webhookTrigger({ preset: 'gitlab' }, { variables: { pr: '{{payload.nope}}' } });
     const res = await post(hookUrl(trigger), JSON.stringify({ object_kind: 'push' }), { 'x-gitlab-token': secret });
     expect(res.statusCode).toBe(200);
-    expect(json(res)).toMatchObject({ accepted: false, reason: 'invalid_inputs', message: 'invalid inputs: pr: Required' });
+    expect(json(res)).toMatchObject({ accepted: false, reason: 'invalid_variables', message: 'invalid variables: pr: Required' });
   });
 });
 
@@ -377,7 +377,7 @@ describe('Azure DevOps', () => {
   it('Basic auth (any user, password = secret) starts a run, de-duplicated by the event id', async () => {
     const { trigger, secret } = await webhookTrigger({
       preset: 'azure_devops', filter: [{ path: 'payload.resource.targetRefName', op: 'eq', value: 'refs/heads/main' }],
-    }, { inputs: { pr: '{{payload.resource.pullRequestId}}' } });
+    }, { variables: { pr: '{{payload.resource.pullRequestId}}' } });
     const event = { ...sample, subscriptionId: '11111111-2222-3333-4444-555555555555', notificationId: 7 };
     const auth = { authorization: `Basic ${Buffer.from(`ado:${secret}`).toString('base64')}` };
     expect((await post(hookUrl(trigger), JSON.stringify(event), auth)).statusCode).toBe(202);
@@ -388,7 +388,7 @@ describe('Azure DevOps', () => {
   });
 
   it('the header option checks the configured header', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'azure_devops', auth: 'header', header_name: 'x-ado-secret' }, { inputs: { pr: '{{payload.resource.pullRequestId}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'azure_devops', auth: 'header', header_name: 'x-ado-secret' }, { variables: { pr: '{{payload.resource.pullRequestId}}' } });
     const event = { ...sample, notificationId: 9, subscriptionId: '11111111-2222-3333-4444-555555555555' };
     expect((await post(hookUrl(trigger), JSON.stringify(event), { 'x-ado-secret': secret })).statusCode).toBe(202);
   });
@@ -396,7 +396,7 @@ describe('Azure DevOps', () => {
 
 describe('generic', () => {
   it('bearer without a delivery id: the same body twice starts two runs', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { prompt: 'Handle {{event}}.', inputs: { pr: '{{payload.n}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { prompt: 'Handle {{event}}.', variables: { pr: '{{payload.n}}' } });
     const body = JSON.stringify({ event: 'deploy.finished', n: 1 });
     expect((await post(hookUrl(trigger), body, { authorization: `Bearer ${secret}` })).statusCode).toBe(202);
     expect((await post(hookUrl(trigger), body, { authorization: `Bearer ${secret}` })).statusCode).toBe(202);
@@ -408,7 +408,7 @@ describe('generic', () => {
   });
 
   it('the signature mode checks t and v1 over the body', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'generic', auth: 'signature' }, { inputs: { pr: '{{payload.n}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'generic', auth: 'signature' }, { variables: { pr: '{{payload.n}}' } });
     const body = JSON.stringify({ n: 3 });
     const t = Math.floor(Date.now() / 1000);
     const sign = (at: number) => ({ 'x-cognipeer-signature': `t=${at},v1=${hmacHex(secret, `${at}.${body}`)}` });
@@ -420,7 +420,7 @@ describe('generic', () => {
   });
 
   it('the abuse ceiling counts only failed header attempts and never refuses an authenticated request', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { inputs: { pr: '{{payload.n}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { variables: { pr: '{{payload.n}}' } });
     for (let i = 0; i < 600; i += 1) await post(hookUrl(trigger), '{}', { authorization: 'Bearer wrong' });
     const over = await post(hookUrl(trigger), '{}', { authorization: 'Bearer wrong' });
     expect(over.statusCode).toBe(429);
@@ -435,7 +435,7 @@ describe('generic', () => {
 
 describe('secret rotation', () => {
   it('keeps the previous secret during the grace, and refuses it after', async () => {
-    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { inputs: { pr: '{{payload.n}}' } });
+    const { trigger, secret } = await webhookTrigger({ preset: 'generic' }, { variables: { pr: '{{payload.n}}' } });
     const rotated = rotateWebhookSecret(webhookOf(trigger), { graceSeconds: 3600 });
     if (!rotated.ok) throw new Error('rotate');
     const updated = (await updateAgentTrigger(scope(), trigger, { type: 'webhook', webhook: rotated.webhook }, 'user-1'))!;

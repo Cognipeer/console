@@ -25,9 +25,9 @@ import {
   filterRuleMatches,
   firstFilterMiss,
   globMatch,
-  inputMappingProblems,
+  variableMappingProblems,
   jsonText,
-  mapWebhookInputs,
+  mapWebhookVariables,
   parseFilterRules,
   renderWebhookTemplate,
   templateProblem,
@@ -339,31 +339,31 @@ describe('input mapping', () => {
   const view = boundedView({ payload: { number: 42, title: 'Fix', draft: 'false', labels: [{ name: 'bug' }], big: 'y'.repeat(8 * 1024) } });
 
   it('a single tag keeps the type; other strings are rendered; strings are coerced to the declared type', () => {
-    const mapped = mapWebhookInputs(declared, {
+    const mapped = mapWebhookVariables(declared, {
       number: '{{ payload.number }}', title: 'PR {{payload.title}}', draft: '{{payload.draft}}', labels: '{{payload.labels}}', region: 'eu',
     }, view);
-    expect(mapped).toEqual({ ok: true, inputs: { number: 42, title: 'PR "Fix"', draft: false, labels: [{ name: 'bug' }], region: 'eu' } });
-    expect(Object.getPrototypeOf((mapped as unknown as { inputs: { labels: object } }).inputs.labels)).toBe(Array.prototype);
+    expect(mapped).toEqual({ ok: true, variables: { number: 42, title: 'PR "Fix"', draft: false, labels: [{ name: 'bug' }], region: 'eu' } });
+    expect(Object.getPrototypeOf((mapped as unknown as { variables: { labels: object } }).variables.labels)).toBe(Array.prototype);
   });
 
   it('literal overrides go on top, unrendered', () => {
-    const mapped = mapWebhookInputs(declared, { number: '{{payload.number}}' }, view, { title: '{{payload.title}}' });
-    expect(mapped).toEqual({ ok: true, inputs: { number: 42, title: '{{payload.title}}' } });
+    const mapped = mapWebhookVariables(declared, { number: '{{payload.number}}' }, view, { title: '{{payload.title}}' });
+    expect(mapped).toEqual({ ok: true, variables: { number: 42, title: '{{payload.title}}' } });
   });
 
   it('reports a missing required value, a bad type and the size caps', () => {
-    expect(mapWebhookInputs(declared, { number: '{{payload.missing}}' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: number: Required' });
-    expect(mapWebhookInputs(declared, { number: '{{payload.title}}' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: number: Must be an integer' });
-    expect(mapWebhookInputs(declared, { number: '{{payload.number}}', title: 'x {{payload.big}}' }, view)).toMatchObject({ ok: false });
-    expect(mapWebhookInputs(declared, { number: '{{payload.number}}', labels: 'not {{payload.title}} json' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: labels: Must be JSON' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.missing}}' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: number: Required' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.title}}' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: number: Must be an integer' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.number}}', title: 'x {{payload.big}}' }, view)).toMatchObject({ ok: false });
+    expect(mapWebhookVariables(declared, { number: '{{payload.number}}', labels: 'not {{payload.title}} json' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: labels: Must be JSON' });
   });
 
   it('checks a mapping at save time', () => {
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', region: 'eu' })).toEqual([]);
-    expect(inputMappingProblems(declared, { region: 'eu' })).toEqual([{ field: 'number', message: 'Required' }]);
-    expect(inputMappingProblems(declared, { number: '{{payload.labels.*.name}}' })[0].message).toMatch(/only allowed in filter/);
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', region: 'asia' })[0].field).toBe('region');
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', other: 'x' })[0]).toEqual({ field: 'other', message: 'Not an input of this agent' });
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', region: 'eu' })).toEqual([]);
+    expect(variableMappingProblems(declared, { region: 'eu' })).toEqual([{ field: 'number', message: 'Required' }]);
+    expect(variableMappingProblems(declared, { number: '{{payload.labels.*.name}}' })[0].message).toMatch(/only allowed in filter/);
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', region: 'asia' })[0].field).toBe('region');
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', other: 'x' })[0]).toEqual({ field: 'other', message: 'Not a variable of this agent' });
   });
 });
 

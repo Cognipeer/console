@@ -61,8 +61,8 @@ A body that is not a JSON object (malformed, empty, an array or a string) is `40
 
 | Field | |
 | --- | --- |
-| `input` | A string, or [Responses input items](/api/agents#input-formats) (`input_text`, `input_file`, `input_image`). May be empty when `inputs` is given. |
-| `inputs` | Values for the agent's declared [inputs](/api/agents#typed-inputs-and-structured-output). |
+| `input` | A string, or [Responses input items](/api/agents#input-formats) (`input_text`, `input_file`, `input_image`). May be empty when `variables` is given. |
+| `variables` | Values for the agent's declared [variables](/api/agents#variables): named, typed values sent next to the message and checked before the model is called. The natural fit for a run a program starts. |
 | `session_id` | Continue that session; without it a new session starts and its id comes back on the run. |
 | `version` | A published version number, or `"draft"`. The default is the published version (the draft while nothing is published). |
 | `class` | `default` (the default) or `deferred`. |
@@ -224,7 +224,7 @@ Tenant quotas can lower the wait window, the maximum duration and the active-run
 
 | Status | Code | When |
 | --- | --- | --- |
-| `400` | `invalid_json`, `invalid_callback`, `invalid_schedule`, `invalid_wait`, `invalid_metadata`, `invalid_inputs`, `invalid_response_format`, `invalid_version`, `idempotency_key_reserved` | The request is malformed (`invalid_json`: the body is not a JSON object); the message says which field. |
+| `400` | `invalid_json`, `invalid_callback`, `invalid_schedule`, `invalid_wait`, `invalid_metadata`, `invalid_variables`, `invalid_response_format`, `invalid_version`, `idempotency_key_reserved` | The request is malformed (`invalid_json`: the body is not a JSON object); the message says which field. |
 | `400` | `attachment_unreachable` | A remote `file_url` / `image_url` (or A2A `file.uri`) could not be fetched, or did not arrive within the outbound timeout (30 seconds by default; headers and body together). |
 | `404` | `agent_run_not_found` | No such run in this project. |
 | `409` | `agent_run_conflict` | The session already has an active run. |

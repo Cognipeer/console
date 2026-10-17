@@ -62,7 +62,7 @@ import {
   resolveInvocationAgent,
   resolveInvocationCallback,
   resolveInvocationConfig,
-  resolveInvocationInputs,
+  resolveInvocationVariables,
   resolveInvocationLimits,
   resolveInvocationModel,
   runOutcomeRefusal,
@@ -233,7 +233,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       const target = await resolveInvocationAgent(reply, 'client', ctx, agentKey, body.version);
       if (!target) return reply;
       const { agent } = target;
-      const input = parseInvocationInput(reply, 'client', agent, body.input, { allowEmpty: body.inputs !== undefined && body.inputs !== null });
+      const input = parseInvocationInput(reply, 'client', agent, body.input, { allowEmpty: body.variables !== undefined && body.variables !== null });
       if (!input) return reply;
 
       let runClass: AgentRunClass = 'default';
@@ -262,8 +262,8 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!metadata.ok) return bad(metadata.message, 'invalid_metadata');
       const responseFormat = parseInvocationResponseFormat(reply, 'client', body.response_format, 'response_format');
       if (!responseFormat) return reply;
-      const inputs = resolveInvocationInputs(reply, 'client', await resolveInvocationConfig(ctx, target), body.inputs);
-      if (!inputs) return reply;
+      const variables = resolveInvocationVariables(reply, 'client', await resolveInvocationConfig(ctx, target), body.variables);
+      if (!variables) return reply;
 
       // The session it continues (`session_id`), or a new one.
       let conversation: IAgentConversation | null = null;
@@ -363,7 +363,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         usePublished: target.usePublished,
         runtimeContext: invocationRuntimeContext(request, ctx, body.runtime_context),
         responseFormat: responseFormat.format,
-        inputs: inputs.inputs,
+        variables: variables.variables,
         runClass,
         channel: 'runs' as const,
         trigger: 'request' as const,

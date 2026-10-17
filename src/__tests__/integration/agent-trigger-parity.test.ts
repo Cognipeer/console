@@ -62,7 +62,7 @@ describeForEachProvider('Agent triggers', (getDb) => {
     const runAt = new Date('2026-11-01T06:00:00.000Z');
     const first = await db.createAgentTrigger(record({
       metadata: { team: 'ops' },
-      inputs: { region: 'eu' },
+      variables: { region: 'eu' },
       callback: { url: 'https://example.com/hook', secretSealed: 'sealed' },
       responseFormat: { type: 'json_object' },
       version: 3,
@@ -79,7 +79,7 @@ describeForEachProvider('Agent triggers', (getDb) => {
       type: 'schedule',
       schedule: { cron: '0 2 * * *', timezone: 'Europe/Istanbul' },
       metadata: { team: 'ops' },
-      inputs: { region: 'eu' },
+      variables: { region: 'eu' },
       callback: { url: 'https://example.com/hook', secretSealed: 'sealed' },
       responseFormat: { type: 'json_object' },
       version: 3,

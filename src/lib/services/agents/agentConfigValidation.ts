@@ -26,7 +26,7 @@ import {
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
 import { validateSeedFiles } from './agentSandboxSeedFiles';
-import { validateInputDeclaration } from './agentInputs';
+import { validateVariableDeclaration } from './agentVariables';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
@@ -183,8 +183,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
-    // Declared inputs: names, types, enums, defaults.
-    for (const issue of validateInputDeclaration(config.inputs)) issues.errors.push({ field: issue.field, message: issue.message });
+    // Declared variables: names, types, enums, defaults.
+    for (const issue of validateVariableDeclaration(config.variables)) issues.errors.push({ field: issue.field, message: issue.message });
 
     const budget = config.budget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
     if (budget !== undefined && budget !== null) {

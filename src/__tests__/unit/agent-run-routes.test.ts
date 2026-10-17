@@ -596,7 +596,7 @@ describe('GET/POST /client/v1/agents/runs/:runId — tenant+project scoping (§1
   });
 });
 
-describe('POST /responses — structured output and inputs (§6)', () => {
+describe('POST /responses — structured output and variables (§6)', () => {
   const TRIAGE = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] };
   const declare = (config: Record<string, unknown>) => {
     const declared = { ...activeAgent(), config: { modelKey: 'gpt-4o', ...config } };
@@ -647,39 +647,39 @@ describe('POST /responses — structured output and inputs (§6)', () => {
     expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 
-  it('inputs are validated against the agent declaration and delivered validated, defaults applied', async () => {
-    declare({ inputs: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }] });
+  it('variables are validated against the agent declaration and delivered validated, defaults applied', async () => {
+    declare({ variables: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }] });
     hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
 
-    const bad = await post({ model: 'support-agent', input: 'hello', inputs: {} });
+    const bad = await post({ model: 'support-agent', input: 'hello', variables: {} });
     expect(bad.statusCode).toBe(400);
     expect(error(bad.body)).toMatchObject({
-      code: 'invalid_inputs', param: 'inputs', errors: [{ field: 'customer_id', message: 'Required' }],
+      code: 'invalid_variables', param: 'variables', errors: [{ field: 'customer_id', message: 'Required' }],
     });
     expect(hoisted.startAgentRun).not.toHaveBeenCalled();
 
-    const ok = await post({ model: 'support-agent', input: 'hello', inputs: { customer_id: 'c-1' } });
+    const ok = await post({ model: 'support-agent', input: 'hello', variables: { customer_id: 'c-1' } });
     expect(ok.statusCode).toBe(200);
-    expect(startInput().inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(startInput().variables).toEqual({ customer_id: 'c-1', priority: 'low' });
   });
 
-  it('a request with only inputs (an empty message) is accepted', async () => {
-    declare({ inputs: [{ name: 'topic', type: 'string' }] });
+  it('a request with only variables (an empty message) is accepted', async () => {
+    declare({ variables: [{ name: 'topic', type: 'string' }] });
     hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
-    const res = await post({ model: 'support-agent', input: '', inputs: { topic: 'billing' } });
+    const res = await post({ model: 'support-agent', input: '', variables: { topic: 'billing' } });
     expect(res.statusCode).toBe(200);
-    expect(startInput().inputs).toEqual({ topic: 'billing' });
+    expect(startInput().variables).toEqual({ topic: 'billing' });
   });
 
-  it('GET /agents/:key publishes input_schema and output_schema (the agent as a typed function)', async () => {
+  it('GET /agents/:key publishes variables_schema and output_schema (the agent as a typed function)', async () => {
     declare({
-      inputs: [{ name: 'customer_id', type: 'string', required: true, description: 'Who to look up' }],
+      variables: [{ name: 'customer_id', type: 'string', required: true, description: 'Who to look up' }],
       structuredOutput: { enabled: true, schema: TRIAGE },
     });
     const res = await client.inject({ method: 'GET', url: '/api/client/v1/agents/support-agent', headers: TOKEN_HEADERS });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ agent: Record<string, unknown> }>(res.body).agent).toMatchObject({
-      input_schema: {
+      variables_schema: {
         type: 'object',
         properties: { customer_id: { type: 'string', description: 'Who to look up' } },
         required: ['customer_id'],
@@ -690,7 +690,7 @@ describe('POST /responses — structured output and inputs (§6)', () => {
 
     declare({});
     const plain = await client.inject({ method: 'GET', url: '/api/client/v1/agents/support-agent', headers: TOKEN_HEADERS });
-    expect(parseJsonBody<{ agent: Record<string, unknown> }>(plain.body).agent).toMatchObject({ input_schema: null, output_schema: null });
+    expect(parseJsonBody<{ agent: Record<string, unknown> }>(plain.body).agent).toMatchObject({ variables_schema: null, output_schema: null });
   });
 });
 

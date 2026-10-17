@@ -2601,8 +2601,8 @@ export interface AgentResponseFormat {
   strict?: boolean;
 }
 
-/** One declared input of an agent (`IAgentConfig.inputs`). */
-export interface IAgentInputField {
+/** One declared variable of an agent (`IAgentConfig.variables`). */
+export interface IAgentVariable {
   /** `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, unique within the agent. */
   name: string;
   label?: string;
@@ -2802,10 +2802,10 @@ export interface IAgentConfig {
     allowClientOverride?: boolean;
   };
   /**
-   * Declared inputs of the agent (a form for a human, a validated object for an
+   * Declared variables of the agent (a form for a human, a validated object for an
    * API / trigger caller). Absent = the agent takes free text only. At most 32.
    */
-  inputs?: IAgentInputField[];
+  variables?: IAgentVariable[];
   /**
    * Human in the loop: tool approvals and questions to the user. Absent (every
    * agent created before this existed) = nothing ever pauses.
@@ -3118,7 +3118,7 @@ export interface IAgentTriggerBase {
   enabled: boolean;
   /** The message each fire sends (≤ 32k chars). */
   prompt: string;
-  inputs?: Record<string, unknown> | null;
+  variables?: Record<string, unknown> | null;
   /** A pinned published version; null/absent = the published one. */
   version?: number | null;
   runClass: AgentRunClass;
@@ -3140,7 +3140,7 @@ export interface IAgentTriggerBase {
 }
 
 /**
- * A trigger: a saved way of starting an agent — a prompt (+ inputs) and a
+ * A trigger: a saved way of starting an agent — a prompt (+ variables) and a
  * `type` (`schedule`, `once`, `manual`, `webhook`) with that type's settings
  * object. Every fire is an ordinary AgentRun (`channel: 'trigger'`,
  * `triggerId`), so its history is the runs list filtered by trigger.
@@ -4790,15 +4790,15 @@ export interface IAgentRun extends IUsageAttributionFields {
    */
   unattended?: boolean;
   /**
-   * The message / inputs came from an external payload: inputs never fill the
-   * system prompt's `{{input.*}}` and the Inputs block is closed (agentInputs.ts).
+   * The message / variables came from an external payload: variables never fill the
+   * system prompt's `{{variables.*}}` and the Variables block is closed (agentVariables.ts).
    * Every continuation keeps it.
    */
   externalContent?: boolean;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
-  /** Validated agent inputs (`IAgentConfig.inputs`). */
-  inputs?: Record<string, unknown> | null;
+  /** Validated agent variables (`IAgentConfig.variables`). */
+  variables?: Record<string, unknown> | null;
   /**
    * Bumped on every (re)queue for a NEW execution (create = 1, resume/continue
    * +1). The job dedup key is `ar_${runId}_${queueGeneration}`, so a reconciler

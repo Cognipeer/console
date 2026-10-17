@@ -479,7 +479,7 @@ export type {
   IAgentCallbackConfig,
   AgentRunClass,
   AgentResponseFormat,
-  IAgentInputField,
+  IAgentVariable,
   IAgentAttachmentsConfig,
   IAgentClientToolConfig,
   IAgentClientToolSurfaces,

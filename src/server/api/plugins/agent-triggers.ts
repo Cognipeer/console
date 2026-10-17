@@ -1,6 +1,6 @@
 /**
  * The triggers API (§5.7): a trigger is a saved way of starting an agent — a
- * prompt (+ inputs) and a `type` with that type's settings object (`schedule`:
+ * prompt (+ variables) and a `type` with that type's settings object (`schedule`:
  * a cron in a timezone, `once`: one time, `manual`: by hand, `webhook`: an
  * incoming webhook). Every fire is an ordinary run (`channel: 'trigger'`), so a
  * trigger's history is `GET /client/v1/agents/runs?trigger_id=`.
@@ -23,7 +23,7 @@ import type { AgentTriggerType, AgentTriggerTypeSettings, AgentRunClass, IAgent,
 import type { LicenseType } from '@/lib/license/license-manager';
 import { getAgentByKey } from '@/lib/services/agents';
 import { AGENT_CALLBACK_SECRET_MASK, sealAgentCallbackConfig } from '@/lib/services/agents/agentCallbackConfig';
-import { resolveRunInputs, type InputIssue } from '@/lib/services/agents/agentInputs';
+import { resolveRunVariables, type VariableIssue } from '@/lib/services/agents/agentVariables';
 import {
   apiErrorBody,
   idempotencyKeyConflictErrorBody,
@@ -40,7 +40,7 @@ import {
   fireTrigger,
   getAgentTrigger,
   listAgentTriggers,
-  resolveTriggerInputs,
+  resolveTriggerVariables,
   triggerAgentConfig,
   serializeAgentTrigger,
   updateAgentTrigger,
@@ -60,11 +60,11 @@ import {
   rotateWebhookSecret,
   rotationAnswer,
 } from '@/lib/services/agents/agentTriggerWebhookIntake';
-import { inputMappingProblems, templateProblem } from '@/lib/services/agents/agentTriggerWebhookView';
+import { variableMappingProblems, templateProblem } from '@/lib/services/agents/agentTriggerWebhookView';
 import { getHeaderValue, readJsonBody, withApiRequestContext, withClientApiRequestContext } from '../fastify-utils';
 import {
   parseResponseFormat,
-  parseRunInputs,
+  parseRunVariables,
   parseRunMetadata,
   readIdempotencyKey,
   resolvePublishedAgentConfig,
@@ -114,7 +114,7 @@ const TRIGGER_TYPES: readonly AgentTriggerType[] = ['schedule', 'once', 'manual'
  */
 function readTypeSettings(
   body: Record<string, unknown>,
-): { ok: true; type: AgentTriggerType; settings: Record<string, unknown> } | { ok: false; issue: InputIssue } {
+): { ok: true; type: AgentTriggerType; settings: Record<string, unknown> } | { ok: false; issue: VariableIssue } {
   const issue = (field: string, message: string) => ({ ok: false as const, issue: { field, message } });
   const type = body.type;
   if (typeof type !== 'string' || !TRIGGER_TYPES.includes(type as AgentTriggerType)) {
@@ -141,7 +141,7 @@ export function parseTriggerTypeSettings(
   type: Exclude<AgentTriggerType, 'webhook'>,
   settings: Record<string, unknown>,
   now: Date,
-): { ok: true; settings: AgentTriggerTypeSettings } | { ok: false; issue: InputIssue } {
+): { ok: true; settings: AgentTriggerTypeSettings } | { ok: false; issue: VariableIssue } {
   const issue = (field: string, message: string) => ({ ok: false as const, issue: { field, message } });
   switch (type) {
     case 'schedule': {
@@ -198,9 +198,9 @@ function isStoredTypeSettings(body: Record<string, unknown>, stored: IAgentTrigg
 
 /**
  * A create (`existing` absent) or PATCH body → the fields to save. Absent =
- * unchanged; `null` clears a nullable field. The prompt / inputs / version are
- * checked together against the inputs the agent (that version of it) declares:
- * the prompt may be empty only when the agent declares inputs and the trigger
+ * unchanged; `null` clears a nullable field. The prompt / variables / version are
+ * checked together against the variables the agent (that version of it) declares:
+ * the prompt may be empty only when the agent declares variables and the trigger
  * gives some.
  */
 export async function prepareTriggerWrite(input: {
@@ -209,10 +209,10 @@ export async function prepareTriggerWrite(input: {
   scope: TriggerScope;
   existing?: IAgentTrigger | null;
   now?: Date;
-}): Promise<{ ok: true; write: TriggerWrite; /** A new generated webhook secret, shown once. */ webhookSecret?: string } | { ok: false; errors: InputIssue[] }> {
+}): Promise<{ ok: true; write: TriggerWrite; /** A new generated webhook secret, shown once. */ webhookSecret?: string } | { ok: false; errors: VariableIssue[] }> {
   const { body, agent, scope, existing } = input;
   const now = input.now ?? new Date();
-  const errors: InputIssue[] = [];
+  const errors: VariableIssue[] = [];
   const fields: TriggerFields = {};
   let typeSettings: AgentTriggerTypeSettings | undefined;
   const given = (key: string) => body[key] !== undefined;
@@ -288,11 +288,11 @@ export async function prepareTriggerWrite(input: {
     if (!parsed.ok) errors.push({ field: 'response_format', message: parsed.message });
     else fields.responseFormat = parsed.format;
   }
-  let shapedInputs: Record<string, unknown> | null | undefined;
-  if (given('inputs')) {
-    const parsed = parseRunInputs(body.inputs);
-    if (!parsed.ok) errors.push({ field: 'inputs', message: parsed.message });
-    else shapedInputs = fields.inputs = parsed.inputs;
+  let shapedVariables: Record<string, unknown> | null | undefined;
+  if (given('variables')) {
+    const parsed = parseRunVariables(body.variables);
+    if (!parsed.ok) errors.push({ field: 'variables', message: parsed.message });
+    else shapedVariables = fields.variables = parsed.variables;
   }
   if (given('callback')) {
     const callback = await prepareTriggerCallback(body.callback, existing?.callback ?? null);
@@ -300,29 +300,29 @@ export async function prepareTriggerWrite(input: {
     else fields.callback = callback.callback;
   }
 
-  // Prompt + inputs against the declaration of the version that runs — on create, and whenever one of them
-  // (or the type: a webhook trigger's prompt is a template and its inputs a mapping) changes.
-  if (errors.length === 0 && (!existing || given('prompt') || given('inputs') || given('version') || typeSettings !== undefined)) {
+  // Prompt + variables against the declaration of the version that runs — on create, and whenever one of them
+  // (or the type: a webhook trigger's prompt is a template and its variables a mapping) changes.
+  if (errors.length === 0 && (!existing || given('prompt') || given('variables') || given('version') || typeSettings !== undefined)) {
     const version = fields.version !== undefined ? fields.version : existing?.version ?? null;
     const config = await resolvePublishedAgentConfig(scope.tenantDbName, agent, scope.projectId, version ?? undefined);
-    const inputs = shapedInputs !== undefined ? shapedInputs : existing?.inputs ?? null;
+    const variables = shapedVariables !== undefined ? shapedVariables : existing?.variables ?? null;
     const webhook = typeSettings ? (typeSettings.type === 'webhook' ? typeSettings.webhook : null) : existing?.type === 'webhook' ? existing.webhook : null;
     const prompt = fields.prompt !== undefined ? fields.prompt : existing?.prompt ?? '';
-    const declaresInputs = (config.inputs?.length ?? 0) > 0;
-    const givesInputs = declaresInputs && Boolean(inputs && Object.keys(inputs).length > 0);
+    const declaresVariables = (config.variables?.length ?? 0) > 0;
+    const givesVariables = declaresVariables && Boolean(variables && Object.keys(variables).length > 0);
     if (webhook) {
       const problem = templateProblem(prompt);
       if (problem) errors.push({ field: 'prompt', message: problem });
-      errors.push(...inputMappingProblems(config.inputs, inputs).map((issue) => ({ field: `inputs.${issue.field}`, message: issue.message })));
+      errors.push(...variableMappingProblems(config.variables, variables).map((issue) => ({ field: `variables.${issue.field}`, message: issue.message })));
       // The event payload alone can be the whole message.
-      if (prompt.trim() === '' && !webhook.includePayload && !givesInputs) {
-        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger includes the event payload or gives inputs' });
+      if (prompt.trim() === '' && !webhook.includePayload && !givesVariables) {
+        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger includes the event payload or gives variables' });
       }
     } else {
-      const resolved = resolveRunInputs(config.inputs, inputs);
-      if (!resolved.ok) errors.push(...resolved.errors.map((issue) => ({ field: `inputs.${issue.field}`, message: issue.message })));
-      if (prompt.trim() === '' && !givesInputs) {
-        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger gives the inputs the agent declares' });
+      const resolved = resolveRunVariables(config.variables, variables);
+      if (!resolved.ok) errors.push(...resolved.errors.map((issue) => ({ field: `variables.${issue.field}`, message: issue.message })));
+      if (prompt.trim() === '' && !givesVariables) {
+        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger gives the variables the agent declares' });
       }
     }
     if (!existing && fields.prompt === undefined) fields.prompt = prompt;
@@ -361,7 +361,7 @@ function triggerAnswer(trigger: IAgentTrigger, webhookSecret?: string) {
   return { ...serialized, webhook: { ...serialized.webhook, secret: webhookSecret } };
 }
 
-function invalidTriggerBody(errors: InputIssue[]) {
+function invalidTriggerBody(errors: VariableIssue[]) {
   const summary = errors.slice(0, 5).map((issue) => `${issue.field}: ${issue.message}`).join('; ');
   return apiErrorBody('invalid_request_error', `Invalid trigger - ${summary}`, 'invalid_trigger', { errors });
 }
@@ -447,7 +447,7 @@ function parseSampleHeaders(value: unknown): { ok: true; headers: Record<string,
 
 /**
  * Run now: one fire (trigger `manual`) with the trigger's prompt; the body may
- * override `inputs` (merged over the trigger's) and `metadata`. Answers like the
+ * override `variables` (merged over the trigger's) and `metadata`. Answers like the
  * runs API create: 200 with a run that finished within `wait`, else 202.
  *
  * A webhook trigger also takes a sample `payload` (+ `headers`) and builds the
@@ -461,8 +461,8 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
   if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
   const bad = (message: string, code: string) => reply.code(400).send(invalidRequestErrorBody(message, code));
 
-  const overrides = parseRunInputs(body.inputs);
-  if (!overrides.ok) return bad(overrides.message, 'invalid_inputs');
+  const overrides = parseRunVariables(body.variables);
+  if (!overrides.ok) return bad(overrides.message, 'invalid_variables');
   const metadata = parseRunMetadata(body.metadata);
   if (!metadata.ok) return bad(metadata.message, 'invalid_metadata');
   const prefer = parsePreferHeader(getHeaderValue(request, 'prefer'));
@@ -487,7 +487,7 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
   if (!sampleHeaders.ok) return bad(sampleHeaders.message, 'invalid_headers');
 
   let message = trigger.prompt;
-  let runInputs: Record<string, unknown> | null;
+  let runVariables: Record<string, unknown> | null;
   let runMetadata = metadata.metadata;
   let externalContent = false;
   if (trigger.type === 'webhook') {
@@ -496,7 +496,7 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
       tenantDbName: caller.tenant.tenantDbName,
       payload: body.payload,
       headers: sampleHeaders.headers,
-      overrides: overrides.inputs,
+      overrides: overrides.variables,
       metadata: metadata.metadata,
       secrets: openWebhookSecrets(String(trigger._id), trigger.webhook) ?? [],
     });
@@ -505,22 +505,22 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
       return reply.code(400).send(apiErrorBody('invalid_request_error', `The trigger did not start a run: ${built.turn.reason}`, built.turn.code, { errors: built.turn.errors }));
     }
     message = built.turn.message;
-    runInputs = built.turn.inputs;
+    runVariables = built.turn.variables;
     runMetadata = built.metadata;
     externalContent = body.payload !== undefined;
   } else {
     const config = await triggerAgentConfig(caller.tenant.tenantDbName, trigger);
-    const inputs = resolveTriggerInputs(config, trigger, overrides.inputs);
-    if (!inputs.ok) {
-      return reply.code(400).send(apiErrorBody('invalid_request_error', `Invalid inputs - ${inputs.reason.replace(/^invalid inputs: /, '')}`, 'invalid_inputs', { errors: inputs.errors }));
+    const variables = resolveTriggerVariables(config, trigger, overrides.variables);
+    if (!variables.ok) {
+      return reply.code(400).send(apiErrorBody('invalid_request_error', `Invalid variables - ${variables.reason.replace(/^invalid variables: /, '')}`, 'invalid_variables', { errors: variables.errors }));
     }
-    runInputs = inputs.inputs;
+    runVariables = variables.variables;
   }
 
   const fired = await fireTrigger(trigger, caller.tenant, {
     trigger: 'manual',
     message,
-    inputs: runInputs,
+    variables: runVariables,
     metadata: runMetadata,
     ...(externalContent ? { externalContent: true } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),

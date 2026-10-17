@@ -722,13 +722,13 @@ describe('conversation ownership', () => {
   });
 });
 
-describe('message/send — agent inputs and structured output', () => {
+describe('message/send — agent variables and structured output', () => {
   const REPLY = { output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"label":"bug"}' }] }] };
   const declared = () => mockFn(getAgentByKey).mockResolvedValue({
     ...EXPOSED_AGENT,
     config: {
       ...EXPOSED_AGENT.config,
-      inputs: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }],
+      variables: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }],
     },
   });
   const send = async (parts: unknown[]) => {
@@ -747,12 +747,12 @@ describe('message/send — agent inputs and structured output', () => {
     mockFn(executeAgentChat).mockResolvedValue({ ...REPLY, _conversation_messages: [{ role: 'user' }, { role: 'assistant' }] });
   });
 
-  it('a data part whose keys are declared inputs becomes the run\'s inputs (validated, defaults applied)', async () => {
+  it('a data part whose keys are declared variables becomes the run\'s variables (validated, defaults applied)', async () => {
     declared();
     const body = await send([{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 'c-1' } }]);
     expect(body.error).toBeUndefined();
     const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
-    expect(chatRequest.inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(chatRequest.variables).toEqual({ customer_id: 'c-1', priority: 'low' });
     expect(chatRequest.userMessage).toBe('Triage');
   });
 
@@ -760,19 +760,19 @@ describe('message/send — agent inputs and structured output', () => {
     declared();
     const body = await send([{ kind: 'data', data: { customer_id: 'c-2', priority: 'high' } }]);
     expect(body.error).toBeUndefined();
-    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: '', inputs: { customer_id: 'c-2', priority: 'high' } });
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: '', variables: { customer_id: 'c-2', priority: 'high' } });
   });
 
-  it('invalid inputs are -32602 with errors[]; nothing runs', async () => {
+  it('invalid variables are -32602 with errors[]; nothing runs', async () => {
     declared();
     const body = await send([{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 7 } }]);
-    expect(body.error).toMatchObject({ code: -32602, data: { code: 'invalid_inputs', errors: [{ field: 'customer_id', message: 'Must be a string' }] } });
+    expect(body.error).toMatchObject({ code: -32602, data: { code: 'invalid_variables', errors: [{ field: 'customer_id', message: 'Must be a string' }] } });
     const missing = await send([{ kind: 'text', text: 'Triage' }]);
     expect(missing.error?.data).toMatchObject({ errors: [{ field: 'customer_id', message: 'Required' }] });
     expect(executeAgentChat).not.toHaveBeenCalled();
   });
 
-  it('data that is not an input is appended to the text as a JSON block, and the declared inputs stay apart', async () => {
+  it('data that is not a variable is appended to the text as a JSON block, and the declared variables stay apart', async () => {
     declared();
     await send([
       { kind: 'text', text: 'Triage' },
@@ -780,17 +780,17 @@ describe('message/send — agent inputs and structured output', () => {
       { kind: 'data', data: { ticket: { id: 12 }, note: 'a`b' } },
     ]);
     const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
-    expect(chatRequest.inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(chatRequest.variables).toEqual({ customer_id: 'c-1', priority: 'low' });
     expect(chatRequest.userMessage).toMatch(/^Triage\n\nData:\n```json\n/);
     expect(chatRequest.userMessage).toContain('"id": 12');
     expect(chatRequest.userMessage.match(/```/g)).toHaveLength(2);
   });
 
-  it('an agent that declares no inputs reads any data part as plain data', async () => {
+  it('an agent that declares no variables reads any data part as plain data', async () => {
     const body = await send([{ kind: 'text', text: 'Hi' }, { kind: 'data', data: { a: 1 } }]);
     expect(body.error).toBeUndefined();
     const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
-    expect(chatRequest.inputs).toBeUndefined();
+    expect(chatRequest.variables).toBeUndefined();
     expect(chatRequest.userMessage).toContain('Data:\n```json');
   });
 
@@ -975,13 +975,13 @@ describe('message/stream', () => {
     expect(executeAgentChat).not.toHaveBeenCalled();
   });
 
-  it('declared inputs and data parts reach the run like they do on message/send', async () => {
+  it('declared variables and data parts reach the run like they do on message/send', async () => {
     mockFn(executeAgentChat).mockResolvedValue(ANSWER('ok'));
     await stream(
       [{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 'c-1' } }],
-      { ...EXPOSED_AGENT, config: { inputs: [{ name: 'customer_id', type: 'string', required: true }] } },
+      { ...EXPOSED_AGENT, config: { variables: [{ name: 'customer_id', type: 'string', required: true }] } },
     );
-    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: 'Triage', inputs: { customer_id: 'c-1' } });
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: 'Triage', variables: { customer_id: 'c-1' } });
   });
 
   it('the client going away leaves the run going: it detaches and completes', async () => {
@@ -1303,14 +1303,14 @@ describe('message/send — how a run that did not finish normally is answered', 
     expect(executeAgentChat).not.toHaveBeenCalled();
   });
 
-  it('an authenticated caller\'s data inputs stay prompt variables (not external content)', async () => {
+  it('an authenticated caller\'s data variables stay prompt variables (not external content)', async () => {
     mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
-    mockFn(getAgentByKey).mockResolvedValue({ ...EXPOSED_AGENT, config: { ...EXPOSED_AGENT.config, inputs: [{ name: 'topic', type: 'string' }] } });
+    mockFn(getAgentByKey).mockResolvedValue({ ...EXPOSED_AGENT, config: { ...EXPOSED_AGENT.config, variables: [{ name: 'topic', type: 'string' }] } });
     mockFn(executeAgentChat).mockResolvedValue(answer('ok'));
     await send({ parts: [{ kind: 'text', text: 'Go' }, { kind: 'data', data: { topic: 'billing' } }] });
     const request = mockFn(executeAgentChat).mock.calls[0][0];
-    expect(request.inputs).toEqual({ topic: 'billing' });
-    expect(request.inputsAsPromptVariables).toBeUndefined();
+    expect(request.variables).toEqual({ topic: 'billing' });
+    expect(request.variablesInPrompt).toBeUndefined();
     expect(request.externalContent).toBeUndefined();
   });
 });

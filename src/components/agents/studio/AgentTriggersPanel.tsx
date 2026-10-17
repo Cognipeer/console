@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Triggers of one agent: saved ways of starting it — a prompt (+ inputs) and a
+ * Triggers of one agent: saved ways of starting it — a prompt (+ variables) and a
  * type (a schedule, one time, by hand, or an incoming webhook) with that type's
  * settings. Each fire is a background run; "Runs" opens Sessions → Background
  * runs filtered to the trigger.
@@ -50,7 +50,7 @@ import type { ReactNode } from 'react';
 import EmptyState from '@/components/common/EmptyState';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useDeleteResource } from '@/components/common/confirm';
-import type { IAgentInputField } from '@/lib/database/provider/types.domain';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { upcomingCronFires, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 import {
@@ -60,8 +60,8 @@ import {
     formFromTrigger,
     triggerBodyFromForm,
     timezoneOptions,
-    webhookInputText,
-    webhookInputValue,
+    webhookVariableText,
+    webhookVariableValue,
     type TriggerForm,
     type TriggerFormProblem,
     type TriggerRow,
@@ -79,8 +79,8 @@ import {
 export interface AgentTriggersPanelProps {
     agentId: string;
     agentName: string;
-    /** The inputs the agent declares (its draft; the server checks the version that runs). */
-    declaredInputs?: IAgentInputField[];
+    /** The variables the agent declares (its draft; the server checks the version that runs). */
+    declaredVariables?: IAgentVariable[];
     /** Saved versions, newest first, for the version select. */
     versions: number[];
     /** Open the runs this trigger started. */
@@ -124,7 +124,7 @@ function formatInZone(date: Date, locale: string, timeZone?: string): string {
 
 const fromEpoch = (seconds: number | null | undefined) => (seconds ? new Date(seconds * 1000) : null);
 
-export default function AgentTriggersPanel({ agentId, agentName, declaredInputs, versions, onShowRuns }: AgentTriggersPanelProps) {
+export default function AgentTriggersPanel({ agentId, agentName, declaredVariables, versions, onShowRuns }: AgentTriggersPanelProps) {
     const t = useTranslations('agents.triggers');
     const tConfirm = useTranslations('common.confirm');
     const locale = useLocale();
@@ -322,7 +322,7 @@ export default function AgentTriggersPanel({ agentId, agentName, declaredInputs,
                     agentId={agentId}
                     agentName={agentName}
                     trigger={editing.trigger}
-                    declaredInputs={declaredInputs}
+                    declaredVariables={declaredVariables}
                     versions={versions}
                     onClose={() => setEditing(null)}
                     onSaved={(saved, keepOpen) => {
@@ -344,7 +344,7 @@ interface TriggerEditorProps {
     agentId: string;
     agentName: string;
     trigger: TriggerRow | null;
-    declaredInputs?: IAgentInputField[];
+    declaredVariables?: IAgentVariable[];
     versions: number[];
     onClose: () => void;
     onSaved: (trigger: TriggerRow, keepOpen: boolean) => void;
@@ -353,7 +353,7 @@ interface TriggerEditorProps {
 
 type EditorTab = 'settings' | 'test' | 'deliveries';
 
-function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
+function TriggerEditor({ agentId, agentName, trigger, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
     const t = useTranslations('agents.triggers');
     const locale = useLocale();
     const [form, setForm] = useState<TriggerForm>(() => (trigger ? formFromTrigger(trigger) : emptyTriggerForm()));
@@ -376,7 +376,7 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
     }, [form.type, form.cron, form.timezone]);
 
     const save = async () => {
-        const built = triggerBodyFromForm(form, declaredInputs, trigger);
+        const built = triggerBodyFromForm(form, declaredVariables, trigger);
         if (!built.ok) {
             setProblem(built.problem);
             return;
@@ -416,7 +416,7 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
                 ? [t(WEBHOOK_PRESET_LABEL_KEY[form.webhookPreset]), ...form.webhookEvents].join(' · ')
                 : t('typeManual');
     const webhook = form.type === 'webhook';
-    const declared = declaredInputs ?? [];
+    const declared = declaredVariables ?? [];
 
     const settings = (
         <>
@@ -532,8 +532,8 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
                 {webhook ? <WebhookTemplateVariables /> : null}
                 {declared.length > 0 && webhook ? (
                     <Stack gap="sm">
-                        <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
-                        <Text size="xs" c="dimmed">{t('webhookInputsHint')}</Text>
+                        <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
+                        <Text size="xs" c="dimmed">{t('webhookVariablesHint')}</Text>
                         {declared.map((field) => (
                             <TextInput
                                 key={field.name}
@@ -541,11 +541,11 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
                                 description={field.description}
                                 required={field.required}
                                 ff="monospace"
-                                placeholder={t('inputUnset')}
-                                value={webhookInputText(form.inputs[field.name])}
+                                placeholder={t('variableUnset')}
+                                value={webhookVariableText(form.variables[field.name])}
                                 onChange={(event) => {
                                     const text = event.currentTarget.value;
-                                    set('inputs', { ...form.inputs, [field.name]: text === '' ? undefined : webhookInputValue(field, text) });
+                                    set('variables', { ...form.variables, [field.name]: text === '' ? undefined : webhookVariableValue(field, text) });
                                 }}
                             />
                         ))}
@@ -553,13 +553,14 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
                 ) : null}
                 {declared.length > 0 && !webhook ? (
                     <Stack gap="sm">
-                        <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
+                        <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
+                        <Text size="xs" c="dimmed">{t('variablesHint')}</Text>
                         {declared.map((field) => (
-                            <InputValueField
+                            <VariableValueField
                                 key={field.name}
                                 field={field}
-                                value={form.inputs[field.name]}
-                                onChange={(value) => set('inputs', { ...form.inputs, [field.name]: value })}
+                                value={form.variables[field.name]}
+                                onChange={(value) => set('variables', { ...form.variables, [field.name]: value })}
                             />
                         ))}
                     </Stack>
@@ -655,8 +656,8 @@ function TriggerEditor({ agentId, agentName, trigger, declaredInputs, versions, 
     );
 }
 
-/** One declared input's value: a field for its type; empty = not set (the default applies). */
-function InputValueField({ field, value, onChange }: { field: IAgentInputField; value: unknown; onChange: (value: unknown) => void }) {
+/** One declared variable's value: a field for its type; empty = not set (the default applies). */
+function VariableValueField({ field, value, onChange }: { field: IAgentVariable; value: unknown; onChange: (value: unknown) => void }) {
     const t = useTranslations('agents.triggers');
     const label = field.label || field.name;
     const common = { label, description: field.description, required: field.required };
@@ -665,7 +666,7 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
             <Select
                 {...common}
                 clearable
-                placeholder={t('inputUnset')}
+                placeholder={t('variableUnset')}
                 value={value === undefined || value === null ? null : String(value)}
                 data={field.enum.map(String)}
                 onChange={(next) => onChange(next === null ? undefined : field.type === 'string' ? next : Number(next))}
@@ -679,7 +680,7 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
                 <NumberInput
                     {...common}
                     allowDecimal={field.type === 'number'}
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={typeof value === 'number' ? value : ''}
                     onChange={(next) => onChange(next === '' ? undefined : Number(next))}
                 />
@@ -689,19 +690,19 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
                 <Select
                     {...common}
                     clearable
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={value === true ? 'true' : value === false ? 'false' : null}
-                    data={[{ value: 'true', label: t('inputYes') }, { value: 'false', label: t('inputNo') }]}
+                    data={[{ value: 'true', label: t('variableYes') }, { value: 'false', label: t('variableNo') }]}
                     onChange={(next) => onChange(next === null ? undefined : next === 'true')}
                 />
             );
         case 'json':
-            return <JsonInputValue field={field} value={value} onChange={onChange} />;
+            return <JsonVariableValue field={field} value={value} onChange={onChange} />;
         default:
             return (
                 <TextInput
                     {...common}
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={typeof value === 'string' ? value : ''}
                     onChange={(event) => onChange(event.currentTarget.value === '' ? undefined : event.currentTarget.value)}
                 />
@@ -709,7 +710,7 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
     }
 }
 
-function JsonInputValue({ field, value, onChange }: { field: IAgentInputField; value: unknown; onChange: (value: unknown) => void }) {
+function JsonVariableValue({ field, value, onChange }: { field: IAgentVariable; value: unknown; onChange: (value: unknown) => void }) {
     const t = useTranslations('agents.triggers');
     const [text, setText] = useState(() => (value === undefined ? '' : JSON.stringify(value, null, 2)));
     const [invalid, setInvalid] = useState(false);
@@ -721,7 +722,7 @@ function JsonInputValue({ field, value, onChange }: { field: IAgentInputField; v
             ff="monospace"
             autosize
             minRows={2}
-            placeholder={t('inputUnset')}
+            placeholder={t('variableUnset')}
             value={text}
             error={invalid ? t('invalidJson') : undefined}
             onChange={(event) => {

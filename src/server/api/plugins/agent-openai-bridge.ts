@@ -393,8 +393,8 @@ export interface RunAgentCompletionInput {
     requestReasoning?: NormalizedReasoning;
     /** `response_format` of the request (replaces the agent's structured output for the turn), validated by the route. */
     responseFormat?: AgentResponseFormat;
-    /** The agent `inputs` of the request, already validated against the agent's declaration. */
-    inputs?: Record<string, unknown>;
+    /** The agent `variables` of the request, already validated against the agent's declaration. */
+    variables?: Record<string, unknown>;
     /** The caller's run limits (its wait window included); the env ceilings otherwise. */
     limits?: AgentRunLimits;
     apiTokenId?: string;
@@ -470,9 +470,9 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         userMessage = input.turn.userMessage;
         session = input.turn.session;
     } else {
-        // A request that carries `inputs` may have no message at all: the Inputs block is the turn.
-        const text = extractLastUserMessage(input.messages) ?? (input.inputs ? '' : null);
-        if (text === null || (!text && !input.inputs)) {
+        // A request that carries `variables` may have no message at all: the Variables block is the turn.
+        const text = extractLastUserMessage(input.messages) ?? (input.variables ? '' : null);
+        if (text === null || (!text && !input.variables)) {
             return { error: 'messages must contain at least one user message', status: 400 };
         }
         userMessage = text;
@@ -504,7 +504,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
         ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
         ...(input.responseFormat ? { responseFormat: input.responseFormat } : {}),
-        ...(input.inputs ? { inputs: input.inputs } : {}),
+        ...(input.variables ? { variables: input.variables } : {}),
         ...(input.runClass ? { runClass: input.runClass } : {}),
         ...(input.metadata ? { metadata: input.metadata } : {}),
         ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey, idempotencyConversationScope: input.idempotencyConversationScope ?? null } : {}),

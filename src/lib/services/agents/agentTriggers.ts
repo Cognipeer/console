@@ -1,5 +1,5 @@
 /**
- * Agent triggers — a saved way of starting an agent: a prompt (+ inputs) and a
+ * Agent triggers — a saved way of starting an agent: a prompt (+ variables) and a
  * `type` with that type's settings object (a cron `schedule` in a timezone,
  * `once`, `manual`, or an incoming `webhook`). Every fire is an ordinary
  * AgentRun (`channel: 'trigger'`, `triggerId`), started through `startAgentRun`
@@ -24,7 +24,7 @@ import type {
 import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { agentDefaultCallback, openAgentCallbackSecret } from './agentCallbackConfig';
 import { AgentQuotaExceededError, AgentSpendLimitError } from './agentErrors';
-import { resolveRunInputs, type InputIssue } from './agentInputs';
+import { resolveRunVariables, type VariableIssue } from './agentVariables';
 import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentRunService';
 import { createConversation, resolveAgentConfig } from './agentService';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
@@ -54,9 +54,9 @@ export interface FireTriggerInput {
   trigger: TriggerFireSource;
   /** The final user message. */
   message: string;
-  /** Already validated against the agent's declared inputs. */
-  inputs?: Record<string, unknown> | null;
-  /** The message / inputs came from an external payload: inputs stay out of the system prompt. */
+  /** Already validated against the agent's declared variables. */
+  variables?: Record<string, unknown> | null;
+  /** The message / variables came from an external payload: variables stay out of the system prompt. */
   externalContent?: boolean;
   /** Merged over the trigger's metadata (≤ 16 keys together). */
   metadata?: Record<string, string> | null;
@@ -205,7 +205,7 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
             ...(trigger.version != null ? { version: trigger.version } : {}),
             usePublished: trigger.version == null,
             responseFormat: trigger.responseFormat ?? null,
-            inputs: input.inputs ?? null,
+            variables: input.variables ?? null,
             runClass: trigger.runClass ?? 'default',
             channel: 'trigger',
             metadata: Object.keys(metadata).length > 0 ? metadata : null,
@@ -275,7 +275,7 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
   return result;
 }
 
-// ── Inputs at fire time ──────────────────────────────────────────────────
+// ── Variables at fire time ───────────────────────────────────────────────
 
 /** The config a trigger's runs execute: its pinned version, else the published one (the draft while none is). */
 export async function triggerAgentConfig(tenantDbName: string, trigger: Pick<IAgentTrigger, 'agentKey' | 'projectId' | 'version'>): Promise<IAgentConfig | null> {
@@ -287,27 +287,27 @@ export async function triggerAgentConfig(tenantDbName: string, trigger: Pick<IAg
 }
 
 /**
- * The trigger's inputs (+ a Run now's overrides), checked against the inputs
+ * The trigger's variables (+ a Run now's overrides), checked against the variables
  * the agent declares NOW — the agent may have been republished since the
  * trigger was saved. Defaults applied.
  */
-export function resolveTriggerInputs(
-  config: Pick<IAgentConfig, 'inputs'> | null,
-  trigger: Pick<IAgentTrigger, 'inputs'>,
+export function resolveTriggerVariables(
+  config: Pick<IAgentConfig, 'variables'> | null,
+  trigger: Pick<IAgentTrigger, 'variables'>,
   overrides?: Record<string, unknown> | null,
-): { ok: true; inputs: Record<string, unknown> | null } | { ok: false; errors: InputIssue[]; reason: string } {
-  const merged = { ...(trigger.inputs ?? {}), ...(overrides ?? {}) };
-  const resolved = resolveRunInputs(config?.inputs, Object.keys(merged).length > 0 ? merged : null);
+): { ok: true; variables: Record<string, unknown> | null } | { ok: false; errors: VariableIssue[]; reason: string } {
+  const merged = { ...(trigger.variables ?? {}), ...(overrides ?? {}) };
+  const resolved = resolveRunVariables(config?.variables, Object.keys(merged).length > 0 ? merged : null);
   if (resolved.ok) return resolved;
   const first = resolved.errors[0];
-  return { ok: false, errors: resolved.errors, reason: `invalid inputs: ${first.field}: ${first.message}` };
+  return { ok: false, errors: resolved.errors, reason: `invalid variables: ${first.field}: ${first.message}` };
 }
 
 // ── Store ────────────────────────────────────────────────────────────────
 
 /** The fields of a write that do not depend on the trigger's type. */
 export type TriggerFields = Partial<Pick<IAgentTriggerBase,
-  'name' | 'description' | 'enabled' | 'prompt' | 'inputs' | 'version' | 'runClass' | 'metadata' | 'callback' | 'responseFormat'>>;
+  'name' | 'description' | 'enabled' | 'prompt' | 'variables' | 'version' | 'runClass' | 'metadata' | 'callback' | 'responseFormat'>>;
 
 /**
  * What a create or an update saves. A `type` always comes with its settings
@@ -365,7 +365,7 @@ export function createAgentTrigger(
     enabled,
     ...typeSettings,
     prompt: write.prompt,
-    inputs: write.inputs ?? null,
+    variables: write.variables ?? null,
     version: write.version ?? null,
     runClass: write.runClass ?? 'default',
     metadata: write.metadata ?? null,
@@ -446,7 +446,7 @@ export function serializeAgentTrigger(trigger: IAgentTrigger) {
     enabled: trigger.enabled,
     ...serializeTypeSettings(trigger),
     prompt: trigger.prompt,
-    inputs: trigger.inputs ?? null,
+    variables: trigger.variables ?? null,
     version: trigger.version ?? null,
     class: trigger.runClass ?? 'default',
     metadata: trigger.metadata ?? {},

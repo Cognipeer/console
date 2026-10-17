@@ -65,7 +65,7 @@ GET /api/client/v1/agents/:agentKey
     },
     "status": "active",
     "createdAt": "2026-01-15T10:00:00.000Z",
-    "input_schema": null,
+    "variables_schema": null,
     "output_schema": null,
     "attachments": {
       "enabled": true,
@@ -79,7 +79,7 @@ GET /api/client/v1/agents/:agentKey
 }
 ```
 
-`input_schema` and `output_schema` describe the agent as a typed function: the JSON Schema of the `inputs` it takes (`null` when it declares none) and of its structured answer (`null` for a plain-text agent). `attachments` is present when the agent can take files, and its `outputs` says whether the agent can [write files](/guide/session-files#files-the-agent-produces) for the person. `attachments.accepts_images` is `true` only while uploads are on and the bucket can take a file **and** the agent's model reads images, so it is `false` whenever uploads are off. The example shows exactly what the route returns; `models` is added when the agent offers more than one model, and nothing else (the older `experience` block is not part of this response).
+`variables_schema` and `output_schema` describe the agent as a typed function: the JSON Schema of the [variables](#variables) it takes (`null` when it declares none) and of its structured answer (`null` for a plain-text agent). `attachments` is present when the agent can take files, and its `outputs` says whether the agent can [write files](/guide/session-files#files-the-agent-produces) for the person. `attachments.accepts_images` is `true` only while uploads are on and the bucket can take a file **and** the agent's model reads images, so it is `false` whenever uploads are off. The example shows exactly what the route returns; `models` is added when the agent offers more than one model, and nothing else (the older `experience` block is not part of this response).
 
 ## Invoke an agent (Responses API)
 
@@ -119,8 +119,8 @@ A token needs the Models **or** the Agents service for `/responses`, and then th
 | `stream` | boolean | No | Server-Sent Events, see [Streaming](#streaming) |
 | `background` | boolean | No | Queue the run and answer `202` at once (also the `X-Cognipeer-Background: true` header). Streamed with `background: true`, a disconnect does not stop the run |
 | `service_tier` | string | No | `flex` queues the run in the low-priority [class](/guide/agent-background-execution#run-classes) and waits for it like a plain call. Anything else is the default class |
-| `text.format` | object | No | Structured output for this call, see [below](#typed-inputs-and-structured-output) |
-| `inputs` | object | No | Values for the agent's declared inputs (an extension) |
+| `text.format` | object | No | Structured output for this call, see [below](#structured-output) |
+| `variables` | object | No | Values for the agent's declared [variables](#variables) (an extension) |
 | `metadata` | object | No | Up to 16 string pairs kept on the run |
 | `reasoning.effort`, `agent_model` | string | No | Reasoning effort, and one of the agent's additional models. The effort applies to a run that executes in the request (a waited call, a stream); a queued run (`background: true`, `service_tier: "flex"`) uses the agent's own effort |
 | `callback_url`, `callback_secret` | string | No | A [callback](/guide/agent-background-execution#callbacks-and-webhooks) for a run that nobody is waiting on |
@@ -284,9 +284,26 @@ An agent with [approvals & questions](/guide/agent-approvals) can pause. The res
 
 Answer with `POST /api/client/v1/agents/sessions/{conversationId}/actions/{actionId}` (the session id is `cognipeer.session_id`; the run's own `POST /agents/runs/{runId}/actions/{actionId}` does the same). An agent that does not use these features never returns this status.
 
-### Typed inputs and structured output
+### Variables
 
-An agent can declare **inputs**, typed arguments of a call (**Configure → Inputs**: a name, a type of `string`, `number`, `integer`, `boolean` or `json`, a label, an enum, a default, required or not; up to 32 of them). A request sends values in `inputs` (the runs API, `/responses`, chat completions, A2A data parts and triggers all take them); they are checked (`400 invalid_inputs` with `errors: [{ field, message }]`, each string at most 8 KiB, all of them at most 32 KiB), defaults are applied, and the turn gets them as the prompt variables <span v-pre>`{{input.<name>}}`</span> and as an `Inputs` JSON block after the user message. `GET /agents/{key}` publishes them as `input_schema`.
+An agent can declare **variables**: named, typed values that a caller sends **next to** the message (**Configure → Variables**: a name, a type of `string`, `number`, `integer`, `boolean` or `json`, a label, allowed values, a default, required or not; up to 32 of them). A request sends the values in `variables`, and they are checked **before the model is called**: a missing required value or a wrong type is a `400` and nothing is spent.
+
+- **What the agent sees.** The instructions can use them as <span v-pre>`{{variables.<name>}}`</span>, and the turn also gets them as a `Variables` JSON block after the user message, so the model sees them even if the instructions never mention them. Declared defaults fill what a request leaves out.
+- **What the client sees.** `GET /agents/{key}` publishes the declaration as `variables_schema` (a JSON Schema), so n8n, scripts and forms know what to send.
+- **What is refused.** A name the agent does not declare, a required value with no default that is missing (an explicit `null` counts as missing), a wrong type (there is no coercion: `integer` needs a whole number) and a value outside the allowed values answer `400 invalid_variables` with every problem in `errors: [{ field, message }]`. Each string is at most 8 KiB and all the variables together at most 32 KiB.
+
+**When to use them.** For runs that a **program** starts, where the caller can send values: the [runs API](/guide/agent-background-execution), `/responses`, [triggers](/guide/agent-triggers) (a schedule with fixed values, a webhook that maps payload fields), A2A `data` parts, n8n or CI pipelines. The values of a webhook delivery or of a public A2A caller are external data: they reach the model only in the `Variables` block (closed with a line that says where the data ends), never in the system prompt.
+
+**Not in chat.** Chat clients cannot send them. Open WebUI and the other OpenAI-compatible chat clients send only the person's messages: chat completions take `variables` as an extension, but a plain chat client never fills it. On an agent with a **required** variable that has **no default**, every chat message that arrives through the API is therefore refused with `400 invalid_variables`. The Studio playground, portals, evaluation suites and red-team runs send only a message as well: nothing is refused there, defaults still fill the instructions, and a variable without one stays empty. If the agent is also used in chat, keep its variables optional or give each one a default.
+
+**Per turn.** The values belong to the request that carries them, and a session does not remember them:
+
+- the next message is checked on its own, so a required value has to be sent again (or have a default);
+- the instructions are rendered again on every turn, from that turn's values over the defaults;
+- the `Variables` block is part of the stored user message, so the session history keeps the block of every turn that sent values, and a client that resends the same values on every turn repeats the block there;
+- a turn that stops for an [approval or a question](/guide/agent-approvals), or is continued after a [budget](/guide/agent-session-budgets) stop, keeps its own values: nobody has to send them again.
+
+### Structured output
 
 A call can ask for **structured output** instead of free text, in each API's own spelling:
 

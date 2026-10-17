@@ -15,7 +15,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { AgentTriggerWebhook, AgentTriggerWebhookAuth, AgentTriggerWebhookPreset } from '@/lib/database';
 import { generateWebhookSecret } from '@/lib/services/webhooks/webhookEndpointService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import type { InputIssue } from './agentInputs';
+import type { VariableIssue } from './agentVariables';
 import {
   DEFAULT_WEBHOOK_HEADER_NAME,
   WEBHOOK_PRESET_AUTH,
@@ -49,7 +49,7 @@ function sealed(secret: string, source: 'generated' | 'provided') {
 
 export type WebhookWrite =
   | { ok: true; webhook: AgentTriggerWebhook; /** A new generated secret, shown once. */ secret?: string }
-  | { ok: false; errors: InputIssue[] };
+  | { ok: false; errors: VariableIssue[] };
 
 /**
  * The `webhook` settings from a create / PATCH body's `webhook` object.
@@ -61,7 +61,7 @@ export type WebhookWrite =
  */
 export function parseWebhookWrite(value: Record<string, unknown>, existing: AgentTriggerWebhook | null | undefined): WebhookWrite {
   const prev = existing ?? null;
-  const errors: InputIssue[] = [];
+  const errors: VariableIssue[] = [];
   const issue = (field: string, message: string) => errors.push({ field: `webhook.${field}`, message });
 
   const preset = (value.preset ?? prev?.preset) as AgentTriggerWebhookPreset | undefined;
