@@ -95,6 +95,7 @@ import {
 import { clientA2aApiPlugin } from '@/server/api/plugins/client-a2a';
 import * as spendLimits from '@/lib/services/agents/agentSpendLimits';
 import { abortLocalTurns } from '@/lib/services/agents/turnWatch';
+import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
 import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { createMockDb } from '../helpers/db.mock';
@@ -643,7 +644,7 @@ describe('tasks/get and unknown methods', () => {
       method: 'POST',
       url: '/api/client/v1/a2a/support-bot',
       headers: { authorization: 'Bearer tok' },
-      payload: { jsonrpc: '2.0', id: 5, method: 'tasks/resubscribe', params: {} },
+      payload: { jsonrpc: '2.0', id: 5, method: 'tasks/pushNotificationConfig/set', params: {} },
     });
     expect(parseJsonBody<{ error: { code: number } }>(unknown.body).error.code).toBe(-32601);
   });
@@ -976,14 +977,12 @@ describe('message/stream', () => {
     expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: 'Triage', inputs: { customer_id: 'c-1' } });
   });
 
-  it('the client going away stops the run', async () => {
-    let aborted!: () => void;
-    const turnAborted = new Promise<void>((resolve) => { aborted = resolve; });
-    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void; signal: AbortSignal }) => {
+  it('the client going away leaves the run going: it detaches and completes', async () => {
+    let finishTurn!: () => void;
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
       request.onTextChunk('Working');
-      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
-      aborted();
-      return ANSWER('Working');
+      await new Promise<void>((resolve) => { finishTurn = resolve; });
+      return ANSWER('Working on it');
     });
     const app = await buildApp();
     await app.listen({ port: 0, host: '127.0.0.1' });
@@ -998,10 +997,117 @@ describe('message/stream', () => {
     const reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain('"kind":"task"');
     controller.abort();
-    await turnAborted;
-    await vi.waitFor(() => expect(requestAgentRunCancel).toHaveBeenCalledWith('run-1', 'tenant-1', 'proj-1'));
-    await vi.waitFor(() => expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'canceled' })));
+    await vi.waitFor(() => expect(markAgentRunDetached).toHaveBeenCalledWith('run-1', 'tenant-1', expect.any(Date)));
+    expect(requestAgentRunCancel).not.toHaveBeenCalled();
+    finishTurn();
+    await vi.waitFor(() => expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'succeeded' })));
     await app.close();
+  });
+});
+
+describe('tasks/resubscribe', () => {
+  type Evt = Record<string, any>;
+  const resubscribe = async (id: string) => {
+    const app = await buildApp();
+    return app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 7, method: 'tasks/resubscribe', params: { id } },
+    });
+  };
+  const eventsOf = (body: string): Evt[] => body.split('\n\n').filter((chunk) => chunk.startsWith('data: ')).map((chunk) => {
+    const frame = JSON.parse(chunk.slice('data: '.length));
+    expect(frame).toMatchObject({ jsonrpc: '2.0', id: 7 });
+    return frame.result;
+  });
+  const summary = (events: Evt[]) => events.map((e) => (e.kind === 'status-update' ? `status:${e.status.state}${e.final ? ':final' : ''}`
+    : e.kind === 'artifact-update' ? `artifact:${e.artifact.name ?? e.artifact.artifactId}${e.append ? ':append' : ''}${e.lastChunk ? ':last' : ''}` : e.kind));
+  const row = (overrides: Record<string, unknown>) => ({
+    _id: 'run-1', mode: 'inline', agentKey: 'support-bot', conversationId: 'conv-9', tenantId: 'tenant-1', projectId: 'proj-1', ...overrides,
+  });
+  const DONE = {
+    status: 'completed',
+    output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello' }] }],
+  };
+  const listAgentSessionEvents = vi.fn();
+  const getAgentSessionMaxSeq = vi.fn();
+
+  beforeEach(() => {
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    listAgentSessionEvents.mockResolvedValue([]);
+    getAgentSessionMaxSeq.mockResolvedValue(4);
+    mockFn(getDatabase).mockResolvedValue(createMockDb({
+      runWithTenant, getAgentRunById, listAgentSessionEvents, getAgentSessionMaxSeq,
+    } as never));
+  });
+
+  it('a running task: the Task, then what the run writes next, and its end as artifacts and the final status', async () => {
+    let reads = 0;
+    getAgentRunById.mockImplementation(async () => {
+      reads += 1;
+      // 1: the lookup, 2: the first poll (the follower is subscribed by now), 3: the run has ended.
+      if (reads === 2) {
+        setTimeout(() => {
+          const at = new Date().toISOString();
+          sessionEventBus.publish('conv-9', { seq: 5, type: 'session.status_running', data: {}, runId: 'run-1', createdAt: at });
+          sessionEventBus.publish('conv-9', { type: 'agent.message.delta', data: { text: 'Hel' }, runId: 'run-1', createdAt: at });
+          // Another run of the session is not this task.
+          sessionEventBus.publish('conv-9', { type: 'agent.message.delta', data: { text: 'other' }, runId: 'run-2', createdAt: at });
+          sessionEventBus.publish('conv-9', { type: 'agent.message.delta', data: { text: 'lo' }, runId: 'run-1', createdAt: at });
+        }, 20);
+      }
+      return reads < 3 ? row({ status: 'running' }) : row({ status: 'succeeded', result: DONE });
+    });
+    const res = await resubscribe('run_run-1');
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const events = eventsOf(res.body);
+    expect(summary(events)).toEqual([
+      'task', 'status:working', 'artifact:response', 'artifact:response:append', 'artifact:response:last', 'status:completed:final',
+    ]);
+    expect(events[0]).toMatchObject({ kind: 'task', id: 'run_run-1', contextId: 'conv-9', status: { state: 'working' } });
+    expect(events.filter((e) => e.kind === 'artifact-update').map((e) => e.artifact.parts[0].text)).toEqual(['Hel', 'lo', 'Hello']);
+    expect(events.slice(1).every((e) => e.taskId === 'run_run-1' && e.contextId === 'conv-9')).toBe(true);
+    // Followed from the session event log, after the newest event stored when it attached.
+    expect(listAgentSessionEvents).toHaveBeenCalledWith('conv-9', expect.objectContaining({ afterSeq: 4, runId: 'run-1' }));
+  });
+
+  it('a finished task: its Task and the final status event at once', async () => {
+    getAgentRunById.mockResolvedValue(row({ status: 'succeeded', result: DONE }));
+    const events = eventsOf((await resubscribe('run_run-1')).body);
+    expect(summary(events)).toEqual(['task', 'status:completed:final']);
+    expect(events[0].artifacts[0].parts[0].text).toBe('Hello');
+    expect(getAgentSessionMaxSeq).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', 'failed'], ['canceled', 'canceled'], ['requires_action', 'input-required'],
+  ])('a %s run ends at once with its %s final status', async (status, state) => {
+    getAgentRunById.mockResolvedValue(row({ status, errorMessage: 'boom', result: status === 'requires_action' ? { status: 'requires_action', output: [] } : null }));
+    expect(summary(eventsOf((await resubscribe('run_run-1')).body))).toEqual(['task', `status:${state}:final`]);
+  });
+
+  it('a task id from before runs (task_<conversation>_<index>) resolves like tasks/get', async () => {
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1',
+      messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'Earlier answer' }],
+    });
+    const events = eventsOf((await resubscribe('task_conv-9_1')).body);
+    expect(summary(events)).toEqual(['task', 'status:completed:final']);
+    expect(events[0]).toMatchObject({ id: 'task_conv-9_1', artifacts: [{ parts: [{ text: 'Earlier answer' }] }] });
+  });
+
+  it('an unknown task, or one the caller may not read, is TaskNotFound (-32001) as plain JSON', async () => {
+    getAgentRunById.mockResolvedValue(null);
+    for (const id of ['run_missing', 'bogus', '']) {
+      const res = await resubscribe(id);
+      expect(res.headers['content-type']).toContain('application/json');
+      expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32001);
+    }
+    getAgentRunById.mockResolvedValue(row({ status: 'running' }));
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'someone-else', messages: [] });
+    expect(parseJsonBody<{ error: { code: number } }>((await resubscribe('run_run-1')).body).error.code).toBe(-32001);
   });
 });
 

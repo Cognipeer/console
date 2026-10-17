@@ -29,6 +29,7 @@ import { getDatabase } from '@/lib/database';
 import {
   createConversation,
   executeAgentChat,
+  getConversationById,
 } from '@/lib/services/agents/agentService';
 import {
   normalizeA2aMetadataUpdate,
@@ -234,6 +235,25 @@ describe('public message/send and message/stream — blocking and streaming', ()
     });
     expect(kinds).toEqual(['task', 'working', 'artifact-update', 'artifact-update', 'completed:final']);
     expect(mockFn(executeAgentChat).mock.calls[0][0].userId).toBe('a2a-public');
+  });
+
+  it('tasks/resubscribe reattaches to a public caller\'s task; a task another caller started is TaskNotFound', async () => {
+    const getAgentRunById = vi.fn().mockResolvedValue({
+      _id: 'run-1', mode: 'inline', status: 'succeeded', agentKey: 'support-bot', conversationId: 'conv-1', tenantId: 'tenant-1', projectId: 'proj-1',
+      result: { status: 'completed', output: REPLY.output },
+    });
+    mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, listAgents, findTenantById, getAgentRunById } as never));
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'a2a-public', messages: [] });
+    const res = await call('tasks/resubscribe', { id: 'run_run-1' });
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const kinds = res.body.split('\n\n').filter((chunk) => chunk.startsWith('data: ')).map((chunk) => {
+      const result = JSON.parse(chunk.slice(6)).result;
+      return result.kind === 'status-update' ? `${result.status.state}${result.final ? ':final' : ''}` : result.kind;
+    });
+    expect(kinds).toEqual(['task', 'completed:final']);
+
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    expect(parseJsonBody<{ error: { code: number } }>((await call('tasks/resubscribe', { id: 'run_run-1' })).body).error.code).toBe(-32001);
   });
 
   it('advertises streaming and the text and JSON modes on its card', async () => {

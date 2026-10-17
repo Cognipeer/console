@@ -644,11 +644,11 @@ const WAIT_POLL_MIN_MS = 500;
 const WAIT_POLL_MAX_MS = 2_000;
 
 /**
- * Polls a run until it is terminal, paused (`requires_action`) or `timeoutMs`
- * passed (500 ms, backing off to 2 s). Returns the latest row; null when it
- * does not exist (or vanished).
+ * Polls a run until it is terminal, paused (`requires_action`), `timeoutMs`
+ * passed or `signal` aborted (500 ms, backing off to 2 s). Returns the latest
+ * row; null when it does not exist (or vanished).
  */
-export async function waitForAgentRun(ref: AgentRunRef, timeoutMs: number): Promise<IAgentRun | null> {
+export async function waitForAgentRun(ref: AgentRunRef, timeoutMs: number, signal?: AbortSignal): Promise<IAgentRun | null> {
   const runId = normalizeAgentRunId(ref.runId);
   const deadline = Date.now() + Math.max(0, timeoutMs);
   let delay = WAIT_POLL_MIN_MS;
@@ -656,8 +656,17 @@ export async function waitForAgentRun(ref: AgentRunRef, timeoutMs: number): Prom
     const run = await runWithTenantDb(ref.tenantDbName, (db) => db.getAgentRunById(runId, ref.tenantId, ref.projectId));
     if (!run || !isAgentRunActive(run)) return run;
     const left = deadline - Date.now();
-    if (left <= 0) return run;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(delay, left)));
+    if (left <= 0 || signal?.aborted) return run;
+    await new Promise<void>((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, Math.min(delay, left));
+      signal?.addEventListener('abort', wake, { once: true });
+    });
+    if (signal?.aborted) return run;
     delay = Math.min(WAIT_POLL_MAX_MS, Math.round(delay * 1.5));
   }
 }

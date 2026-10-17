@@ -1,21 +1,25 @@
 import {
   cancelAgentRun,
   getAgentRunStatus,
+  isAgentRunActive,
   publicAgentRunId,
   resolveAgentRunLimits,
+  runWithTenantDb,
   startAgentRun,
+  waitForAgentRun,
   type AgentRunLimits,
   type StartAgentRunInput,
   type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
+import { followSessionEvents } from '@/lib/services/agents/sessionEvents';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
  * A2A clients over JSON-RPC 2.0 (spec v1.0).
  *
  * Token-authenticated surface (per agent, `cpeer_` API token):
  *   GET  /client/v1/a2a/:agentKey/.well-known/agent-card.json
- *   POST /client/v1/a2a/:agentKey          (message/send, message/stream, tasks/get, tasks/cancel)
+ *   POST /client/v1/a2a/:agentKey          (message/send, message/stream, tasks/get, tasks/resubscribe, tasks/cancel)
  *
  * Exposure is OPT-IN per agent via `agent.metadata.a2a` (see
  * `@/lib/services/agents/a2aExposure`); agents without it respond 404 on
@@ -29,7 +33,9 @@ import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
  * turn paused for an approval or an answer), or a `working` one when the wait
  * window ended first and the run carries on. With `configuration.blocking:
  * false` (token route only) the run is queued and the task comes back
- * `submitted`. `message/stream` runs the same turn and answers with events.
+ * `submitted`. `message/stream` runs the same turn and answers with events;
+ * a client that goes away leaves the run going, and `tasks/resubscribe`
+ * reattaches to it (or to any task the caller may read).
  * A message's parts are text, `file` (inline bytes or an http(s) uri, stored as
  * session files) and `data` (the agent's inputs, or JSON appended to the text). The task id is the run's id
  * (`run_<runId>`), so `tasks/get` reads the run and `tasks/cancel` cancels it.
@@ -65,7 +71,7 @@ import {
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
 import { resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
-import { openSseConnection, type SseConnection } from './sse-connection';
+import { openSseConnection } from './sse-connection';
 import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
@@ -577,6 +583,57 @@ function runRefusalRpc(rpcId: string | number | null, outcome: StartAgentRunOutc
   }
 }
 
+/** An open A2A task stream: one JSON-RPC response per event, on one SSE connection. */
+interface A2aTaskStream {
+  /** Aborted when the client goes away. */
+  readonly signal: AbortSignal;
+  emit(result: Record<string, unknown>): void;
+  status(status: Record<string, unknown>, final: boolean, metadata?: unknown): void;
+  /** A piece of the answer's text: the first creates the text artifact, the rest append to it. */
+  text(chunk: string): void;
+  /**
+   * A Task as its closing events: its artifacts, then its status as the final
+   * event. After streamed text the text artifact is closed with an empty last
+   * chunk, unless `wholeText`: then the whole answer replaces it (a follower
+   * that joined late has only part of it).
+   */
+  finish(task: Record<string, unknown>, options?: { wholeText?: boolean }): void;
+  end(): void;
+}
+
+function openA2aTaskStream(reply: FastifyReply, rpcId: string | number | null, taskId: string, contextId: string): A2aTaskStream {
+  const connection = openSseConnection(reply);
+  const textArtifactId = `${taskId}_artifact`;
+  let streamed = false;
+  const emit = (result: Record<string, unknown>) => connection.write(`data: ${JSON.stringify(jsonRpcOk(rpcId, result))}\n\n`);
+  const status = (state: Record<string, unknown>, final: boolean, metadata?: unknown) => emit({
+    kind: 'status-update', taskId, contextId, status: state, final, ...(metadata ? { metadata } : {}),
+  });
+  const artifact = (value: Record<string, unknown>, append: boolean, lastChunk: boolean) => emit({
+    kind: 'artifact-update', taskId, contextId, artifact: value, append, lastChunk,
+  });
+  return {
+    signal: connection.signal,
+    emit,
+    status,
+    text(chunk) {
+      if (!chunk) return;
+      artifact({ artifactId: textArtifactId, name: 'response', parts: [{ kind: 'text', text: chunk }] }, streamed, false);
+      streamed = true;
+    },
+    finish(task, options = {}) {
+      const closeStreamed = streamed && !options.wholeText;
+      if (closeStreamed) artifact({ artifactId: textArtifactId, name: 'response', parts: [{ kind: 'text', text: '' }] }, true, true);
+      for (const value of (task.artifacts ?? []) as Array<Record<string, unknown>>) {
+        if (closeStreamed && value.artifactId === textArtifactId) continue;
+        artifact(value, false, true);
+      }
+      status(task.status as Record<string, unknown>, true, task.metadata);
+    },
+    end: connection.end,
+  };
+}
+
 /**
  * `message/stream`: the turn as server-sent events, one JSON-RPC response per
  * event. The Task opens it (`submitted`), then a `working` status event, then
@@ -585,10 +642,9 @@ function runRefusalRpc(rpcId: string | number | null, outcome: StartAgentRunOutc
  * files and the structured answer as artifacts, and a final status event
  * (`completed`, `input-required`, `failed` or `canceled`). The stream opens
  * once the run has started: a refusal before that (409 / 429) is a plain
- * JSON-RPC error. The client going away cancels the run, as on the other
- * streams here. (A2A leaves a dropped stream running so it can be resumed with
- * `tasks/resubscribe`, which this server does not offer; the Task id is the
- * first event, so `tasks/get` and `tasks/cancel` work from the start.)
+ * JSON-RPC error. The client going away does not stop the run: it carries on
+ * detached (as a Responses stream with `background: true` does), and
+ * `tasks/resubscribe` reattaches to it; `tasks/cancel` stops it.
  */
 async function streamA2aTurn(
   reply: FastifyReply,
@@ -598,26 +654,8 @@ async function streamA2aTurn(
 ): Promise<FastifyReply> {
   const contextId = base.conversationId;
   const disconnected = new AbortController();
-  const sse: { connection: SseConnection | null } = { connection: null };
+  const open: { stream: A2aTaskStream | null } = { stream: null };
   let taskId = '';
-  let streamed = false;
-  const textArtifactId = () => `${taskId}_artifact`;
-  const emit = (result: Record<string, unknown>) => sse.connection?.write(`data: ${JSON.stringify(jsonRpcOk(rpcId, result))}\n\n`);
-  const statusEvent = (status: Record<string, unknown>, final: boolean, metadata?: unknown) => emit({
-    kind: 'status-update', taskId, contextId, status, final, ...(metadata ? { metadata } : {}),
-  });
-  const artifactEvent = (artifact: Record<string, unknown>, append: boolean, lastChunk: boolean) => emit({
-    kind: 'artifact-update', taskId, contextId, artifact, append, lastChunk,
-  });
-  /** A Task as its closing events: its artifacts, then its status as the final event. */
-  const finish = (task: Record<string, unknown>) => {
-    if (streamed) artifactEvent({ artifactId: textArtifactId(), name: 'response', parts: [{ kind: 'text', text: '' }] }, true, true);
-    for (const artifact of (task.artifacts ?? []) as Array<Record<string, unknown>>) {
-      if (streamed && artifact.artifactId === textArtifactId()) continue;
-      artifactEvent(artifact, false, true);
-    }
-    statusEvent(task.status as Record<string, unknown>, true, task.metadata);
-  };
 
   try {
     const outcome = await startAgentRun({
@@ -625,44 +663,116 @@ async function streamA2aTurn(
       execution: {
         kind: 'inline',
         waitMs: 0,
-        stream: {
-          onTextChunk: (text) => {
-            if (!text) return;
-            artifactEvent({ artifactId: textArtifactId(), name: 'response', parts: [{ kind: 'text', text }] }, streamed, false);
-            streamed = true;
-          },
-        },
+        stream: { onTextChunk: (text) => open.stream?.text(text) },
         signal: disconnected.signal,
-        cancelOnDisconnect: true,
+        cancelOnDisconnect: false,
         onStarted: (run) => {
           taskId = publicAgentRunId(run);
-          sse.connection = openSseConnection(reply);
-          sse.connection.signal.addEventListener('abort', () => disconnected.abort(), { once: true });
-          emit(stateTask(taskId, contextId, 'submitted'));
-          statusEvent({ state: 'working', timestamp: new Date().toISOString() }, false);
+          const stream = openA2aTaskStream(reply, rpcId, taskId, contextId);
+          open.stream = stream;
+          stream.signal.addEventListener('abort', () => disconnected.abort(), { once: true });
+          stream.emit(stateTask(taskId, contextId, 'submitted'));
+          stream.status({ state: 'working', timestamp: new Date().toISOString() }, false);
         },
       },
     });
     const refusal = runRefusalRpc(rpcId, outcome);
     if (refusal) return await reply.code(200).send(refusal);
     if (outcome.kind === 'completed') {
-      finish(outcome.run.status === 'canceled'
+      open.stream?.finish(outcome.run.status === 'canceled'
         ? stateTask(taskId, contextId, 'canceled')
         : taskFromResponse(taskId, contextId, outcome.response, baseUrl));
     } else if ('run' in outcome) {
-      finish(taskFromRun(outcome.run, baseUrl));
+      open.stream?.finish(taskFromRun(outcome.run, baseUrl));
     }
   } catch (error) {
     // Before the stream opened this is the call's error like any other; after, the run ended in failure.
-    if (!sse.connection) throw error;
+    if (!open.stream) throw error;
     const classified = logAgentRouteError(logger, 'A2A stream error', error);
-    statusEvent({
+    open.stream.status({
       state: 'failed',
       timestamp: new Date().toISOString(),
       message: { kind: 'message', role: 'agent', messageId: `${taskId}_status`, parts: [{ kind: 'text', text: classified.error.message }] },
     }, true, { errorType: classified.error.type, ...(classified.error.code ? { errorCode: classified.error.code } : {}) });
   } finally {
-    sse.connection?.end();
+    open.stream?.end();
+  }
+  return reply;
+}
+
+/** How long one `tasks/resubscribe` follows a task that does not end; then the stream closes and the client resubscribes. */
+const RESUBSCRIBE_MAX_MS = 60 * 60 * 1000;
+
+/**
+ * `tasks/resubscribe`: reattaches to a task. The Task as it stands comes
+ * first; a task that already ended (or waits on a person) is followed by its
+ * final status event and the stream closes. A running or queued task is
+ * followed through the session event log, the same source as the runs API's
+ * event stream, so it works from any node: `working` when the turn starts,
+ * the answer's text as artifact chunks, and, once the run row is terminal,
+ * the whole answer, files and structured answer as artifacts and the final
+ * status event.
+ */
+async function resubscribeA2aTask(
+  reply: FastifyReply,
+  rpcId: string | number | null,
+  ctx: A2aCallContext,
+  found: { task: Record<string, unknown>; run?: IAgentRun },
+  baseUrl: string,
+): Promise<FastifyReply> {
+  const { task, run } = found;
+  const taskId = String(task.id);
+  const contextId = String(task.contextId);
+  if (!run || !isAgentRunActive(run)) {
+    const stream = openA2aTaskStream(reply, rpcId, taskId, contextId);
+    try {
+      stream.emit(task);
+      stream.status(task.status as Record<string, unknown>, true, task.metadata);
+    } finally {
+      stream.end();
+    }
+    return reply;
+  }
+
+  // What happens next: events after the newest one stored now.
+  const afterSeq = await runWithTenantDb(ctx.tenantDbName, (db) => db.getAgentSessionMaxSeq(run.conversationId));
+  const stream = openA2aTaskStream(reply, rpcId, taskId, contextId);
+  const follow = new AbortController();
+  stream.signal.addEventListener('abort', () => follow.abort(), { once: true });
+  try {
+    stream.emit(task);
+    const following = runWithTenantDb(ctx.tenantDbName, (db) => followSessionEvents({
+      db,
+      conversationId: run.conversationId,
+      afterSeq,
+      runId: String(run._id),
+      types: ['session.status_running', 'agent.message.delta'],
+      signal: follow.signal,
+      maxDurationMs: RESUBSCRIBE_MAX_MS,
+      write: ({ event, data }) => {
+        if (event === 'agent.message.delta') stream.text(typeof data.data.text === 'string' ? data.data.text : '');
+        else stream.status({ state: 'working', timestamp: new Date().toISOString() }, false);
+      },
+      // The SSE connection pings on its own.
+      writePing: () => undefined,
+    })).catch((error: unknown) => {
+      // The run row still ends the stream; only the chunks in between are lost.
+      logger.warn('A2A resubscribe could not follow the session events', { taskId, error: error instanceof Error ? error.message : String(error) });
+    });
+    // The run row says when the task ended (events are best effort; the row is not).
+    const settled = await waitForAgentRun(
+      { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: String(run._id) },
+      RESUBSCRIBE_MAX_MS,
+      follow.signal,
+    );
+    follow.abort();
+    await following;
+    if (settled && !isAgentRunActive(settled)) stream.finish(taskFromRun(settled, baseUrl), { wholeText: true });
+  } catch (error) {
+    logAgentRouteError(logger, 'A2A resubscribe error', error);
+  } finally {
+    follow.abort();
+    stream.end();
   }
   return reply;
 }
@@ -718,41 +828,13 @@ export async function handleA2aRpc(
       return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, baseUrl)));
     }
 
-    if (method === 'tasks/get') {
+    if (method === 'tasks/get' || method === 'tasks/resubscribe') {
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
-      if (isRunTaskId(requestedId)) {
-        const run = await loadTaskRun(ctx, agent, requestedId);
-        if (!run) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
-        return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(run, externalBaseUrl(request))));
-      }
-      const parsed = requestedId ? parseTaskId(requestedId) : null;
-      if (!parsed) {
-        return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
-      }
-      const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
-      const message = conversationVisibleTo(conversation, agent, ctx)
-        ? conversation?.messages?.[parsed.messageIndex]
-        : undefined;
-      if (!message || message.role !== 'assistant') {
-        return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
-      }
-      if (message.pendingActions?.some((action) => action.status === 'pending')) {
-        return reply.code(200).send(jsonRpcOk(
-          rpcId,
-          inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions.map(toClientPendingAction)),
-        ));
-      }
-      return reply.code(200).send(jsonRpcOk(
-        rpcId,
-        completedTask(
-          requestedId,
-          parsed.conversationId,
-          message.content,
-          message.stopReason ? { reason: message.stopReason, ...(message.stopDetail ? { detail: message.stopDetail } : {}) } : undefined,
-          a2aFileArtifacts(requestedId, toClientOutputFiles(parsed.conversationId, message.attachments), externalBaseUrl(request)),
-          { parsed: message.output, error: message.outputError },
-        ),
-      ));
+      const baseUrl = externalBaseUrl(request);
+      const found = await findTask(ctx, agent, requestedId, baseUrl);
+      if (!found) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+      if (method === 'tasks/resubscribe') return await resubscribeA2aTask(reply, rpcId, ctx, found, baseUrl);
+      return reply.code(200).send(jsonRpcOk(rpcId, found.task));
     }
 
     if (method === 'tasks/cancel') {
@@ -860,6 +942,43 @@ export async function handleA2aRpc(
       ...extra,
     }));
   }
+}
+
+/**
+ * The task an id names, when this caller may see it: a run (`run_<runId>`;
+ * `run` is then set) or, from before tasks were runs, an assistant message
+ * (`task_<conversationId>_<index>`).
+ */
+async function findTask(
+  ctx: A2aCallContext,
+  agent: IAgent,
+  requestedId: string,
+  baseUrl: string,
+): Promise<{ task: Record<string, unknown>; run?: IAgentRun } | null> {
+  if (isRunTaskId(requestedId)) {
+    const run = await loadTaskRun(ctx, agent, requestedId);
+    return run ? { task: taskFromRun(run, baseUrl), run } : null;
+  }
+  const parsed = requestedId ? parseTaskId(requestedId) : null;
+  if (!parsed) return null;
+  const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
+  const message = conversationVisibleTo(conversation, agent, ctx)
+    ? conversation?.messages?.[parsed.messageIndex]
+    : undefined;
+  if (!message || message.role !== 'assistant') return null;
+  if (message.pendingActions?.some((action) => action.status === 'pending')) {
+    return { task: inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions.map(toClientPendingAction)) };
+  }
+  return {
+    task: completedTask(
+      requestedId,
+      parsed.conversationId,
+      message.content,
+      message.stopReason ? { reason: message.stopReason, ...(message.stopDetail ? { detail: message.stopDetail } : {}) } : undefined,
+      a2aFileArtifacts(requestedId, toClientOutputFiles(parsed.conversationId, message.attachments), baseUrl),
+      { parsed: message.output, error: message.outputError },
+    ),
+  };
 }
 
 /** The run a `run_<id>` task names, when this caller may see it (this agent, this project, a conversation it started). */
