@@ -31,7 +31,7 @@ import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
 import { checkEmbeddedClientTools } from './agentClientTools';
-import { normalizeAttachmentsFolder } from './sessionFilesConfig';
+import { normalizeAttachmentsFolder, SESSION_FILE_OUTPUTS_LIMITS } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { reasoningConfigIssues } from './agentReasoning';
 import { MAX_MEMORY_MOUNTS } from './agentMemoryMounts';
@@ -260,6 +260,18 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         for (const flag of ['enabled', 'attachNewUploads'] as const) {
             if (attachments[flag] !== undefined && typeof attachments[flag] !== 'boolean') {
                 issues.errors.push({ field: `attachments.${flag}`, message: 'must be true or false' });
+            }
+        }
+        const outputs = attachments.outputs;
+        if (outputs !== undefined && outputs !== null) {
+            if (typeof outputs !== 'object' || Array.isArray(outputs)) {
+                issues.errors.push({ field: 'attachments.outputs', message: 'must be an object' });
+            } else {
+                if (outputs.enabled !== undefined && typeof outputs.enabled !== 'boolean') {
+                    issues.errors.push({ field: 'attachments.outputs.enabled', message: 'must be true or false' });
+                }
+                checkNumber(issues, 'attachments.outputs.maxFilesPerTurn', outputs.maxFilesPerTurn, { min: 1, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, integer: true });
+                checkNumber(issues, 'attachments.outputs.maxFileSizeMb', outputs.maxFileSizeMb, { min: 0, exclusiveMin: true, max: Math.min(SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, getConfig().limits.fileUploadMaxMb) });
             }
         }
         const folder = normalizeAttachmentsFolder(attachments.folder);

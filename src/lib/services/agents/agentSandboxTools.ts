@@ -129,7 +129,7 @@ export interface BuildAgentSandboxToolsInput {
     protect: (policyName: string, tool: AnyTool) => AnyTool;
     onWarning: (message: string) => void;
     /** Where `/outputs/` files are saved as session files; without it nothing is collected. */
-    outputs?: { agentConfig: IAgentConfig | undefined; actorId: string };
+    outputs?: { agentConfig: IAgentConfig | undefined; actorId: string; tokenId?: string };
 }
 
 export interface AgentSandboxTools {
@@ -514,6 +514,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                     contentType: resolveUploadMimeType(undefined, file.name),
                     data: file.data,
                     actorId: outputs.actorId,
+                    ...(outputs.tokenId ? { tokenId: outputs.tokenId } : {}),
                 }),
             });
             if (session && result.attachments.length > 0) {

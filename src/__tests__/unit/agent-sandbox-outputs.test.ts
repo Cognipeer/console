@@ -134,7 +134,7 @@ describe('helpers', () => {
 describe('wire', () => {
   it('maps only agent outputs to output_files and file_path annotations', () => {
     const files = toClientOutputFiles('conv1', [att('r.pdf', 9), { fileId: 'u1', name: 'upload.txt', mimeType: 'text/plain', size: 1 }]);
-    expect(files).toEqual([{ id: 'f_r.pdf', name: 'r.pdf', mime_type: 'text/plain', size: 9, download_url: '/client/v1/agents/sessions/conv1/files/f_r.pdf/content' }]);
+    expect(files).toEqual([{ id: 'f_r.pdf', name: 'r.pdf', mime_type: 'text/plain', size: 9, download_url: '/api/client/v1/agents/sessions/conv1/files/f_r.pdf/content' }]);
     expect(toFileAnnotations(files)).toEqual([{ type: 'file_path', file_id: 'f_r.pdf', filename: 'r.pdf' }]);
     expect(toClientOutputFiles('c', undefined)).toEqual([]);
   });

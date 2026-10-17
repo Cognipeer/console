@@ -52,6 +52,7 @@ import {
     deleteFile,
     downloadFile,
     generateFileRelativeKey,
+    replaceFileContent,
     uploadFile,
 } from '@/lib/services/files';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
@@ -60,6 +61,7 @@ import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions'
 import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
 import { AgentAttachmentError } from './agentErrors';
 import {
+    FILE_OUTPUT_TYPES,
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_LIST_TOOL,
     SESSION_FILES_READ_TOOL,
@@ -275,6 +277,58 @@ export function estimateBase64Size(data: string): number {
     return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
+interface FileQuotaCheck {
+    scope: SessionFileScope;
+    bucketKey: string;
+    /** The file's size once stored: what the per-request size limit looks at. */
+    bytes: number;
+    /** What this write adds to the project's storage (the whole file for a new one, the growth for an append). */
+    addedBytes: number;
+    /** A new file (counts against the rate and total-files limits) or one that grows. */
+    newFile: boolean;
+    actor: { userId: string; licenseType?: string; tokenId?: string };
+}
+
+/**
+ * The quota checks every write of a session file goes through (an upload, a file the agent wrote):
+ * the plan's per-request limits, the files rate limit, the project's total files and its storage.
+ * Refuses with `429 quota_exceeded` before anything is stored.
+ */
+async function assertFileQuotas(db: DatabaseProvider, check: FileQuotaCheck): Promise<void> {
+    const { scope, actor } = check;
+    const quotaContext = {
+        domain: 'file' as const,
+        ...(actor.licenseType ? { licenseType: actor.licenseType as LicenseType } : {}),
+        projectId: scope.projectId,
+        resourceKey: check.bucketKey,
+        tenantDbName: scope.tenantDbName,
+        tenantId: scope.tenantId,
+        ...(actor.tokenId ? { tokenId: actor.tokenId } : {}),
+        userId: actor.userId,
+    };
+    const perRequest = await checkPerRequestLimits(quotaContext, { fileSize: check.bytes, filesPerRequest: 1 });
+    if (!perRequest.allowed) {
+        throw new AgentAttachmentError(429, 'quota_exceeded', perRequest.reason || 'Quota exceeded');
+    }
+    const rate = await checkRateLimit(quotaContext, { files: check.newFile ? 1 : 0, requests: 1, storageBytes: check.addedBytes });
+    if (!rate.allowed) {
+        throw new AgentAttachmentError(429, 'quota_exceeded', rate.reason || 'Rate limit exceeded');
+    }
+    if (check.newFile) {
+        const resource = await checkResourceQuota(quotaContext, 'filesTotal', await db.countFileRecords({ projectId: scope.projectId }));
+        if (!resource.allowed) {
+            throw new AgentAttachmentError(429, 'quota_exceeded', resource.reason || 'File quota exceeded');
+        }
+    }
+    const storageLimit = perRequest.effectiveLimits.quotas?.maxStorageBytes;
+    if (storageLimit !== undefined && storageLimit !== -1) {
+        const projected = (await db.sumFileRecordBytes({ projectId: scope.projectId })) + check.addedBytes;
+        if (projected > storageLimit) {
+            throw new AgentAttachmentError(429, 'quota_exceeded', `storageBytes limit exceeded (${projected}/${storageLimit})`);
+        }
+    }
+}
+
 export interface UploadSessionFileInput {
     scope: SessionFileScope;
     conversation: Pick<IAgentConversation, '_id' | 'agentKey'>;
@@ -316,42 +370,14 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
 
     const conversationId = String(conversation._id);
     const db = await tenantDb(scope.tenantDbName);
-    const held = await db.listFileRecordsByConversation(conversationId);
+    // What the agent wrote itself is not what a person attached: it does not use up the person's file count.
+    const held = (await db.listFileRecordsByConversation(conversationId)).filter((record) => record.origin !== 'agent_output');
     if (held.length >= cfg.maxFiles) {
         throw new AgentAttachmentError(409, 'too_many_files', `A session holds at most ${cfg.maxFiles} files. Delete one to attach another.`);
     }
 
     const bucketKey = await resolveSessionFilesBucket(scope, cfg);
-
-    const quotaContext = {
-        domain: 'file' as const,
-        licenseType: actor.licenseType as LicenseType,
-        projectId: scope.projectId,
-        resourceKey: bucketKey,
-        tenantDbName: scope.tenantDbName,
-        tenantId: scope.tenantId,
-        ...(actor.tokenId ? { tokenId: actor.tokenId } : {}),
-        userId: actor.userId,
-    };
-    const perRequest = await checkPerRequestLimits(quotaContext, { fileSize: declaredBytes, filesPerRequest: 1 });
-    if (!perRequest.allowed) {
-        throw new AgentAttachmentError(429, 'quota_exceeded', perRequest.reason || 'Quota exceeded');
-    }
-    const rate = await checkRateLimit(quotaContext, { files: 1, requests: 1, storageBytes: declaredBytes });
-    if (!rate.allowed) {
-        throw new AgentAttachmentError(429, 'quota_exceeded', rate.reason || 'Rate limit exceeded');
-    }
-    const resource = await checkResourceQuota(quotaContext, 'filesTotal', await db.countFileRecords({ projectId: scope.projectId }));
-    if (!resource.allowed) {
-        throw new AgentAttachmentError(429, 'quota_exceeded', resource.reason || 'File quota exceeded');
-    }
-    const storageLimit = perRequest.effectiveLimits.quotas?.maxStorageBytes;
-    if (storageLimit !== undefined && storageLimit !== -1) {
-        const projected = (await db.sumFileRecordBytes({ projectId: scope.projectId })) + declaredBytes;
-        if (projected > storageLimit) {
-            throw new AgentAttachmentError(429, 'quota_exceeded', `storageBytes limit exceeded (${projected}/${storageLimit})`);
-        }
-    }
+    await assertFileQuotas(db, { scope, bucketKey, bytes: declaredBytes, addedBytes: declaredBytes, newFile: true, actor });
 
     const buffer = typeof input.data === 'string' ? decodeBase64(input.data) : input.data;
     // The estimate above is for a string; the decoded size is what is stored.
@@ -385,10 +411,21 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
     return toSessionFileView(result.record);
 }
 
+const formatMb = (bytes: number) => `${Number((bytes / (1024 * 1024)).toFixed(2))} MB`;
+
+/** What one turn has stored of the agent's own files, against its cap. Shared by every write of the turn. */
+export interface AgentOutputTurn {
+    saved: number;
+    maxFiles: number;
+}
+
 /**
- * Stores a file the agent wrote to its sandbox's `/outputs/` (see agentSandboxOutputs.ts) as a session file of
- * origin `agent_output`. Unlike an upload it needs no `attachments.enabled` and ignores the per-session file count
- * and the MIME allow-list (those guard what a person sends); it does need the agent's bucket and the size limit.
+ * Stores a file the agent wrote itself (to its sandbox's `/outputs/`, see agentSandboxOutputs.ts, or with
+ * `session_files_create`) as a session file of origin `agent_output`. Unlike an upload it needs no
+ * `attachments.enabled` and ignores the person's per-session file count and the MIME allow-list (those
+ * guard what a person sends). It does need the agent's bucket, and it is held to the same limits an
+ * upload is: the file's size (`maxFileBytes`, else the agent's `attachments.maxFileSizeMb`), the turn's
+ * file cap (`turn`), and the project's file quotas.
  * Throws on any refusal: the caller keeps a turn alive.
  */
 export async function saveAgentOutputFile(input: {
@@ -399,12 +436,29 @@ export async function saveAgentOutputFile(input: {
     contentType: string;
     data: Buffer;
     actorId: string;
+    tokenId?: string;
+    maxFileBytes?: number;
+    turn?: AgentOutputTurn;
 }): Promise<IAgentMessageAttachment> {
     const cfg = resolveAttachmentsConfig(input.agentConfig?.attachments);
     const bucketKey = await resolveSessionFilesBucket(input.scope, cfg);
-    if (input.data.length > Math.floor(cfg.maxFileSizeMb * 1024 * 1024)) {
-        throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, input.contentType));
+    if (input.data.length > (input.maxFileBytes ?? Math.floor(cfg.maxFileSizeMb * 1024 * 1024))) {
+        throw new AgentAttachmentError(413, 'file_too_large', input.maxFileBytes !== undefined
+            ? `The file exceeds the ${formatMb(input.maxFileBytes)} limit for files an agent writes.`
+            : fileTooLargeMessage(cfg, input.contentType));
     }
+    if (input.turn && input.turn.saved >= input.turn.maxFiles) {
+        throw new AgentAttachmentError(409, 'too_many_files', `At most ${input.turn.maxFiles} files can be created in one turn.`);
+    }
+    const db = await tenantDb(input.scope.tenantDbName);
+    await assertFileQuotas(db, {
+        scope: input.scope,
+        bucketKey,
+        bytes: input.data.length,
+        addedBytes: input.data.length,
+        newFile: true,
+        actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+    });
     const conversationId = String(input.conversation._id);
     const result = await uploadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, {
         bucketKey,
@@ -428,7 +482,53 @@ export async function saveAgentOutputFile(input: {
             origin: 'agent_output',
         },
     });
+    if (input.turn) input.turn.saved += 1;
     return { ...toMessageAttachment(result.record), origin: 'agent_output' };
+}
+
+/**
+ * Adds text to a file the agent wrote earlier in this session (`session_files_append`). Only a file of
+ * origin `agent_output` of this agent and session, and only one of the text types the agent may write
+ * (so a binary file the sandbox produced is never rewritten as text). The grown file must stay within
+ * `maxFileBytes` and the project's storage quota. Throws `AgentAttachmentError` on a refusal.
+ */
+export async function appendAgentOutputFile(input: {
+    scope: SessionFileScope;
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey'>;
+    fileId: string;
+    data: Buffer;
+    actorId: string;
+    tokenId?: string;
+    maxFileBytes: number;
+}): Promise<IAgentMessageAttachment> {
+    const conversationId = String(input.conversation._id);
+    const record = await findSessionFileRecord(input.scope, conversationId, input.fileId);
+    if (!record || record.origin !== 'agent_output' || record.agentKey !== input.conversation.agentKey) {
+        throw new AgentAttachmentError(404, 'file_not_found', 'Only a file this agent created in this session can be appended to.');
+    }
+    const extension = record.name.includes('.') ? record.name.split('.').pop()!.toLowerCase() : '';
+    if (!FILE_OUTPUT_TYPES[extension]) {
+        throw new AgentAttachmentError(415, 'unsupported_file_type', 'Only text files the agent created can be appended to.');
+    }
+    const grown = record.size + input.data.length;
+    if (grown > input.maxFileBytes) {
+        throw new AgentAttachmentError(413, 'file_too_large', `The file would exceed the ${formatMb(input.maxFileBytes)} limit for files an agent writes.`);
+    }
+    const db = await tenantDb(input.scope.tenantDbName);
+    await assertFileQuotas(db, {
+        scope: input.scope,
+        bucketKey: record.bucketKey,
+        bytes: grown,
+        addedBytes: input.data.length,
+        newFile: false,
+        actor: { userId: input.actorId, ...(input.tokenId ? { tokenId: input.tokenId } : {}) },
+    });
+    const current = await downloadFile(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key);
+    const updated = await replaceFileContent(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key, {
+        data: Buffer.concat([current.data, input.data]),
+        updatedBy: input.actorId,
+    });
+    return { ...toMessageAttachment(updated), origin: 'agent_output' };
 }
 
 /**
@@ -616,7 +716,9 @@ export async function findUnsentSessionFiles(
     const sent = conversation.metadata?.sentFileIds;
     if (Array.isArray(sent)) for (const fileId of sent) if (typeof fileId === 'string') carried.add(fileId);
     const files = await db.listFileRecordsByConversation(String(conversation._id));
+    // A file the agent wrote reaches the person on the answer that carries it; it never rides on their next message.
     return files.filter((record) => record.purpose === 'conversation'
+        && record.origin !== 'agent_output'
         && record.projectId === scope.projectId
         && !carried.has(String(record._id)));
 }

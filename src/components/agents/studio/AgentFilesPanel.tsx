@@ -35,7 +35,7 @@ import {
 import type { ComboboxItem, ComboboxLikeRenderOptionInput } from '@mantine/core';
 import { IconAlertTriangle, IconCheck, IconFolder, IconInfoCircle } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
+import { FILE_OUTPUT_EXTENSIONS, SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import { ConfigBlock } from './ConfigSection';
 import {
     attachesNewUploads,
@@ -52,7 +52,10 @@ import {
     MIME_TYPE_SUGGESTIONS,
     mbToBytes,
     normalizeFolder,
+    OUTPUTS_LIMITS,
+    outputsEnabled,
     patchAttachments,
+    patchOutputs,
     type AttachmentBucketOption,
     type AttachmentsSettings,
     type BucketPickerItem,
@@ -132,6 +135,7 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
     const current = value ?? {};
     const set = (patch: Partial<AttachmentsSettings>) => onChange(patchAttachments(value, patch));
     const on = filesEnabled(value);
+    const hasBucket = Boolean(current.bucketKey?.trim());
 
     const list = buckets.status === 'ready' ? buckets.buckets : null;
     const labels: BucketReasonLabels & { notFound: (key: string) => string } = {
@@ -198,6 +202,40 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                 checked={on}
                 onChange={(event) => set({ enabled: event.currentTarget.checked })}
             />
+
+            <ConfigBlock title={t('outputsTitle')}>
+                <Stack gap="sm">
+                    <Switch
+                        label={t('cfgOutputs')}
+                        description={hasBucket ? t('cfgOutputsDescription', { types: FILE_OUTPUT_EXTENSIONS.map((ext) => `.${ext}`).join(' ') }) : t('cfgOutputsNeedsBucket')}
+                        checked={hasBucket && outputsEnabled(value)}
+                        disabled={!hasBucket}
+                        onChange={(event) => onChange(patchOutputs(value, { enabled: event.currentTarget.checked }))}
+                    />
+                    {hasBucket && outputsEnabled(value) ? (
+                        <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                            <NumberInput
+                                label={t('cfgOutputsMaxFiles')}
+                                placeholder={String(OUTPUTS_LIMITS.maxFilesPerTurn.default)}
+                                min={1}
+                                max={OUTPUTS_LIMITS.maxFilesPerTurn.max}
+                                allowDecimal={false}
+                                value={current.outputs?.maxFilesPerTurn ?? ''}
+                                onChange={(v) => onChange(patchOutputs(value, { maxFilesPerTurn: typeof v === 'number' ? v : undefined }))}
+                            />
+                            <NumberInput
+                                label={t('cfgOutputsMaxFileSize')}
+                                placeholder={String(OUTPUTS_LIMITS.maxFileSizeMb.default)}
+                                min={0.1}
+                                max={OUTPUTS_LIMITS.maxFileSizeMb.max}
+                                decimalScale={1}
+                                value={current.outputs?.maxFileSizeMb ?? ''}
+                                onChange={(v) => onChange(patchOutputs(value, { maxFileSizeMb: typeof v === 'number' ? v : undefined }))}
+                            />
+                        </SimpleGrid>
+                    ) : null}
+                </Stack>
+            </ConfigBlock>
 
             {on ? (
                 <>

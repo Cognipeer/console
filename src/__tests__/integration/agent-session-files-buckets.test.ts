@@ -174,7 +174,26 @@ describe('what a client is told about an agent’s attachments', () => {
     await model('gpt-6-luna');
     expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', maxFiles: 4, maxFileSizeMb: 5, allowedMimeTypes: ['image/*'] } })).toEqual({
       enabled: true, maxFiles: 4, maxFileSizeMb: 5, allowedMimeTypes: ['image/*'], acceptsImages: true,
+      // The files the agent writes itself: on with a working bucket, the default limits, the text types.
+      outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv', 'txt', 'json', 'html', 'xml', 'yaml', 'yml'] },
     });
+  });
+
+  it('the files the agent writes are reported apart from the uploads: with uploads off, switched off, with the author’s limits, bucket not usable', async () => {
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    await bucket('broken', 'ghost-provider');
+    await model('gpt-4o');
+    // Uploads off, a bucket named: the agent can still hand files back.
+    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads' } })).toMatchObject({
+      enabled: false, outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2 },
+    });
+    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: false } } })).toMatchObject({ outputs: { enabled: false } });
+    // The author's limits, clamped to what the server allows; limits are shown even while off.
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { maxFilesPerTurn: 4, maxFileSizeMb: 99 } } })).outputs)
+      .toMatchObject({ enabled: true, maxFilesPerTurn: 4, maxFileSizeMb: 10 });
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'broken' } })).outputs).toMatchObject({ enabled: false, maxFilesPerTurn: 10 });
+    expect((await describeFor({ modelKey: 'main' })).outputs).toMatchObject({ enabled: false });
   });
 
   it('files on but the bucket cannot take a file: not enabled — the paperclip stays hidden', async () => {
@@ -186,7 +205,10 @@ describe('what a client is told about an agent’s attachments', () => {
 
   it('off by default, and not set up without a bucket', async () => {
     await model('gpt-4o');
-    expect(await describeFor({ modelKey: 'main' })).toEqual({ enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: true });
+    expect(await describeFor({ modelKey: 'main' })).toEqual({
+      enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: true,
+      outputs: { enabled: false, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv', 'txt', 'json', 'html', 'xml', 'yaml', 'yml'] },
+    });
     expect(await describeFor({ modelKey: 'main', attachments: { enabled: true } })).toMatchObject({ enabled: false });
   });
 

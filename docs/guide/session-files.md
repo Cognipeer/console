@@ -92,7 +92,7 @@ Content-Type: application/pdf
 <bytes>
 ```
 
-A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "text/plain", "data": "<base64 or data URL>" }` (`contentType` is accepted too). (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
+A `multipart/form-data` body works too (for a browser form or `curl -F file=@contract.pdf`): the first file part is stored, with its filename and type; `?name=` overrides the name. A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "text/plain", "data": "<base64 or data URL>" }` (`contentType` is accepted too). (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
 
 | Call | |
 | --- | --- |
@@ -159,16 +159,31 @@ An attached file is shown wherever the message is: in the session page, in the *
 
 ## Files the agent produces
 
+Two ways, and they can be used together: the agent writes a text file with a tool (no sandbox needed), or an agent with a [sandbox](/guide/sandbox) leaves files in `/outputs/`. Either way the files are stored as session files (origin `agent_output`) and delivered on the answer the same way.
+
+### Without a sandbox: `session_files_create` and `session_files_append`
+
+An agent that has an attachments bucket can write text files for the user. It is on by default once a bucket is chosen; in **Configure → Files** the *Let the agent create files* switch turns it off and sets two limits. The *Accept attachments* switch does not need to be on.
+
+- **`session_files_create({ filename, content, mime_type? })`** creates a file and returns `{ file_id, filename, mime_type, size_bytes, download_url }`. Allowed types: `.md .csv .txt .json .html .xml .yaml .yml`; the MIME type is derived from the extension, and a `mime_type` that disagrees is refused. The name is sanitized (no directories, no odd characters) and a name already used in the session becomes `name-1.ext`.
+- **`session_files_append({ file_id, content })`** adds text to the end of a file this agent created in this session (so a long file can be built in parts). It refuses a file the person uploaded, a file of another session, and any file that is not one of the text types.
+- **Limits.** *Files per turn* (default 10, at most 20) and *Largest file* (default 2 MB, at most 10 MB), enforced on save and at run time. The files also go through the same checks an upload does: the project's file quota, total file count and storage limit. They do not count toward the *Max files per session* of the person's uploads.
+- **Approvals.** Both tools follow the agent's *per-tool* approval setting when one is set and are otherwise never asked about.
+- **Delivery.** A file created or appended to in a turn is attached to that turn's answer, and a file the agent wrote never rides along on the person's next message. The agent's prompt gets a short section naming the tools and the limits.
+- **Discovery.** `GET /client/v1/agents/{key}` reports `attachments.outputs`: `{ enabled, max_files_per_turn, max_file_size_mb, types }`.
+
+### With a sandbox: `/outputs/`
+
 An agent with a [sandbox](/guide/sandbox) is told to write the files meant for the user to `/outputs/` (the folder is created on demand). At the end of each turn the platform saves the new or changed files there as session files and attaches them to the answer. The agent needs no preview link to hand a file over.
 
 - **Bucket required.** Outputs are stored in the agent's attachments bucket (the same one uploads use) and follow its *Max file size* and *Keep files for*. The *Accept attachments* switch does not need to be on. Without a bucket nothing is collected and the agent is not told about `/outputs/`.
 - **Limits.** At most 20 files per turn; a file over the size limit is skipped with a warning. A file is delivered again only when its size or modification time changes.
 - **Never fails the turn.** A file that cannot be saved is logged and listed in the message's `warnings`; the answer is returned as usual.
 - **Where you see them.** On the assistant message's `attachments` (each marked `origin: "agent_output"`), and in the file list of the session.
-- **API.** The `/responses` body gets an `output_files` array (`id`, `name`, `mime_type`, `size`, `download_url`) and `file_path` annotations (`file_id`, `filename`) on the `output_text`. `download_url` is the session file content route, `/client/v1/agents/sessions/{id}/files/{fileId}/content`. Both fields are absent when the turn produced no files.
+- **API.** The `/responses` body gets an `output_files` array (`id`, `name`, `mime_type`, `size`, `download_url`) and `file_path` annotations (`file_id`, `filename`) on the `output_text`. `download_url` is the session file content route, `/api/client/v1/agents/sessions/{id}/files/{fileId}/content` (relative to the server origin). Both fields are absent when the turn produced no files.
 - **Other surfaces.** The same files ride on every way to call the agent, additively and only when there are files:
   - *Chat completions:* `output_files` on the body, `file_path` annotations on `message.annotations`; a streamed reply puts them as `files` on the closing chunk.
-  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = absolute download URL under `/api`; fetch it with the same credentials), on `message/send` and `tasks/get`.
+  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = the absolute download URL; fetch it with the same credentials), on `message/send` and `tasks/get`.
   - *Resumed turns:* a turn that continues after an approval or client-tool answer collects `/outputs/` too.
   - *Event log:* an `agent.output_file` event per file, just before `agent.message`, so a live stream can show the file chip as the turn ends.
   - *History:* `GET /client/v1/agents/sessions/{id}/messages` (`?limit`, `?after=<index>`) lists the transcript; each message's `attachments` give `id`, `name`, `mime_type`, `size`, `origin` (`user_upload` or `agent_output`) and `download_url`, and `output_files` repeats the agent's. A client that reloads a session still shows the files.

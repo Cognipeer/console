@@ -18,7 +18,8 @@ const attachments = [
   { fileId: 'u1', name: 'in.csv', mimeType: 'text/csv', size: 10 },
 ];
 const files = toClientOutputFiles('c1', attachments);
-const url = '/client/v1/agents/sessions/c1/files/f1/content';
+// `/api` included: the URL a client can fetch from the server origin.
+const url = '/api/client/v1/agents/sessions/c1/files/f1/content';
 
 describe('chat completions', () => {
   it('carries output_files and file_path annotations, nothing when there are none', () => {
@@ -42,7 +43,7 @@ describe('A2A', () => {
     expect(a2aFileArtifacts('task_c1_1', files, 'https://api.example.com')).toEqual([{
       artifactId: 'task_c1_1_file_1',
       name: 'report.pdf',
-      parts: [{ kind: 'file', file: { name: 'report.pdf', mimeType: 'application/pdf', uri: `https://api.example.com/api${url}` } }],
+      parts: [{ kind: 'file', file: { name: 'report.pdf', mimeType: 'application/pdf', uri: `https://api.example.com${url}` } }],
       metadata: { fileId: 'f1', size: 1234 },
     }]);
     expect(a2aFileArtifacts('t', [], 'https://x')).toEqual([]);

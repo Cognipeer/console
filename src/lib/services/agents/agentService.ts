@@ -170,6 +170,9 @@ import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './age
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
+import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
+import { inspectFileBucket } from './sessionFilesBucket';
+import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
@@ -3446,7 +3449,7 @@ export interface AgentChatResponse {
     output_parsed?: unknown;
     /** Why the structured contract failed (parse/validation); mutually exclusive with `output_parsed`. */
     output_error?: string;
-    /** Files the agent wrote to its sandbox's `/outputs/` this turn, saved as session files. Additive; absent when none. */
+    /** Files the agent produced this turn (its sandbox's `/outputs/`, or `session_files_create`), saved as session files. Additive; absent when none. */
     output_files?: ClientOutputFile[];
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
@@ -3933,6 +3936,33 @@ async function buildLocalAgentRun(input: {
         };
     }
 
+    // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
+    // session to attach them to and a files bucket that works. Built before the client tools so their name
+    // reservation (`taken`, below) covers these too.
+    let fileOutputs: FileOutputTools | undefined;
+    const outputsOn = outputsAvailability(config);
+    if (input.conversation && outputsOn.available) {
+        const bucket = await inspectFileBucket(db, tenantId, projectId, outputsOn.cfg.bucketKey).catch(() => null);
+        if (bucket?.usable) {
+            fileOutputs = buildFileOutputTools({
+                createToolFn: createTool,
+                zod: z,
+                guard: toolGuard,
+                scope: sessionFilesScope,
+                conversation: { _id: input.conversation._id, agentKey },
+                agentConfig: config,
+                actorId,
+                ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
+                limits: outputsOn.outputs,
+            });
+            tools.push(...fileOutputs.tools);
+            toolDefinitions.push(...fileOutputs.definitions);
+            systemPrompt = systemPrompt
+                ? `${systemPrompt}\n\n${fileOutputsPrompt(outputsOn.outputs)}`
+                : fileOutputsPrompt(outputsOn.outputs);
+        }
+    }
+
     // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
     // the other bound tools once the run is over. A conversation keeps a
     // persistent sandbox across its turns, a stateless call gets a throwaway one.
@@ -3947,7 +3977,7 @@ async function buildLocalAgentRun(input: {
         zod: z,
         protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
         onWarning: (message) => warnings.add(message),
-        outputs: { agentConfig: config, actorId },
+        outputs: { agentConfig: config, actorId, ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}) },
     });
     // Files the agent writes to /outputs/ are delivered after the turn; that needs a session to attach them to and a bucket.
     if (sandboxTools.tools.length > 0 && input.conversation && resolveAttachmentsConfig(config.attachments).bucketKey) {
@@ -4118,7 +4148,8 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
-        collectOutputs: sandboxTools.collectOutputs,
+        // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
+        collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
     };
