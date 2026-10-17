@@ -616,6 +616,8 @@ export interface FollowSessionEventsOptions {
   /** Resume after this seq (0 = from the beginning). */
   afterSeq: number;
   types?: string[];
+  /** Only the events of this run (bare run id), replayed and live. */
+  runId?: string;
   write: (frame: FollowedFrame) => void;
   writePing: () => void;
   /** Aborted when the client goes away. */
@@ -654,7 +656,8 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
   } = options;
   const bus = options.bus ?? sessionEventBus;
   const typeFilter = types && types.length > 0 ? new Set(types) : null;
-  const wanted = (type: string) => !typeFilter || typeFilter.has(type);
+  const runFilter = options.runId;
+  const wanted = (frame: SessionEventFrame) => (!typeFilter || typeFilter.has(frame.type)) && (!runFilter || frame.runId === runFilter);
 
   let lastSent = Math.max(0, options.afterSeq);
   let replaying = true;
@@ -662,7 +665,7 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
   const held: SessionEventFrame[] = [];
 
   const send = (frame: SessionEventFrame) => {
-    if (revoked || !wanted(frame.type)) return;
+    if (revoked || !wanted(frame)) return;
     if (frame.seq !== undefined) {
       if (frame.seq <= lastSent) return;
       lastSent = frame.seq;
@@ -724,6 +727,7 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
       const page = await db.listAgentSessionEvents(conversationId, {
         afterSeq: cursor,
         ...(typeFilter ? { types: [...typeFilter] } : {}),
+        ...(runFilter ? { runId: runFilter } : {}),
         limit: pageSize,
       });
       for (const row of page) {

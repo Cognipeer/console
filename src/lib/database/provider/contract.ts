@@ -1653,7 +1653,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Events with `seq > afterSeq`, ascending. `types` filters by exact type. */
   listAgentSessionEvents(
     conversationId: string,
-    options?: { afterSeq?: number; types?: string[]; limit?: number },
+    /** `runId`: only the events one run wrote (the runs API's event log of a run). */
+    options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
   ): Promise<IAgentSessionEvent[]>;
   /** Highest `seq` written for the conversation; 0 when there are none. */
   getAgentSessionMaxSeq(conversationId: string): Promise<number>;

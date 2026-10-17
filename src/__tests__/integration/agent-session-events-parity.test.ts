@@ -70,6 +70,21 @@ describeForEachProvider('Agent session events / pending actions', (getDb) => {
     expect((await db.listAgentSessionEvents(conv, { limit: 2 })).map((e) => e.seq)).toEqual([1, 2]);
   });
 
+  it('lists only the events one run wrote', async () => {
+    const db = getDb();
+    const conv = `c-${Math.random().toString(36).slice(2, 8)}`;
+    await db.appendAgentSessionEvents([
+      { ...event(conv, 1, 'user.message'), runId: 'run-a' },
+      { ...event(conv, 2, 'agent.message'), runId: 'run-a' },
+      { ...event(conv, 3, 'user.message'), runId: 'run-b' },
+      event(conv, 4, 'session.status_idle'),
+      { ...event(conv, 5, 'agent.message'), runId: 'run-b' },
+    ]);
+    expect((await db.listAgentSessionEvents(conv, { runId: 'run-b' })).map((e) => e.seq)).toEqual([3, 5]);
+    expect((await db.listAgentSessionEvents(conv, { runId: 'run-b', afterSeq: 3 })).map((e) => e.seq)).toEqual([5]);
+    expect((await db.listAgentSessionEvents(conv, { runId: 'run-a', limit: 1 })).map((e) => e.seq)).toEqual([1]);
+  });
+
   it('rejects a duplicate (conversationId, seq) with AgentSessionEventSeqConflictError', async () => {
     const db = getDb();
     const conv = `c-${Math.random().toString(36).slice(2, 8)}`;

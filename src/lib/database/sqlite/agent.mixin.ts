@@ -531,11 +531,15 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async listAgentSessionEvents(
       conversationId: string,
-      options?: { afterSeq?: number; types?: string[]; limit?: number },
+      options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
     ): Promise<IAgentSessionEvent[]> {
       const db = this.getTenantDb();
       const conditions = ['conversationId = @conversationId'];
       const params: Record<string, unknown> = { conversationId };
+      if (options?.runId) {
+        conditions.push('runId = @runId');
+        params.runId = options.runId;
+      }
       if (options?.afterSeq !== undefined && options.afterSeq > 0) {
         conditions.push('seq > @afterSeq');
         params.afterSeq = options.afterSeq;

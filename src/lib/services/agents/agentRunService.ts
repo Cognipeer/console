@@ -495,6 +495,8 @@ export type StartAgentRunExecution =
     signal?: AbortSignal;
     /** On disconnect: stop the run (a stream that did not ask for background) or keep it running detached. */
     cancelOnDisconnect: boolean;
+    /** The admitted row, before the turn starts (a stream names its run up front). */
+    onStarted?: (run: IAgentRun) => void;
   }
   | {
     kind: 'queued';
@@ -800,6 +802,11 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
         return { kind: 'concurrency_limit', ...cap, runClass };
       }
 
+      try {
+        execution.onStarted?.(inserted);
+      } catch (error) {
+        logger.warn('Inline run start hook failed', { runId: inserted._id, error: error instanceof Error ? error.message : String(error) });
+      }
       const handle = executeInlineRun(db, inserted, input, execution, limits.maxDurationMs);
       if (execution.stream) return inlineOutcome(await handle.settled);
       const window = delaySentinel(execution.waitMs, WINDOW_SENTINEL);

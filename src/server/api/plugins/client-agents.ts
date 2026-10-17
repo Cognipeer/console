@@ -1,11 +1,10 @@
-import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { agentShowsReasoning } from '@/lib/services/agents/agentReasoning';
 import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentRun, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
-  createConversation,
   deleteAgentRecord,
   getAgentByKey,
   getConversationById,
@@ -20,32 +19,22 @@ import {
   agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
 import {
-  MAX_IDEMPOTENCY_KEY_LENGTH,
-  agentDefaultCallback,
   apiErrorBody,
   invalidRequestErrorBody,
   isAgentRunActive,
   lookupIdempotentAgentRun,
-  publicAgentRunId,
   waitForAgentRun,
-  resolveAgentRunLimits,
   serializeAgentRun,
-  validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
-import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
-import type { LicenseType } from '@/lib/license/license-manager';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
-import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
-import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
-import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
+import { extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
-import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   authorizationRefusalOf,
   getApiTokenContextForRequest,
@@ -65,16 +54,21 @@ import {
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
-import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { advertisedModelsForRequest } from './agent-model-authz';
+import { sendAuthorizationUnavailable } from './agent-session-access';
 import {
-  AgentModelError,
-  advertisedModelsForRequest,
-  rememberSessionModel,
-  requestedAgentModel,
-  resolveRunModelForRequest,
-  sendAgentModelError,
-} from './agent-model-authz';
-import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
+  checkSessionContinuable,
+  invocationApiTokenId,
+  invocationRuntimeContext,
+  parseInvocationReasoning,
+  parseNewSessionBudget,
+  prepareInvocationSession,
+  readIdempotencyKey,
+  resolveInvocationCallback,
+  resolveInvocationLimits,
+  resolveInvocationModel,
+  sendRunAccepted,
+} from './agent-invocation';
 
 const logger = createLogger('api:client-agents');
 
@@ -116,15 +110,6 @@ export function readSessionReference(body: Record<string, unknown>): { id?: stri
   }
   if (named.length === 2 && named[0] !== named[1]) return { error: 'session_id and conversation name different sessions' };
   return named.length > 0 ? { id: named[0] } : {};
-}
-
-/** 202 for a run that is still going: the run object, where to follow it, and when to look again. */
-function sendRunAccepted(reply: FastifyReply, run: IAgentRun) {
-  return reply
-    .code(202)
-    .header('Location', `/api/client/v1/agents/runs/${publicAgentRunId(run)}`)
-    .header('Retry-After', '2')
-    .send(serializeAgentRun(run));
 }
 
 /**
@@ -243,45 +228,8 @@ function createResponsesHandler(usePublished: boolean) {
             ? apiErrorBody('not_found_error', 'session_id does not match a session of this agent', 'session_not_found')
             : { error: 'previous_response_id does not match a valid conversation' });
         }
-        // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
-        // `agent.session_manage_others` and `agent.session_view_others` (the answer is built from what the session
-        // holds). Whichever route the request came in on (this one is `agents`, the OpenAI-shaped `/responses` is
-        // `models`), a token only reaches a session through this check.
-        const access = await decideSessionAccess(request, conversation, {
-          need: 'continue',
-          agent,
-          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
-        });
-        if (!access.ok) return sendClientSessionRefusal(reply, request, access);
-        // Waiting on an approval or an answer, and the agent refuses new
-        // messages meanwhile: say so before any run is created.
-        const blocking = await pendingActionsBlockingMessage(ctx.tenantDbName, conversation, agent.config);
-        if (blocking) {
-          return reply.code(409).send({
-            error: {
-              type: 'pending_action',
-              code: 'pending_action',
-              message: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
-              pending_action_ids: blocking,
-            },
-          });
-        }
-        // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it
-        // with "no", so it takes the permission to answer.
-        const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
-        if (cancelRefusal?.unavailable) {
-          return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
-        }
-        if (cancelRefusal) {
-          return reply.code(403).send(apiErrorBody(
-            'permission_error',
-            CANCEL_PENDING_FORBIDDEN_MESSAGE,
-            'action_forbidden',
-            cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : undefined,
-          ));
-        }
-        // The session has used up its own spend budget: nothing to run (402).
-        assertSessionBudgetAvailable(conversation);
+        // Access, an open approval/question, `cancel_pending` and a spent budget (agent-invocation.ts).
+        if (!await checkSessionContinuable(request, reply, 'client', ctx, agent, conversation)) return reply;
         conversationId = resolvedConversationId;
         sessionConversation = conversation;
         idempotencyConversationScope = resolvedConversationId;
@@ -294,72 +242,37 @@ function createResponsesHandler(usePublished: boolean) {
       // PATCH /client/v1/agents/sessions/:conversationId.
       let sessionBudget: IAgentSessionBudget | null | undefined;
       if (!conversationId) {
-        if (body.budget === null) sessionBudget = null;
-        else if (body.budget !== undefined) {
-          const parsed = parseSessionBudget(body.budget);
-          if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
-          sessionBudget = parsed.budget;
-        }
-        // An agent whose admin set a session budget binds its API clients to it.
-        if (sessionBudget !== undefined) {
-          const violation = clientBudgetViolation(agent.config, sessionBudget);
-          if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
-        }
+        const parsedBudget = parseNewSessionBudget(reply, 'client', agent, body.budget);
+        if (!parsedBudget) return reply;
+        sessionBudget = parsedBudget.budget;
       }
 
-      // `reasoning_effort` / `reasoning: { effort }`: the lowest rung of the reasoning precedence (the agent's
-      // own pick and the Model Hub default win), so a bad value is refused instead of silently ignored.
-      const reasoningRequest = parseAgentRequestReasoning(body);
-      if (reasoningRequest.error) {
-        return reply.code(400).send(invalidRequestErrorBody(reasoningRequest.error, 'invalid_reasoning'));
-      }
+      // `reasoning_effort` / `reasoning: { effort }`: the lowest rung of the reasoning precedence.
+      const reasoningRequest = parseInvocationReasoning(reply, 'client', body);
+      if (!reasoningRequest) return reply;
 
       // Which of the agent's models this run uses (`agent_model` / header; the sticky model of the session otherwise).
       // The config that will run decides the list: the published one for /agents/responses or a pinned version.
-      let modelChoice: AgentModelChoice | undefined;
-      const askedModel = requestedAgentModel(request, body);
-      if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
-        const runConfig = usePublished || requestedVersion !== undefined
-          ? (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId, requestedVersion)).config
-          : agent.config;
-        if (askedModel || runConfig.additionalModels?.length) {
-          try {
-            modelChoice = await resolveRunModelForRequest(request, {
-              agent, config: runConfig, projectId: ctx.projectId, requested: askedModel, conversation: sessionConversation,
-            });
-          } catch (error) {
-            if (error instanceof AgentModelError) return sendAgentModelError(reply, request, error);
-            throw error;
-          }
-        }
-      }
+      const chosenModel = await resolveInvocationModel(request, reply, 'client', ctx, {
+        target: { agent, ...(requestedVersion !== undefined ? { version: requestedVersion } : {}), usePublished },
+        body,
+        conversation: sessionConversation,
+      });
+      if (!chosenModel) return reply;
+      const { modelChoice } = chosenModel;
 
       // Effective run limits: min(env ceiling, tenant quota).
-      const limits = await resolveAgentRunLimits({
-        quotaContext: {
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          licenseType: ctx.tenant.licenseType as LicenseType,
-          userId: ctx.tokenRecord.userId,
-          tokenId: ctx.tokenRecord._id?.toString(),
-        },
-      });
+      const limits = await resolveInvocationLimits(ctx);
 
-      const idempotencyKey = getHeaderValue(request, 'idempotency-key');
-      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
       // Every call is a recorded run, so an Idempotency-Key works on synchronous calls too.
-      if (idempotencyKey && idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
-        return reply.code(400).send(invalidRequestErrorBody(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
-      }
+      const idempotency = readIdempotencyKey(request, reply, 'client');
+      if (!idempotency) return reply;
+      const idempotencyKey = idempotency.key;
+      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
 
       // A synchronous call may detach into a run too, so its callback applies when it does.
-      let callback: { url?: string; secret?: string } = agentDefaultCallback(agent.config);
-      if (body.callback_url !== undefined || body.callback_secret !== undefined) {
-        const requested = await validateCallbackRequest(body.callback_url, body.callback_secret);
-        if (!requested.ok) return reply.code(400).send(invalidRequestErrorBody(requested.message, 'invalid_callback'));
-        if (requested.url) callback = { url: requested.url, secret: requested.secret };
-      }
+      const callback = await resolveInvocationCallback(reply, 'client', agent, body.callback_url, body.callback_secret);
+      if (!callback) return reply;
 
       // A replayed request must not mint a fresh conversation first — every
       // retry of "start a new conversation" would leave an orphan behind.
@@ -400,48 +313,19 @@ function createResponsesHandler(usePublished: boolean) {
         });
       }
 
-      if (!conversationId) {
-        const conversation = await createConversation(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          ctx.tokenRecord.userId,
-          agent.key,
-          undefined,
-          { source: 'api' },
-          sessionBudget,
-        );
-        conversationId = String(conversation._id);
-        sessionConversation = conversation;
-      }
-      // A queued run reads the choice from its session, so it is stored before the run is created.
-      if (modelChoice && sessionConversation) await rememberSessionModel(ctx.tenantDbName, sessionConversation, modelChoice);
-
-      // Files in the request become files of the session this turn runs on.
-      let attachments: string[] = [];
-      let namedAttachments: string[] = [];
-      if (userInput.files.length > 0 && sessionConversation) {
-        const stored = await storeResponseInputFiles({
-          files: userInput.files,
-          scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-          conversation: sessionConversation,
-          agentConfig: agent.config,
-          actor: {
-            userId: ctx.tokenRecord.userId,
-            licenseType: ctx.tenant.licenseType,
-            tokenId: ctx.tokenRecord._id?.toString() ?? ctx.token,
-          },
-        });
-        attachments = stored.attachments;
-        namedAttachments = stored.named;
-      }
-
-      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
-      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
-        userId: ctx.tokenRecord.userId,
-        tokenId: apiTokenId,
-        source: 'api',
+      // The session (new or continued), the model choice stored on it, the request's files as its files.
+      const prepared = await prepareInvocationSession(ctx, {
+        agent,
+        conversation: sessionConversation,
+        sessionBudget,
+        ...(modelChoice ? { modelChoice } : {}),
+        userInput,
       });
+      conversationId = prepared.conversationId;
+      const { attachments, namedAttachments } = prepared;
+
+      const apiTokenId = invocationApiTokenId(ctx);
+      const runtimeContext = invocationRuntimeContext(request, ctx, body.runtime_context);
 
       if (background) {
         const outcome = await createBackgroundAgentRun({

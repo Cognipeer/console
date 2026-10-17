@@ -514,10 +514,11 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async listAgentSessionEvents(
       conversationId: string,
-      options?: { afterSeq?: number; types?: string[]; limit?: number },
+      options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
     ): Promise<IAgentSessionEvent[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { conversationId };
+      if (options?.runId) filter.runId = options.runId;
       if (options?.afterSeq !== undefined && options.afterSeq > 0) filter.seq = { $gt: options.afterSeq };
       if (options?.types && options.types.length > 0) filter.type = { $in: options.types };
       let cursor = db.collection(COLLECTIONS.agentSessionEvents).find(filter).sort({ seq: 1 });

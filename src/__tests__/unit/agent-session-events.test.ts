@@ -31,9 +31,10 @@ function fakeDb(initial: Row[] = []) {
     }),
     getAgentSessionMaxSeq: vi.fn(async (conversationId: string) =>
       Math.max(0, ...rows.filter((r) => r.conversationId === conversationId).map((r) => r.seq))),
-    listAgentSessionEvents: vi.fn(async (conversationId: string, o?: { afterSeq?: number; types?: string[]; limit?: number }) =>
+    listAgentSessionEvents: vi.fn(async (conversationId: string, o?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string }) =>
       rows
-        .filter((r) => r.conversationId === conversationId && r.seq > (o?.afterSeq ?? 0) && (!o?.types || o.types.includes(r.type)))
+        .filter((r) => r.conversationId === conversationId && r.seq > (o?.afterSeq ?? 0) && (!o?.types || o.types.includes(r.type))
+          && (!o?.runId || r.runId === o.runId))
         .sort((a, b) => a.seq - b.seq)
         .slice(0, o?.limit ?? Infinity)),
     updateAgentConversationRuntime: vi.fn(async (_id: string, _patch: Record<string, unknown>) => undefined),
@@ -272,6 +273,7 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
     db: ReturnType<typeof fakeDb>;
     afterSeq: number;
     types?: string[];
+    runId?: string;
     during?: (bus: ReturnType<typeof createSessionEventBus>) => void | Promise<void>;
     after?: (bus: ReturnType<typeof createSessionEventBus>) => void | Promise<void>;
     pageSize?: number;
@@ -291,6 +293,7 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
       conversationId: 'c1',
       afterSeq: opts.afterSeq,
       ...(opts.types ? { types: opts.types } : {}),
+      ...(opts.runId ? { runId: opts.runId } : {}),
       bus,
       signal: controller.signal,
       write: (f) => written.push(f),
@@ -315,6 +318,22 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
     });
     expect(written.map((f) => f.id)).toEqual([2, 3, 4, 5]);
     expect(new Set(written.map((f) => f.id)).size).toBe(written.length);
+  });
+
+  it('with a run filter replays and follows only that run\'s events', async () => {
+    const db = fakeDb([{ ...row(1), runId: 'r1' }, { ...row(2), runId: 'r2' }, row(3), { ...row(4), runId: 'r1' }]);
+    const written = await run({
+      db,
+      afterSeq: 0,
+      runId: 'r1',
+      after: (bus) => {
+        bus.publish('c1', { ...frame(5), runId: 'r2' });
+        bus.publish('c1', { type: 'agent.message.delta', data: { text: 'a' }, runId: 'r1', createdAt: new Date().toISOString() });
+        bus.publish('c1', { ...frame(6), runId: 'r1' });
+      },
+    });
+    expect(written.map((f) => f.id)).toEqual([1, 4, undefined, 6]);
+    expect(db.listAgentSessionEvents).toHaveBeenCalledWith('c1', expect.objectContaining({ runId: 'r1' }));
   });
 
   it('follows live frames after the replay and gives live-only events no id', async () => {
