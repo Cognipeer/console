@@ -33,6 +33,7 @@ const hoisted = vi.hoisted(() => ({
   cancelPending: vi.fn(),
   getConversationById: vi.fn(),
   runAgentCompletion: vi.fn(),
+  prepareSession: vi.fn(),
   agent: { _id: 'agent-1', key: 'support-agent', status: 'active', config: {} },
 }));
 
@@ -40,6 +41,11 @@ vi.mock('@/server/api/plugins/agent-session-access', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/server/api/plugins/agent-session-access')>();
   return { ...actual, decideSessionAccess: hoisted.decide };
 });
+vi.mock('@/server/api/plugins/agent-invocation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/api/plugins/agent-invocation')>()),
+  // The session of a new turn is created here; the run itself is what these tests look at.
+  prepareInvocationSession: hoisted.prepareSession,
+}));
 vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
   refuseCancelPending: hoisted.cancelPending,
   approvalAuthorizerFor: () => async () => ({ allowed: true }),
@@ -91,6 +97,7 @@ describe('chat completions into a session somebody else started', () => {
     hoisted.cancelPending.mockResolvedValue(null);
     hoisted.decide.mockResolvedValue({ ok: true, userId: 'user-1', owner: false });
     hoisted.runAgentCompletion.mockResolvedValue({ content: 'ok', conversationId: 'conv-1' });
+    hoisted.prepareSession.mockResolvedValue({ conversationId: 'conv-1', conversation, attachments: [], namedAttachments: [] });
     app = await createFastifyApiTestApp(clientInferenceApiPlugin);
   });
   afterEach(async () => {
@@ -127,6 +134,7 @@ describe('the run behind an agent chat completion', () => {
     vi.clearAllMocks();
     (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant: <T>(_n: string, fn: () => T) => fn() } as never));
+    hoisted.prepareSession.mockImplementation(async () => ({ conversationId: 'conv-7', conversation: { _id: 'conv-7' }, attachments: [], namedAttachments: [] }));
     app = await createFastifyApiTestApp(clientInferenceApiPlugin);
   });
   afterEach(async () => {
@@ -134,10 +142,7 @@ describe('the run behind an agent chat completion', () => {
   });
 
   it('names its session in X-Cognipeer-Session-Id and gets the caller\'s run limits and token', async () => {
-    hoisted.runAgentCompletion.mockImplementation(async (input: { onSession?: (id: string) => void }) => {
-      input.onSession?.('conv-7');
-      return { content: 'ok', conversationId: 'conv-7', runId: 'run-7' };
-    });
+    hoisted.runAgentCompletion.mockResolvedValue({ content: 'ok', conversationId: 'conv-7', runId: 'run-7' });
     const res = await send();
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-cognipeer-session-id']).toBe('conv-7');
@@ -149,10 +154,8 @@ describe('the run behind an agent chat completion', () => {
   });
 
   it('past the wait window: 202 with an empty chat.completion naming the run, and Location on the runs API', async () => {
-    hoisted.runAgentCompletion.mockImplementation(async (input: { onSession?: (id: string) => void }) => {
-      input.onSession?.('conv-8');
-      return { accepted: { _id: 'run-8', status: 'running', mode: 'inline' }, conversationId: 'conv-8' };
-    });
+    hoisted.prepareSession.mockResolvedValue({ conversationId: 'conv-8', conversation: { _id: 'conv-8' }, attachments: [], namedAttachments: [] });
+    hoisted.runAgentCompletion.mockResolvedValue({ accepted: { _id: 'run-8', status: 'running', mode: 'inline' }, conversationId: 'conv-8' });
     const res = await send();
     expect(res.statusCode).toBe(202);
     expect(res.headers.location).toBe('/api/client/v1/agents/runs/run_run-8');

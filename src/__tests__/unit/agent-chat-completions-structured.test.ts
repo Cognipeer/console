@@ -11,6 +11,7 @@ const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   resolveAgentModel: vi.fn(),
   runAgentCompletion: vi.fn(),
+  prepareSession: vi.fn(),
   getModelByKey: vi.fn(),
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -40,6 +41,12 @@ vi.mock('@/server/api/plugins/agent-openai-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/server/api/plugins/agent-openai-bridge')>()),
   resolveAgentModel: hoisted.resolveAgentModel,
   runAgentCompletion: hoisted.runAgentCompletion,
+}));
+
+vi.mock('@/server/api/plugins/agent-invocation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/api/plugins/agent-invocation')>()),
+  // The session of a new turn is created here; the run itself is what these tests look at.
+  prepareInvocationSession: hoisted.prepareSession,
 }));
 
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -76,6 +83,7 @@ beforeEach(async () => {
   AGENT = { _id: 'a1', key: 'support-agent', name: 'Support', projectId: 'proj-1', tenantId: 'tenant-1', config: { modelKey: 'gpt-4o' } };
   hoisted.resolveAgentModel.mockImplementation(async () => AGENT);
   hoisted.getModelByKey.mockResolvedValue(null);
+  hoisted.prepareSession.mockResolvedValue({ conversationId: 'conv-1', conversation: { _id: 'conv-1' }, attachments: [], namedAttachments: [] });
   hoisted.runAgentCompletion.mockResolvedValue({ content: 'hello', conversationId: 'conv-1' });
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientInferenceApiPlugin);

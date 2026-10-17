@@ -5,7 +5,7 @@
  * Cognipeer API token at:
  *
  *   GET  /api/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json
- *   POST /api/public/a2a/:tenantId/:endpointSlug   (JSON-RPC message/send, tasks/get)
+ *   POST /api/public/a2a/:tenantId/:endpointSlug   (JSON-RPC message/send, message/stream, tasks/get, tasks/cancel)
  *
  * The URL carries the tenant id (opaque) plus the agent's random 16-char
  * endpoint slug — the pair is unguessable, but treat it like a webhook URL:
@@ -105,6 +105,7 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
           tenantId: agent.tenantId,
           projectId: agent.projectId,
           userId: PUBLIC_A2A_USER_ID,
+          licenseType: tenant.licenseType,
         },
         agent,
         request,

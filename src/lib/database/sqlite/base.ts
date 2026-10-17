@@ -1162,12 +1162,15 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
+    // Digest of the transcript a chat-completions client holds, to match a resent transcript back to its session.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'transcriptHash', 'transcriptHash TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // A client tool call a host page has to answer: its timeout (JSON).
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_transcript ON ${TABLES.agentConversations}(projectId, agentKey, createdBy, transcriptHash, updatedAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).

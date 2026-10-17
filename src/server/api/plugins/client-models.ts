@@ -14,17 +14,19 @@
  * rather than overwriting the real secret (`mergeSettings`). Model providers are
  * returned via the provider service's already-sanitized view (`hasCredentials`).
  *
- *   GET    /client/v1/models              – list (?category,?providerKey,?providerDriver,?includeProviders)
+ *   GET    /client/v1/models              – list (?category,?providerKey,?providerDriver,?includeProviders);
+ *                                           `data` also lists the project's active agents as `agent:<key>`
+ *                                           when the caller may read the `agents` service
  *   POST   /client/v1/models              – create
  *   POST   /client/v1/models/dynamic      – create a dynamic (routing) model
  *   GET    /client/v1/models/providers    – list model providers (sanitized)
  *   POST   /client/v1/models/providers    – create a model provider
- *   GET    /client/v1/models/:id          – fetch one
+ *   GET    /client/v1/models/:id          – fetch one (`agent:<key>` fetches an active agent, same condition)
  *   PUT    /client/v1/models/:id          – update
  *   DELETE /client/v1/models/:id          – delete
  */
 
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
   type IDynamicRoutingConfig,
   type IModel,
@@ -42,7 +44,8 @@ import {
   listModels,
   updateModel,
 } from '@/lib/services/models/modelService';
-import { toOpenAiModelListResponse } from '@/lib/services/models/openaiDiscovery';
+import { toOpenAiAgentListEntry, toOpenAiModelListResponse } from '@/lib/services/models/openaiDiscovery';
+import { getAgentByKey, listAgents } from '@/lib/services/agents';
 import {
   ModelCapabilityValidationError,
   parseModelCapabilityOverrides,
@@ -50,7 +53,13 @@ import {
 } from '@/lib/services/models/modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
-import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import {
+  authorizationRefusalOf,
+  authorizeServiceForRequest,
+  readJsonBody,
+  sendApiTokenError,
+  withClientApiRequestContext,
+} from '../fastify-utils';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -59,6 +68,11 @@ import {
 } from './guardrail-bindings';
 
 const logger = createLogger('api:client-models');
+
+/** The route is gated on `models`; the agents behind it are listed only to a caller who may read the `agents` service. */
+async function mayReadAgents(request: FastifyRequest): Promise<boolean> {
+  return (await authorizeServiceForRequest(request, 'agents', { level: 'read' })).allowed;
+}
 
 const PLACEHOLDER = '••••••••';
 const SENSITIVE_FIELDS = new Set([
@@ -223,9 +237,15 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       const openAiDiscovery = toOpenAiModelListResponse(models);
+      // Agents answer chat completions and Responses by `agent:<key>`, so an OpenAI client's model picker lists them
+      // too - unless the query narrows to something an agent is not (another category, a provider).
+      const listsAgents = (query.category === undefined || query.category === 'llm') && !query.providerDriver && !query.providerKey;
+      const agents = listsAgents && await mayReadAgents(request)
+        ? (await listAgents(auth.tenantDbName, { projectId, status: 'active' })).map(toOpenAiAgentListEntry)
+        : [];
       const payload: Record<string, unknown> = {
         object: openAiDiscovery.object,
-        data: openAiDiscovery.data,
+        data: [...openAiDiscovery.data, ...agents],
         models: models.map(sanitizeModel),
       };
 
@@ -235,6 +255,8 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(payload);
     } catch (error) {
+      // The engine could not decide whether agents may be listed: the wrapper answers as the gate would (503).
+      if (authorizationRefusalOf(error)) throw error;
       logger.error('Client list models error', { error });
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
@@ -285,6 +307,12 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       const projectId = requireProjectId(auth.projectId, reply);
       if (!projectId) return reply;
       const { id } = request.params as { id: string };
+      if (id.startsWith('agent:')) {
+        // An agent is not listed to a caller who may not read the agents service: for them it is not found.
+        const agent = await mayReadAgents(request) ? await getAgentByKey(auth.tenantDbName, id.slice('agent:'.length), projectId) : null;
+        if (!agent || agent.status !== 'active') return reply.code(404).send({ error: 'Agent not found' });
+        return reply.code(200).send(toOpenAiAgentListEntry(agent));
+      }
       const model = await getModelById(auth.tenantDbName, id, projectId);
 
       if (!model) {
@@ -293,6 +321,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ model: sanitizeModel(model) });
     } catch (error) {
+      if (authorizationRefusalOf(error)) throw error;
       logger.error('Client fetch model error', { error });
       return sendApiTokenError(reply, error)
         ?? reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });

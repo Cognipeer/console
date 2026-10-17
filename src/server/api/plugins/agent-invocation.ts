@@ -28,17 +28,22 @@ import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentAction
 import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   agentDefaultCallback,
+  agentRunConcurrencyLimitErrorBody,
+  agentRunConflictErrorBody,
   apiErrorBody,
+  idempotencyKeyConflictErrorBody,
   publicAgentRunId,
   resolveAgentRunLimits,
   serializeAgentRun,
   validateCallbackRequest,
   type AgentRunLimits,
+  type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
 import { resolveRunInputs } from '@/lib/services/agents/agentInputs';
 import { resolveResponseFormatSchema } from '@/lib/services/agents/agentRuntimeConfig';
 import {
+  InputContentPartError,
   extractResponseUserInput,
   storeResponseInputFiles,
   type ResponseUserInput,
@@ -220,7 +225,11 @@ export interface InvocationInput {
   userMessage: string;
 }
 
-/** The text and the files (`input_file` / `input_image`) of the last user message (the Responses `input`). */
+/**
+ * The text and the files (`input_file` / `input_image`) of the last user
+ * message (the Responses `input`, or chat `messages`): every text part joined,
+ * a part type the API does not take refused (400 `unsupported_content_part`).
+ */
 export function parseInvocationInput(
   reply: FastifyReply,
   dialect: InvocationDialect,
@@ -228,7 +237,13 @@ export function parseInvocationInput(
   input: unknown,
   options: { allowEmpty?: boolean } = {},
 ): InvocationInput | null {
-  const userInput = extractResponseUserInput(input);
+  let userInput: ResponseUserInput;
+  try {
+    userInput = extractResponseUserInput(input);
+  } catch (error) {
+    if (error instanceof InputContentPartError) return fail(reply, dialect, invalid(error.message, error.code, error.param));
+    throw error;
+  }
   const userMessage = userInput.text ?? '';
   if (!userMessage && userInput.files.length === 0 && !options.allowEmpty) {
     return fail(reply, dialect, invalid('input field is required (string or array of message items)', 'missing_input', 'input'));
@@ -615,6 +630,20 @@ export function invocationRuntimeContext(request: FastifyRequest, ctx: ApiTokenC
 }
 
 // ── Replies ──────────────────────────────────────────────────────────────
+
+/** The 409 / 429 a start outcome is refused with (client envelope; `openAiEnvelopeOf` for OpenAI), or null for a run. */
+export function runOutcomeRefusal(outcome: StartAgentRunOutcome): { status: number; body: unknown } | null {
+  switch (outcome.kind) {
+    case 'conflict':
+      return { status: 409, body: agentRunConflictErrorBody() };
+    case 'idempotency_conflict':
+      return { status: 409, body: idempotencyKeyConflictErrorBody() };
+    case 'concurrency_limit':
+      return { status: 429, body: agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass) };
+    default:
+      return null;
+  }
+}
 
 /** The runs API URL of a run (`Location` of every 202). */
 export function agentRunLocation(run: Pick<IAgentRun, '_id'>): string {

@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { AgentGuardrailBlockedError, getConversationById, type AgentChatResponse } from '@/lib/services/agents/agentService';
+import { getConversationById } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -15,25 +15,50 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
-import { toClientErrorBody, type ClientOutputFile } from '@/lib/services/agents/clientWire';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
-import type { IAgent } from '@/lib/database';
+import type { AgentRunClass, IAgent, IAgentConversation, IAgentRun } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
-import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
+import { approvalAuthorizerFor } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
-import { agentRunLocation, authorizeInvocationTarget, parseInvocationResponseFormat, resolveInvocationInputs, resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
-import { publicAgentRunId } from '@/lib/services/agents/agentRunService';
+import {
+  agentRunLocation,
+  authorizeInvocationTarget,
+  checkSessionContinuable,
+  openAiEnvelopeOf,
+  parseInvocationInput,
+  parseInvocationResponseFormat,
+  parseRunMetadata,
+  prepareInvocationSession,
+  readIdempotencyKey,
+  resolveInvocationInputs,
+  resolveInvocationLimits,
+  resolvePublishedAgentConfig,
+  sendInvocationFailure,
+  type InvocationInput,
+} from './agent-invocation';
+import { idempotencyKeyConflictErrorBody } from '@/lib/services/agents';
+import { isAgentRunActive, lookupIdempotentAgentRun, publicAgentRunId, waitForAgentRun } from '@/lib/services/agents/agentRunService';
+import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
+import { namedFileIds } from '@/lib/services/agents/responseInputFiles';
+import { findChatTranscriptSessionId, rememberChatTranscript } from '@/lib/services/agents/chatTranscript';
+import { agentResponseStatus } from './agent-response-object';
+import { sendAgentGuardrailBlock } from './agent-config-write';
+import { openSseConnection } from './sse-connection';
 import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
   AGENT_MODEL_PREFIX,
+  completionOfRun,
   resolveAgentModel,
   runAgentCompletion,
   toChatChunk,
   toChatCompletion,
   toChatToolCallsChunk,
+  toChatUsageChunk,
   extractToolAnswers,
   type OpenAiMessage,
+  type RunAgentCompletionInput,
 } from './agent-openai-bridge';
 import {
   calculateCost,
@@ -43,7 +68,6 @@ import {
   checkBudget,
   checkPerRequestLimits,
   checkRateLimit,
-  settleUsageBudget,
 } from '@/lib/quota/quotaGuard';
 import {
   anthropicErrorBody,
@@ -58,77 +82,30 @@ import {
 import {
   applyStreamHeaders,
   authorizationRefusalOf,
+  getHeaderValue,
   readJsonBody,
   withAnthropicApiRequestContext,
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
 import { authz } from '@/lib/iam/routeAuthz';
+import {
+  estimateTokens,
+  extractMessageText,
+  modelChatFailure,
+  quotaExceededPayload,
+  runModelChatCompletion,
+  sanitize,
+  type ChatCompletionRequest,
+} from './model-chat-gateway';
 
 const logger = createLogger('api:client-inference');
 
-type MessageContentPart = string | { text?: string };
-type ChatMessage = {
-  content?: string | MessageContentPart[];
-};
-type ChatCompletionRequest = {
-  [key: string]: unknown;
-  max_completion_tokens?: number;
-  max_tokens?: number;
-  messages?: unknown;
-  model?: string;
-  request_id?: string;
-  stream?: boolean;
-};
 type EmbeddingRequest = {
   [key: string]: unknown;
   input?: string | string[];
   model?: string;
   request_id?: string;
 };
-
-function quotaExceededPayload(message = 'Quota exceeded') {
-  return { error: { message, type: 'rate_limit_error' } };
-}
-
-
-function estimateTokens(text: string): number {
-  if (!text) {
-    return 0;
-  }
-  return Math.ceil(text.length / 4);
-}
-
-function extractMessageText(messages: unknown): string {
-  if (!Array.isArray(messages)) {
-    return '';
-  }
-
-  const parts: string[] = [];
-  for (const message of messages as ChatMessage[]) {
-    const content = message?.content;
-    if (typeof content === 'string') {
-      parts.push(content);
-      continue;
-    }
-
-    if (!Array.isArray(content)) {
-      continue;
-    }
-
-    for (const part of content) {
-      if (typeof part === 'string') {
-        parts.push(part);
-        continue;
-      }
-
-      if (typeof part?.text === 'string') {
-        parts.push(part.text);
-      }
-    }
-  }
-
-  return parts.join('\n');
-}
 
 function extractEmbeddingInputText(input: unknown): string {
   if (typeof input === 'string') {
@@ -148,26 +125,6 @@ function extractEmbeddingInputText(input: unknown): string {
   return JSON.stringify(input);
 }
 
-function sanitize(value: unknown, max = 20_000) {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  try {
-    const serialized = JSON.stringify(value);
-    if (serialized.length <= max) {
-      return value;
-    }
-
-    return {
-      preview: serialized.slice(0, max),
-      truncated: true,
-    };
-  } catch {
-    return '[unserializable]';
-  }
-}
-
 function invalidJson(reply: FastifyReply) {
   return reply.code(400).send({
     error: {
@@ -177,9 +134,32 @@ function invalidJson(reply: FastifyReply) {
   });
 }
 
+/** Chat parameters an agent does not take (its own config decides); listed back in `X-Cognipeer-Ignored-Params`. */
+const AGENT_IGNORED_CHAT_PARAMS = [
+  'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'tools', 'tool_choice', 'parallel_tool_calls',
+  'stop', 'seed', 'presence_penalty', 'frequency_penalty', 'n', 'logit_bias', 'logprobs', 'top_logprobs',
+] as const;
+
+const chatFail = (
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  code: string,
+  options: { type?: string; param?: string } = {},
+) => sendInvocationFailure(reply, 'openai', {
+  status, type: options.type ?? 'invalid_request_error', message, code, ...(options.param ? { param: options.param } : {}),
+});
+
 /**
  * Runs an agent and answers in the chat-completions shape, streaming when
- * the caller asked for it.
+ * the caller asked for it. System and developer messages are ignored (the
+ * agent owns its prompt), and only the last user message is the turn: the
+ * session holds the rest, found by `conversation_id`, the
+ * `X-Cognipeer-Session-Id` header or, failing both, the transcript the client
+ * resends (chatTranscript.ts). The turn is a run like on the other dialects:
+ * `service_tier: "flex"` queues it as a deferred run the call waits on, an
+ * `Idempotency-Key` makes a retry the same run, a wait window that ends first
+ * answers 202 and a stream that loses its reader stops the run.
  *
  * Quota and usage accounting stay the agent runtime's own: `executeAgentChat`
  * records the turn against the agent, which is where an agent run belongs.
@@ -191,7 +171,31 @@ async function handleAgentChatCompletion(input: {
   agent: IAgent;
   auth: ApiTokenContext;
   body: Record<string, unknown>;
-  headers: FastifyRequest['headers'];
+  model: string;
+  reply: FastifyReply;
+}) {
+  const { request, agent, auth, body, model, reply } = input;
+  try {
+    return await runAgentChat({ request, agent, auth, body, model, reply });
+  } catch (error) {
+    // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope).
+    if (authorizationRefusalOf(error)) throw error;
+    return sendAgentChatFailure(reply, error);
+  }
+}
+
+function sendAgentChatFailure(reply: FastifyReply, error: unknown) {
+  const blocked = sendAgentGuardrailBlock(reply, error);
+  if (blocked) return blocked;
+  const classified = logAgentRouteError(logger, 'Agent chat completion failed', error);
+  return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
+}
+
+async function runAgentChat(input: {
+  request: FastifyRequest;
+  agent: IAgent;
+  auth: ApiTokenContext;
+  body: Record<string, unknown>;
   model: string;
   reply: FastifyReply;
 }) {
@@ -201,8 +205,14 @@ async function handleAgentChatCompletion(input: {
   // The agent's `showReasoning` is applied by the run itself; a request can only narrow it further
   // (`include_reasoning: false` / `reasoning: { exclude: true }`), never bring back what the agent hid.
   const includeReasoning = shouldReturnReasoning(undefined, body);
+  const messages = Array.isArray(body.messages) ? body.messages as OpenAiMessage[] : undefined;
+  const answeringToolCalls = extractToolAnswers(messages).length > 0;
+  const version = typeof body.version === 'number' ? body.version : undefined;
 
-  const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, input.headers, {
+  const ignored = AGENT_IGNORED_CHAT_PARAMS.filter((name) => body[name] !== undefined && body[name] !== null);
+  if (ignored.length > 0) void reply.header('X-Cognipeer-Ignored-Params', ignored.join(','));
+
+  const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
     userId: auth.tokenRecord.userId,
     tokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
     source: 'api',
@@ -211,21 +221,72 @@ async function handleAgentChatCompletion(input: {
   // `reasoning_effort` / `reasoning: { effort }`: the lowest rung (agent pick > Model Hub > this), refused when invalid.
   const reasoningRequest = parseAgentRequestReasoning(body);
   if (reasoningRequest.error) {
-    return reply.code(400).send({
-      error: { message: reasoningRequest.error, type: 'invalid_request_error', param: 'reasoning_effort', code: 'invalid_reasoning' },
-    });
+    return chatFail(reply, 400, reasoningRequest.error, 'invalid_reasoning', { param: 'reasoning_effort' });
   }
 
-  // `response_format` (the answer comes back as a JSON string in `message.content`) and the `inputs` extension:
-  // both refused here, before a run exists, in OpenAI's envelope.
+  // `response_format` (the answer comes back as a JSON string in `message.content`), the `inputs` extension and
+  // `metadata`: all refused here, before a run exists, in OpenAI's envelope.
   const responseFormat = parseInvocationResponseFormat(reply, 'openai', body.response_format, 'response_format');
   if (!responseFormat) return reply;
-  const runInputs = resolveInvocationInputs(
-    reply, 'openai',
-    await resolvePublishedAgentConfig(auth.tenantDbName, agent, auth.projectId, typeof body.version === 'number' ? body.version : undefined),
-    body.inputs,
-  );
+  const runInputs = resolveInvocationInputs(reply, 'openai', await resolvePublishedAgentConfig(auth.tenantDbName, agent, auth.projectId, version), body.inputs);
   if (!runInputs) return reply;
+  const metadata = parseRunMetadata(body.metadata);
+  if (!metadata.ok) return chatFail(reply, 400, metadata.message, 'invalid_metadata', { param: 'metadata' });
+  // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class, waited on like a plain call.
+  const runClass: AgentRunClass = body.service_tier === 'flex' ? 'deferred' : 'default';
+  // A deferred run waits for a slot in its own queue: there is no turn to stream yet.
+  if (streaming && runClass === 'deferred') {
+    return chatFail(reply, 400, 'stream cannot be combined with service_tier "flex"', 'unsupported_parameter', { param: 'service_tier' });
+  }
+  const idempotency = readIdempotencyKey(request, reply, 'openai');
+  if (!idempotency) return reply;
+
+  // The turn: the last user message's text and files (an image-only message is a message), or the answers to tool calls.
+  let userInput: InvocationInput | null = null;
+  if (!answeringToolCalls) {
+    userInput = parseInvocationInput(reply, 'openai', agent, messages, { allowEmpty: true });
+    if (!userInput) return reply;
+    if (!userInput.userMessage && userInput.userInput.files.length === 0 && !runInputs.inputs) {
+      return chatFail(reply, 400, 'messages must contain at least one user message', 'missing_messages', { param: 'messages' });
+    }
+  }
+
+  // The session: named by the caller, else (a user turn) the one whose last turn left the transcript the request continues.
+  const namedBySession = typeof body.conversation_id === 'string' && body.conversation_id !== '' ? body.conversation_id : undefined;
+  const namedByHeader = getHeaderValue(request, 'x-cognipeer-session-id') || undefined;
+  if (namedBySession && namedByHeader && namedBySession !== namedByHeader) {
+    return chatFail(reply, 400, 'conversation_id and X-Cognipeer-Session-Id name different sessions: send one of them', 'session_conflict');
+  }
+  const named = namedBySession ?? namedByHeader;
+  const matched = named || answeringToolCalls
+    ? undefined
+    : await findChatTranscriptSessionId(auth.tenantDbName, { projectId: auth.projectId, agentKey: agent.key, userId: String(auth.tokenRecord.userId ?? '') }, messages);
+  const sessionId = named ?? matched;
+  if (answeringToolCalls && !sessionId) {
+    return chatFail(reply, 400, 'conversation_id is required to answer a tool call: send the one the reply carried', 'missing_conversation_id', { param: 'conversation_id' });
+  }
+  let conversation: IAgentConversation | null = null;
+  if (sessionId) {
+    const found = await getConversationById(auth.tenantDbName, sessionId).catch(() => null);
+    if (found && found.agentKey === agent.key && found.projectId === auth.projectId) conversation = found;
+    else if (named) return chatFail(reply, 404, 'conversation_id does not match a conversation for this agent', 'session_not_found', { param: 'conversation_id' });
+  }
+  if (conversation) {
+    if (answeringToolCalls) {
+      // A `tool` message answers an open call (authorized when it is resolved): only the access to the session is asked here.
+      const access = await decideSessionAccess(request, conversation, {
+        need: 'continue',
+        agent,
+        actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
+      });
+      if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
+    } else if (!await checkSessionContinuable(request, reply, 'openai', auth, agent, conversation)) {
+      return reply;
+    }
+  }
+  if (userInput?.userInput.files.some((file) => file.fileId) && !conversation) {
+    return chatFail(reply, 400, 'file_id names a file already uploaded to a session: continue that session with conversation_id, or send file_data / image_url.', 'attachment_not_found');
+  }
 
   // Which of the agent's models answers (`agent_model` in the body - `extra_body` for OpenAI SDKs - or the
   // `x-cognipeer-agent-model` header; the session's last model otherwise). `model` stays the agent's id.
@@ -233,15 +294,9 @@ async function handleAgentChatCompletion(input: {
   const askedModel = requestedAgentModel(request, body);
   if (askedModel || agent.config.additionalModels?.length) {
     try {
-      const runConfig = await resolveAgentConfigForModels(auth.tenantDbName, agent, auth.projectId, typeof body.version === 'number' ? body.version : undefined);
+      const runConfig = await resolveAgentConfigForModels(auth.tenantDbName, agent, auth.projectId, version);
       if (askedModel || runConfig.additionalModels?.length) {
-        const conversation = typeof body.conversation_id === 'string'
-          ? await getConversationById(auth.tenantDbName, body.conversation_id).catch(() => null)
-          : null;
-        modelChoice = await resolveRunModelForRequest(request, {
-          agent, config: runConfig, projectId: auth.projectId, requested: askedModel,
-          conversation: conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId ? conversation : null,
-        });
+        modelChoice = await resolveRunModelForRequest(request, { agent, config: runConfig, projectId: auth.projectId, requested: askedModel, conversation });
       }
     } catch (error) {
       if (error instanceof AgentModelError) return sendOpenAiAgentModelError(reply, error);
@@ -250,6 +305,40 @@ async function handleAgentChatCompletion(input: {
   }
   const cognipeer = modelChoice ? { cognipeer: { agent_model: modelChoice.modelKey } } : {};
   const limits = await resolveInvocationLimits(auth);
+  const ref = { tenantDbName: auth.tenantDbName, tenantId: auth.tenantId, projectId: auth.projectId };
+  // Only a session the caller named is part of what makes a retry "the same": a new (or matched) one is not.
+  const idempotencyConversationScope = named ?? null;
+
+  // A retry of a run this key already started: its answer, without a second session or a second run.
+  let replayed: IAgentRun | null = null;
+  if (idempotency.key && userInput) {
+    const prior = await lookupIdempotentAgentRun({
+      ...ref,
+      agentKey: agent.key,
+      userMessage: userInput.userMessage,
+      idempotencyAttachments: namedFileIds(userInput.userInput.files),
+      version,
+      idempotencyKey: idempotency.key,
+      idempotencyConversationScope,
+    });
+    if (prior.kind === 'conflict') return reply.code(409).send(openAiEnvelopeOf(idempotencyKeyConflictErrorBody()));
+    if (prior.kind === 'replay') replayed = prior.run;
+  }
+
+  // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
+  if (runClass === 'deferred' && userInput && !replayed) {
+    await assertQueuedTurnSpendAllowed({ ...ref, agentKey: agent.key, userId: auth.tokenRecord.userId });
+  }
+
+  // The session (new or continued), the model choice stored on it, the message's files as its files.
+  const turn = userInput && !replayed
+    ? {
+      userMessage: userInput.userMessage,
+      session: await prepareInvocationSession(auth, { agent, conversation, ...(modelChoice ? { modelChoice } : {}), userInput: userInput.userInput }),
+    }
+    : undefined;
+  const conversationId = replayed?.conversationId ?? turn?.session.conversationId ?? String(sessionId);
+  void reply.header('X-Cognipeer-Session-Id', conversationId);
 
   const common = {
     limits,
@@ -258,11 +347,15 @@ async function handleAgentChatCompletion(input: {
     ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     ...(responseFormat.format ? { responseFormat: responseFormat.format } : {}),
     ...(runInputs.inputs ? { inputs: runInputs.inputs } : {}),
+    runClass,
+    metadata: metadata.metadata,
+    ...(idempotency.key ? { idempotencyKey: idempotency.key, idempotencyConversationScope } : {}),
     agent,
     model,
-    messages: body.messages as OpenAiMessage[] | undefined,
-    ...(typeof body.conversation_id === 'string' ? { conversationId: body.conversation_id } : {}),
-    ...(typeof body.version === 'number' ? { version: body.version } : {}),
+    messages,
+    ...(turn ? { turn } : {}),
+    conversationId,
+    ...(version !== undefined ? { version } : {}),
     runtimeContext,
     ctx: {
       tenantDbName: auth.tenantDbName,
@@ -286,30 +379,20 @@ async function handleAgentChatCompletion(input: {
       },
     },
   };
+  // A retry's run waits up to the window when it is still going; every other call goes through the engine.
+  const execute = async (hooks: Pick<RunAgentCompletionInput, 'signal' | 'onTextChunk' | 'onReasoningChunk'> = {}) => {
+    if (!replayed) return runAgentCompletion({ ...common, ...hooks });
+    const settled = isAgentRunActive(replayed) && replayed.status !== 'scheduled'
+      ? (await waitForAgentRun({ ...ref, runId: String(replayed._id) }, limits.syncWaitMs)) ?? replayed
+      : replayed;
+    return completionOfRun(settled, conversationId);
+  };
+  // The next request of this client carries what it holds now: remember it (a retry's answer is not a new turn).
+  const remember = (result: { content: string; toolCalls?: unknown[] }) =>
+    replayed || result.toolCalls?.length ? undefined : rememberChatTranscript(auth.tenantDbName, conversationId, messages, result.content);
 
   if (!streaming) {
-    let result: Awaited<ReturnType<typeof runAgentCompletion>>;
-    try {
-      result = await runAgentCompletion({
-        ...common,
-        onSession: (conversationId) => { void reply.header('X-Cognipeer-Session-Id', conversationId); },
-      });
-    } catch (error) {
-      if (error instanceof AgentGuardrailBlockedError) {
-        return reply.code(error.status).send({
-          error: {
-            type: 'guardrail_block',
-            action: 'block',
-            message: error.message,
-            reason: error.reason,
-            guardrail_key: error.guardrailKey ?? null,
-            hook: error.hook ?? null,
-          },
-        });
-      }
-      const classified = logAgentRouteError(logger, 'Agent chat completion failed', error);
-      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
-    }
+    const result = await execute();
     if ('error' in result) {
       return reply.code(result.status).send({
         error: {
@@ -333,52 +416,30 @@ async function handleAgentChatCompletion(input: {
           model,
           choices: [],
           cognipeer: {
-            status: 'in_progress',
+            status: agentResponseStatus(result.accepted),
             run_id: publicAgentRunId(result.accepted),
             session_id: result.conversationId,
             ...(modelChoice ? { agent_model: modelChoice.modelKey } : {}),
           },
         });
     }
+    await remember(result);
     return reply.code(200).send({
       ...toChatCompletion({ id, model, ...result, ...(includeReasoning ? {} : { reasoning: undefined }) }),
       ...cognipeer,
     });
   }
 
-  // The headers go out once the session is known (`X-Cognipeer-Session-Id`), or with the first chunk.
-  applyStreamHeaders(reply);
-
-  let closed = false;
-  // A reader that goes away stops the run, as OpenAI's stream does.
-  const disconnect = new AbortController();
-  reply.raw.on('close', () => {
-    closed = true;
-    if (!reply.raw.writableFinished) disconnect.abort();
-  });
-  const send = (payload: unknown) => {
-    if (closed) return;
-    try {
-      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
-    } catch {
-      closed = true;
-    }
-  };
+  const sse = openSseConnection(reply);
+  const send = (payload: unknown) => sse.write(`data: ${JSON.stringify(payload)}\n\n`);
+  send(toChatChunk({ id, model, opening: true, conversationId }));
 
   let streamed = '';
   let streamedReasoning = '';
-  let toolCallsSent = false;
-  let stopReason: AgentChatResponse['stop_reason'];
-  let files: ClientOutputFile[] | undefined;
   try {
-    const result = await runAgentCompletion({
-      ...common,
-      signal: disconnect.signal,
-      onSession: (conversationId) => {
-        if (reply.raw.headersSent) return;
-        reply.raw.setHeader('X-Cognipeer-Session-Id', conversationId);
-        reply.raw.flushHeaders?.();
-      },
+    // A reader that goes away stops the run, as OpenAI's stream does.
+    const result = await execute({
+      signal: sse.signal,
       onTextChunk: (text) => {
         streamed += text;
         send(toChatChunk({ id, model, delta: text }));
@@ -396,7 +457,7 @@ async function handleAgentChatCompletion(input: {
     if ('error' in result) {
       send({ error: { message: result.error, type: result.type ?? 'invalid_request_error', ...(result.code ? { code: result.code } : {}) } });
     } else if ('accepted' in result) {
-      // Not reached for a stream (it has no window); kept so every outcome ends the stream with something.
+      // Only a retry of a run that is still going gets here (a stream has no window): say where it can be followed.
       send({ error: { message: 'The run is still in progress', type: 'server_error', code: 'agent_run_in_progress', run_id: publicAgentRunId(result.accepted) } });
     } else {
       // Thinking that did not stream (a routed run without relay, a model call that was not streamed)
@@ -420,23 +481,24 @@ async function handleAgentChatCompletion(input: {
           });
         }
       }
-      stopReason = result.stopReason;
-      files = result.outputFiles;
       if (result.toolCalls?.length) {
         // Ends the stream the way OpenAI does when the model calls tools: the calls, then finish_reason "tool_calls".
         send({ ...toChatToolCallsChunk({ id, model, toolCalls: result.toolCalls }), conversation_id: result.conversationId });
-        toolCallsSent = true;
+      } else {
+        send({ ...toChatChunk({ id, model, finish: true, stopReason: result.stopReason, files: result.outputFiles, conversationId: result.conversationId }), ...cognipeer });
       }
+      // `stream_options.include_usage`: the run's usage, in a chunk of its own after the last one.
+      if (result.usage && (body.stream_options as { include_usage?: unknown } | undefined)?.include_usage === true) {
+        send(toChatUsageChunk({ id, model, usage: result.usage }));
+      }
+      await remember(result);
     }
-    if (!toolCallsSent) send({ ...toChatChunk({ id, model, finish: true, stopReason, files }), ...cognipeer });
   } catch (error) {
     const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
     send({ error: toClientErrorBody(classified.error) });
   } finally {
-    if (!closed) {
-      reply.raw.write('data: [DONE]\n\n');
-      reply.raw.end();
-    }
+    sse.write('data: [DONE]\n\n');
+    sse.end();
   }
   return reply;
 }
@@ -499,146 +561,12 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (!explicitAgent) await authorizeInvocationTarget(request, agent ? 'agent' : 'model');
       if (agent) {
-        // Continuing a session that waits on a request, under `cancel_pending`, cancels that request: it takes
-        // the permission to answer it.
-        if (typeof body.conversation_id === 'string') {
-          const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
-          if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
-            // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
-            // `agent.session_manage_others` and `agent.session_view_others` - as for the Responses route, whichever
-            // service gate let the token in.
-            const access = await decideSessionAccess(request, conversation, {
-              need: 'continue',
-              agent,
-              actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
-            });
-            if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
-            // A `tool` message answers an open call (authorized when it is resolved); only a new message cancels one.
-            const answeringToolCalls = extractToolAnswers(body.messages as OpenAiMessage[] | undefined).length > 0;
-            const refusal = answeringToolCalls ? null : await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
-            if (refusal?.unavailable) {
-              return reply.code(503).send({
-                error: {
-                  message: 'Authorization is temporarily unavailable',
-                  type: 'server_error',
-                  code: 'authorization_unavailable',
-                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
-                },
-              });
-            }
-            if (refusal) {
-              return reply.code(403).send({
-                error: {
-                  message: CANCEL_PENDING_FORBIDDEN_MESSAGE,
-                  type: 'permission_error',
-                  code: 'action_forbidden',
-                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
-                },
-              });
-            }
-          }
-        }
-        return handleAgentChatCompletion({
-          request,
-          agent,
-          auth,
-          body: body as Record<string, unknown>,
-          headers: request.headers,
-          model: modelKey,
-          reply,
-        });
+        return handleAgentChatCompletion({ request, agent, auth, body: body as Record<string, unknown>, model: modelKey, reply });
       }
 
-      const requestedOutputTokens =
-        typeof body.max_completion_tokens === 'number'
-          ? body.max_completion_tokens
-          : typeof body.max_tokens === 'number'
-            ? body.max_tokens
-            : undefined;
-      const estimatedInputTokens = estimateTokens(extractMessageText(body.messages));
-      const estimatedTotalTokens = requestedOutputTokens === undefined
-        ? estimatedInputTokens
-        : estimatedInputTokens + requestedOutputTokens;
-      const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
-      const quotaContext = {
-        domain: 'llm' as const,
-        licenseType: auth.tenant.licenseType as LicenseType,
-        projectId: auth.projectId,
-        resourceKey: modelKey,
-        tenantDbName: auth.tenantDbName,
-        tenantId: auth.tenantId,
-        tokenId,
-        userId: auth.tokenRecord.userId,
-      };
-
-      try {
-        const quotaResult = await checkPerRequestLimits(quotaContext, {
-          inputTokens: estimatedInputTokens,
-          outputTokens: requestedOutputTokens,
-          totalTokens: estimatedTotalTokens,
-        });
-        if (!quotaResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(quotaResult.reason || 'Quota exceeded'),
-          );
-        }
-
-        const rateLimitResult = await checkRateLimit(quotaContext, {
-          requests: 1,
-          tokens: estimatedInputTokens,
-        });
-        if (!rateLimitResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(rateLimitResult.reason || 'Rate limit exceeded'),
-          );
-        }
-
-        const budgetResult = await checkBudget(quotaContext);
-        if (!budgetResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(budgetResult.reason || 'Budget exceeded'),
-          );
-        }
-      } catch (error) {
-        logger.error('Client chat quota check error', { error });
-        return reply.code(500).send({
-          error: {
-            message: 'Quota check failed',
-            type: 'server_error',
-          },
-        });
-      }
-
-      const result = await handleChatCompletion({
-        body,
-        modelKey,
-        projectId: auth.projectId,
-        stream: Boolean(body.stream),
-        tenantDbName: auth.tenantDbName,
-        tenantId: auth.tenantId,
-        callerContext: {
-          channel: 'api',
-          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
-          projectId: auth.projectId,
-        },
-        // Settling here (rather than after the call returns, as before) is
-        // what makes this work for BOTH stream and non-stream: a streamed
-        // response's real usage isn't known until long after this function
-        // has already returned the still-open stream below, so a post-hoc
-        // `if (result.usage)` check here silently never fired for it — the
-        // budget counter never debited a single streamed request. See the
-        // 2026-09-05 assessment, F-05.
-        onUsageSettled: (cost) => {
-          void settleUsageBudget(quotaContext, cost);
-        },
-      });
-
-      const actualOutputTokens = result.usage?.outputTokens || 0;
-      if (actualOutputTokens > 0) {
-        void checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch((error) =>
-          logger.error('Failed to update chat rate limit usage', { error }),
-        );
-      }
+      const outcome = await runModelChatCompletion(auth, body, { modelKey });
+      if (outcome.kind === 'refused') return reply.code(outcome.status).send(outcome.body);
+      const { result } = outcome;
 
       if (result.stream) {
         applyStreamHeaders(reply, result.requestId);
@@ -656,51 +584,8 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope), not a model error.
       if (authorizationRefusalOf(error)) throw error;
       logger.error('Client chat completion error', { error });
-
-      if (error instanceof GuardrailBlockError) {
-        return reply.code(400).send({
-          error: {
-            action: error.action,
-            findings: error.findings,
-            guardrail_key: error.guardrailKey,
-            message: error.message,
-            type: 'guardrail_block',
-          },
-        });
-      }
-
-      const normalizedError = normalizeInferenceError(error);
-
-      try {
-        const model = modelKey
-          ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
-          : null;
-        if (model) {
-          const errorMessage = normalizedError.error.message;
-          await logModelUsage(auth.tenantDbName, model, {
-            errorMessage,
-            latencyMs: Date.now() - startedAt,
-            providerRequest: sanitize({ body, model: body?.model }),
-            providerResponse: sanitize({ error: errorMessage }),
-            requestId: typeof body?.request_id === 'string'
-              ? body.request_id
-              : crypto.randomUUID(),
-            route: 'chat.completions',
-            status: 'error',
-            usage: {},
-          });
-        }
-      } catch (logError) {
-        logger.error('Failed to log client chat completion error', { error: logError });
-      }
-
-      if (normalizedError.status >= 400 && normalizedError.status < 500) {
-        // Keeps a provider's 401/403 out of the security audit trail's `denied`
-        // bucket — our own auth already passed to get here.
-        request.upstreamStatusForwarded = true;
-      }
-
-      return reply.code(normalizedError.status).send({ error: normalizedError.error });
+      const failure = await modelChatFailure(request, auth, { modelKey, body, startedAt }, error);
+      return reply.code(failure.status).send(failure.body);
     }
   }));
 

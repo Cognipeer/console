@@ -151,8 +151,12 @@ describe('POST /client/v1/responses', () => {
     refusedFor(await respond('tok-models', 'agent:support'), 'agents');
     refusedFor(await respond('tok-models', 'support'), 'agents');
     refusedFor(await respond('tok-agents', 'chat-alpha'), 'models');
-    // a models token gets past the check to the model route
-    expect((await respond('tok-models', 'chat-alpha')).body.error.code).toBe('model_target_unsupported');
+    // a models token gets past the check to the model: one gateway call, answered as a Response object
+    const ok = await respond('tok-models', 'chat-alpha');
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(ok.body).toMatchObject({ object: 'response', status: 'completed', model: 'chat-alpha', output_text: 'hi' });
+    expect(hoisted.handleChatCompletion).toHaveBeenCalledTimes(1);
+    expect(hoisted.handleChatCompletion.mock.calls[0][0]).toMatchObject({ modelKey: 'chat-alpha', route: 'responses' });
   });
 
   it('refuses a token with neither at the gate, and answers an unknown name with 404', async () => {

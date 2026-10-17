@@ -5,6 +5,8 @@ import {
   resolveAgentRunLimits,
   startAgentRun,
   type AgentRunLimits,
+  type StartAgentRunInput,
+  type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 /**
@@ -13,7 +15,7 @@ import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
  *
  * Token-authenticated surface (per agent, `cpeer_` API token):
  *   GET  /client/v1/a2a/:agentKey/.well-known/agent-card.json
- *   POST /client/v1/a2a/:agentKey          (message/send, tasks/get)
+ *   POST /client/v1/a2a/:agentKey          (message/send, message/stream, tasks/get, tasks/cancel)
  *
  * Exposure is OPT-IN per agent via `agent.metadata.a2a` (see
  * `@/lib/services/agents/a2aExposure`); agents without it respond 404 on
@@ -25,7 +27,11 @@ import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
  * A `message/send` is a run (`startAgentRun`, channel `a2a`) executed inside
  * the call: it returns a `completed` task (or an `input-required` one when the
  * turn paused for an approval or an answer), or a `working` one when the wait
- * window ended first and the run carries on. The task id is the run's id
+ * window ended first and the run carries on. With `configuration.blocking:
+ * false` (token route only) the run is queued and the task comes back
+ * `submitted`. `message/stream` runs the same turn and answers with events.
+ * A message's parts are text, `file` (inline bytes or an http(s) uri, stored as
+ * session files) and `data` (the agent's inputs, or JSON appended to the text). The task id is the run's id
  * (`run_<runId>`), so `tasks/get` reads the run and `tasks/cancel` cancels it.
  * Ids from before (`task_<conversationId>_<messageIndex>`) still resolve
  * against the conversation's messages.
@@ -39,6 +45,16 @@ import type { IAgent, IAgentInputField, IAgentRun } from '@/lib/database';
 import type { AgentChatResponse } from '@/lib/services/agents/agentService';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
 import { resolveRunInputs, stringifyInputsBlock } from '@/lib/services/agents/agentInputs';
+import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
+import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
+import {
+  extractResponseUserInput,
+  InputContentPartError,
+  storeResponseInputFiles,
+  type ResponseInputFile,
+} from '@/lib/services/agents/responseInputFiles';
+import { attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
+import { attachmentsAvailability } from '@/lib/services/agents/sessionFilesConfig';
 import { isA2aEnabled } from '@/lib/services/agents/a2aExposure';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -49,6 +65,7 @@ import {
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
 import { resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
+import { openSseConnection, type SseConnection } from './sse-connection';
 import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
@@ -68,6 +85,8 @@ interface A2aPart {
   kind?: string;
   text?: string;
   data?: unknown;
+  /** A `file` part: its content inline (`bytes`, base64) or by reference (`uri`). */
+  file?: { bytes?: string; uri?: string; name?: string; mimeType?: string };
 }
 
 interface A2aIncomingMessage {
@@ -86,6 +105,10 @@ export interface A2aCallContext {
   /** Attribution identity: the token's user, or a sentinel for public calls. */
   userId: string;
   tokenId?: string;
+  /** The tenant's license type (file quotas are counted by it). */
+  licenseType?: string;
+  /** `configuration.blocking: false` may queue the run and answer at once (the authenticated surface only). */
+  allowNonBlocking?: boolean;
   /** The caller's run limits (its wait window included); the env ceilings otherwise. */
   limits?: AgentRunLimits;
 }
@@ -345,6 +368,11 @@ export function buildAgentCard(
   options: { publicAccess?: boolean } = {},
 ): Record<string, unknown> {
   const toolTags = (agent.config.toolBindings ?? []).flatMap((b) => b.toolNames).slice(0, 20);
+  // Text, and JSON (a `data` part: the agent's inputs; a structured answer); files too once the agent takes attachments.
+  const attachments = attachmentsAvailability(agent.config);
+  const fileTypes = attachments.available ? (attachments.cfg.allowedMimeTypes.length > 0 ? attachments.cfg.allowedMimeTypes : ['*/*']) : [];
+  const inputModes = [...new Set(['text/plain', 'application/json', ...fileTypes])];
+  const outputModes = ['text/plain', 'application/json'];
 
   return {
     protocolVersion: A2A_PROTOCOL_VERSION,
@@ -355,20 +383,20 @@ export function buildAgentCard(
     provider: { organization: 'Cognipeer', url: 'https://cognipeer.com' },
     version: agent.publishedVersion ? String(agent.publishedVersion) : '0',
     capabilities: {
-      streaming: false,
+      streaming: true,
       pushNotifications: false,
       stateTransitionHistory: false,
     },
-    defaultInputModes: ['text/plain'],
-    defaultOutputModes: ['text/plain'],
+    defaultInputModes: inputModes,
+    defaultOutputModes: outputModes,
     skills: [
       {
         id: 'chat',
         name: `Chat with ${agent.name}`,
         description: agent.description || `Conversational access to the "${agent.name}" agent.`,
         tags: ['chat', ...toolTags],
-        inputModes: ['text/plain'],
-        outputModes: ['text/plain'],
+        inputModes,
+        outputModes,
       },
     ],
     ...(options.publicAccess
@@ -384,6 +412,259 @@ export function buildAgentCard(
           security: [{ bearer: [] }],
         }),
   };
+}
+
+/** The files of a message's `file` parts (`bytes` base64 or an http(s) `uri`), as the shared input files; text and data parts are read elsewhere. */
+function a2aInputFiles(parts: A2aPart[] | undefined): ResponseInputFile[] {
+  const content = (Array.isArray(parts) ? parts : []).flatMap((part): Array<Record<string, unknown>> => {
+    if (!part || part.kind !== 'file' || !isPlainObject(part.file)) return [];
+    const { bytes, uri, name, mimeType } = part.file;
+    const filename = typeof name === 'string' && name ? { filename: name } : {};
+    if (typeof bytes === 'string' && bytes) {
+      return [{ type: 'input_file', file_data: typeof mimeType === 'string' && mimeType ? `data:${mimeType};base64,${bytes}` : bytes, ...filename }];
+    }
+    if (typeof uri === 'string' && uri) return [{ type: 'input_file', file_url: uri, ...filename }];
+    return [];
+  });
+  // The shared reader checks the shapes (an http(s) uri) and the file count.
+  return content.length > 0 ? extractResponseUserInput([{ role: 'user', content }]).files : [];
+}
+
+type A2aTurn =
+  | { failure: ReturnType<typeof jsonRpcError> }
+  | { base: Omit<StartAgentRunInput, 'execution'>; limits: AgentRunLimits };
+
+/**
+ * Everything a `message/send` / `message/stream` needs before its run starts:
+ * the declared inputs, the text, the files stored on the session, the session
+ * itself (contextId), the cancel_pending check, the runtime context. A failure
+ * is the JSON-RPC error to answer with.
+ */
+async function prepareA2aTurn(
+  ctx: A2aCallContext,
+  agent: IAgent,
+  request: FastifyRequest,
+  params: Record<string, unknown> | undefined,
+  rpcId: string | number | null,
+  /** The run is queued rather than waited on (`blocking: false`). */
+  queued: boolean,
+): Promise<A2aTurn> {
+  const fail = (code: number, message: string, data?: Record<string, unknown>): A2aTurn => ({ failure: jsonRpcError(rpcId, code, message, data) });
+  const message = (params?.message ?? {}) as A2aIncomingMessage;
+  // The config this call runs (published), for the agent's declared inputs and file limits.
+  const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
+  const data = splitA2aDataParts(message.parts, runConfig.inputs);
+  const resolvedInputs = resolveRunInputs(runConfig.inputs, Object.keys(data.inputs).length > 0 ? data.inputs : null);
+  if (!resolvedInputs.ok) {
+    return fail(-32602, 'Invalid params: invalid inputs', { type: 'invalid_request_error', code: 'invalid_inputs', errors: resolvedInputs.errors });
+  }
+  let files: ResponseInputFile[];
+  try {
+    files = a2aInputFiles(message.parts);
+  } catch (error) {
+    if (error instanceof InputContentPartError) return fail(-32602, `Invalid params: ${error.message}`, { type: 'invalid_request_error', code: error.code });
+    throw error;
+  }
+  const availability = attachmentsAvailability(runConfig);
+  if (files.length > 0 && !availability.available) {
+    return fail(-32602, `Invalid params: ${attachmentsUnavailableMessage(availability.reason)}`, { type: 'invalid_request_error', code: 'attachments_disabled' });
+  }
+  const userMessage = appendA2aData(extractText(message.parts), data.other);
+  if (!userMessage.trim() && !resolvedInputs.inputs && files.length === 0) {
+    return fail(-32602, 'Invalid params: message.parts must contain text');
+  }
+
+  // contextId ↔ conversationId: reuse the Responses API conversation
+  // store, scoped on agent AND project like every other agent surface.
+  const contextId = typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined;
+  if (contextId && !conversationVisibleTo(await getConversationById(ctx.tenantDbName, contextId), agent, ctx)) {
+    return fail(-32602, 'Invalid params: unknown contextId');
+  }
+  // A queued turn learns of an exhausted spend limit now, before a session is created for it.
+  if (queued) {
+    await assertQueuedTurnSpendAllowed({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, agentKey: agent.key, userId: ctx.userId });
+  }
+  const resolved = await resolveConversation(contextId, agent, ctx, 'a2a');
+  if ('error' in resolved) return fail(-32602, 'Invalid params: unknown contextId');
+  const { conversationId } = resolved;
+
+  // A new message to a task that waits on a request, under `cancel_pending`, cancels that request. Over the
+  // token route the caller is a principal the engine can be asked about (the public route's callers are
+  // the conversation's creator by construction - `conversationVisibleTo` - and have no principal).
+  if (contextId && request.apiTokenContext) {
+    const refusal = await refuseCancelPending(request, {
+      tenantDbName: ctx.tenantDbName,
+      conversation: await getConversationById(ctx.tenantDbName, contextId),
+      agent,
+    });
+    if (refusal?.unavailable) {
+      return fail(ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+        ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+      });
+    }
+    if (refusal) {
+      return fail(ERR_FORBIDDEN, CANCEL_PENDING_FORBIDDEN_MESSAGE, {
+        ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+      });
+    }
+  }
+
+  let attachments: string[] = [];
+  if (files.length > 0) {
+    try {
+      ({ attachments } = await storeResponseInputFiles({
+        files,
+        scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        conversation: { _id: conversationId, agentKey: agent.key },
+        agentConfig: runConfig,
+        actor: { userId: ctx.userId, licenseType: ctx.licenseType ?? '', ...(ctx.tokenId ? { tokenId: ctx.tokenId } : {}) },
+      }));
+    } catch (error) {
+      if (error instanceof AgentAttachmentError) {
+        return fail(error.status === 429 ? ERR_AUTHORIZATION_UNAVAILABLE : -32602, `Invalid params: ${error.message}`, { type: 'invalid_request_error', code: error.code });
+      }
+      throw error;
+    }
+  }
+
+  const runtimeContext = buildRuntimeContextFromRequest(
+    message.metadata?.runtime_context,
+    request.headers,
+    {
+      userId: ctx.userId,
+      tokenId: ctx.tokenId,
+      source: 'a2a',
+    },
+  );
+  const limits = ctx.limits ?? await resolveAgentRunLimits();
+  return {
+    limits,
+    base: {
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      agentKey: agent.key,
+      conversationId,
+      userMessage,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      userId: ctx.userId,
+      ...(ctx.tokenId ? { apiTokenId: ctx.tokenId, actorType: 'api_token' as const } : {}),
+      usePublished: true,
+      runtimeContext,
+      ...(resolvedInputs.inputs ? { inputs: resolvedInputs.inputs } : {}),
+      channel: 'a2a',
+      trigger: 'request',
+      limits,
+    },
+  };
+}
+
+/** The JSON-RPC error of a start the engine refused, or null for a run. */
+function runRefusalRpc(rpcId: string | number | null, outcome: StartAgentRunOutcome): ReturnType<typeof jsonRpcError> | null {
+  switch (outcome.kind) {
+    case 'conflict':
+      return jsonRpcError(rpcId, -32603, 'An active run (queued or running) already exists for this conversation.', {
+        type: 'agent_run_conflict', code: 'agent_run_conflict',
+      });
+    case 'concurrency_limit':
+      return jsonRpcError(rpcId, -32603, 'Too many agent runs are queued or running; retry later.', {
+        type: 'rate_limit_error', code: 'agent_run_concurrency_limit', class: outcome.runClass, scope: outcome.scope, limit: outcome.limit,
+      });
+    case 'idempotency_conflict':
+      return jsonRpcError(rpcId, -32603, 'Idempotency conflict', { type: 'idempotency_key_conflict' });
+    default:
+      return null;
+  }
+}
+
+/**
+ * `message/stream`: the turn as server-sent events, one JSON-RPC response per
+ * event. The Task opens it (`submitted`), then a `working` status event, then
+ * the answer's text as artifact chunks while the model writes it (the first
+ * creates the artifact, the rest append, an empty last one closes it), the
+ * files and the structured answer as artifacts, and a final status event
+ * (`completed`, `input-required`, `failed` or `canceled`). The stream opens
+ * once the run has started: a refusal before that (409 / 429) is a plain
+ * JSON-RPC error. The client going away cancels the run, as on the other
+ * streams here. (A2A leaves a dropped stream running so it can be resumed with
+ * `tasks/resubscribe`, which this server does not offer; the Task id is the
+ * first event, so `tasks/get` and `tasks/cancel` work from the start.)
+ */
+async function streamA2aTurn(
+  reply: FastifyReply,
+  rpcId: string | number | null,
+  base: Omit<StartAgentRunInput, 'execution'>,
+  baseUrl: string,
+): Promise<FastifyReply> {
+  const contextId = base.conversationId;
+  const disconnected = new AbortController();
+  const sse: { connection: SseConnection | null } = { connection: null };
+  let taskId = '';
+  let streamed = false;
+  const textArtifactId = () => `${taskId}_artifact`;
+  const emit = (result: Record<string, unknown>) => sse.connection?.write(`data: ${JSON.stringify(jsonRpcOk(rpcId, result))}\n\n`);
+  const statusEvent = (status: Record<string, unknown>, final: boolean, metadata?: unknown) => emit({
+    kind: 'status-update', taskId, contextId, status, final, ...(metadata ? { metadata } : {}),
+  });
+  const artifactEvent = (artifact: Record<string, unknown>, append: boolean, lastChunk: boolean) => emit({
+    kind: 'artifact-update', taskId, contextId, artifact, append, lastChunk,
+  });
+  /** A Task as its closing events: its artifacts, then its status as the final event. */
+  const finish = (task: Record<string, unknown>) => {
+    if (streamed) artifactEvent({ artifactId: textArtifactId(), name: 'response', parts: [{ kind: 'text', text: '' }] }, true, true);
+    for (const artifact of (task.artifacts ?? []) as Array<Record<string, unknown>>) {
+      if (streamed && artifact.artifactId === textArtifactId()) continue;
+      artifactEvent(artifact, false, true);
+    }
+    statusEvent(task.status as Record<string, unknown>, true, task.metadata);
+  };
+
+  try {
+    const outcome = await startAgentRun({
+      ...base,
+      execution: {
+        kind: 'inline',
+        waitMs: 0,
+        stream: {
+          onTextChunk: (text) => {
+            if (!text) return;
+            artifactEvent({ artifactId: textArtifactId(), name: 'response', parts: [{ kind: 'text', text }] }, streamed, false);
+            streamed = true;
+          },
+        },
+        signal: disconnected.signal,
+        cancelOnDisconnect: true,
+        onStarted: (run) => {
+          taskId = publicAgentRunId(run);
+          sse.connection = openSseConnection(reply);
+          sse.connection.signal.addEventListener('abort', () => disconnected.abort(), { once: true });
+          emit(stateTask(taskId, contextId, 'submitted'));
+          statusEvent({ state: 'working', timestamp: new Date().toISOString() }, false);
+        },
+      },
+    });
+    const refusal = runRefusalRpc(rpcId, outcome);
+    if (refusal) return await reply.code(200).send(refusal);
+    if (outcome.kind === 'completed') {
+      finish(outcome.run.status === 'canceled'
+        ? stateTask(taskId, contextId, 'canceled')
+        : taskFromResponse(taskId, contextId, outcome.response, baseUrl));
+    } else if ('run' in outcome) {
+      finish(taskFromRun(outcome.run, baseUrl));
+    }
+  } catch (error) {
+    // Before the stream opened this is the call's error like any other; after, the run ended in failure.
+    if (!sse.connection) throw error;
+    const classified = logAgentRouteError(logger, 'A2A stream error', error);
+    statusEvent({
+      state: 'failed',
+      timestamp: new Date().toISOString(),
+      message: { kind: 'message', role: 'agent', messageId: `${taskId}_status`, parts: [{ kind: 'text', text: classified.error.message }] },
+    }, true, { errorType: classified.error.type, ...(classified.error.code ? { errorCode: classified.error.code } : {}) });
+  } finally {
+    sse.connection?.end();
+  }
+  return reply;
 }
 
 /**
@@ -408,110 +689,33 @@ export async function handleA2aRpc(
     rpcId = body.id ?? null;
     const method = body.method;
 
-    if (method === 'message/send') {
-      const message = (body.params?.message ?? {}) as A2aIncomingMessage;
-      // The config this call runs (published), for the agent's declared inputs.
-      const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
-      const data = splitA2aDataParts(message.parts, runConfig.inputs);
-      const resolvedInputs = resolveRunInputs(runConfig.inputs, Object.keys(data.inputs).length > 0 ? data.inputs : null);
-      if (!resolvedInputs.ok) {
-        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: invalid inputs', { type: 'invalid_request_error', code: 'invalid_inputs', errors: resolvedInputs.errors }));
-      }
-      const userMessage = appendA2aData(extractText(message.parts), data.other);
-      if (!userMessage.trim() && !resolvedInputs.inputs) {
-        return reply.code(200).send(
-          jsonRpcError(rpcId, -32602, 'Invalid params: message.parts must contain text'),
-        );
-      }
+    if (method === 'message/send' || method === 'message/stream') {
+      const streaming = method === 'message/stream';
+      // Only the authenticated surface may leave early (`blocking: false`): a public caller always waits
+      // for the answer, or for the window to end (a `working` task then).
+      const configuration = isPlainObject(body.params?.configuration) ? body.params.configuration : {};
+      const queued = !streaming && ctx.allowNonBlocking === true && configuration.blocking === false;
+      const prepared = await prepareA2aTurn(ctx, agent, request, body.params, rpcId, queued);
+      if ('failure' in prepared) return reply.code(200).send(prepared.failure);
+      const baseUrl = externalBaseUrl(request);
+      if (streaming) return await streamA2aTurn(reply, rpcId, prepared.base, baseUrl);
 
-      // contextId ↔ conversationId: reuse the Responses API conversation
-      // store, scoped on agent AND project like every other agent surface.
-      const contextId = typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined;
-      if (contextId && !conversationVisibleTo(await getConversationById(ctx.tenantDbName, contextId), agent, ctx)) {
-        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'));
-      }
-      const resolved = await resolveConversation(
-        contextId,
-        agent,
-        ctx,
-        'a2a',
-      );
-      if ('error' in resolved) {
-        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'));
-      }
-      const { conversationId } = resolved;
-
-      // A new message to a task that waits on a request, under `cancel_pending`, cancels that request. Over the
-      // token route the caller is a principal the engine can be asked about (the public route's callers are
-      // the conversation's creator by construction - `conversationVisibleTo` - and have no principal).
-      if (contextId && request.apiTokenContext) {
-        const refusal = await refuseCancelPending(request, {
-          tenantDbName: ctx.tenantDbName,
-          conversation: await getConversationById(ctx.tenantDbName, contextId),
-          agent,
-        });
-        if (refusal?.unavailable) {
-          return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
-            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
-          }));
-        }
-        if (refusal) {
-          return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, CANCEL_PENDING_FORBIDDEN_MESSAGE, {
-            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
-          }));
-        }
-      }
-
-      const runtimeContext = buildRuntimeContextFromRequest(
-        message.metadata?.runtime_context,
-        request.headers,
-        {
-          userId: ctx.userId,
-          tokenId: ctx.tokenId,
-          source: 'a2a',
-        },
-      );
-
-      const limits = ctx.limits ?? await resolveAgentRunLimits();
       const outcome = await startAgentRun({
-        tenantDbName: ctx.tenantDbName,
-        tenantId: ctx.tenantId,
-        projectId: ctx.projectId,
-        agentKey: agent.key,
-        conversationId,
-        userMessage,
-        userId: ctx.userId,
-        ...(ctx.tokenId ? { apiTokenId: ctx.tokenId, actorType: 'api_token' as const } : {}),
-        usePublished: true,
-        runtimeContext,
-        ...(resolvedInputs.inputs ? { inputs: resolvedInputs.inputs } : {}),
-        channel: 'a2a',
-        trigger: 'request',
+        ...prepared.base,
         // Past the window the run carries on and the caller gets a `working` task to poll with tasks/get.
-        execution: { kind: 'inline', waitMs: limits.syncWaitMs, cancelOnDisconnect: false },
-        limits,
+        execution: queued ? { kind: 'queued' } : { kind: 'inline', waitMs: prepared.limits.syncWaitMs, cancelOnDisconnect: false },
       });
-      if (outcome.kind === 'conflict') {
-        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'An active run (queued or running) already exists for this conversation.', {
-          type: 'agent_run_conflict', code: 'agent_run_conflict',
-        }));
-      }
-      if (outcome.kind === 'concurrency_limit') {
-        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'Too many agent runs are queued or running; retry later.', {
-          type: 'rate_limit_error', code: 'agent_run_concurrency_limit', class: outcome.runClass, scope: outcome.scope, limit: outcome.limit,
-        }));
-      }
-      if (outcome.kind === 'idempotency_conflict') {
-        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'Idempotency conflict', { type: 'idempotency_key_conflict' }));
-      }
+      const refusal = runRefusalRpc(rpcId, outcome);
+      if (refusal) return reply.code(200).send(refusal);
       if (outcome.kind === 'completed') {
         return reply.code(200).send(jsonRpcOk(
           rpcId,
-          taskFromResponse(publicAgentRunId(outcome.run), conversationId, outcome.response, externalBaseUrl(request)),
+          taskFromResponse(publicAgentRunId(outcome.run), prepared.base.conversationId, outcome.response, baseUrl),
         ));
       }
-      // `detached` (the window ended first) and the rest: the run as it stands — `working` while it goes on.
-      return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, externalBaseUrl(request))));
+      // `detached` (the window ended first), `accepted` (queued): the run as it stands.
+      if (!('run' in outcome)) throw new Error(`Unexpected start outcome: ${outcome.kind}`);
+      return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, baseUrl)));
     }
 
     if (method === 'tasks/get') {
@@ -718,6 +922,8 @@ export const clientA2aApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: ctx.projectId,
           userId: ctx.tokenRecord.userId,
           tokenId: ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined,
+          licenseType: ctx.tenant.licenseType,
+          allowNonBlocking: true,
           limits: await resolveInvocationLimits(ctx),
         },
         agent,

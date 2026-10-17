@@ -1,16 +1,22 @@
 /**
- * The files in a Responses API request.
+ * The input of an agent request: the text and the files of its last user message.
  *
- * `input` may carry, next to `input_text`, `input_file { file_id | file_data,
- * filename }` and `input_image { file_id | image_url }` parts. They used to be
- * dropped; now each becomes a file of the session the request runs on:
+ * Shared by every dialect that starts an agent turn (Responses, the runs API,
+ * chat completions, A2A). A message's parts, in either spelling:
+ *  - text: `input_text` / `text` — every text part, joined with a blank line;
+ *  - `input_file { file_id | file_data | file_url, filename }` (chat: `file { file: { file_id | file_data, filename } }`);
+ *  - `input_image { file_id | image_url }` (chat: `image_url { url }`).
+ * Any other part type (e.g. `input_audio`) is refused (400
+ * `unsupported_content_part`) rather than silently dropped. Each file becomes
+ * a file of the session the request runs on:
  *  - `file_id` names a file already uploaded to the session;
  *  - `file_data` (base64 or a data URL) and a `data:` `image_url` are decoded
  *    and uploaded;
- *  - an `http(s)` `image_url` is fetched through the SSRF guard, capped at the
- *    agent's file size limit, and uploaded — if the URL answers with an image
- *    (`image/*`); anything else is refused, so `image_url` is not a way to
- *    pull arbitrary web content into the model's context.
+ *  - an `http(s)` `image_url` / `file_url` is fetched through the SSRF guard,
+ *    capped at the agent's file size limit, and uploaded. An `image_url` must
+ *    answer with an image (`image/*`), so it is not a way to pull arbitrary web
+ *    content into the model's context; a `file_url`'s type is then checked
+ *    against the agent's allowed types like any upload.
  * The turn then reads them like any attachment (sessionFiles.ts).
  */
 
@@ -38,39 +44,74 @@ export interface ResponseInputFile {
 }
 
 export interface ResponseUserInput {
-    /** The first `input_text` (or the whole string input); null when there is none. */
+    /** Every text part, joined with a blank line (or the whole string input); null when there is none. */
     text: string | null;
     files: ResponseInputFile[];
 }
 
+/** A part of the input the API does not take: 400, in the caller's dialect. */
+export class InputContentPartError extends Error {
+    readonly status = 400;
+
+    constructor(message: string, readonly code: 'unsupported_content_part' | 'invalid_file_url', readonly param = 'input') {
+        super(message);
+        this.name = 'InputContentPartError';
+    }
+}
+
 const MAX_INPUT_FILES = 100;
+const TEXT_PART_TYPES = new Set(['input_text', 'text']);
 
 function stringField(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function toInputFile(part: Record<string, unknown>): ResponseInputFile | null {
-    if (part.type === 'input_file') {
-        const fileId = stringField(part.file_id);
-        const data = stringField(part.file_data);
-        if (!fileId && !data) return null;
-        return { kind: 'file', ...(fileId ? { fileId } : { data }), ...(stringField(part.filename) ? { filename: stringField(part.filename) } : {}) };
+function httpUrl(value: string, where: string): string {
+    let parsed: URL;
+    try {
+        parsed = new URL(value);
+    } catch {
+        throw new InputContentPartError(`${where} must be an http(s) URL`, 'invalid_file_url');
     }
-    if (part.type === 'input_image') {
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new InputContentPartError(`${where} must be an http(s) URL`, 'invalid_file_url');
+    }
+    return value;
+}
+
+/** A file part as a file; null for one that names nothing (skipped, as before). Throws for a part type the API does not take. */
+function toInputFile(part: Record<string, unknown>): ResponseInputFile | null {
+    if (part.type === 'input_file' || part.type === 'file') {
+        // Chat completions nests the fields under `file`.
+        const spec = part.type === 'file' && part.file && typeof part.file === 'object' ? part.file as Record<string, unknown> : part;
+        const fileId = stringField(spec.file_id);
+        const data = stringField(spec.file_data);
+        const url = stringField(spec.file_url);
+        const filename = stringField(spec.filename) ? { filename: stringField(spec.filename) } : {};
+        if (fileId) return { kind: 'file', fileId, ...filename };
+        if (data) return { kind: 'file', data, ...filename };
+        if (url) return { kind: 'file', url: httpUrl(url, 'input_file.file_url'), ...filename };
+        return null;
+    }
+    if (part.type === 'input_image' || part.type === 'image_url') {
         const fileId = stringField(part.file_id);
         const imageUrl = typeof part.image_url === 'object' && part.image_url !== null
             ? stringField((part.image_url as { url?: unknown }).url)
             : stringField(part.image_url);
         if (fileId) return { kind: 'image', fileId };
         if (!imageUrl) return null;
-        return imageUrl.startsWith('data:') ? { kind: 'image', data: imageUrl } : { kind: 'image', url: imageUrl };
+        return imageUrl.startsWith('data:') ? { kind: 'image', data: imageUrl } : { kind: 'image', url: httpUrl(imageUrl, 'image_url') };
     }
-    return null;
+    throw new InputContentPartError(
+        `Content part type "${typeof part.type === 'string' ? part.type : 'unknown'}" is not supported: send text, input_file or input_image parts.`,
+        'unsupported_content_part',
+    );
 }
 
 /**
- * The text and the files of the LAST user message of a Responses `input`.
- * A message with files and no text is a message (the text is then null).
+ * The text and the files of the LAST user message of a Responses `input` (or
+ * of chat `messages`). A message with files and no text is a message (the text
+ * is then null). Throws `InputContentPartError` for a part it does not take.
  */
 export function extractResponseUserInput(input: unknown): ResponseUserInput {
     if (typeof input === 'string') return { text: input, files: [] };
@@ -84,12 +125,18 @@ export function extractResponseUserInput(input: unknown): ResponseUserInput {
         if (typeof candidate.content === 'string') return { text: candidate.content, files: [] };
         if (!Array.isArray(candidate.content)) continue;
 
-        const textPart = candidate.content.find((part) => part.type === 'input_text' && typeof part.text === 'string');
-        const files = candidate.content
-            .map((part) => (part && typeof part === 'object' ? toInputFile(part) : null))
-            .filter((file): file is ResponseInputFile => file !== null)
-            .slice(0, MAX_INPUT_FILES);
-        const text = textPart && typeof textPart.text === 'string' ? textPart.text : null;
+        const texts: string[] = [];
+        const files: ResponseInputFile[] = [];
+        for (const part of candidate.content) {
+            if (!part || typeof part !== 'object') continue;
+            if (TEXT_PART_TYPES.has(part.type as string)) {
+                if (typeof part.text === 'string') texts.push(part.text);
+                continue;
+            }
+            const file = toInputFile(part);
+            if (file && files.length < MAX_INPUT_FILES) files.push(file);
+        }
+        const text = texts.length > 0 ? texts.join('\n\n') : null;
         if (text !== null || files.length > 0) return { text, files };
     }
     return { text: null, files: [] };
@@ -113,11 +160,18 @@ function parseDataUrl(value: string): { mimeType?: string; data: string } {
 }
 
 /**
- * Downloads the image at `url` through the SSRF guard, refusing anything past
- * `maxBytes` and anything the server does not declare as `image/*`. (Only
- * `input_image` carries a URL; `input_file` is `file_id` or inline data.)
+ * Downloads the file at `url` through the SSRF guard, refusing anything past
+ * `maxBytes`. An image (`input_image`) must be declared `image/*` by the
+ * server; a file (`input_file.file_url`) keeps the declared type (none = left
+ * to the upload's guess from the name), checked against the agent's allowed
+ * types when it is uploaded.
  */
-async function fetchRemoteImage(url: string, maxBytes: number, maxMb: number): Promise<{ data: Buffer; mimeType: string; name: string }> {
+async function fetchRemoteFile(
+    url: string,
+    kind: ResponseInputFile['kind'],
+    maxBytes: number,
+    maxMb: number,
+): Promise<{ data: Buffer; mimeType?: string; name: string }> {
     const tooLarge = () => new AgentAttachmentError(413, 'file_too_large', `The file at ${new URL(url).host} exceeds the ${maxMb} MB limit of this agent.`);
     let response: Response;
     try {
@@ -129,8 +183,8 @@ async function fetchRemoteImage(url: string, maxBytes: number, maxMb: number): P
         throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched (HTTP ${response.status}).`);
     }
     // Decided on the header, before a byte of the body is read.
-    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-    if (!mimeType || !mimeType.startsWith('image/')) {
+    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() || undefined;
+    if (kind === 'image' && (!mimeType || !mimeType.startsWith('image/'))) {
         await response.body?.cancel().catch(() => undefined);
         throw new AgentAttachmentError(
             415,
@@ -160,7 +214,7 @@ async function fetchRemoteImage(url: string, maxBytes: number, maxMb: number): P
     return {
         data: Buffer.concat(chunks),
         mimeType,
-        name: pathName && pathName.includes('.') ? decodeURIComponent(pathName) : 'image',
+        name: pathName && pathName.includes('.') ? decodeURIComponent(pathName) : kind,
     };
 }
 
@@ -188,7 +242,7 @@ export async function storeResponseInputFiles(input: {
         let mimeType: string | undefined;
         let data: Buffer | string;
         if (file.url) {
-            const fetched = await fetchRemoteImage(file.url, maxBytes, cfg.maxFileSizeMb);
+            const fetched = await fetchRemoteFile(file.url, file.kind, maxBytes, cfg.maxFileSizeMb);
             ({ data, mimeType } = fetched);
             if (!file.filename) name = fetched.name;
         } else {

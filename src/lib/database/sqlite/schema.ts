@@ -1707,7 +1707,8 @@ export const TENANT_SCHEMA_SQL = `
     lastEventSeq INTEGER,
     budget TEXT,
     spentUsd REAL,
-    runtimeTurnId TEXT
+    runtimeTurnId TEXT,
+    transcriptHash TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);

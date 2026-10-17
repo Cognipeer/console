@@ -3441,6 +3441,12 @@ export interface IAgentConversation {
    */
   runtimeTurnId?: string;
   /**
+   * sha256 of the transcript a chat-completions client holds after this session's last turn (its messages
+   * without system/developer ones, plus the answer it was given). A client that resends its whole transcript
+   * and no session id is matched back to the session by it (`findAgentConversationByTranscriptHash`).
+   */
+  transcriptHash?: string;
+  /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
    * per-message override still wins) — see `executePlaygroundChatLocal`.
