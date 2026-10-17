@@ -3178,11 +3178,20 @@ export interface IAgentTurnCompaction {
   outputTokens?: number;
   summary?: {
     userDirectives?: string[];
+    /** Directive → the user's own words it came from (agent-sdk ≥ 0.15). */
+    directiveSources?: Record<string, string>;
     facts?: Array<{ key: string; value: string }>;
     goals?: string[];
     openQuestions?: string[];
     discarded?: string[];
   };
+  /**
+   * Directives the summarizer returned that no user message supports, so the
+   * SDK did not keep them (agent-sdk ≥ 0.15).
+   */
+  droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+  /** Model that produced the summary. */
+  model?: string;
   integrityNotes?: string[];
   /** The summarizer call failed and a local fallback summary was used. */
   failed?: boolean;

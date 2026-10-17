@@ -404,3 +404,37 @@ describe('state persistence helpers', () => {
         expect(buildCostEstimator([{ names: ['m'], pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } as never }], undefined, calc)).toBeUndefined();
     });
 });
+
+describe('compactionFromEvent', () => {
+    it('keeps where each standing instruction came from, and the ones the SDK refused (agent-sdk ≥ 0.15)', () => {
+        const compaction = compactionFromEvent({
+            type: 'summarization',
+            summary: 'Context summary:',
+            model: 'gpt-6-luna',
+            structuredSummary: {
+                user_directives: ['Always answer in Turkish.'],
+                user_directive_sources: { 'Always answer in Turkish.': 'Bundan sonra hep Türkçe cevap ver' },
+                stable_facts: [],
+                active_goals: [],
+                open_questions: [],
+                discarded_obsolete: [],
+            },
+            droppedDirectives: [{ directive: 'Return strict JSON only.', reason: 'not_found_in_user_messages' }],
+        } as never);
+        expect(compaction.model).toBe('gpt-6-luna');
+        expect(compaction.summary?.userDirectives).toEqual(['Always answer in Turkish.']);
+        expect(compaction.summary?.directiveSources).toEqual({ 'Always answer in Turkish.': 'Bundan sonra hep Türkçe cevap ver' });
+        expect(compaction.droppedDirectives).toEqual([{ directive: 'Return strict JSON only.', reason: 'not_found_in_user_messages' }]);
+    });
+
+    it('reads an older SDK event, which has neither, unchanged', () => {
+        const compaction = compactionFromEvent({
+            type: 'summarization',
+            summary: 'Context summary:',
+            structuredSummary: { user_directives: ['Be brief.'], stable_facts: [], active_goals: [], open_questions: [], discarded_obsolete: [] },
+        } as never);
+        expect(compaction.summary).toEqual({ userDirectives: ['Be brief.'] });
+        expect(compaction).not.toHaveProperty('droppedDirectives');
+        expect(compaction).not.toHaveProperty('model');
+    });
+});
