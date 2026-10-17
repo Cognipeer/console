@@ -8,8 +8,24 @@ on:
 
   pull_request:
 
+# A newer push to the same PR makes the older run pointless. Pushes to main
+# are never cancelled, so every commit there gets a complete run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Pipeline shape:
+#
+#   lint ─────────┐
+#   test (matrix) ┼─► build ──────────┐
+#   docs ─────────┤   docker-builder ─┼─► validate
+#   audit ────────┘                   │
+#   license ──────────────────────────┘
+#
+# `validate` is the single aggregate check (it keeps the old job name, so a
+# branch-protection rule on "validate" keeps working).
 jobs:
-  validate:
+  lint:
     runs-on: cognipeer-azure-runners
     steps:
       - name: Checkout
@@ -24,31 +40,124 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The browser integration suites drive a real Chromium — they exist to
-      # catch the class of defect that passes a mocked test and fails in
-      # production (a Playwright option silently ignored, a locator that
-      # resolves to nothing). Without the binary they skip themselves, which
-      # would quietly remove that coverage from CI.
-      - name: Install Chromium for browser tests
-        run: npx playwright install --with-deps chromium
-
       - name: Lint
         run: npm run lint
 
+  # The suite is split by category and run as parallel jobs. Every test file
+  # belongs to exactly one group: the browser files are carved out of the
+  # others with --exclude, so a new file is picked up by its directory without
+  # touching this list. `unit` is by far the largest directory and is sharded.
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: cognipeer-azure-runners
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unit 1/3
+            args: src/__tests__/unit --shard=1/3
+          - name: unit 2/3
+            args: src/__tests__/unit --shard=2/3
+          - name: unit 3/3
+            args: src/__tests__/unit --shard=3/3
+          - name: api
+            args: src/__tests__/api
+          - name: integration
+            args: src/__tests__/integration
+          - name: contracts + ai
+            args: src/__tests__/contracts src/__tests__/ai
+          # The browser integration suites drive a real Chromium — they exist
+          # to catch the class of defect that passes a mocked test and fails in
+          # production (a Playwright option silently ignored, a locator that
+          # resolves to nothing). Without the binary they skip themselves,
+          # which would quietly remove that coverage from CI, so this is the
+          # only group that installs it.
+          # vitest treats these as substring filters on the file path, so this
+          # selects exactly the files the other groups exclude via
+          # '**/browser-*.test.ts' and '**/crawler-e2e.test.ts'.
+          - name: browser
+            args: browser- crawler-e2e
+            chromium: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium for browser tests
+        if: matrix.chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Test
-        run: npm run test
+        if: ${{ !matrix.chromium }}
+        run: >
+          npx vitest run ${{ matrix.args }}
+          --exclude '**/browser-*.test.ts'
+          --exclude '**/crawler-e2e.test.ts'
+
+      - name: Test (browser)
+        if: matrix.chromium
+        run: npx vitest run ${{ matrix.args }}
+
+  # Static checks that read source only; they need neither the test run nor the
+  # build output, so they start immediately.
+  endpoint-coverage:
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Endpoint auth-coverage gate
         run: npm run test:endpoints
 
-      - name: Build
-        run: npm run build
+  docs:
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Docker builder parity
-        run: docker build --target builder .
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Build docs
         run: npm run docs:build
+
+  audit:
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Production dependency audit
         run: npm audit --omit=dev --audit-level=high
@@ -56,3 +165,53 @@ jobs:
 
       - name: License summary
         run: npx license-checker --production --summary
+
+  # The expensive jobs start only once everything cheap has passed, so a lint
+  # error or a red test does not burn a full Next build and a Docker build.
+  build:
+    needs: [lint, test, endpoint-coverage]
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+  # Builds the Dockerfile's `builder` stage, which runs its own `npm run build`
+  # inside the image. It does not use the build job's output, so the two run
+  # side by side.
+  docker-builder:
+    needs: [lint, test, endpoint-coverage]
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker builder parity
+        run: docker build --target builder .
+
+  validate:
+    if: ${{ always() }}
+    needs: [lint, test, endpoint-coverage, docs, audit, build, docker-builder]
+    runs-on: cognipeer-azure-runners
+    steps:
+      - name: Require every job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "$NEEDS"
+          if [ "$FAILED" = 'true' ]; then
+            echo 'One or more required jobs did not succeed.'
+            exit 1
+          fi
