@@ -2,11 +2,13 @@
 
 /**
  * Routines of one agent: saved ways of starting it — a prompt (+ inputs) and a
- * trigger (a schedule, one time, or by hand). Each fire is a background run;
- * "Runs" opens Sessions → Background runs filtered to the routine.
+ * trigger (a schedule, one time, by hand, or an incoming webhook). Each fire is
+ * a background run; "Runs" opens Sessions → Background runs filtered to the
+ * routine.
  *
  * The editor is a full-screen FormShell; deleting asks through the shared
- * confirm dialog.
+ * confirm dialog. A saved webhook routine's editor stays open with its Connect
+ * card (the secret is shown there once) and the Test / Deliveries tabs.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -24,6 +26,7 @@ import {
     Stack,
     Switch,
     Table,
+    Tabs,
     Text,
     Textarea,
     TextInput,
@@ -52,11 +55,21 @@ import {
     formFromRoutine,
     routineBodyFromForm,
     timezoneOptions,
+    webhookInputText,
+    webhookInputValue,
     type RoutineForm,
     type RoutineFormProblem,
     type RoutineRow,
     type RoutineTriggerType,
 } from './routineForm';
+import {
+    WEBHOOK_PRESET_LABEL_KEY,
+    WebhookConnectCard,
+    WebhookDeliveriesPanel,
+    WebhookTemplateVariables,
+    WebhookTestPanel,
+    WebhookTriggerFields,
+} from './RoutineWebhookParts';
 
 export interface AgentRoutinesPanelProps {
     agentId: string;
@@ -73,7 +86,12 @@ const TRIGGER_LABEL_KEY: Record<RoutineTriggerType, string> = {
     schedule: 'triggerSchedule',
     once: 'triggerOnce',
     manual: 'triggerManual',
+    webhook: 'triggerWebhook',
 };
+
+const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';
+
+type StoredTrigger = { type: string; cron?: string; timezone?: string; run_at?: string; preset?: string; events?: string[] };
 
 /** The message of an API error body (`{ error: { message } }`), else the status. */
 async function errorMessage(res: Response): Promise<string> {
@@ -117,7 +135,11 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
     useEffect(() => { void load(); }, [load]);
 
     const triggerSummary = (routine: RoutineRow): string => {
-        const trigger = routine.trigger as { type: string; cron?: string; timezone?: string; run_at?: string };
+        const trigger = routine.trigger as StoredTrigger;
+        if (trigger.type === 'webhook') {
+            const preset = t(WEBHOOK_PRESET_LABEL_KEY[trigger.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
+            return trigger.events && trigger.events.length > 0 ? `${preset} · ${trigger.events.join(', ')}` : t('summaryWebhookAny', { preset });
+        }
         if (trigger.type === 'schedule') return t('summarySchedule', { cron: trigger.cron ?? '', timezone: trigger.timezone ?? '' });
         if (trigger.type === 'once' && trigger.run_at) return t('summaryOnce', { time: formatInZone(new Date(trigger.run_at), locale) });
         return t('summaryManual');
@@ -277,11 +299,13 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                     declaredInputs={declaredInputs}
                     versions={versions}
                     onClose={() => setEditing(null)}
-                    onSaved={() => {
-                        setEditing(null);
+                    onSaved={(saved, keepOpen) => {
+                        // A webhook routine stays open on the saved row: its Connect card holds the URL and the secret.
+                        setEditing(keepOpen ? { routine: saved } : null);
                         notifications.show({ color: 'teal', message: t('saved') });
                         void load();
                     }}
+                    onShowRuns={onShowRuns}
                 />
             ) : null}
         </Stack>
@@ -297,15 +321,22 @@ interface RoutineEditorProps {
     declaredInputs?: IAgentInputField[];
     versions: number[];
     onClose: () => void;
-    onSaved: () => void;
+    onSaved: (routine: RoutineRow, keepOpen: boolean) => void;
+    onShowRuns: (routine: { id: string; name: string }) => void;
 }
 
-function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, onClose, onSaved }: RoutineEditorProps) {
+type EditorTab = 'settings' | 'test' | 'deliveries';
+
+function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, onClose, onSaved, onShowRuns }: RoutineEditorProps) {
     const t = useTranslations('agents.routines');
     const locale = useLocale();
     const [form, setForm] = useState<RoutineForm>(() => (routine ? formFromRoutine(routine) : emptyRoutineForm()));
     const [problem, setProblem] = useState<RoutineFormProblem | null>(null);
     const [saving, setSaving] = useState(false);
+    const [tab, setTab] = useState<EditorTab>('settings');
+    /** The webhook secret from the last save / rotation: shown once, never read back. */
+    const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
+    const storedWebhook = routine?.trigger.type === 'webhook' ? routine.trigger as Parameters<typeof WebhookConnectCard>[0]['trigger'] : null;
     const zones = useMemo(() => timezoneOptions(), []);
     const set = <K extends keyof RoutineForm>(key: K, value: RoutineForm[K]) => {
         setForm((prev) => ({ ...prev, [key]: value }));
@@ -335,7 +366,13 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 notifications.show({ color: 'red', message: t('saveFailed', { message: await errorMessage(res) }) });
                 return;
             }
-            onSaved();
+            const saved = await res.json() as RoutineRow & { webhook?: { url: string; secret?: string } };
+            const keepOpen = saved.trigger.type === 'webhook';
+            if (keepOpen) {
+                if (saved.webhook?.secret) setRevealedSecret(saved.webhook.secret);
+                setForm((prev) => ({ ...prev, webhookSecret: '' }));
+            }
+            onSaved(saved, keepOpen);
         } finally {
             setSaving(false);
         }
@@ -345,26 +382,14 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
         ? `${form.cron} (${form.timezone})`
         : form.triggerType === 'once'
             ? (form.onceMode === 'in' ? `+${form.delayAmount} ${t(form.delayUnit)}` : form.runAtLocal.replace('T', ' '))
-            : t('triggerManual');
+            : form.triggerType === 'webhook'
+                ? [t(WEBHOOK_PRESET_LABEL_KEY[form.webhookPreset]), ...form.webhookEvents].join(' · ')
+                : t('triggerManual');
+    const webhook = form.triggerType === 'webhook';
+    const declared = declaredInputs ?? [];
 
-    return (
-        <FormShell
-            open
-            onClose={onClose}
-            icon={<IconCalendarTime size={16} />}
-            title={routine ? t('titleEdit') : t('titleNew')}
-            subtitle={t('subtitle', { agent: agentName })}
-            primaryAction={{ label: t('save'), color: 'teal', loading: saving, onClick: () => void save() }}
-            secondaryAction={{ label: t('cancel'), onClick: onClose }}
-            summary={(
-                <SummaryGroup title={t('summaryTitle')}>
-                    <SummaryKV label={t('summaryTrigger')} value={triggerSummary} mono={form.triggerType === 'schedule'} />
-                    {preview && preview[0] ? <SummaryKV label={t('summaryNext')} value={formatInZone(preview[0], locale)} /> : null}
-                    <SummaryKV label={t('summaryVersion')} value={form.version === null ? t('versionPublished') : t('versionN', { n: form.version })} />
-                    <SummaryKV label={t('summaryClass')} value={t(form.runClass === 'deferred' ? 'classDeferred' : 'classDefault')} />
-                </SummaryGroup>
-            )}
-        >
+    const settings = (
+        <>
             <FormSection number={1} title={t('sectionBasics')} description={t('sectionBasicsDescription')}>
                 <FormField label={t('name')} required>
                     <TextInput value={form.name} placeholder={t('namePlaceholder')} error={errorOf('name')} onChange={(event) => set('name', event.currentTarget.value)} />
@@ -444,16 +469,54 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                     </Stack>
                 ) : null}
                 {form.triggerType === 'manual' ? <Text size="sm" c="dimmed">{t('manualHint')}</Text> : null}
+                {webhook ? (
+                    <WebhookTriggerFields
+                        form={form}
+                        set={set}
+                        storedStandardSecret={(storedWebhook as { auth?: string } | null)?.auth === 'standard_webhooks'}
+                        errorOf={errorOf}
+                    />
+                ) : null}
             </FormSection>
 
             <FormSection number={3} title={t('sectionPrompt')} description={t('sectionPromptDescription')}>
-                <FormField label={t('prompt')} hint={t('promptHint')}>
-                    <Textarea autosize minRows={4} maxRows={14} value={form.prompt} placeholder={t('promptPlaceholder')} onChange={(event) => set('prompt', event.currentTarget.value)} />
+                <FormField label={t('prompt')} hint={t(webhook ? 'webhookPromptHint' : 'promptHint')}>
+                    <Textarea
+                        autosize
+                        minRows={4}
+                        maxRows={14}
+                        ff={webhook ? 'monospace' : undefined}
+                        value={form.prompt}
+                        placeholder={webhook ? WEBHOOK_PROMPT_PLACEHOLDER : t('promptPlaceholder')}
+                        onChange={(event) => set('prompt', event.currentTarget.value)}
+                    />
                 </FormField>
-                {(declaredInputs ?? []).length > 0 ? (
+                {webhook ? <WebhookTemplateVariables /> : null}
+                {declared.length > 0 && webhook ? (
                     <Stack gap="sm">
                         <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
-                        {(declaredInputs ?? []).map((field) => (
+                        <Text size="xs" c="dimmed">{t('webhookInputsHint')}</Text>
+                        {declared.map((field) => (
+                            <TextInput
+                                key={field.name}
+                                label={field.label || field.name}
+                                description={field.description}
+                                required={field.required}
+                                ff="monospace"
+                                placeholder={t('inputUnset')}
+                                value={webhookInputText(form.inputs[field.name])}
+                                onChange={(event) => {
+                                    const text = event.currentTarget.value;
+                                    set('inputs', { ...form.inputs, [field.name]: text === '' ? undefined : webhookInputValue(field, text) });
+                                }}
+                            />
+                        ))}
+                    </Stack>
+                ) : null}
+                {declared.length > 0 && !webhook ? (
+                    <Stack gap="sm">
+                        <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
+                        {declared.map((field) => (
                             <InputValueField
                                 key={field.name}
                                 field={field}
@@ -475,7 +538,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                             onChange={(value) => set('version', !value || value === 'published' ? null : Number(value))}
                         />
                     </FormField>
-                    <FormField label={t('class')} hint={t('classHint')}>
+                    <FormField label={t('class')} hint={t(webhook ? 'webhookClassHint' : 'classHint')}>
                         <SegmentedControl
                             value={form.runClass}
                             onChange={(value) => set('runClass', value as RoutineForm['runClass'])}
@@ -502,6 +565,54 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                     <Textarea ff="monospace" autosize minRows={3} maxRows={14} value={form.responseFormatText} error={errorOf('responseFormatText')} onChange={(event) => set('responseFormatText', event.currentTarget.value)} />
                 </FormField>
             </FormSection>
+        </>
+    );
+
+    return (
+        <FormShell
+            open
+            onClose={onClose}
+            icon={<IconCalendarTime size={16} />}
+            title={routine ? t('titleEdit') : t('titleNew')}
+            subtitle={t('subtitle', { agent: agentName })}
+            primaryAction={{ label: t('save'), color: 'teal', loading: saving, onClick: () => void save() }}
+            secondaryAction={{ label: t('cancel'), onClick: onClose }}
+            summary={(
+                <SummaryGroup title={t('summaryTitle')}>
+                    <SummaryKV label={t('summaryTrigger')} value={triggerSummary} mono={form.triggerType === 'schedule'} />
+                    {preview && preview[0] ? <SummaryKV label={t('summaryNext')} value={formatInZone(preview[0], locale)} /> : null}
+                    <SummaryKV label={t('summaryVersion')} value={form.version === null ? t('versionPublished') : t('versionN', { n: form.version })} />
+                    <SummaryKV label={t('summaryClass')} value={t(form.runClass === 'deferred' ? 'classDeferred' : 'classDefault')} />
+                </SummaryGroup>
+            )}
+        >
+            {storedWebhook && routine ? (
+                <Tabs value={tab} onChange={(value) => setTab((value as EditorTab | null) ?? 'settings')} keepMounted={false}>
+                    <Tabs.List mb="md">
+                        <Tabs.Tab value="settings">{t('tabSettings')}</Tabs.Tab>
+                        <Tabs.Tab value="test">{t('tabTest')}</Tabs.Tab>
+                        <Tabs.Tab value="deliveries">{t('tabDeliveries')}</Tabs.Tab>
+                    </Tabs.List>
+                    <Tabs.Panel value="settings">
+                        <Stack gap="md">
+                            <WebhookConnectCard
+                                agentId={agentId}
+                                routineId={routine.id}
+                                trigger={storedWebhook}
+                                revealedSecret={revealedSecret}
+                                onSecret={setRevealedSecret}
+                            />
+                            {settings}
+                        </Stack>
+                    </Tabs.Panel>
+                    <Tabs.Panel value="test">
+                        <WebhookTestPanel agentId={agentId} routineId={routine.id} preset={form.webhookPreset} />
+                    </Tabs.Panel>
+                    <Tabs.Panel value="deliveries">
+                        <WebhookDeliveriesPanel agentId={agentId} routineId={routine.id} onShowRuns={() => onShowRuns({ id: routine.id, name: routine.name })} />
+                    </Tabs.Panel>
+                </Tabs>
+            ) : settings}
         </FormShell>
     );
 }

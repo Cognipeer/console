@@ -50,6 +50,7 @@ import type {
   IAgentRun,
   AgentRunClass,
   IAgentRoutine,
+  IAgentRoutineDelivery,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1168,6 +1169,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     result: { fireAt: Date; status: 'started' | 'failed'; runId?: string | null; error?: string | null },
   ): Promise<boolean>;
+  /** The routine whose webhook trigger has this hook id (tenant DB), or null. */
+  findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null>;
+
+  // ── Agent routine webhook deliveries (tenant-specific) ──
+  recordAgentRoutineDelivery(record: Omit<IAgentRoutineDelivery, '_id'>): Promise<IAgentRoutineDelivery>;
+  /** Newest first; `before` = a delivery id of the previous page (the rows after it). */
+  listAgentRoutineDeliveries(filter: {
+    tenantId: string;
+    projectId: string;
+    routineId: string;
+    limit: number;
+    before?: string;
+  }): Promise<IAgentRoutineDelivery[]>;
+  /** Retention: removes up to `batchSize` deliveries whose `expiresAt` is before `olderThan`. */
+  cleanupAgentRoutineDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }>;
+  /** Removes a routine's delivery log (the routine, or its agent, was deleted). */
+  deleteAgentRoutineDeliveries(routineId: string): Promise<number>;
 
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
@@ -2186,6 +2204,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     runClass?: AgentRunClass;
     routineId?: string;
     channel?: NonNullable<IAgentRun['channel']>;
+    trigger?: NonNullable<IAgentRun['trigger']>;
     /** Exact `key = value` pairs the run's metadata must carry. */
     metadata?: Record<string, string>;
     createdAfter?: Date;

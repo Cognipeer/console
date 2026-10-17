@@ -2994,14 +2994,98 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
-/** What starts a routine's runs. A webhook trigger is reserved for incoming webhooks (built separately). */
+/** The sender an incoming webhook trigger is set up for (its event / delivery id headers and auth choices). */
+export type AgentRoutineWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+
+/**
+ * How a delivery proves it knows the routine's secret. The first three sign
+ * the raw body (checked once the body is read); the rest carry the secret in a
+ * header (checked before the body is read).
+ */
+export type AgentRoutineWebhookAuth =
+  /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
+  | 'github_signature'
+  /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
+  | 'standard_webhooks'
+  /** `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. */
+  | 'signature'
+  /** `X-Gitlab-Token: <secret>`. */
+  | 'gitlab_token'
+  /** `Authorization: Bearer <secret>`. */
+  | 'bearer'
+  /** `Authorization: Basic base64(<any user>:<secret>)`. */
+  | 'basic'
+  /** `<headerName>: <secret>`. */
+  | 'header';
+
+/** One filter rule over the delivery (all rules must match). */
+export interface AgentRoutineWebhookFilterRule {
+  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
+  path: string;
+  op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
+  value?: string | number | boolean | Array<string | number | boolean>;
+}
+
+/** An incoming webhook: each authenticated, matching delivery to its URL fires the routine. */
+export interface AgentRoutineWebhookTrigger {
+  type: 'webhook';
+  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook; never reused. */
+  hookId: string;
+  preset: AgentRoutineWebhookPreset;
+  auth: AgentRoutineWebhookAuth;
+  /** Auth `header` only; lower-case. */
+  headerName?: string | null;
+  /** `encryptObject(secret)`; never serialized. */
+  secretSealed: string;
+  /** The secret's last 4 characters. */
+  secretHint: string;
+  /** `provided` only with `standard_webhooks` (the sender generates that secret). */
+  secretSource: 'generated' | 'provided';
+  /** The secret before the last rotation, accepted until `previousSecretExpiresAt`. */
+  previousSecretSealed?: string | null;
+  previousSecretExpiresAt?: Date | null;
+  /** Normalized event names to accept; empty / absent = every event. */
+  events?: string[] | null;
+  /** All must match (≤ 20). */
+  filter?: AgentRoutineWebhookFilterRule[] | null;
+  /** Append the event payload (JSON) to the message. */
+  includePayload: boolean;
+}
+
+/** What starts a routine's runs. */
 export type AgentRoutineTrigger =
   /** A 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
   | { type: 'schedule'; cron: string; timezone: string }
   /** One run at a fixed time. */
   | { type: 'once'; runAt: Date }
   /** Only started on request (Run now, `POST …/routines/{id}/run`). */
-  | { type: 'manual' };
+  | { type: 'manual' }
+  | AgentRoutineWebhookTrigger;
+
+export type AgentRoutineDeliveryOutcome =
+  'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
+
+/**
+ * One request to a routine's webhook URL, as its delivery log keeps it: the
+ * outcome and normalized ids only — never the payload, headers or a secret.
+ */
+export interface IAgentRoutineDelivery {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  routineId: string;
+  receivedAt: Date;
+  /** `receivedAt` + 7 days; the reconciler's retention removes it after. */
+  expiresAt: Date;
+  outcome: AgentRoutineDeliveryOutcome;
+  httpStatus: number;
+  event?: string | null;
+  deliveryId?: string | null;
+  runId?: string | null;
+  /** A fixed reason text (≤ 300 chars); never payload text. */
+  reason?: string | null;
+  bytes: number;
+}
 
 /**
  * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
@@ -4653,7 +4737,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** The surface that created the run. */
   channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'routine' | null;
   routineId?: string | null;
-  trigger?: 'request' | 'schedule' | 'once' | 'manual' | null;
+  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**
    * No interactive user on the run (a routine fire): a gated tool follows the
    * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.

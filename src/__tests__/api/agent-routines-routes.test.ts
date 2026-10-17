@@ -175,7 +175,7 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
     [{ name: 'a', trigger: { type: 'schedule', cron: '0 9 * * *', timezone: 'Mars/Olympus' }, prompt: 'x' }, 'trigger.timezone'],
     [{ name: 'a', trigger: { type: 'once', run_at: '2020-01-01T00:00:00Z' }, prompt: 'x' }, 'trigger.run_at'],
     [{ name: 'a', trigger: { type: 'once' }, prompt: 'x' }, 'trigger.run_at'],
-    [{ name: 'a', trigger: { type: 'webhook' }, prompt: 'x' }, 'trigger.type'],
+    [{ name: 'a', trigger: { type: 'webhook', preset: 'bitbucket' }, prompt: 'x' }, 'trigger.preset'],
     [{ name: 'a', trigger: SCHEDULE, prompt: '' }, 'prompt'],
     [{ name: 'a', trigger: SCHEDULE, prompt: 'x'.repeat(32_001) }, 'prompt'],
     [{ name: 'a', trigger: SCHEDULE, prompt: 'x', inputs: { region: 'mars' } }, 'inputs.region'],
@@ -356,5 +356,153 @@ describe('dashboard: /agents/:agentId/routines', () => {
     hoisted.session.current = { ...(hoisted.session.current as object), projectId: 'proj-2' };
     const res = await dashboard('GET');
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('webhook trigger (SPEC-webhooks W6)', () => {
+  const WEBHOOK = {
+    type: 'webhook', preset: 'github', events: ['pull_request'],
+    filter: [{ path: 'payload.action', op: 'in', value: ['opened', 'synchronize'] }],
+  };
+  const STANDARD = `whsec_${Buffer.alloc(32, 3).toString('base64')}`;
+  const create = async (trigger: Record<string, unknown> = WEBHOOK, extra: Record<string, unknown> = {}) => {
+    const res = await client('POST', '', { name: 'PR review', trigger, prompt: 'Review PR {{payload.number}}.', inputs: { days: '{{payload.number}}' }, ...extra });
+    expect(res.statusCode, res.body).toBe(201);
+    return json<{ id: string; trigger: Record<string, unknown>; webhook?: { url: string; secret: string } }>(res);
+  };
+
+  it('create answers with the URL and the generated secret once; reads show only its hint', async () => {
+    const created = await create();
+    expect(created.webhook?.secret).toMatch(/^whsec_/);
+    expect(created.webhook?.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
+    expect(created.trigger).toEqual({
+      type: 'webhook', url: created.webhook?.url, preset: 'github', auth: 'github_signature', header_name: null,
+      secret_hint: created.webhook?.secret.slice(-4), secret_source: 'generated', previous_secret_valid_until: null,
+      events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true,
+    });
+    const read = await client('GET', `/${created.id}`);
+    expect(read.body).not.toContain(created.webhook!.secret);
+    expect(read.body).not.toMatch(/secretSealed|secret_sealed/);
+    expect(json(read)).not.toHaveProperty('webhook');
+    expect(json<{ next_fire_at: unknown }>(read).next_fire_at).toBeNull();
+  });
+
+  it('refuses a prompt template, filter or mapping the rules do not allow', async () => {
+    for (const [body, field] of [
+      [{ prompt: 'Hi {{{payload.title}}}' }, 'prompt'],
+      [{ prompt: '{{> partial}}' }, 'prompt'],
+      [{ prompt: '{{payload.labels.*.name}}' }, 'prompt'],
+      [{ trigger: { ...WEBHOOK, filter: [{ path: 'payload.constructor', op: 'exists' }] } }, 'trigger.filter[0].path'],
+      [{ trigger: { ...WEBHOOK, preset: 'gitlab', auth: 'standard_webhooks' } }, 'trigger.secret'],
+      [{ trigger: { ...WEBHOOK, auth: 'bearer' } }, 'trigger.auth'],
+      [{ inputs: { days: '{{secret.x}}' } }, 'inputs.days'],
+    ] as Array<[Record<string, unknown>, string]>) {
+      const res = await client('POST', '', { name: 'Bad', trigger: WEBHOOK, prompt: 'ok', inputs: { days: '{{payload.number}}' }, ...body });
+      expect(res.statusCode, JSON.stringify(body)).toBe(400);
+      expect(json<{ error: { code: string; errors: Array<{ field: string }> } }>(res).error).toMatchObject({ code: 'invalid_routine', errors: [expect.objectContaining({ field })] });
+    }
+  });
+
+  it('PATCH keeps the hook id and secret; to Standard Webhooks needs the sender’s secret; away from it generates one', async () => {
+    const created = await create({ type: 'webhook', preset: 'gitlab' });
+    const url = created.webhook!.url;
+    const kept = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', preset: 'gitlab', events: ['merge_request'] } });
+    expect(json<{ trigger: { url: string; events: string[] } }>(kept).trigger).toMatchObject({ url, events: ['merge_request'] });
+    expect(json(kept)).not.toHaveProperty('webhook');
+
+    const missing = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'standard_webhooks' } });
+    expect(missing.statusCode).toBe(400);
+    const signing = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'standard_webhooks', secret: STANDARD } });
+    expect(signing.statusCode).toBe(200);
+    expect(json<{ trigger: Record<string, unknown> }>(signing).trigger).toMatchObject({ url, auth: 'standard_webhooks', secret_source: 'provided' });
+    expect(signing.body).not.toContain(STANDARD);
+    expect(json(signing)).not.toHaveProperty('webhook');
+
+    const back = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'gitlab_token' } });
+    expect(json<{ webhook: { url: string; secret: string } }>(back).webhook).toMatchObject({ url, secret: expect.stringMatching(/^whsec_/) });
+  });
+
+  it('switching to another trigger drops the hook id', async () => {
+    const created = await create();
+    const switched = await client('PATCH', `/${created.id}`, { trigger: { type: 'manual' }, prompt: 'Plain prompt.', inputs: null });
+    expect(switched.statusCode, switched.body).toBe(200);
+    expect(json<{ trigger: unknown }>(switched).trigger).toEqual({ type: 'manual' });
+    const hookId = created.webhook!.url.split('/').pop()!;
+    expect(await db.findAgentRoutineByHookId(hookId)).toBeNull();
+  });
+
+  it('rotate-secret answers the new secret and the end of the grace', async () => {
+    const created = await create({ type: 'webhook', preset: 'generic' });
+    const before = Math.floor(Date.now() / 1000);
+    const res = await client('POST', `/${created.id}/webhook/rotate-secret`, { grace_seconds: 3600 });
+    expect(res.statusCode).toBe(200);
+    const body = json<{ object: string; secret: string; secret_hint: string; previous_valid_until: number }>(res);
+    expect(body).toMatchObject({ object: 'agent.routine.webhook_secret', secret: expect.stringMatching(/^whsec_/) });
+    expect(body.secret).not.toBe(created.webhook!.secret);
+    expect(body.secret_hint).toBe(body.secret.slice(-4));
+    expect(body.previous_valid_until).toBeGreaterThanOrEqual(before + 3600);
+    expect(json<{ trigger: { previous_secret_valid_until: number } }>(await client('GET', `/${created.id}`)).trigger.previous_secret_valid_until).toBe(body.previous_valid_until);
+    expect((await client('POST', `/${created.id}/webhook/rotate-secret`, { grace_seconds: 90_000 })).statusCode).toBe(400);
+    const instant = json<{ previous_valid_until: unknown }>(await dashboard('POST', `/${created.id}/webhook/rotate-secret`, {}));
+    expect(instant.previous_valid_until).toBeNull();
+
+    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', trigger: SCHEDULE, prompt: 'x' }));
+    const refused = await client('POST', `/${plain.id}/webhook/rotate-secret`, {});
+    expect(json<{ error: { code: string } }>(refused).error.code).toBe('routine_not_webhook');
+  });
+
+  it('Run now with a sample payload builds the delivery’s turn (trigger manual, external content); dry_run creates nothing', async () => {
+    const created = await create(WEBHOOK, { metadata: { team: 'platform' } });
+    const payload = { action: 'opened', number: 7 };
+    const dry = await client('POST', `/${created.id}/run`, { payload, headers: { 'X-GitHub-Event': 'pull_request', 'X-GitHub-Delivery': 'd-9' }, dry_run: true });
+    expect(dry.statusCode).toBe(200);
+    expect(json(dry)).toMatchObject({
+      object: 'agent.routine.dry_run', matched: true, reason: null, event: 'pull_request', delivery_id: 'd-9',
+      inputs: { days: 7 }, errors: [],
+    });
+    expect(json<{ prompt: string }>(dry).prompt).toContain('Review PR 7.');
+    const missed = json(await client('POST', `/${created.id}/run`, { payload: { action: 'closed' }, headers: { 'x-github-event': 'pull_request' }, dry_run: true }));
+    expect(missed).toMatchObject({ matched: false, reason: 'rule 1 (payload.action in) did not match (value: string, 6 chars)' });
+    expect(hoisted.fireRoutine).not.toHaveBeenCalled();
+
+    hoisted.fireRoutine.mockResolvedValue({ kind: 'accepted', run: run() });
+    // Run now does not apply the events / filter: a closed PR still runs.
+    const fired = await client('POST', `/${created.id}/run`, { payload: { action: 'closed', number: 8 }, headers: { 'x-github-event': 'pull_request' } });
+    expect(fired.statusCode).toBe(202);
+    const input = hoisted.fireRoutine.mock.calls[0][2];
+    expect(input).toMatchObject({
+      trigger: 'manual', externalContent: true, inputs: { days: 8 }, metadata: { webhook_event: 'pull_request' },
+    });
+    expect(input.message).toMatch(/^This run was started by an incoming webhook \(github · pull_request\)\./);
+    expect(input.message).toContain('Webhook event (JSON):');
+
+    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', trigger: SCHEDULE, prompt: 'x' }));
+    const refused = await client('POST', `/${plain.id}/run`, { payload });
+    expect(refused.statusCode).toBe(400);
+  });
+
+  it('lists the delivery log newest first with a cursor', async () => {
+    const created = await create();
+    for (let i = 0; i < 3; i += 1) {
+      await db.recordAgentRoutineDelivery({
+        tenantId, projectId: PROJECT_ID, routineId: created.id, receivedAt: new Date(Date.UTC(2026, 9, 18, 10, i)),
+        expiresAt: new Date(Date.UTC(2026, 9, 25)), outcome: i === 2 ? 'accepted' : 'filtered', httpStatus: i === 2 ? 202 : 200,
+        event: 'pull_request', deliveryId: `d-${i}`, runId: i === 2 ? 'abc' : null, reason: null, bytes: 10,
+      });
+    }
+    const page = json<{ object: string; data: Array<Record<string, unknown>>; has_more: boolean }>(await client('GET', `/${created.id}/deliveries?limit=2`));
+    expect(page).toMatchObject({ object: 'list', has_more: true });
+    expect(page.data[0]).toEqual({
+      id: expect.any(String), object: 'agent.routine.delivery', received_at: Math.floor(Date.UTC(2026, 9, 18, 10, 2) / 1000),
+      outcome: 'accepted', http_status: 202, event: 'pull_request', delivery_id: 'd-2', run_id: 'run_abc', reason: null, bytes: 10,
+    });
+    const rest = json<{ data: Array<{ delivery_id: string }>; has_more: boolean }>(await dashboard('GET', `/${created.id}/deliveries?before=${String(page.data[1].id)}`));
+    expect(rest.data.map((row) => row.delivery_id)).toEqual(['d-0']);
+    expect(rest.has_more).toBe(false);
+    expect((await client('GET', `/${created.id}/deliveries?limit=500`)).statusCode).toBe(400);
+
+    // Deleting the routine removes its log.
+    await client('DELETE', `/${created.id}`);
+    expect(await db.listAgentRoutineDeliveries({ tenantId, projectId: PROJECT_ID, routineId: created.id, limit: 10 })).toHaveLength(0);
   });
 });

@@ -58,6 +58,7 @@ export const COLLECTIONS = {
   alertStates: 'alert_states',
   schedulerClaims: 'scheduler_claims',
   agentRoutines: 'agent_routines',
+  agentRoutineDeliveries: 'agent_routine_deliveries',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',

@@ -390,6 +390,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       runClass?: AgentRunClass;
       routineId?: string;
       channel?: NonNullable<IAgentRun['channel']>;
+      trigger?: NonNullable<IAgentRun['trigger']>;
       metadata?: Record<string, string>;
       createdAfter?: Date;
       createdBefore?: Date;
@@ -404,6 +405,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
       if (filter.routineId) { conds.push('routineId = @routineId'); params.routineId = filter.routineId; }
       if (filter.channel) { conds.push('channel = @channel'); params.channel = filter.channel; }
+      if (filter.trigger) { conds.push('runTrigger = @runTrigger'); params.runTrigger = filter.trigger; }
       if (filter.userId) { conds.push('userId = @userId'); params.userId = filter.userId; }
       if (filter.runClass) conds.push(this.runClassCondition(filter.runClass));
       const inList = (column: string, prefix: string, values: string[], negate = false) => {

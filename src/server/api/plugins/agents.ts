@@ -64,6 +64,7 @@ import {
 import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
 import { getDatabase } from '@/lib/database';
 import {
+  AGENT_RUN_TRIGGERS,
   getAgentRunStatus,
   listAgentRuns,
   requestAgentRunCancellation,
@@ -1255,7 +1256,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; routineId?: string };
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; routineId?: string; trigger?: string };
+      const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
       const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
@@ -1281,6 +1283,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
         // A routine's history (Studio's Routines list links here).
         ...(query.routineId ? { routineId: query.routineId } : {}),
+        ...(trigger ? { trigger } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });

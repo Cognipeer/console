@@ -11,8 +11,140 @@ import { DEFAULT_ROUTINE_TIMEZONE, isValidRoutineTimezone, validateRoutineCron }
 export type RoutineRow = ReturnType<typeof serializeAgentRoutine>;
 
 /** The trigger types the editor offers, in order. A new type is added here and in the editor's switch. */
-export const ROUTINE_TRIGGER_TYPES = ['schedule', 'once', 'manual'] as const;
+export const ROUTINE_TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
 export type RoutineTriggerType = (typeof ROUTINE_TRIGGER_TYPES)[number];
+
+// ── Webhook trigger ──────────────────────────────────────────────────────
+// The preset / auth lists mirror routineWebhookAuth.ts, which uses node:crypto
+// and cannot be imported here; routine-form.test.ts keeps the two equal.
+
+export const WEBHOOK_PRESETS = ['github', 'gitlab', 'azure_devops', 'generic'] as const;
+export type WebhookPreset = (typeof WEBHOOK_PRESETS)[number];
+export type WebhookAuth = 'github_signature' | 'gitlab_token' | 'standard_webhooks' | 'basic' | 'header' | 'bearer' | 'signature';
+
+/** The auth modes each preset offers; the first is its default. */
+export const WEBHOOK_PRESET_AUTH: Record<WebhookPreset, readonly WebhookAuth[]> = {
+    github: ['github_signature'],
+    gitlab: ['gitlab_token', 'standard_webhooks'],
+    azure_devops: ['basic', 'header'],
+    generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
+};
+
+export const DEFAULT_WEBHOOK_HEADER_NAME = 'x-cognipeer-token';
+
+export const WEBHOOK_FILTER_OPS = ['eq', 'neq', 'in', 'not_in', 'exists', 'not_exists', 'contains', 'starts_with', 'glob'] as const;
+export type WebhookFilterOp = (typeof WEBHOOK_FILTER_OPS)[number];
+
+/** One filter row as edited: `in` / `not_in` take a comma-separated list; `exists` / `not_exists` no value. */
+export interface WebhookFilterRow {
+    path: string;
+    op: WebhookFilterOp;
+    value: string;
+}
+
+/** The variables a prompt template / input mapping may use (routineWebhookView WEBHOOK_CONTEXT_ROOTS). */
+export const WEBHOOK_TEMPLATE_VARIABLES = [
+    'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'received_at', 'routine.id', 'routine.name', 'agent.key',
+] as const;
+
+/** Event-name suggestions per preset (generic senders name their own). */
+export const WEBHOOK_EVENT_SUGGESTIONS: Record<WebhookPreset, readonly string[]> = {
+    github: ['pull_request', 'pull_request_review', 'pull_request_review_comment', 'push', 'issues', 'issue_comment', 'release', 'workflow_run'],
+    gitlab: ['merge_request', 'push', 'tag_push', 'note', 'issue', 'work_item', 'pipeline', 'build', 'release', 'deployment'],
+    azure_devops: [
+        'git.pullrequest.created', 'git.pullrequest.updated', 'git.pullrequest.merged', 'ms.vss-code.git-pullrequest-comment-event',
+        'git.push', 'build.complete', 'workitem.created', 'workitem.updated', 'workitem.commented',
+    ],
+    generic: [],
+};
+
+/** GitHub / GitLab "Actions" chips: compiled to a `<path> in [...]` rule placed first in the filter. */
+export const WEBHOOK_ACTION_PATH: Partial<Record<WebhookPreset, string>> = {
+    github: 'payload.action',
+    gitlab: 'payload.object_attributes.action',
+};
+
+export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly string[]>> = {
+    github: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'closed', 'created', 'submitted', 'completed'],
+    gitlab: ['open', 'update', 'reopen', 'approved', 'merge', 'close'],
+};
+
+/** One-click filter examples per preset (i18n key under agents.routines → rows they add). */
+export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key: string; rows: WebhookFilterRow[] }>> = {
+    github: [
+        {
+            key: 'exampleGithubOpened',
+            rows: [
+                { path: 'payload.action', op: 'in', value: 'opened, synchronize, reopened' },
+                { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
+            ],
+        },
+        { key: 'exampleGithubMain', rows: [{ path: 'payload.pull_request.base.ref', op: 'eq', value: 'main' }] },
+        { key: 'exampleGithubMembers', rows: [{ path: 'payload.pull_request.author_association', op: 'in', value: 'OWNER, MEMBER, COLLABORATOR' }] },
+    ],
+    gitlab: [
+        { key: 'exampleGitlabMr', rows: [{ path: 'payload.object_attributes.action', op: 'in', value: 'open, update' }] },
+        { key: 'exampleGitlabNotDraft', rows: [{ path: 'payload.object_attributes.draft', op: 'neq', value: 'true' }] },
+    ],
+    azure_devops: [
+        { key: 'exampleAdoMain', rows: [{ path: 'payload.resource.targetRefName', op: 'eq', value: 'refs/heads/main' }] },
+        {
+            key: 'exampleAdoCompleted',
+            rows: [
+                { path: 'payload.resource.status', op: 'eq', value: 'completed' },
+                { path: 'payload.resource.mergeStatus', op: 'eq', value: 'succeeded' },
+            ],
+        },
+    ],
+    generic: [],
+};
+
+/** A sample delivery per preset for the editor's Test tab: what the sender would post. */
+export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, string>; payload: Record<string, unknown> }> = {
+    github: {
+        headers: { 'x-github-event': 'pull_request', 'x-github-delivery': '00000000-0000-4000-8000-000000000001' },
+        payload: {
+            action: 'opened',
+            number: 42,
+            pull_request: {
+                title: 'Add retry to the importer', draft: false, author_association: 'MEMBER',
+                html_url: 'https://github.com/example/repo/pull/42', user: { login: 'octocat' },
+                base: { ref: 'main' }, head: { ref: 'feature/retry' },
+            },
+            repository: { full_name: 'example/repo' },
+            sender: { login: 'octocat' },
+        },
+    },
+    gitlab: {
+        headers: { 'x-gitlab-event': 'Merge Request Hook', 'webhook-id': 'msg_sample_1' },
+        payload: {
+            object_kind: 'merge_request',
+            user: { username: 'jane' },
+            project: { path_with_namespace: 'example/repo' },
+            object_attributes: {
+                iid: 7, title: 'Add retry to the importer', action: 'open', state: 'opened', draft: false,
+                source_branch: 'feature/retry', target_branch: 'main', url: 'https://gitlab.example.com/example/repo/-/merge_requests/7',
+            },
+        },
+    },
+    azure_devops: {
+        headers: {},
+        payload: {
+            id: '6a1c3a1e-0000-4000-8000-000000000001',
+            eventType: 'git.pullrequest.created',
+            resource: {
+                pullRequestId: 12, title: 'Add retry to the importer', status: 'active', isDraft: false,
+                sourceRefName: 'refs/heads/feature/retry', targetRefName: 'refs/heads/main',
+                createdBy: { displayName: 'Jane Doe', uniqueName: 'jane@example.com' },
+                repository: { name: 'repo' },
+            },
+        },
+    },
+    generic: {
+        headers: { 'x-cognipeer-event-id': 'evt_sample_1' },
+        payload: { event: 'ticket.created', ticket: { id: 'T-1001', title: 'Login page is slow', priority: 'high' } },
+    },
+};
 
 export type OnceMode = 'at' | 'in';
 export type DelayUnit = 'minutes' | 'hours';
@@ -43,6 +175,16 @@ export interface RoutineForm {
     callbackSigned: boolean;
     /** The response_format JSON as the API spells it; empty = none. */
     responseFormatText: string;
+    webhookPreset: WebhookPreset;
+    webhookAuth: WebhookAuth;
+    webhookHeaderName: string;
+    /** Standard Webhooks only: the sender's `whsec_…` secret; empty keeps the stored one. */
+    webhookSecret: string;
+    webhookEvents: string[];
+    /** GitHub / GitLab only (WEBHOOK_ACTION_PATH). */
+    webhookActions: string[];
+    webhookFilter: WebhookFilterRow[];
+    webhookIncludePayload: boolean;
 }
 
 export const CRON_PRESETS = [
@@ -99,7 +241,122 @@ export function emptyRoutineForm(timezone = browserTimezone(), now = new Date())
         callbackSecret: '',
         callbackSigned: false,
         responseFormatText: '',
+        webhookPreset: 'github',
+        webhookAuth: 'github_signature',
+        webhookHeaderName: DEFAULT_WEBHOOK_HEADER_NAME,
+        webhookSecret: '',
+        webhookEvents: [],
+        webhookActions: [],
+        webhookFilter: [],
+        webhookIncludePayload: true,
     };
+}
+
+/** A stored input value as the webhook mapping's text field shows it. */
+export function webhookInputText(value: unknown): string {
+    if (value === undefined || value === null) return '';
+    return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/**
+ * A webhook mapping field's text → the value to store: text with a `{{tag}}`
+ * stays a template (the server renders it per delivery); anything else is a
+ * literal brought to the declared type, as a request's inputs would be.
+ */
+export function webhookInputValue(field: IAgentInputField | undefined, text: string): unknown {
+    if (text.includes('{{')) return text;
+    const trimmed = text.trim();
+    switch (field?.type) {
+        case 'number':
+        case 'integer':
+            // Only a complete number: "1." stays text while it is typed.
+            return /^-?\d+(?:\.\d+)?$/.test(trimmed) ? Number(trimmed) : text;
+        case 'boolean':
+            return trimmed === 'true' ? true : trimmed === 'false' ? false : text;
+        case 'json':
+            try {
+                return JSON.parse(trimmed);
+            } catch {
+                return text;
+            }
+        default:
+            return text;
+    }
+}
+
+const listText = (value: unknown) => (Array.isArray(value) ? value.map(String).join(', ') : value === undefined || value === null ? '' : String(value));
+const splitList = (text: string) => text.split(',').map((item) => item.trim()).filter(Boolean);
+
+/** A filter row → the API rule, or null when its value is missing. */
+function ruleFromRow(row: WebhookFilterRow): Record<string, unknown> | null {
+    const path = row.path.trim();
+    if (row.op === 'exists' || row.op === 'not_exists') return { path, op: row.op };
+    if (row.op === 'in' || row.op === 'not_in') {
+        const list = splitList(row.value);
+        return list.length > 0 ? { path, op: row.op, value: list } : null;
+    }
+    return row.value !== '' ? { path, op: row.op, value: row.value } : null;
+}
+
+interface StoredWebhookTrigger {
+    type: 'webhook';
+    url?: string;
+    preset?: string;
+    auth?: string;
+    header_name?: string | null;
+    events?: string[];
+    filter?: Array<{ path: string; op: string; value?: unknown }>;
+    include_payload?: boolean;
+}
+
+/** The webhook part of the form from a stored trigger: an action rule first in the filter becomes the Actions chips. */
+function webhookFormFromTrigger(trigger: StoredWebhookTrigger, base: RoutineForm): Partial<RoutineForm> {
+    const preset = (WEBHOOK_PRESETS as readonly string[]).includes(trigger.preset ?? '') ? trigger.preset as WebhookPreset : 'generic';
+    const auth = WEBHOOK_PRESET_AUTH[preset].includes(trigger.auth as WebhookAuth) ? trigger.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
+    const rules = [...(trigger.filter ?? [])];
+    const actionPath = WEBHOOK_ACTION_PATH[preset];
+    let actions: string[] = [];
+    const first = rules[0];
+    if (actionPath && first && first.path === actionPath && first.op === 'in' && Array.isArray(first.value) && first.value.every((item) => typeof item === 'string')) {
+        actions = first.value as string[];
+        rules.shift();
+    }
+    return {
+        webhookPreset: preset,
+        webhookAuth: auth,
+        webhookHeaderName: trigger.header_name ?? base.webhookHeaderName,
+        webhookEvents: [...(trigger.events ?? [])],
+        webhookActions: actions,
+        webhookFilter: rules.map((rule) => ({
+            path: rule.path,
+            op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
+            value: listText(rule.value),
+        })),
+        webhookIncludePayload: trigger.include_payload !== false,
+    };
+}
+
+/** The filter rules a save sends: the Actions chips first, then the rows. */
+export function webhookFilterBody(form: RoutineForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
+    const rules: Array<Record<string, unknown>> = [];
+    const actionPath = WEBHOOK_ACTION_PATH[form.webhookPreset];
+    if (actionPath && form.webhookActions.length > 0) rules.push({ path: actionPath, op: 'in', value: [...form.webhookActions] });
+    for (const [index, row] of form.webhookFilter.entries()) {
+        if (!row.path.trim() && !row.value.trim()) continue;
+        const rule = ruleFromRow(row);
+        if (!rule || !row.path.trim()) return { ok: false, index };
+        rules.push(rule);
+    }
+    return { ok: true, rules };
+}
+
+/**
+ * Whether the filter limits who can start the routine (an author / sender
+ * rule). On GitHub, GitLab and Azure DevOps anyone who can open a pull request
+ * can otherwise start it; the editor shows a hint, never a prefill.
+ */
+export function hasWebhookAuthorRule(form: RoutineForm): boolean {
+    return form.webhookFilter.some((row) => /^payload\..*(author|sender|user|createdBy)/i.test(row.path.trim()));
 }
 
 export function formatMetadataLines(metadata: Record<string, string> | null | undefined): string {
@@ -126,6 +383,7 @@ export function formFromRoutine(routine: RoutineRow, fallbackTimezone = browserT
     const triggerType = (ROUTINE_TRIGGER_TYPES as readonly string[]).includes(trigger.type) ? trigger.type as RoutineTriggerType : 'manual';
     return {
         ...base,
+        ...(triggerType === 'webhook' ? webhookFormFromTrigger(trigger as StoredWebhookTrigger, base) : {}),
         name: routine.name,
         description: routine.description ?? '',
         enabled: routine.enabled,
@@ -162,6 +420,24 @@ export function triggerBodyFromForm(form: RoutineForm, now = new Date()): { ok: 
             if (at.getTime() < now.getTime()) return { ok: false, problem: { field: 'runAtLocal', key: 'oncePast' } };
             return { ok: true, trigger: { type: 'once', run_at: at.toISOString() } };
         }
+        case 'webhook': {
+            const filter = webhookFilterBody(form);
+            if (!filter.ok) return { ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } };
+            const secret = form.webhookAuth === 'standard_webhooks' ? form.webhookSecret.trim() : '';
+            return {
+                ok: true,
+                trigger: {
+                    type: 'webhook',
+                    preset: form.webhookPreset,
+                    auth: form.webhookAuth,
+                    ...(form.webhookAuth === 'header' ? { header_name: form.webhookHeaderName.trim() || DEFAULT_WEBHOOK_HEADER_NAME } : {}),
+                    ...(secret ? { secret } : {}),
+                    events: [...form.webhookEvents],
+                    filter: filter.rules,
+                    include_payload: form.webhookIncludePayload,
+                },
+            };
+        }
         default:
             return { ok: true, trigger: { type: 'manual' } };
     }
@@ -191,6 +467,11 @@ export function routineBodyFromForm(
     }
     const declaredNames = new Set((declared ?? []).map((field) => field.name));
     const inputs = Object.fromEntries(Object.entries(form.inputs).filter(([name, value]) => declaredNames.has(name) && value !== undefined && value !== ''));
+    // Standard Webhooks: the sender generates the secret, so a routine that does not have one yet needs it pasted in.
+    const storedStandard = stored?.trigger.type === 'webhook' && (stored.trigger as { auth?: string }).auth === 'standard_webhooks';
+    if (form.triggerType === 'webhook' && form.webhookAuth === 'standard_webhooks' && !storedStandard && !form.webhookSecret.trim()) {
+        return { ok: false, problem: { field: 'webhookSecret', key: 'standardSecretRequired' } };
+    }
 
     const body: Record<string, unknown> = {
         name: form.name.trim(),

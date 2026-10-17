@@ -103,6 +103,13 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   agent_routines: [
     { key: { tenantId: 1, projectId: 1, agentKey: 1 }, options: { name: 'idx_tenant_project_agent' } },
     { key: { enabled: 1, nextFireAt: 1 }, options: { name: 'idx_enabled_nextFireAt' } },
+    // An incoming webhook finds its routine by the URL's hook id.
+    { key: { 'trigger.hookId': 1 }, options: { name: 'idx_trigger_hookId' } },
+  ],
+  // Webhook delivery log: listed per routine newest first; expiresAt serves the retention sweep.
+  agent_routine_deliveries: [
+    { key: { tenantId: 1, routineId: 1, receivedAt: -1 }, options: { name: 'idx_tenant_routine_receivedAt' } },
+    { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
   ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },

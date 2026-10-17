@@ -3,17 +3,20 @@
  *
  * A routine is a saved way of starting an agent (prompt + trigger). The
  * scheduler reads due routines tenant-wide (`(enabled, nextFireAt)`), the APIs
- * by agent (`(tenantId, projectId, agentKey)`). Indexes are plain (Cosmos DB's
- * Mongo API rejects partial ones) and ensured on the write path, memoized per
- * tenant DB, like `ensureAgentRunsIndexes`.
+ * by agent (`(tenantId, projectId, agentKey)`), an incoming webhook by its hook
+ * id (`trigger.hookId`). A webhook trigger's delivery log is
+ * `agent_routine_deliveries`. Indexes are plain (Cosmos DB's Mongo API rejects
+ * partial ones) and ensured on the write path, memoized per tenant DB, like
+ * `ensureAgentRunsIndexes`.
  */
 
 import { ObjectId, type Filter } from 'mongodb';
-import type { IAgentRoutine } from '../provider.interface';
+import type { IAgentRoutine, IAgentRoutineDelivery } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 type RoutineDoc = Omit<IAgentRoutine, '_id'> & { _id: ObjectId };
+type DeliveryDoc = Omit<IAgentRoutineDelivery, '_id'> & { _id: ObjectId };
 
 function toRoutine(doc: RoutineDoc): IAgentRoutine {
   return { ...doc, _id: doc._id.toString() };
@@ -37,6 +40,7 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
       for (const [keys, name] of [
         [{ tenantId: 1, projectId: 1, agentKey: 1 }, 'idx_tenant_project_agent'],
         [{ enabled: 1, nextFireAt: 1 }, 'idx_enabled_nextFireAt'],
+        [{ 'trigger.hookId': 1 }, 'idx_trigger_hookId'],
       ] as Array<[Record<string, 1>, string]>) {
         try {
           await col.createIndex(keys, { name });
@@ -46,6 +50,32 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
         }
       }
       if (ok) this.agentRoutinesIndexReady.add(dbName);
+    }
+
+    private agentRoutineDeliveriesIndexReady = new Set<string>();
+
+    private async ensureAgentRoutineDeliveriesIndexes(): Promise<void> {
+      const db = this.getTenantDb();
+      const dbName = db.databaseName;
+      if (this.agentRoutineDeliveriesIndexReady.has(dbName)) return;
+      const col = db.collection(COLLECTIONS.agentRoutineDeliveries);
+      let ok = true;
+      for (const [keys, name] of [
+        [{ tenantId: 1, routineId: 1, receivedAt: -1 }, 'idx_tenant_routine_receivedAt'],
+        [{ expiresAt: 1 }, 'idx_expiresAt'],
+      ] as Array<[Record<string, 1 | -1>, string]>) {
+        try {
+          await col.createIndex(keys, { name });
+        } catch (error) {
+          ok = false;
+          logger.warn('Could not create agent_routine_deliveries index', { dbName, index: name, error });
+        }
+      }
+      if (ok) this.agentRoutineDeliveriesIndexReady.add(dbName);
+    }
+
+    private agentRoutineDeliveries() {
+      return this.getTenantDb().collection<DeliveryDoc>(COLLECTIONS.agentRoutineDeliveries);
     }
 
     private agentRoutines() {
@@ -146,6 +176,59 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
         },
       );
       return res.matchedCount === 1;
+    }
+
+    async findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null> {
+      const doc = await this.agentRoutines().findOne({ 'trigger.hookId': hookId } as Filter<RoutineDoc>);
+      return doc ? toRoutine(doc) : null;
+    }
+
+    // ── Webhook deliveries ────────────────────────────────────────
+
+    async recordAgentRoutineDelivery(record: Omit<IAgentRoutineDelivery, '_id'>): Promise<IAgentRoutineDelivery> {
+      await this.ensureAgentRoutineDeliveriesIndexes();
+      const doc: DeliveryDoc = { ...record, _id: new ObjectId() };
+      await this.agentRoutineDeliveries().insertOne(doc);
+      return { ...doc, _id: doc._id.toString() };
+    }
+
+    async listAgentRoutineDeliveries(filter: {
+      tenantId: string;
+      projectId: string;
+      routineId: string;
+      limit: number;
+      before?: string;
+    }): Promise<IAgentRoutineDelivery[]> {
+      const query: Filter<DeliveryDoc> = { tenantId: filter.tenantId, projectId: filter.projectId, routineId: filter.routineId };
+      if (filter.before) {
+        const cursorId = objectIdOrNull(filter.before);
+        const cursor = cursorId ? await this.agentRoutineDeliveries().findOne({ _id: cursorId, routineId: filter.routineId }) : null;
+        if (!cursor) return [];
+        query.$or = [
+          { receivedAt: { $lt: cursor.receivedAt } },
+          { receivedAt: cursor.receivedAt, _id: { $lt: cursor._id } },
+        ];
+      }
+      const docs = await this.agentRoutineDeliveries()
+        .find(query)
+        .sort({ receivedAt: -1, _id: -1 })
+        .limit(Math.max(1, filter.limit))
+        .toArray();
+      return docs.map((doc) => ({ ...doc, _id: doc._id.toString() }));
+    }
+
+    async cleanupAgentRoutineDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }> {
+      await this.ensureAgentRoutineDeliveriesIndexes();
+      const col = this.agentRoutineDeliveries();
+      const ids = await col.find({ expiresAt: { $lt: options.olderThan } }).project({ _id: 1 }).limit(Math.max(1, options.batchSize)).toArray();
+      if (ids.length === 0) return { deletedCount: 0 };
+      const res = await col.deleteMany({ _id: { $in: ids.map((doc) => doc._id) } });
+      return { deletedCount: res.deletedCount ?? 0 };
+    }
+
+    async deleteAgentRoutineDeliveries(routineId: string): Promise<number> {
+      const res = await this.agentRoutineDeliveries().deleteMany({ routineId });
+      return res.deletedCount ?? 0;
     }
   };
 }

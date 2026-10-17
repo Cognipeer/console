@@ -773,6 +773,7 @@ export const TENANT_SCHEMA_SQL = `
     lastRunId TEXT,
     lastStatus TEXT,
     lastError TEXT,
+    hookId TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -780,6 +781,25 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_agent_routines_scope ON agent_routines(tenantId, projectId, agentKey);
   CREATE INDEX IF NOT EXISTS idx_agent_routines_due ON agent_routines(enabled, nextFireAt);
+
+  -- A webhook trigger's delivery log: outcome and normalized ids only, never the payload.
+  CREATE TABLE IF NOT EXISTS agent_routine_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    routineId TEXT NOT NULL,
+    receivedAt TEXT NOT NULL,
+    expiresAt TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    httpStatus INTEGER NOT NULL,
+    event TEXT,
+    deliveryId TEXT,
+    runId TEXT,
+    reason TEXT,
+    bytes INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_routine ON agent_routine_deliveries(tenantId, routineId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_expires ON agent_routine_deliveries(expiresAt);
 
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).

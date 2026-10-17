@@ -2688,8 +2688,12 @@ export async function deleteAgentRecord(
     return runWithTenantScope(tenantDbName, async (db) => {
         const agent = await db.findAgentById(agentId);
         const deleted = await db.deleteAgent(agentId);
-        // Its routines go with it: nothing could fire them any more.
-        if (deleted && agent) await db.deleteAgentRoutinesForAgent(agent.tenantId, agent.projectId, agent.key);
+        // Its routines (and their webhook delivery logs) go with it: nothing could fire them any more.
+        if (deleted && agent) {
+            const routines = await db.listAgentRoutines({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            for (const routine of routines) await db.deleteAgentRoutineDeliveries(String(routine._id));
+            await db.deleteAgentRoutinesForAgent(agent.tenantId, agent.projectId, agent.key);
+        }
         return deleted;
     });
 }

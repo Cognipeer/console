@@ -21,6 +21,7 @@ import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentR
 import { createConversation, resolveAgentConfig } from './agentService';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { initialNextFireAt } from './routineSchedule';
+import { serializeWebhookTrigger } from './routineWebhookTrigger';
 
 const logger = createLogger('agent-routine');
 
@@ -31,7 +32,7 @@ export function routineActorId(routineId: string): string {
   return `${ROUTINE_ACTOR_PREFIX}${routineId}`;
 }
 
-/** What starts a fire. `webhook` arrives with the incoming-webhook trigger. */
+/** What starts a fire (a request never does). */
 export type RoutineFireTrigger = Exclude<NonNullable<IAgentRun['trigger']>, 'request'>;
 
 export interface RoutineTenant {
@@ -343,18 +344,24 @@ export function updateAgentRoutine(
   ));
 }
 
+/** Removes the routine and its webhook delivery log. */
 export function deleteAgentRoutine(scope: RoutineScope, routine: IAgentRoutine): Promise<boolean> {
-  return runWithTenantScope(scope.tenantDbName, (db) => db.deleteAgentRoutine(String(routine._id), scope.tenantId, scope.projectId));
+  return runWithTenantScope(scope.tenantDbName, async (db) => {
+    const deleted = await db.deleteAgentRoutine(String(routine._id), scope.tenantId, scope.projectId);
+    if (deleted) await db.deleteAgentRoutineDeliveries(String(routine._id));
+    return deleted;
+  });
 }
 
 // ── Wire shape (§5.7) ────────────────────────────────────────────────────
 
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
 
-function serializeTrigger(trigger: AgentRoutineTrigger): Record<string, unknown> {
+function serializeTrigger(trigger: AgentRoutineTrigger, tenantId: string): Record<string, unknown> {
   switch (trigger.type) {
     case 'schedule': return { type: 'schedule', cron: trigger.cron, timezone: trigger.timezone };
     case 'once': return { type: 'once', run_at: new Date(trigger.runAt).toISOString() };
+    case 'webhook': return serializeWebhookTrigger(trigger, tenantId);
     default: return { type: trigger.type };
   }
 }
@@ -373,7 +380,7 @@ export function serializeResponseFormat(format: AgentResponseFormat | null | und
   };
 }
 
-/** A routine as the client API and the dashboard return it — never the sealed callback secret. */
+/** A routine as the client API and the dashboard return it — never a sealed callback or webhook secret. */
 export function serializeAgentRoutine(routine: IAgentRoutine) {
   return {
     id: String(routine._id),
@@ -382,7 +389,7 @@ export function serializeAgentRoutine(routine: IAgentRoutine) {
     name: routine.name,
     description: routine.description ?? null,
     enabled: routine.enabled,
-    trigger: serializeTrigger(routine.trigger),
+    trigger: serializeTrigger(routine.trigger, routine.tenantId),
     prompt: routine.prompt,
     inputs: routine.inputs ?? null,
     version: routine.version ?? null,

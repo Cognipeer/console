@@ -7,13 +7,23 @@
 import { describe, expect, it } from 'vitest';
 import { messages } from '@/lib/i18n/messages';
 import {
+  WEBHOOK_EVENT_SUGGESTIONS,
+  WEBHOOK_FILTER_EXAMPLES,
+  WEBHOOK_FILTER_OPS,
+  WEBHOOK_PRESET_AUTH,
+  WEBHOOK_PRESETS,
+  WEBHOOK_TEMPLATE_VARIABLES,
   emptyRoutineForm,
   formFromRoutine,
+  hasWebhookAuthorRule,
   parseMetadataLines,
   routineBodyFromForm,
   toLocalInputValue,
+  webhookInputValue,
   type RoutineRow,
 } from '@/components/agents/studio/routineForm';
+import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/routineWebhookAuth';
+import { WEBHOOK_CONTEXT_ROOTS, parseFilterRules } from '@/lib/services/agents/routineWebhookView';
 
 const now = new Date('2026-10-18T10:00:00Z');
 const base = () => ({ ...emptyRoutineForm('Europe/Istanbul', now), name: 'Digest', prompt: 'Summarise.' });
@@ -78,6 +88,87 @@ describe('routineBodyFromForm', () => {
   });
 });
 
+describe('webhook trigger', () => {
+  const webhookForm = () => ({ ...base(), triggerType: 'webhook' as const });
+  const storedWebhook = (trigger: Record<string, unknown>) => stored({ trigger: { type: 'webhook', url: 'https://console.example.com/api/public/hooks/t/wh_x', ...trigger } });
+
+  it('the preset and auth lists match the server’s', () => {
+    expect([...WEBHOOK_PRESETS]).toEqual([...SERVER_PRESETS]);
+    expect(WEBHOOK_PRESET_AUTH).toEqual(SERVER_PRESET_AUTH);
+    expect(emptyRoutineForm().webhookHeaderName).toBe(DEFAULT_WEBHOOK_HEADER_NAME);
+    for (const variable of WEBHOOK_TEMPLATE_VARIABLES) expect(WEBHOOK_CONTEXT_ROOTS).toContain(variable.split('.')[0]);
+  });
+
+  it('sends preset, auth, events, the Actions chips as the first rule, then the rows', () => {
+    const built = routineBodyFromForm({
+      ...webhookForm(), webhookEvents: ['pull_request'], webhookActions: ['opened', 'reopened'],
+      webhookFilter: [{ path: 'payload.pull_request.draft', op: 'neq', value: 'true' }, { path: 'payload.labels.*.name', op: 'in', value: 'bug, ui ,' }, { path: '', op: 'eq', value: '' }],
+    }, [], null, now);
+    expect(built.ok && built.body.trigger).toEqual({
+      type: 'webhook', preset: 'github', auth: 'github_signature', events: ['pull_request'], include_payload: true,
+      filter: [
+        { path: 'payload.action', op: 'in', value: ['opened', 'reopened'] },
+        { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
+        { path: 'payload.labels.*.name', op: 'in', value: ['bug', 'ui'] },
+      ],
+    });
+  });
+
+  it('every one-click example is a filter the server accepts', () => {
+    for (const preset of WEBHOOK_PRESETS) {
+      for (const example of WEBHOOK_FILTER_EXAMPLES[preset]) {
+        const built = routineBodyFromForm({ ...webhookForm(), webhookPreset: preset, webhookAuth: WEBHOOK_PRESET_AUTH[preset][0], webhookSecret: 'whsec_x', webhookFilter: example.rows }, [], null, now);
+        expect(built.ok, example.key).toBe(true);
+        expect(parseFilterRules((built.ok && (built.body.trigger as { filter: unknown }).filter)).ok, example.key).toBe(true);
+      }
+    }
+  });
+
+  it('header auth sends the header name; a rule without its value is refused', () => {
+    const header = routineBodyFromForm({ ...webhookForm(), webhookPreset: 'generic', webhookAuth: 'header', webhookHeaderName: 'X-Token' }, [], null, now);
+    expect(header.ok && header.body.trigger).toMatchObject({ auth: 'header', header_name: 'X-Token' });
+    const missing = routineBodyFromForm({ ...webhookForm(), webhookFilter: [{ path: 'payload.action', op: 'eq', value: '' }] }, [], null, now);
+    expect(missing).toEqual({ ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } });
+    const exists = routineBodyFromForm({ ...webhookForm(), webhookFilter: [{ path: 'payload.sender', op: 'exists', value: '' }] }, [], null, now);
+    expect(exists.ok && (exists.body.trigger as { filter: unknown }).filter).toEqual([{ path: 'payload.sender', op: 'exists' }]);
+  });
+
+  it('Standard Webhooks needs the sender’s secret unless the stored routine already has one', () => {
+    const form = { ...webhookForm(), webhookPreset: 'gitlab' as const, webhookAuth: 'standard_webhooks' as const };
+    expect(routineBodyFromForm(form, [], null, now)).toEqual({ ok: false, problem: { field: 'webhookSecret', key: 'standardSecretRequired' } });
+    const pasted = routineBodyFromForm({ ...form, webhookSecret: ' whsec_abc ' }, [], null, now);
+    expect(pasted.ok && pasted.body.trigger).toMatchObject({ auth: 'standard_webhooks', secret: 'whsec_abc' });
+    const row = storedWebhook({ preset: 'gitlab', auth: 'standard_webhooks' });
+    const kept = routineBodyFromForm(form, [], row, now);
+    expect(kept.ok && 'secret' in (kept.body.trigger as object)).toBe(false);
+    // A secret typed for another auth mode is never sent (the server generates those).
+    const other = routineBodyFromForm({ ...webhookForm(), webhookSecret: 'whsec_abc' }, [], null, now);
+    expect(other.ok && 'secret' in (other.body.trigger as object)).toBe(false);
+  });
+
+  it('a stored trigger fills the form; its first action rule becomes the Actions chips', () => {
+    const form = formFromRoutine(storedWebhook({
+      preset: 'gitlab', auth: 'gitlab_token', header_name: null, events: ['merge_request'], include_payload: false,
+      filter: [{ path: 'payload.object_attributes.action', op: 'in', value: ['open', 'update'] }, { path: 'payload.user.username', op: 'in', value: ['jane', 'joe'] }],
+    }), 'UTC');
+    expect(form).toMatchObject({
+      triggerType: 'webhook', webhookPreset: 'gitlab', webhookAuth: 'gitlab_token', webhookEvents: ['merge_request'], webhookIncludePayload: false,
+      webhookActions: ['open', 'update'], webhookFilter: [{ path: 'payload.user.username', op: 'in', value: 'jane, joe' }], webhookSecret: '',
+    });
+    expect(hasWebhookAuthorRule(form)).toBe(true);
+    expect(hasWebhookAuthorRule({ ...form, webhookFilter: [{ path: 'payload.object_attributes.draft', op: 'neq', value: 'true' }] })).toBe(false);
+  });
+
+  it('a mapping field keeps a template as text and brings a literal to the declared type', () => {
+    expect(webhookInputValue({ name: 'n', type: 'integer' }, '{{payload.number}}')).toBe('{{payload.number}}');
+    expect(webhookInputValue({ name: 'n', type: 'integer' }, '7')).toBe(7);
+    expect(webhookInputValue({ name: 'n', type: 'number' }, '1.')).toBe('1.');
+    expect(webhookInputValue({ name: 'b', type: 'boolean' }, 'false')).toBe(false);
+    expect(webhookInputValue({ name: 'j', type: 'json' }, '{"a":1}')).toEqual({ a: 1 });
+    expect(webhookInputValue({ name: 's', type: 'string' }, '42')).toBe('42');
+  });
+});
+
 describe('formFromRoutine', () => {
   it('fills the form from a stored routine (never a secret)', () => {
     const form = formFromRoutine(stored(), 'UTC');
@@ -110,6 +201,20 @@ describe('strings', () => {
     const tr = at(messages.tr, 'agents.routines');
     expect(Object.keys(tr).sort()).toEqual(Object.keys(en).sort());
     for (const key of Object.keys(en)) expect(placeholders(String(tr[key])), key).toEqual(placeholders(String(en[key])));
+  });
+
+  it('keys built at run time (operators, outcomes, presets, auth modes, examples, event hints) exist in both languages', () => {
+    const keys = [
+      ...WEBHOOK_FILTER_OPS.map((op) => `op_${op}`),
+      ...['accepted', 'duplicate', 'filtered', 'ignored', 'unauthorized', 'rejected', 'failed'].map((outcome) => `outcome_${outcome}`),
+      ...['presetGithub', 'presetGitlab', 'presetAzureDevops', 'presetGeneric'].flatMap((key) => [key, `${key}Hint`]),
+      ...WEBHOOK_PRESETS.flatMap((preset) => WEBHOOK_FILTER_EXAMPLES[preset].map((example) => example.key)),
+    ];
+    expect(Object.keys(WEBHOOK_EVENT_SUGGESTIONS).sort()).toEqual([...WEBHOOK_PRESETS].sort());
+    for (const locale of ['en', 'tr'] as const) {
+      const strings = at(messages[locale], 'agents.routines');
+      for (const key of keys) expect(typeof strings[key], `${locale}: ${key}`).toBe('string');
+    }
   });
 
   it('the routine delete confirm has its noun and warning in both languages', () => {

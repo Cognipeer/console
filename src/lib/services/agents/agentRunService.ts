@@ -132,6 +132,9 @@ const MIN_CALLBACK_SECRET_LENGTH = 16;
 const MAX_CALLBACK_SECRET_LENGTH = 256;
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 /** Idempotency-Key prefixes of the runs routines start (`routine:<id>:<slot>`, `hook:<id>:…`); refused from clients. */
+/** What can start a run (the runs list's `trigger` filter). */
+export const AGENT_RUN_TRIGGERS: ReadonlyArray<NonNullable<IAgentRun['trigger']>> = ['request', 'schedule', 'once', 'manual', 'webhook'];
+
 export const RESERVED_IDEMPOTENCY_PREFIXES = ['hook:', 'routine:'] as const;
 
 export function isReservedIdempotencyKey(key: string): boolean {

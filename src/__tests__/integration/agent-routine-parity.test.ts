@@ -4,11 +4,14 @@
  * time comes back a Date), the scheduler's due list, the CAS that moves
  * `nextFireAt` on, the newest-fire-wins record of the last fire, and the
  * agent-delete cascade. Plus the two run flags routines set
- * (`unattended`, `externalContent`), which a resume requeue keeps.
+ * (`unattended`, `externalContent`), which a resume requeue keeps; the
+ * webhook trigger (found by hook id, its dates round-trip) and its delivery
+ * log (newest first with a cursor, batched retention, removal per routine);
+ * the runs list's trigger filter.
  */
 
 import { beforeEach, expect, it } from 'vitest';
-import type { IAgentRoutine } from '@/lib/database/provider.interface';
+import type { AgentRoutineWebhookTrigger, IAgentRoutine, IAgentRoutineDelivery } from '@/lib/database/provider.interface';
 import { describeForEachProvider } from './db-parity.helper';
 
 describeForEachProvider('Agent routines', (getDb) => {
@@ -160,5 +163,98 @@ describeForEachProvider('Agent routines', (getDb) => {
 
     const requeued = await db.requeueAgentRunForResume(String(flagged._id), tenantId, ['action-1']);
     expect(requeued).toMatchObject({ status: 'queued', unattended: true, externalContent: true });
+  });
+
+  const webhookTrigger = (overrides: Partial<AgentRoutineWebhookTrigger> = {}): AgentRoutineWebhookTrigger => ({
+    type: 'webhook',
+    hookId: 'wh_abcdefghijklmnopqrstuvwx',
+    preset: 'github',
+    auth: 'github_signature',
+    headerName: null,
+    secretSealed: 'sealed-current',
+    secretHint: 'wxyz',
+    secretSource: 'generated',
+    previousSecretSealed: 'sealed-previous',
+    previousSecretExpiresAt: new Date('2026-10-19T00:00:00.000Z'),
+    events: ['pull_request'],
+    filter: [{ path: 'payload.action', op: 'in', value: ['opened', 'synchronize'] }],
+    includePayload: true,
+    ...overrides,
+  });
+
+  it('finds a webhook routine by its hook id; its trigger dates round-trip; switching away drops the id', async () => {
+    const db = getDb();
+    const routine = await db.createAgentRoutine(record({ trigger: webhookTrigger(), nextFireAt: null }));
+    await db.createAgentRoutine(record({ name: 'other', trigger: webhookTrigger({ hookId: 'wh_zzzzzzzzzzzzzzzzzzzzzzzz' }) }));
+    const found = await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx');
+    expect(String(found?._id)).toBe(String(routine._id));
+    expect(found?.trigger).toEqual(webhookTrigger());
+    expect(found?.trigger.type === 'webhook' && found.trigger.previousSecretExpiresAt instanceof Date).toBe(true);
+    expect(await db.findAgentRoutineByHookId('wh_unknownunknownunknown')).toBeNull();
+
+    await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { trigger: webhookTrigger({ previousSecretSealed: null, previousSecretExpiresAt: null }) });
+    const rotated = await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx');
+    expect(rotated?.trigger).toMatchObject({ previousSecretSealed: null, previousSecretExpiresAt: null });
+
+    await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { trigger: { type: 'manual' } });
+    expect(await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx')).toBeNull();
+  });
+
+  const delivery = (overrides: Partial<Omit<IAgentRoutineDelivery, '_id'>> = {}): Omit<IAgentRoutineDelivery, '_id'> => ({
+    tenantId,
+    projectId,
+    routineId: 'routine-1',
+    receivedAt: new Date('2026-10-18T10:00:00.000Z'),
+    expiresAt: new Date('2026-10-25T10:00:00.000Z'),
+    outcome: 'accepted',
+    httpStatus: 202,
+    event: 'pull_request',
+    deliveryId: 'd-1',
+    runId: 'run-1',
+    reason: null,
+    bytes: 1234,
+    ...overrides,
+  });
+
+  it('keeps a delivery log per routine, newest first, paged with a cursor', async () => {
+    const db = getDb();
+    const at = (minute: number) => new Date(Date.UTC(2026, 9, 18, 10, minute));
+    const first = await db.recordAgentRoutineDelivery(delivery({ receivedAt: at(1) }));
+    // Two in the same instant: the later write comes first.
+    await db.recordAgentRoutineDelivery(delivery({ receivedAt: at(2), deliveryId: 'd-2', outcome: 'filtered', httpStatus: 200, runId: null, reason: 'rule 1 (payload.action in) did not match (value: string, 6 chars)' }));
+    await db.recordAgentRoutineDelivery(delivery({ receivedAt: at(2), deliveryId: 'd-3', outcome: 'duplicate', httpStatus: 200 }));
+    await db.recordAgentRoutineDelivery(delivery({ routineId: 'routine-2', receivedAt: at(3) }));
+    await db.recordAgentRoutineDelivery(delivery({ projectId: 'proj-2', receivedAt: at(4) }));
+
+    const page = await db.listAgentRoutineDeliveries({ tenantId, projectId, routineId: 'routine-1', limit: 2 });
+    expect(page.map((row) => row.deliveryId)).toEqual(['d-3', 'd-2']);
+    expect(page[1]).toMatchObject({ outcome: 'filtered', httpStatus: 200, runId: null, bytes: 1234 });
+    expect(page[1].receivedAt).toBeInstanceOf(Date);
+    const rest = await db.listAgentRoutineDeliveries({ tenantId, projectId, routineId: 'routine-1', limit: 10, before: String(page[1]._id) });
+    expect(rest.map((row) => String(row._id))).toEqual([String(first._id)]);
+    expect(await db.listAgentRoutineDeliveries({ tenantId, projectId, routineId: 'routine-1', limit: 10, before: 'not-a-delivery' })).toEqual([]);
+  });
+
+  it('removes expired deliveries in batches and a routine’s whole log', async () => {
+    const db = getDb();
+    for (let i = 0; i < 3; i += 1) await db.recordAgentRoutineDelivery(delivery({ expiresAt: new Date('2026-10-01T00:00:00.000Z') }));
+    await db.recordAgentRoutineDelivery(delivery({ expiresAt: new Date('2026-12-01T00:00:00.000Z') }));
+    await db.recordAgentRoutineDelivery(delivery({ routineId: 'routine-2' }));
+    const olderThan = new Date('2026-10-18T00:00:00.000Z');
+    expect(await db.cleanupAgentRoutineDeliveryRetention({ olderThan, batchSize: 2 })).toEqual({ deletedCount: 2 });
+    expect(await db.cleanupAgentRoutineDeliveryRetention({ olderThan, batchSize: 2 })).toEqual({ deletedCount: 1 });
+    expect(await db.cleanupAgentRoutineDeliveryRetention({ olderThan, batchSize: 2 })).toEqual({ deletedCount: 0 });
+    expect(await db.listAgentRoutineDeliveries({ tenantId, projectId, routineId: 'routine-1', limit: 10 })).toHaveLength(1);
+    expect(await db.deleteAgentRoutineDeliveries('routine-1')).toBe(1);
+    expect(await db.listAgentRoutineDeliveries({ tenantId, projectId, routineId: 'routine-2', limit: 10 })).toHaveLength(1);
+  });
+
+  it('filters the runs list by trigger', async () => {
+    const db = getDb();
+    const base = { mode: 'background' as const, tenantId, tenantDbName: dbName, projectId, agentKey: 'report-bot', userMessage: 'hi', status: 'queued' as const };
+    await db.createAgentRun({ ...base, conversationId: 'conv-a', trigger: 'webhook', routineId: 'routine-1' });
+    await db.createAgentRun({ ...base, conversationId: 'conv-b', trigger: 'schedule', routineId: 'routine-1' });
+    const runs = await db.listAgentRuns({ tenantId, projectId, trigger: 'webhook' });
+    expect(runs.map((run) => run.conversationId)).toEqual(['conv-a']);
   });
 });

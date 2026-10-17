@@ -292,6 +292,8 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           const events = await tenantDb.cleanupAgentSessionEventRetention({ olderThan: new Date(now), batchSize: 1000 });
           retentionDeleted += events.deletedCount;
           retentionDeleted += await cleanupWebhookDeliveries(tenantDb, new Date(now));
+          // Incoming webhook delivery logs: each row carries its own expiresAt (7 days).
+          retentionDeleted += (await tenantDb.cleanupAgentRoutineDeliveryRetention({ olderThan: new Date(now), batchSize: 1000 })).deletedCount;
           // Files attached to sessions live as long as the agent's `attachments.retentionDays`
           // (stamped on each file as `expiresAt` when it was uploaded).
           retentionDeleted += await cleanupExpiredSessionFiles(tenantDb, tenant.dbName!, new Date(now));

@@ -3,10 +3,12 @@
  *
  * The trigger is one JSON column (`triggerSpec`; TRIGGER is an SQL keyword),
  * its dates as ISO strings. `nextFireAt` is its own column: the scheduler's
- * `(enabled, nextFireAt)` index reads it.
+ * `(enabled, nextFireAt)` index reads it; so is a webhook trigger's `hookId`
+ * (the incoming webhook's lookup). A webhook trigger's delivery log is
+ * `agent_routine_deliveries`.
  */
 
-import type { AgentRoutineTrigger, IAgentRoutine } from '../provider.interface';
+import type { AgentRoutineTrigger, IAgentRoutine, IAgentRoutineDelivery } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -23,7 +25,12 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
       if (record.enabled !== undefined) out.enabled = this.toBoolInt(record.enabled);
       if (record.trigger !== undefined) {
         const trigger = record.trigger;
-        out.triggerSpec = this.toJson(trigger.type === 'once' ? { ...trigger, runAt: iso(trigger.runAt) } : trigger);
+        out.triggerSpec = this.toJson(
+          trigger.type === 'once' ? { ...trigger, runAt: iso(trigger.runAt) }
+            : trigger.type === 'webhook' ? { ...trigger, previousSecretExpiresAt: iso(trigger.previousSecretExpiresAt) }
+              : trigger,
+        );
+        out.hookId = trigger.type === 'webhook' ? trigger.hookId : null;
       }
       if (record.prompt !== undefined) out.prompt = record.prompt;
       if (record.version !== undefined) out.version = record.version ?? null;
@@ -54,7 +61,7 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
         updatedAt: now,
         // Defaults for the optional columns a new routine leaves out.
         description: null, version: null, inputs: null, metadata: null, callback: null, responseFormat: null,
-        nextFireAt: null, lastFireAt: null, lastRunId: null, lastStatus: null, lastError: null, updatedBy: null,
+        nextFireAt: null, lastFireAt: null, lastRunId: null, lastStatus: null, lastError: null, updatedBy: null, hookId: null,
         ...this.routineColumns(record),
       };
       const names = Object.keys(columns);
@@ -146,11 +153,98 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
         }).changes === 1;
     }
 
+    async findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null> {
+      const row = this.getTenantDb()
+        .prepare(`SELECT * FROM ${TABLES.agentRoutines} WHERE hookId = @hookId LIMIT 1`)
+        .get({ hookId }) as SqliteRow | undefined;
+      return row ? this.mapAgentRoutine(row) : null;
+    }
+
+    // ── Webhook deliveries ────────────────────────────────────────
+
+    async recordAgentRoutineDelivery(record: Omit<IAgentRoutineDelivery, '_id'>): Promise<IAgentRoutineDelivery> {
+      const id = this.newId();
+      this.getTenantDb().prepare(`
+        INSERT INTO ${TABLES.agentRoutineDeliveries}
+          (id, tenantId, projectId, routineId, receivedAt, expiresAt, outcome, httpStatus, event, deliveryId, runId, reason, bytes)
+        VALUES (@id, @tenantId, @projectId, @routineId, @receivedAt, @expiresAt, @outcome, @httpStatus, @event, @deliveryId, @runId, @reason, @bytes)
+      `).run({
+        id,
+        tenantId: record.tenantId,
+        projectId: record.projectId,
+        routineId: record.routineId,
+        receivedAt: record.receivedAt.toISOString(),
+        expiresAt: record.expiresAt.toISOString(),
+        outcome: record.outcome,
+        httpStatus: record.httpStatus,
+        event: record.event ?? null,
+        deliveryId: record.deliveryId ?? null,
+        runId: record.runId ?? null,
+        reason: record.reason ?? null,
+        bytes: record.bytes,
+      });
+      return { ...record, _id: id };
+    }
+
+    async listAgentRoutineDeliveries(filter: {
+      tenantId: string;
+      projectId: string;
+      routineId: string;
+      limit: number;
+      before?: string;
+    }): Promise<IAgentRoutineDelivery[]> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = {
+        tenantId: filter.tenantId, projectId: filter.projectId, routineId: filter.routineId, limit: Math.max(1, filter.limit),
+      };
+      let sql = `SELECT rowid AS seq, * FROM ${TABLES.agentRoutineDeliveries} WHERE tenantId = @tenantId AND projectId = @projectId AND routineId = @routineId`;
+      if (filter.before) {
+        const cursor = db.prepare(`SELECT rowid AS seq, receivedAt FROM ${TABLES.agentRoutineDeliveries} WHERE id = @id AND routineId = @routineId`)
+          .get({ id: filter.before, routineId: filter.routineId }) as { seq: number; receivedAt: string } | undefined;
+        if (!cursor) return [];
+        sql += ' AND (receivedAt < @cursorAt OR (receivedAt = @cursorAt AND rowid < @cursorSeq))';
+        params.cursorAt = cursor.receivedAt;
+        params.cursorSeq = cursor.seq;
+      }
+      const rows = db.prepare(`${sql} ORDER BY receivedAt DESC, rowid DESC LIMIT @limit`).all(params) as SqliteRow[];
+      return rows.map((row) => ({
+        _id: row.id as string,
+        tenantId: row.tenantId as string,
+        projectId: row.projectId as string,
+        routineId: row.routineId as string,
+        receivedAt: new Date(String(row.receivedAt)),
+        expiresAt: new Date(String(row.expiresAt)),
+        outcome: row.outcome as IAgentRoutineDelivery['outcome'],
+        httpStatus: Number(row.httpStatus),
+        event: (row.event as string) ?? null,
+        deliveryId: (row.deliveryId as string) ?? null,
+        runId: (row.runId as string) ?? null,
+        reason: (row.reason as string) ?? null,
+        bytes: Number(row.bytes ?? 0),
+      }));
+    }
+
+    async cleanupAgentRoutineDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }> {
+      const res = this.getTenantDb().prepare(`
+        DELETE FROM ${TABLES.agentRoutineDeliveries}
+        WHERE id IN (SELECT id FROM ${TABLES.agentRoutineDeliveries} WHERE expiresAt < @olderThan LIMIT @batchSize)
+      `).run({ olderThan: options.olderThan.toISOString(), batchSize: Math.max(1, options.batchSize) });
+      return { deletedCount: res.changes };
+    }
+
+    async deleteAgentRoutineDeliveries(routineId: string): Promise<number> {
+      return this.getTenantDb()
+        .prepare(`DELETE FROM ${TABLES.agentRoutineDeliveries} WHERE routineId = @routineId`)
+        .run({ routineId }).changes;
+    }
+
     private mapAgentRoutine(row: SqliteRow): IAgentRoutine {
       const spec = this.parseJson<Record<string, unknown>>(row.triggerSpec, { type: 'manual' });
       const trigger = (spec.type === 'once'
         ? { type: 'once', runAt: new Date(String(spec.runAt)) }
-        : spec) as AgentRoutineTrigger;
+        : spec.type === 'webhook'
+          ? { ...spec, previousSecretExpiresAt: spec.previousSecretExpiresAt ? new Date(String(spec.previousSecretExpiresAt)) : null }
+          : spec) as AgentRoutineTrigger;
       return {
         _id: row.id as string,
         tenantId: row.tenantId as string,
