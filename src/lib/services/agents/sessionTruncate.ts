@@ -27,7 +27,7 @@ import type { DatabaseProvider, IAgentConversation, IAgentMessageVersion } from 
 import type { IAgentConversationMessage } from '@/lib/database/provider/types.domain';
 import { recordAuditLog } from '@/lib/services/audit/auditService';
 import { cancelPendingForNewMessage } from './agentPendingActions';
-import { runWithTenantDb } from './agentRunService';
+import { cancelPausedAgentRuns, runWithTenantDb } from './agentRunService';
 import { createSessionEventWriter } from './sessionEvents';
 import { normalizeStaleRunningStatus } from './sessionRuntime';
 
@@ -149,6 +149,8 @@ export async function truncateSessionAfterMessage(input: TruncateSessionInput): 
             await db.updateAgentConversationRuntime(conversationId, {
                 runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [],
             });
+            // The run that waited on the dropped pause ends `canceled`, with its notifications.
+            await cancelPausedAgentRuns(db, { tenantId: input.tenantId, projectId: input.projectId, conversationId });
         }
         const kept = (working.messages ?? []).slice(0, input.keepThrough + 1);
 

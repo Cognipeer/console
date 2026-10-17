@@ -686,7 +686,8 @@ export async function resolveClientSessionAction(
     if (outcome.kind === 'queued') return reply.code(202).send(serializeAgentRun(outcome.run));
     if (outcome.kind === 'pending') {
       return reply.code(200).send({
-        id: `resp_${String(conversation._id)}`,
+        // The paused run's response id (readable at GET /responses/{id}); a pause no run owns keeps the session's.
+        id: `resp_${outcome.runId ?? String(conversation._id)}`,
         object: 'response',
         model: conversation.agentKey,
         output: [],

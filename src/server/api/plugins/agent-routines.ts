@@ -91,6 +91,8 @@ interface RoutineCaller {
   tenant: RoutineTenant;
   agent: IAgent;
   userId: string;
+  /** The API token of a client call (Run now counts against it). */
+  apiTokenId?: string;
   /** The client API takes an `Idempotency-Key` on Run now; the dashboard does not. */
   dialect: 'client' | 'dashboard';
   /** The longest Run now may wait (`wait` / `Prefer: wait=N`). */
@@ -483,6 +485,8 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
     metadata: runMetadata,
     ...(externalContent ? { externalContent: true } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
+    // Run now counts against the person (and token) who pressed it.
+    principal: { userId: caller.userId, ...(caller.apiTokenId ? { apiTokenId: caller.apiTokenId } : {}) },
   });
   switch (fired.kind) {
     case 'accepted':
@@ -584,6 +588,7 @@ export const agentRoutinesApiPlugin: FastifyPluginAsync = async (app) => {
         tenant: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, licenseType: ctx.tenant.licenseType },
         agent,
         userId: String(ctx.tokenRecord.userId ?? ''),
+        ...(ctx.tokenRecord._id ? { apiTokenId: String(ctx.tokenRecord._id) } : {}),
         dialect: 'client',
         syncWaitMs: async () => (await resolveAgentRunLimits({ quotaContext })).syncWaitMs,
       });

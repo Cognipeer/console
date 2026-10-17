@@ -56,6 +56,21 @@ export interface FireRoutineInput {
   fireAt?: Date;
   /** A normalized event name, for the catalog event only. */
   event?: string;
+  /**
+   * Who the fire counts against (spend limits, run quota, run caps): the
+   * person and token that pressed Run now. Default: the routine's accountable
+   * person (`routineAccountableUserId`).
+   */
+  principal?: { userId: string; apiTokenId?: string };
+}
+
+/**
+ * The person a routine's own fires (schedule, once, webhook) count against:
+ * whoever last changed it, else whoever created it. The run itself stays owned
+ * by the routine's synthetic actor.
+ */
+export function routineAccountableUserId(routine: Pick<IAgentRoutine, 'createdBy' | 'updatedBy'>): string {
+  return routine.updatedBy || routine.createdBy;
 }
 
 export type FireRoutineResult =
@@ -116,7 +131,8 @@ export function resetRoutineEventThrottle(): void {
  * Starts one run of a routine. Never throws. In order (§2.4a): the idempotency
  * pre-check (a run found counts only when it is this routine's), the spend
  * pre-check, a new session (source `routine`, the agent's own budget), the run
- * (queued; owned by the routine's synthetic actor; unattended), the session
+ * (queued; owned by the routine's synthetic actor; unattended; counted against
+ * the accountable principal's spend and quota policies), the session
  * removed again for anything but an accepted run, the outcome recorded on the
  * routine (accepted / failed only — the newest fire wins), the catalog event.
  */
@@ -124,6 +140,7 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
   const routineId = String(routine._id);
   const fireAt = input.fireAt ?? new Date();
   const userId = routineActorId(routineId);
+  const principal = input.principal ?? { userId: routineAccountableUserId(routine) };
   const scope = { tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, projectId: routine.projectId };
   let result: FireRoutineResult;
   try {
@@ -147,7 +164,7 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
         }
 
         try {
-          await assertQueuedTurnSpendAllowed({ ...scope, agentKey: routine.agentKey, userId });
+          await assertQueuedTurnSpendAllowed({ ...scope, agentKey: routine.agentKey, userId: principal.userId });
         } catch (error) {
           if (error instanceof AgentSpendLimitError) return { kind: 'spend_limit', reason: 'spend limit reached', retryAfterSeconds: 3600 };
           throw error;
@@ -175,6 +192,7 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
             userMessage: input.message,
             userId,
             actorType: 'system',
+            accountable: principal,
             ...(routine.version != null ? { version: routine.version } : {}),
             usePublished: routine.version == null,
             responseFormat: routine.responseFormat ?? null,
@@ -191,7 +209,12 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
             callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,
             execution: { kind: 'queued' },
             limits: await resolveAgentRunLimits({
-              quotaContext: { ...scope, ...(tenant.licenseType ? { licenseType: tenant.licenseType as never } : {}) },
+              quotaContext: {
+                ...scope,
+                ...(tenant.licenseType ? { licenseType: tenant.licenseType as never } : {}),
+                userId: principal.userId,
+                ...(principal.apiTokenId ? { tokenId: principal.apiTokenId } : {}),
+              },
             }),
           });
           switch (started.kind) {
