@@ -35,9 +35,10 @@ import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody, toClientOutputFiles, toClientPendingAction, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IAgent, IAgentRun } from '@/lib/database';
+import type { IAgent, IAgentInputField, IAgentRun } from '@/lib/database';
 import type { AgentChatResponse } from '@/lib/services/agents/agentService';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
+import { resolveRunInputs, stringifyInputsBlock } from '@/lib/services/agents/agentInputs';
 import { isA2aEnabled } from '@/lib/services/agents/a2aExposure';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -47,7 +48,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
-import { resolveInvocationLimits } from './agent-invocation';
+import { resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
 import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
@@ -66,6 +67,7 @@ const ERR_AUTHORIZATION_UNAVAILABLE = -32603;
 interface A2aPart {
   kind?: string;
   text?: string;
+  data?: unknown;
 }
 
 interface A2aIncomingMessage {
@@ -126,6 +128,43 @@ function extractText(parts: A2aPart[] | undefined): string {
     .join('\n');
 }
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The `data` parts of a message. A part whose keys are all inputs the agent
+ * declares carries those inputs (validated like any request's); any other data
+ * is appended to the text as a JSON block, so the agent still reads it.
+ */
+export function splitA2aDataParts(
+  parts: A2aPart[] | undefined,
+  declared: ReadonlyArray<IAgentInputField> | undefined,
+): { inputs: Record<string, unknown>; other: Record<string, unknown>[] } {
+  const names = new Set((declared ?? []).map((field) => field.name));
+  const inputs: Record<string, unknown> = {};
+  const other: Record<string, unknown>[] = [];
+  for (const part of Array.isArray(parts) ? parts : []) {
+    if (!part || part.kind !== 'data' || !isPlainObject(part.data)) continue;
+    const keys = Object.keys(part.data);
+    if (keys.length > 0 && names.size > 0 && keys.every((key) => names.has(key))) Object.assign(inputs, part.data);
+    else if (keys.length > 0) other.push(part.data);
+  }
+  return { inputs, other };
+}
+
+/** Data that is not an input, as the block appended to the message text. */
+function appendA2aData(text: string, other: Record<string, unknown>[]): string {
+  if (other.length === 0) return text;
+  const blocks = other.map((data) => `Data:\n\`\`\`json\n${stringifyInputsBlock(data)}\n\`\`\``);
+  return [text, ...blocks].filter((part) => part.length > 0).join('\n\n');
+}
+
+/** The data artifact of a structured answer (`output_parsed`): the parsed object, as an A2A `data` part. */
+function structuredArtifact(taskIdValue: string, parsed: unknown): Array<Record<string, unknown>> {
+  if (!isPlainObject(parsed)) return [];
+  return [{ artifactId: `${taskIdValue}_data`, name: 'output', parts: [{ kind: 'data', data: parsed }] }];
+}
+
 /** A task id of the run scheme (`run_<runId>`). */
 function isRunTaskId(id: string): boolean {
   return /^run_[A-Za-z0-9-]+$/.test(id);
@@ -152,6 +191,7 @@ function taskFromResponse(id: string, contextId: string, result: AgentChatRespon
       ? { reason: result.stop_reason, ...(result.stop_detail ? { detail: result.stop_detail } : {}) }
       : undefined,
     a2aFileArtifacts(id, result.output_files ?? [], baseUrl),
+    { parsed: result.output_parsed, error: result.output_error },
   );
 }
 
@@ -214,7 +254,13 @@ function completedTask(
   stop?: { reason: string; detail?: string },
   /** Files the agent produced this turn, as extra artifacts. */
   fileArtifacts: ReadonlyArray<Record<string, unknown>> = [],
+  /** The structured answer (a `data` artifact), or why the contract failed (`metadata.outputError`). */
+  structured: { parsed?: unknown; error?: string } = {},
 ): Record<string, unknown> {
+  const metadata = {
+    ...(stop ? { stopReason: stop.reason, ...(stop.detail ? { stopDetail: stop.detail } : {}) } : {}),
+    ...(structured.error ? { outputError: structured.error } : {}),
+  };
   return {
     kind: 'task',
     id,
@@ -235,13 +281,14 @@ function completedTask(
         }
         : {}),
     },
-    ...(stop ? { metadata: { stopReason: stop.reason, ...(stop.detail ? { stopDetail: stop.detail } : {}) } } : {}),
+    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
     artifacts: [
       {
         artifactId: `${id}_artifact`,
         name: 'response',
         parts: [{ kind: 'text', text: assistantText }],
       },
+      ...structuredArtifact(id, structured.parsed),
       ...fileArtifacts,
     ],
   };
@@ -363,8 +410,15 @@ export async function handleA2aRpc(
 
     if (method === 'message/send') {
       const message = (body.params?.message ?? {}) as A2aIncomingMessage;
-      const userMessage = extractText(message.parts);
-      if (!userMessage.trim()) {
+      // The config this call runs (published), for the agent's declared inputs.
+      const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
+      const data = splitA2aDataParts(message.parts, runConfig.inputs);
+      const resolvedInputs = resolveRunInputs(runConfig.inputs, Object.keys(data.inputs).length > 0 ? data.inputs : null);
+      if (!resolvedInputs.ok) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: invalid inputs', { type: 'invalid_request_error', code: 'invalid_inputs', errors: resolvedInputs.errors }));
+      }
+      const userMessage = appendA2aData(extractText(message.parts), data.other);
+      if (!userMessage.trim() && !resolvedInputs.inputs) {
         return reply.code(200).send(
           jsonRpcError(rpcId, -32602, 'Invalid params: message.parts must contain text'),
         );
@@ -430,6 +484,7 @@ export async function handleA2aRpc(
         ...(ctx.tokenId ? { apiTokenId: ctx.tokenId, actorType: 'api_token' as const } : {}),
         usePublished: true,
         runtimeContext,
+        ...(resolvedInputs.inputs ? { inputs: resolvedInputs.inputs } : {}),
         channel: 'a2a',
         trigger: 'request',
         // Past the window the run carries on and the caller gets a `working` task to poll with tasks/get.
@@ -491,6 +546,7 @@ export async function handleA2aRpc(
           message.content,
           message.stopReason ? { reason: message.stopReason, ...(message.stopDetail ? { detail: message.stopDetail } : {}) } : undefined,
           a2aFileArtifacts(requestedId, toClientOutputFiles(parsed.conversationId, message.attachments), externalBaseUrl(request)),
+          { parsed: message.output, error: message.outputError },
         ),
       ));
     }

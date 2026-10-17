@@ -25,7 +25,7 @@ import {
     toolInputSchemaToZod,
     resolveAgentRuntimeOptions,
     resolveAgentSkillPolicy,
-    resolveStructuredOutputSchema,
+    resolveTurnOutputSchema,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption, buildMountedMemoryStores } from './agentMemoryAdapter';
@@ -231,8 +231,10 @@ import {
     toPublicPendingAction,
     toSdkAnswerSet,
     type OpenedPause,
+    type PausedTurnOptions,
     type PublicPendingAction,
 } from './agentPendingActions';
+import { composeUserMessageWithInputs } from './agentInputs';
 
 const logger = createLogger('agents');
 
@@ -3207,6 +3209,17 @@ export interface AgentChatRequest {
     responseFormat?: AgentResponseFormat;
     inputs?: Record<string, unknown>;
     /**
+     * Whether `inputs` also fill the `{{input.<name>}}` prompt variables (default
+     * true). Off for inputs that came from outside the platform's own callers: they
+     * then reach the model only inside the user message, never the system prompt.
+     */
+    inputsAsPromptVariables?: boolean;
+    /**
+     * The message / inputs came from an external payload (a webhook): the Inputs
+     * block is closed with a line saying where the external data ends.
+     */
+    externalContent?: boolean;
+    /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so
      * a run routed to another node replays its chunks over the cluster stream
@@ -3711,6 +3724,11 @@ async function buildLocalAgentRun(input: {
      * calls the model (reading a tool's schema).
      */
     spend?: AgentSpendScope;
+    /** Per-request structured output: replaces `config.structuredOutput` for this turn. */
+    responseFormat?: AgentResponseFormat;
+    /** Validated agent inputs of the turn, exposed as `{{input.<name>}}` (see `inputsAsPromptVariables`). */
+    inputs?: Record<string, unknown>;
+    inputsAsPromptVariables?: boolean;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
@@ -3759,6 +3777,8 @@ async function buildLocalAgentRun(input: {
         version: input.version,
         runtimeContext,
         userId: input.userId,
+        inputs: input.inputs,
+        inputsAsPromptVariables: input.inputsAsPromptVariables,
     });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
@@ -4037,7 +4057,7 @@ async function buildLocalAgentRun(input: {
     cleanupTasks.push(...subagentCleanupTasks);
 
     const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
-    const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
+    const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
     const tracingMetadata = input.modelChoice
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
@@ -4373,6 +4393,18 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
+/** What a continuation must apply again: the turn's own structured output and inputs. */
+function pausedTurnOptions(
+    request: Pick<AgentChatRequest, 'responseFormat' | 'inputs' | 'inputsAsPromptVariables'>,
+): PausedTurnOptions | undefined {
+    if (!request.responseFormat && !request.inputs && request.inputsAsPromptVariables !== false) return undefined;
+    return {
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.inputs ? { inputs: request.inputs } : {}),
+        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+    };
+}
+
 function toAgentChatResponse(input: {
     conversationId: string;
     priorMessageCount: number;
@@ -4485,7 +4517,12 @@ async function runAgentChatTurn(
     // The block that separates the person's words from what the turn adds for
     // attached files must not be something the person can type: the transcript
     // is cut at it (`persistedUserTurn`).
-    const userMessage = neutralizeAttachmentMarker(request.userMessage);
+    // The Inputs block (and, for external content, its closing line) belongs to the
+    // user turn like the words themselves: it is what the model reads, what the
+    // transcript stores and what a resume replays.
+    const userMessage = neutralizeAttachmentMarker(
+        composeUserMessageWithInputs(request.userMessage, request.inputs, { externalContent: request.externalContent }),
+    );
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4686,6 +4723,9 @@ async function runAgentChatTurn(
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.inputs ? { inputs: request.inputs } : {}),
+        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -4847,6 +4887,7 @@ async function runAgentChatTurn(
                 hitl,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
+                turn: pausedTurnOptions(request),
                 createdBy: request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
@@ -5716,6 +5757,14 @@ export interface AgentResumeRequest {
     /** The background run executing this continuation, when there is one. */
     runId?: string;
     runtimeContext?: AgentRuntimeContext;
+    /**
+     * The turn's per-request structured output / inputs (the run row's, for a queued
+     * continuation). A paused turn carries its own with the paused state, which
+     * wins when this is absent; a budget continuation has only these.
+     */
+    responseFormat?: AgentResponseFormat;
+    inputs?: Record<string, unknown>;
+    inputsAsPromptVariables?: boolean;
     cancellationCell?: AgentRunCancellationCell;
     signal?: AbortSignal;
     onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -5993,6 +6042,13 @@ async function runAgentResumeTurn(
     const questions = pausedRun?.questions ?? [];
     const bySdkId = pausedRun?.bySdkId ?? new Map<string, IAgentPendingAction>();
     const source: 'agent' | 'agent-playground' = paused?.source ?? request.continuation!.source;
+    // The turn's own structured output and inputs: the request's, else the ones the pause stored.
+    const turnOptions: PausedTurnOptions = {
+        ...(paused?.turn ?? {}),
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.inputs ? { inputs: request.inputs } : {}),
+        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+    };
     const startedAt = Date.now();
 
     // The session's own budget and the tenant's spend limit, before the model is
@@ -6033,6 +6089,9 @@ async function runAgentResumeTurn(
         memoryConversationId: conversationId,
         threadId: conversationId,
         ...(spend ? { spend } : {}),
+        ...(turnOptions.responseFormat ? { responseFormat: turnOptions.responseFormat } : {}),
+        ...(turnOptions.inputs ? { inputs: turnOptions.inputs } : {}),
+        ...(turnOptions.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
     });
 
     try {
@@ -6226,6 +6285,7 @@ async function runAgentResumeTurn(
                 hitl,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
+                ...(Object.keys(turnOptions).length > 0 ? { turn: turnOptions } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);

@@ -22,7 +22,7 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
-import { agentRunLocation, resolveInvocationLimits } from './agent-invocation';
+import { agentRunLocation, parseInvocationResponseFormat, resolveInvocationInputs, resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
 import { publicAgentRunId } from '@/lib/services/agents/agentRunService';
 import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
@@ -213,6 +213,17 @@ async function handleAgentChatCompletion(input: {
     });
   }
 
+  // `response_format` (the answer comes back as a JSON string in `message.content`) and the `inputs` extension:
+  // both refused here, before a run exists, in OpenAI's envelope.
+  const responseFormat = parseInvocationResponseFormat(reply, 'openai', body.response_format, 'response_format');
+  if (!responseFormat) return reply;
+  const runInputs = resolveInvocationInputs(
+    reply, 'openai',
+    await resolvePublishedAgentConfig(auth.tenantDbName, agent, auth.projectId, typeof body.version === 'number' ? body.version : undefined),
+    body.inputs,
+  );
+  if (!runInputs) return reply;
+
   // Which of the agent's models answers (`agent_model` in the body - `extra_body` for OpenAI SDKs - or the
   // `x-cognipeer-agent-model` header; the session's last model otherwise). `model` stays the agent's id.
   let modelChoice: Awaited<ReturnType<typeof resolveRunModelForRequest>> | undefined;
@@ -242,6 +253,8 @@ async function handleAgentChatCompletion(input: {
     ...(auth.tokenRecord._id ? { apiTokenId: String(auth.tokenRecord._id) } : {}),
     ...(modelChoice ? { modelChoice } : {}),
     ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
+    ...(responseFormat.format ? { responseFormat: responseFormat.format } : {}),
+    ...(runInputs.inputs ? { inputs: runInputs.inputs } : {}),
     agent,
     model,
     messages: body.messages as OpenAiMessage[] | undefined,

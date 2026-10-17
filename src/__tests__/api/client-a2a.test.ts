@@ -696,3 +696,109 @@ describe('conversation ownership', () => {
     expect(approval.ending).not.toHaveBeenCalled();
   });
 });
+
+describe('message/send — agent inputs and structured output', () => {
+  const REPLY = { output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"label":"bug"}' }] }] };
+  const declared = () => mockFn(getAgentByKey).mockResolvedValue({
+    ...EXPOSED_AGENT,
+    config: {
+      ...EXPOSED_AGENT.config,
+      inputs: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }],
+    },
+  });
+  const send = async (parts: unknown[]) => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { role: 'user', parts } } },
+    });
+    return parseJsonBody<{ result?: Record<string, unknown>; error?: { code: number; message: string; data?: Record<string, unknown> } }>(res.body);
+  };
+
+  beforeEach(() => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    mockFn(executeAgentChat).mockResolvedValue({ ...REPLY, _conversation_messages: [{ role: 'user' }, { role: 'assistant' }] });
+  });
+
+  it('a data part whose keys are declared inputs becomes the run\'s inputs (validated, defaults applied)', async () => {
+    declared();
+    const body = await send([{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 'c-1' } }]);
+    expect(body.error).toBeUndefined();
+    const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
+    expect(chatRequest.inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(chatRequest.userMessage).toBe('Triage');
+  });
+
+  it('a message of only a data part is a valid turn', async () => {
+    declared();
+    const body = await send([{ kind: 'data', data: { customer_id: 'c-2', priority: 'high' } }]);
+    expect(body.error).toBeUndefined();
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: '', inputs: { customer_id: 'c-2', priority: 'high' } });
+  });
+
+  it('invalid inputs are -32602 with errors[]; nothing runs', async () => {
+    declared();
+    const body = await send([{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 7 } }]);
+    expect(body.error).toMatchObject({ code: -32602, data: { code: 'invalid_inputs', errors: [{ field: 'customer_id', message: 'Must be a string' }] } });
+    const missing = await send([{ kind: 'text', text: 'Triage' }]);
+    expect(missing.error?.data).toMatchObject({ errors: [{ field: 'customer_id', message: 'Required' }] });
+    expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+
+  it('data that is not an input is appended to the text as a JSON block, and the declared inputs stay apart', async () => {
+    declared();
+    await send([
+      { kind: 'text', text: 'Triage' },
+      { kind: 'data', data: { customer_id: 'c-1' } },
+      { kind: 'data', data: { ticket: { id: 12 }, note: 'a`b' } },
+    ]);
+    const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
+    expect(chatRequest.inputs).toEqual({ customer_id: 'c-1', priority: 'low' });
+    expect(chatRequest.userMessage).toMatch(/^Triage\n\nData:\n```json\n/);
+    expect(chatRequest.userMessage).toContain('"id": 12');
+    expect(chatRequest.userMessage.match(/```/g)).toHaveLength(2);
+  });
+
+  it('an agent that declares no inputs reads any data part as plain data', async () => {
+    const body = await send([{ kind: 'text', text: 'Hi' }, { kind: 'data', data: { a: 1 } }]);
+    expect(body.error).toBeUndefined();
+    const chatRequest = mockFn(executeAgentChat).mock.calls[0][0];
+    expect(chatRequest.inputs).toBeUndefined();
+    expect(chatRequest.userMessage).toContain('Data:\n```json');
+  });
+
+  it('a structured answer comes back as a data artifact next to the text one', async () => {
+    mockFn(executeAgentChat).mockResolvedValue({ ...REPLY, output_parsed: { label: 'bug', score: 2 }, _conversation_messages: [{}, {}] });
+    const body = await send([{ kind: 'text', text: 'Triage' }]);
+    const artifacts = body.result!.artifacts as Array<{ artifactId: string; name: string; parts: Array<Record<string, unknown>> }>;
+    expect(artifacts.map((a) => a.name)).toEqual(['response', 'output']);
+    expect(artifacts[1]).toMatchObject({ artifactId: 'run_run-1_data', parts: [{ kind: 'data', data: { label: 'bug', score: 2 } }] });
+  });
+
+  it('a failed contract is reported in metadata.outputError, with no data artifact', async () => {
+    mockFn(executeAgentChat).mockResolvedValue({ ...REPLY, output_error: 'label is required', _conversation_messages: [{}, {}] });
+    const body = await send([{ kind: 'text', text: 'Triage' }]);
+    expect(body.result!.metadata).toEqual({ outputError: 'label is required' });
+    expect((body.result!.artifacts as unknown[]).length).toBe(1);
+  });
+
+  it('tasks/get on a finished run carries the data artifact too', async () => {
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    getAgentRunById.mockResolvedValue({
+      _id: 'run-5', mode: 'inline', status: 'succeeded', agentKey: 'support-bot', projectId: 'proj-1', tenantId: 'tenant-1', conversationId: 'conv-1',
+      result: { ...REPLY, output_parsed: { label: 'ok' } },
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 2, method: 'tasks/get', params: { id: 'run_run-5' } },
+    });
+    const body = parseJsonBody<{ result: { artifacts: Array<{ name: string; parts: Array<{ data?: unknown }> }> } }>(res.body);
+    expect(body.result.artifacts.map((a) => a.name)).toEqual(['response', 'output']);
+    expect(body.result.artifacts[1].parts[0].data).toEqual({ label: 'ok' });
+  });
+});

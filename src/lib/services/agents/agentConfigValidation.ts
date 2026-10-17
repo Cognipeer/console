@@ -26,6 +26,7 @@ import {
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
 import { validateSeedFiles } from './agentSandboxSeedFiles';
+import { validateInputDeclaration } from './agentInputs';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
@@ -181,6 +182,9 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             issues.errors.push({ field: 'structuredOutput.schema', message: 'The schema declares no properties' });
         }
     }
+
+    // Declared inputs: names, types, enums, defaults.
+    for (const issue of validateInputDeclaration(config.inputs)) issues.errors.push(issue);
 
     const budget = config.budget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
     if (budget !== undefined && budget !== null) {

@@ -37,7 +37,7 @@ import {
     type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
 import { toClientPendingAction, toFileAnnotations, type ClientOutputFile, type ClientPendingAction } from '@/lib/services/agents/clientWire';
-import type { IAgent, IAgentRun } from '@/lib/database';
+import type { AgentResponseFormat, IAgent, IAgentRun } from '@/lib/database';
 import { createConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
 import {
     executeAgentChat,
@@ -366,6 +366,10 @@ export interface RunAgentCompletionInput {
     modelChoice?: AgentModelChoice;
     /** `reasoning_effort` / `reasoning: { effort }` of the request, validated by the route. Lowest rung. */
     requestReasoning?: NormalizedReasoning;
+    /** `response_format` of the request (replaces the agent's structured output for the turn), validated by the route. */
+    responseFormat?: AgentResponseFormat;
+    /** The agent `inputs` of the request, already validated against the agent's declaration. */
+    inputs?: Record<string, unknown>;
     /** The caller's run limits (its wait window included); the env ceilings otherwise. */
     limits?: AgentRunLimits;
     apiTokenId?: string;
@@ -423,8 +427,9 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     const toolAnswers = extractToolAnswers(input.messages);
     if (toolAnswers.length > 0) return answerToolCalls(input, toolAnswers);
 
-    const userMessage = extractLastUserMessage(input.messages);
-    if (!userMessage) {
+    // A request that carries `inputs` may have no message at all: the Inputs block is the turn.
+    const userMessage = extractLastUserMessage(input.messages) ?? (input.inputs ? '' : null);
+    if (userMessage === null || (!userMessage && !input.inputs)) {
         return { error: 'messages must contain at least one user message', status: 400 };
     }
 
@@ -454,6 +459,8 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
         ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
         ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
+        ...(input.responseFormat ? { responseFormat: input.responseFormat } : {}),
+        ...(input.inputs ? { inputs: input.inputs } : {}),
         // The chat-completions wire has no way to answer an approval: a gated
         // tool follows the agent's `humanInTheLoop.unattended` setting (deny by
         // default; `pause` leaves the session waiting in the dashboard).
@@ -499,11 +506,14 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
 }
 
 /** A Responses-shaped agent result as a chat completion: the answer, or the client tools it is waiting on. */
-function completionFrom(result: AgentChatResponse, conversationId: string): AgentCompletionResult {
+export function completionFrom(result: AgentChatResponse, conversationId: string): AgentCompletionResult {
     const toolCalls = toChatToolCalls(result.required_action?.actions);
     const reasoning = extractAnswerReasoning(result);
     return {
-        content: extractAnswerText(result),
+        // A turn under a structured contract answers with the JSON of the parsed output.
+        content: result.output_parsed !== undefined && result.output_parsed !== null
+            ? JSON.stringify(result.output_parsed)
+            : extractAnswerText(result),
         ...(reasoning ? { reasoning } : {}),
         conversationId,
         ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),

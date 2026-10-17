@@ -6,11 +6,12 @@
  * to an empty string. The prompt looked fine in the Prompts module, ran hollow
  * under an agent, and nothing anywhere said so.
  *
- * Values come from three places, lowest precedence first:
+ * Values come from these places, lowest precedence first:
  *
  *   1. `config.promptVariables` — static defaults set on the agent
  *   2. `runtimeContext.metadata` — per-call values from the caller
- *   3. built-ins (`agent`, `now`, `user`) — written last, so a caller cannot
+ *   3. `input` — the validated agent inputs (`config.inputs`), as `{{input.<name>}}`
+ *   4. built-ins (`agent`, `now`, `user`) — written last, so a caller cannot
  *      forge the agent's own identity into the prompt
  *
  * A caller can only fill placeholders the prompt author wrote: Mustache renders
@@ -24,6 +25,7 @@ import Mustache from 'mustache';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
+import { inputPromptValues } from './agentInputs';
 
 /** Reserved top-level names the caller cannot override. */
 export const BUILT_IN_PROMPT_VARIABLES = ['agent', 'now', 'user'] as const;
@@ -37,6 +39,14 @@ export interface PromptVariableInput {
     version?: number | null;
     runtimeContext?: AgentRuntimeContext;
     userId?: string;
+    /** Validated agent inputs of this turn, exposed as `{{input.<name>}}`. */
+    inputs?: Record<string, unknown> | null;
+    /**
+     * False keeps the inputs out of the prompt template (they came from outside
+     * the platform's own callers and are delivered only in the user message).
+     * Default true.
+     */
+    inputsAsPromptVariables?: boolean;
 }
 
 export interface ResolvedPromptVariables {
@@ -83,6 +93,16 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
         if (BUILT_INS.has(key)) continue;
         values[key] = value;
         fromCaller.push(key);
+    }
+
+    // `input` is the agent's own declared namespace: a caller's metadata key of the
+    // same name does not get to shape it. Defaults come from the declaration, so a
+    // turn that supplied nothing still renders them.
+    if (input.inputsAsPromptVariables === false) {
+        delete values.input;
+    } else {
+        const inputValues = inputPromptValues(input.config.inputs, input.inputs);
+        if (inputValues) values.input = inputValues;
     }
 
     const now = new Date();
@@ -152,6 +172,8 @@ export function renderPromptTemplate(
  */
 export function shouldRenderInlinePrompt(config: IAgentConfig, template?: string): boolean {
     if (Object.keys(config.promptVariables ?? {}).length > 0) return true;
+    // Declared inputs are `{{input.<name>}}` placeholders.
+    if ((config.inputs?.length ?? 0) > 0) return true;
     if (!template) return false;
     const referenced = collectTemplateVariables(template);
     return referenced.some((name) => BUILT_INS.has(name));

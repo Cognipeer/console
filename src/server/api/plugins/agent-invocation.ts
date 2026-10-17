@@ -14,6 +14,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import type {
   AgentResponseFormat,
   IAgent,
+  IAgentConfig,
   IAgentConversation,
   IAgentRun,
   IAgentSessionBudget,
@@ -35,6 +36,8 @@ import {
   type AgentRunLimits,
 } from '@/lib/services/agents/agentRunService';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
+import { resolveRunInputs } from '@/lib/services/agents/agentInputs';
+import { resolveResponseFormatSchema } from '@/lib/services/agents/agentRuntimeConfig';
 import {
   extractResponseUserInput,
   storeResponseInputFiles,
@@ -443,15 +446,71 @@ export function parseResponseFormat(value: unknown): { ok: true; format: AgentRe
     return { ok: false, message: 'response_format name must be 1-64 characters of A-Z, a-z, 0-9, "_" or "-"' };
   }
   if (spec.strict !== undefined && typeof spec.strict !== 'boolean') return { ok: false, message: 'response_format strict must be a boolean' };
-  return {
-    ok: true,
-    format: {
-      type: 'json_schema',
-      ...(typeof spec.name === 'string' ? { name: spec.name } : {}),
-      schema: spec.schema,
-      ...(typeof spec.strict === 'boolean' ? { strict: spec.strict } : {}),
-    },
+  const format: AgentResponseFormat = {
+    type: 'json_schema',
+    ...(typeof spec.name === 'string' ? { name: spec.name } : {}),
+    schema: spec.schema,
+    ...(typeof spec.strict === 'boolean' ? { strict: spec.strict } : {}),
   };
+  // The converter is the judge: a schema it cannot turn into an object contract is refused here.
+  const resolved = resolveResponseFormatSchema(format);
+  if (!resolved.ok) return { ok: false, message: resolved.message };
+  return { ok: true, format };
+}
+
+/** `parseResponseFormat` as a refusal in the dialect's envelope (`invalid_response_format`). */
+export function parseInvocationResponseFormat(
+  reply: FastifyReply,
+  dialect: InvocationDialect,
+  value: unknown,
+  param: string,
+): { format: AgentResponseFormat | null } | null {
+  const parsed = parseResponseFormat(value);
+  if (!parsed.ok) return fail(reply, dialect, invalid(parsed.message, 'invalid_response_format', param));
+  return { format: parsed.format };
+}
+
+/** The published config (or the pinned version's); the agent's own draft when it cannot be resolved. */
+export async function resolvePublishedAgentConfig(
+  tenantDbName: string,
+  agent: Pick<IAgent, 'key' | 'config'>,
+  projectId: string,
+  version?: number,
+): Promise<IAgentConfig> {
+  try {
+    return (await resolveAgentConfig(tenantDbName, agent.key, projectId, version))?.config ?? agent.config;
+  } catch {
+    return agent.config;
+  }
+}
+
+/** The config the turn runs: the published (or pinned) version, the draft when explicitly asked. */
+export async function resolveInvocationConfig(ctx: ApiTokenContext, target: ResolvedInvocationAgent): Promise<IAgentConfig> {
+  const { agent, version, usePublished } = target;
+  if (!usePublished && version === undefined) return agent.config;
+  return resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId, version);
+}
+
+/**
+ * The agent inputs of a request, checked against the declaration of the config
+ * that runs: shape, then required / type / enum / unknown names, defaults applied.
+ * `invalid_inputs` carries every problem in `errors: [{ field, message }]`.
+ */
+export function resolveInvocationInputs(
+  reply: FastifyReply,
+  dialect: InvocationDialect,
+  config: Pick<IAgentConfig, 'inputs'>,
+  value: unknown,
+  param = 'inputs',
+): { inputs: Record<string, unknown> | null } | null {
+  const shaped = parseRunInputs(value);
+  if (!shaped.ok) return fail(reply, dialect, invalid(shaped.message, 'invalid_inputs', param));
+  const resolved = resolveRunInputs(config.inputs, shaped.inputs);
+  if (!resolved.ok) {
+    const summary = resolved.errors.slice(0, 5).map((e) => `${e.field}: ${e.message}`).join('; ');
+    return fail(reply, dialect, { ...invalid(`Invalid inputs - ${summary}`, 'invalid_inputs', param), extra: { errors: resolved.errors } });
+  }
+  return { inputs: resolved.inputs };
 }
 
 export const RUN_INPUTS_MAX_KEYS = 32;

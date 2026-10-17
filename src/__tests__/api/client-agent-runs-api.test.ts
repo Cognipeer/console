@@ -256,12 +256,22 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     expect((await create({ input: 'hello', class: 'cheap' })).statusCode).toBe(400);
   });
 
+  const TRIAGE_SCHEMA = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] };
+  /** An agent declaring `inputs`: the published config (what API calls run) and the draft carry them. */
+  const declareInputs = (inputs: unknown[]) => {
+    const declared = { ...agent(), config: { modelKey: 'gpt-4o', inputs } };
+    hoisted.getAgentByKey.mockResolvedValue(declared);
+    hoisted.resolveAgentConfig.mockResolvedValue({ agent: declared, config: declared.config, resolvedVersion: 3 });
+  };
+  const lastStart = () => hoisted.startAgentRun.mock.calls.at(-1)![0];
+
   it('passes metadata, response_format, inputs, the callback and version "draft" through to the run', async () => {
+    declareInputs([{ name: 'customer_id', type: 'string' }]);
     const res = await create({
       input: 'hello',
       version: 'draft',
       metadata: { ticket: 'OPS-12' },
-      response_format: { type: 'json_schema', json_schema: { name: 'triage', schema: { type: 'object' }, strict: true } },
+      response_format: { type: 'json_schema', json_schema: { name: 'triage', schema: TRIAGE_SCHEMA, strict: true } },
       inputs: { customer_id: 'c-9' },
       callback: { url: 'https://hooks.example.com/run', secret: 'x'.repeat(20) },
     });
@@ -269,11 +279,64 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     expect(startInput()).toMatchObject({
       usePublished: false,
       metadata: { ticket: 'OPS-12' },
-      responseFormat: { type: 'json_schema', name: 'triage', schema: { type: 'object' }, strict: true },
+      responseFormat: { type: 'json_schema', name: 'triage', schema: TRIAGE_SCHEMA, strict: true },
       inputs: { customer_id: 'c-9' },
       callback: { url: 'https://hooks.example.com/run', secret: 'x'.repeat(20) },
     });
     expect(startInput().version).toBeUndefined();
+  });
+
+  it('refuses a response_format the converter cannot turn into an object contract', async () => {
+    for (const schema of [{ type: 'object' }, { type: 'array', items: { type: 'string' } }, { type: 'weird' }, { properties: { a: { type: 'string' } } }]) {
+      const res = await create({ input: 'hi', response_format: { type: 'json_schema', json_schema: { name: 'x', schema } } });
+      expect(res.statusCode, JSON.stringify(schema)).toBe(400);
+      expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('invalid_response_format');
+    }
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('accepts json_object and the Responses spelling, and treats type "text" as no format', async () => {
+    await create({ input: 'hi', response_format: { type: 'json_object' } });
+    expect(lastStart().responseFormat).toEqual({ type: 'json_object' });
+    await create({ input: 'hi', response_format: { type: 'json_schema', name: 'n', schema: TRIAGE_SCHEMA } });
+    expect(lastStart().responseFormat).toMatchObject({ type: 'json_schema', name: 'n' });
+    await create({ input: 'hi', response_format: { type: 'text' } });
+    expect(lastStart().responseFormat).toBeNull();
+  });
+
+  it('validates inputs against the agent declaration: required, type, enum, unknown names, defaults', async () => {
+    declareInputs([
+      { name: 'customer_id', type: 'string', required: true },
+      { name: 'priority', type: 'string', enum: ['low', 'high'], default: 'low' },
+      { name: 'attempts', type: 'integer' },
+    ]);
+    const failure = async (inputs: unknown) => {
+      const res = await create({ input: 'hi', inputs });
+      expect(res.statusCode).toBe(400);
+      const error = parseJsonBody<{ error: { code: string; errors: Array<{ field: string; message: string }> } }>(res.body).error;
+      expect(error.code).toBe('invalid_inputs');
+      return error.errors;
+    };
+    expect(await failure({})).toEqual([{ field: 'customer_id', message: 'Required' }]);
+    expect(await failure({ customer_id: 7 })).toEqual([{ field: 'customer_id', message: 'Must be a string' }]);
+    expect(await failure({ customer_id: 'c', priority: 'urgent' })).toEqual([{ field: 'priority', message: 'Must be one of: low, high' }]);
+    expect(await failure({ customer_id: 'c', attempts: 1.5 })).toEqual([{ field: 'attempts', message: 'Must be an integer' }]);
+    expect(await failure({ customer_id: 'c', other: 1 })).toEqual([{ field: 'other', message: 'Not an input of this agent' }]);
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+
+    const ok = await create({ input: 'hi', inputs: { customer_id: 'c-1', attempts: 2 } });
+    expect(ok.statusCode).toBe(202);
+    // The default fills the field the caller left out.
+    expect(lastStart().inputs).toEqual({ customer_id: 'c-1', priority: 'low', attempts: 2 });
+  });
+
+  it('an agent that declares no inputs refuses any, and an empty message is fine when inputs carry the turn', async () => {
+    const res = await create({ input: 'hi', inputs: { a: 1 } });
+    expect(res.statusCode).toBe(400);
+    declareInputs([{ name: 'topic', type: 'string' }]);
+    const ok = await create({ input: '', inputs: { topic: 'billing' } });
+    expect(ok.statusCode).toBe(202);
+    expect(lastStart().inputs).toEqual({ topic: 'billing' });
   });
 
   it('pins version N after checking it exists', async () => {
@@ -289,6 +352,7 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ input: 'hi', metadata: { 'bad key': 'x' } }, 'invalid_metadata'],
       [{ input: 'hi', response_format: { type: 'json_schema' } }, 'invalid_response_format'],
+      [{ input: 'hi', response_format: { type: 'json_schema', json_schema: { schema: { type: 'object' } } } }, 'invalid_response_format'],
       [{ input: 'hi', inputs: ['x'] }, 'invalid_inputs'],
       [{ input: 'hi', version: 0 }, 'invalid_version'],
       [{ input: 'hi', wait: -1 }, 'invalid_wait'],

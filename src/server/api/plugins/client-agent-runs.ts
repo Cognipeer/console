@@ -53,13 +53,14 @@ import {
   parseInvocationInput,
   parseInvocationReasoning,
   parseNewSessionBudget,
-  parseResponseFormat,
-  parseRunInputs,
+  parseInvocationResponseFormat,
   parseRunMetadata,
   prepareInvocationSession,
   readIdempotencyKey,
   resolveInvocationAgent,
   resolveInvocationCallback,
+  resolveInvocationConfig,
+  resolveInvocationInputs,
   resolveInvocationLimits,
   resolveInvocationModel,
   sendRunAccepted,
@@ -253,10 +254,10 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const metadata = parseRunMetadata(body.metadata);
       if (!metadata.ok) return bad(metadata.message, 'invalid_metadata');
-      const responseFormat = parseResponseFormat(body.response_format);
-      if (!responseFormat.ok) return bad(responseFormat.message, 'invalid_response_format');
-      const inputs = parseRunInputs(body.inputs);
-      if (!inputs.ok) return bad(inputs.message, 'invalid_inputs');
+      const responseFormat = parseInvocationResponseFormat(reply, 'client', body.response_format, 'response_format');
+      if (!responseFormat) return reply;
+      const inputs = resolveInvocationInputs(reply, 'client', await resolveInvocationConfig(ctx, target), body.inputs);
+      if (!inputs) return reply;
 
       // The session it continues (`session_id`), or a new one.
       let conversation: IAgentConversation | null = null;

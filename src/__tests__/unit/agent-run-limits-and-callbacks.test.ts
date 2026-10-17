@@ -284,6 +284,7 @@ describe('ids and serialization', () => {
       result: null,
       output_text: null,
       output_parsed: null,
+      output_error: null,
       error: { type: 'max_duration_exceeded', message: 'too long' },
       scheduled_for: null,
       created_at: 1704067200,

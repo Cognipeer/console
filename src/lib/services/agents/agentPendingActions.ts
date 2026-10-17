@@ -22,6 +22,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
 import type {
+    AgentResponseFormat,
     DatabaseProvider,
     IAgentConversation,
     IAgentMessagePendingAction,
@@ -118,10 +119,24 @@ const RESUME_CTX_KEYS = [
     '__traceContinuation',
 ] as const;
 
+/**
+ * What the turn was asked for beyond the agent's own config: the per-request
+ * structured output and the validated inputs. They ride with the paused state
+ * so the continuation rebuilds the SAME turn (same schema, same prompt values)
+ * whoever answers the pause.
+ */
+export interface PausedTurnOptions {
+    responseFormat?: AgentResponseFormat;
+    inputs?: Record<string, unknown>;
+    /** False when the inputs were kept out of the system prompt (external content). */
+    inputsAsPromptVariables?: boolean;
+}
+
 interface PausedEnvelope {
     v: 1;
     source: PauseSource;
     state: Record<string, unknown>;
+    turn?: PausedTurnOptions;
 }
 
 /**
@@ -150,6 +165,7 @@ export function serializePausedState(
     state: AgentSdkSmartState | undefined,
     source: PauseSource,
     maxBytes: number = MAX_STATE_BYTES,
+    turn?: PausedTurnOptions,
 ): string | null {
     if (!state) return null;
     const raw = state as unknown as Record<string, unknown>;
@@ -169,17 +185,19 @@ export function serializePausedState(
     }
     stored.ctx = resumeCtx;
 
-    const text = JSON.stringify({ v: 1, source, state: stored } satisfies PausedEnvelope);
+    const hasTurn = Boolean(turn && (turn.responseFormat || turn.inputs || turn.inputsAsPromptVariables === false));
+    const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
     return text.length <= maxBytes ? text : null;
 }
 
-export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState } | null {
+export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState; turn?: PausedTurnOptions } | null {
     try {
         const parsed = JSON.parse(text) as PausedEnvelope;
         if (!parsed || parsed.v !== 1 || typeof parsed.state !== 'object' || !parsed.state) return null;
         return {
             source: parsed.source === 'agent-playground' ? 'agent-playground' : 'agent',
             state: parsed.state as unknown as AgentSdkSmartState,
+            ...(parsed.turn && typeof parsed.turn === 'object' ? { turn: parsed.turn } : {}),
         };
     } catch {
         return null;
@@ -254,6 +272,8 @@ export interface OpenPauseInput {
     /** The version the paused turn ran (null = the draft), so the continuation rebuilds the same agent. */
     agentVersion: number | null;
     usePublished: boolean;
+    /** The request-level structured output / inputs the continuation must apply again. */
+    turn?: PausedTurnOptions;
     /** Who started the turn. */
     createdBy: string;
 }
@@ -284,7 +304,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
     const normal = serializeCarriedState(input.state);
     const snapshot = normal === null
         ? null
-        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length);
+        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length, input.turn);
     if (!snapshot) {
         logger.warn('Paused run state is too large to store; not pausing', { conversationId: input.conversationId });
         return null;

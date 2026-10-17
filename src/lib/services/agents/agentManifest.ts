@@ -20,6 +20,7 @@ import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
 import { maskAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
+import { validateInputDeclaration } from './agentInputs';
 import { assertMayNameBucket, type CanNameBucket } from './attachmentsBucketAccess';
 import type { ManifestResources } from './manifestResources';
 
@@ -260,6 +261,9 @@ export function validateAgentManifest(input: unknown): string[] {
     if (spec.structuredOutput?.enabled && !spec.structuredOutput.schema) {
         issues.push('spec.structuredOutput.enabled is true but no schema is set');
     }
+
+    // The declared inputs travel with the agent: a malformed list is refused on import like on save.
+    for (const issue of validateInputDeclaration(spec.inputs)) issues.push(`spec.${issue.field}: ${issue.message}`);
 
     return issues;
 }

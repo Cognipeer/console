@@ -23,7 +23,6 @@ import {
   waitForAgentRun,
   type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
-import { resolveAgentConfig } from '@/lib/services/agents/agentService';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
@@ -60,19 +59,22 @@ import {
   parseInvocationInput,
   parseInvocationReasoning,
   parseNewSessionBudget,
-  parseResponseFormat,
-  parseRunInputs,
+  parseInvocationResponseFormat,
   parseRunMetadata,
   prepareInvocationSession,
   readIdempotencyKey,
   resolveInvocationAgent,
   resolveInvocationCallback,
+  resolveInvocationConfig,
+  resolveInvocationInputs,
   resolveInvocationLimits,
   resolveInvocationModel,
   resolveInvocationTarget,
+  resolvePublishedAgentConfig,
   sendInvocationFailure,
 } from './agent-invocation';
 import { sendAgentResponseObject } from './agent-response-object';
+import { inputsToJsonSchema } from '@/lib/services/agents/agentInputs';
 
 const logger = createLogger('api:client-agents');
 
@@ -185,10 +187,10 @@ function createResponsesHandler(agentsOnly: boolean) {
       const textFormat = body.text && typeof body.text === 'object' && !Array.isArray(body.text)
         ? (body.text as { format?: unknown }).format
         : undefined;
-      const responseFormat = parseResponseFormat(textFormat);
-      if (!responseFormat.ok) return openAiFail(reply, 400, responseFormat.message, 'invalid_response_format', { param: 'text.format' });
-      const inputs = parseRunInputs(body.inputs);
-      if (!inputs.ok) return openAiFail(reply, 400, inputs.message, 'invalid_inputs', { param: 'inputs' });
+      const responseFormat = parseInvocationResponseFormat(reply, 'openai', textFormat, 'text.format');
+      if (!responseFormat) return reply;
+      const inputs = resolveInvocationInputs(reply, 'openai', await resolveInvocationConfig(ctx, target), body.inputs);
+      if (!inputs) return reply;
       // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class. Anything else runs as default.
       const runClass: AgentRunClass = body.service_tier === 'flex' ? 'deferred' : 'default';
       const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
@@ -423,9 +425,12 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // The config API callers run: the published version (the draft while nothing is published).
+      const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
+
       // The models a caller may pick, when the agent offers more than its main one (those they may not use are left out).
       const models = !agent.config.additionalModels?.length ? undefined : await advertisedModelsForRequest(request, {
-        agent: { ...agent, config: (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId).catch(() => null))?.config ?? agent.config },
+        agent: { ...agent, config: runConfig },
         tenantDbName: ctx.tenantDbName,
         projectId: ctx.projectId,
       }).catch(() => undefined);
@@ -453,6 +458,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
+          // The agent as a typed function: what `inputs` it takes and the shape of its structured answer (null = none).
+          input_schema: inputsToJsonSchema(runConfig.inputs),
+          output_schema: runConfig.structuredOutput?.enabled && runConfig.structuredOutput.schema ? runConfig.structuredOutput.schema : null,
           ...(models ? { models } : {}),
           ...(attachments ? {
             attachments: {

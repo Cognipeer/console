@@ -190,6 +190,23 @@ describe('validateAgentConfig', () => {
         expect(fields(result.errors)).toContain('structuredOutput.schema');
     });
 
+    it('checks the declared inputs: names, types, enums and defaults', () => {
+        const ok = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            inputs: [{ name: 'customer_id', type: 'string', required: true }, { name: 'tier', type: 'string', enum: ['a', 'b'], default: 'a' }],
+        });
+        expect(fields(ok.errors)).toEqual([]);
+        const bad = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            inputs: [
+                { name: 'bad name', type: 'string' },
+                { name: 'n', type: 'integer', default: 'x' },
+                { name: 'n', type: 'string' },
+            ],
+        } as unknown as IAgentConfig);
+        expect(fields(bad.errors)).toEqual(expect.arrayContaining(['inputs[0].name', 'inputs[1].default', 'inputs[2].name']));
+    });
+
     it('flags summary_only without summarization, and warns about the ignored askUser', () => {
         const result = validateAgentConfigShape({
             modelKey: 'gpt-main',

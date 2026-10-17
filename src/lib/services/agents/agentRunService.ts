@@ -150,10 +150,11 @@ export function publicAgentRunId(run: Pick<IAgentRun, '_id'>): string {
 }
 
 /** Text and parsed structured output lifted from a Responses-shaped result. */
-function liftRunOutput(result: Record<string, unknown> | null | undefined): { text: string | null; parsed: unknown } {
-  if (!result) return { text: null, parsed: null };
+function liftRunOutput(result: Record<string, unknown> | null | undefined): { text: string | null; parsed: unknown; error: string | null } {
+  if (!result) return { text: null, parsed: null, error: null };
   const parsed = result.output_parsed ?? null;
-  if (typeof result.output_text === 'string') return { text: result.output_text, parsed };
+  const error = typeof result.output_error === 'string' ? result.output_error : null;
+  if (typeof result.output_text === 'string') return { text: result.output_text, parsed, error };
   const output = Array.isArray(result.output) ? result.output as Array<Record<string, unknown>> : [];
   const parts: string[] = [];
   for (const item of output) {
@@ -162,7 +163,7 @@ function liftRunOutput(result: Record<string, unknown> | null | undefined): { te
       if (part?.type === 'output_text' && typeof part.text === 'string') parts.push(part.text);
     }
   }
-  return { text: parts.length > 0 ? parts.join('') : null, parsed };
+  return { text: parts.length > 0 ? parts.join('') : null, parsed, error };
 }
 
 /**
@@ -196,6 +197,7 @@ export function serializeAgentRun(run: IAgentRun) {
     result,
     output_text: output.text,
     output_parsed: output.parsed,
+    output_error: output.error,
     error: run.status === 'failed' || run.status === 'canceled'
       ? { type: run.errorReason ?? 'agent_error', message: run.errorMessage ?? null }
       : null,
@@ -1726,6 +1728,9 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             userId: request.userId,
             runId,
             runtimeContext: request.runtimeContext,
+            ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+            ...(request.inputs ? { inputs: request.inputs } : {}),
+            ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
             cancellationCell,
             continuation: {
               source: 'agent',
@@ -1744,6 +1749,9 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             trigger: request.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume',
             runId,
             runtimeContext: request.runtimeContext,
+            ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+            ...(request.inputs ? { inputs: request.inputs } : {}),
+            ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
             cancellationCell,
           }).then((resumed) => resumed.response)
           : executeAgentChatLocal(request),

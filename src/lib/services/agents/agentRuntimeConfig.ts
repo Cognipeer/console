@@ -19,6 +19,7 @@ import { z, type ZodTypeAny } from 'zod';
 import type { SmartAgentOptions } from '@cognipeer/agent-sdk';
 
 import type {
+    AgentResponseFormat,
     IAgentConfig,
     IAgentLimits,
     IAgentRuntimeConfig,
@@ -335,6 +336,61 @@ export function resolveStructuredOutputSchema(
     // A bare `z.any()` is not a contract — treat it as "not configured" so the
     // agent keeps its normal free-text behaviour instead of silently no-opping.
     return schema._def?.typeName === 'ZodAny' ? undefined : schema;
+}
+
+/** A request's schema is held to the same size ceiling as the stored one. */
+export const MAX_RESPONSE_FORMAT_SCHEMA_BYTES = 64 * 1024;
+
+/**
+ * The zod contract for a per-request structured output (`text.format`,
+ * `response_format`). `json_object` is any JSON object. A `json_schema` that does
+ * not convert to an object schema (the converter degrades what it does not
+ * understand to `z.any()`, which is no contract) is refused, so the caller hears
+ * about it instead of getting free text back.
+ */
+export function resolveResponseFormatSchema(
+    format: AgentResponseFormat,
+): { ok: true; schema: ZodTypeAny } | { ok: false; message: string } {
+    if (format.type === 'json_object') return { ok: true, schema: z.object({}).passthrough() };
+    if (format.type !== 'json_schema' || !format.schema || typeof format.schema !== 'object') {
+        return { ok: false, message: 'response_format json_schema needs a schema object' };
+    }
+    let size = 0;
+    try { size = JSON.stringify(format.schema).length; } catch { return { ok: false, message: 'response_format schema must be JSON' }; }
+    if (size > MAX_RESPONSE_FORMAT_SCHEMA_BYTES) {
+        return { ok: false, message: `response_format schema must be at most ${MAX_RESPONSE_FORMAT_SCHEMA_BYTES} bytes` };
+    }
+    if ((format.schema as { type?: unknown }).type !== 'object') {
+        return { ok: false, message: 'response_format schema\'s top level must be `type: "object"`' };
+    }
+    const schema = jsonSchemaToZod(format.schema, format.strict === true);
+    if (schema._def?.typeName === 'ZodAny' || !(schema instanceof z.ZodObject)) {
+        return { ok: false, message: 'response_format schema is not one the agent can enforce' };
+    }
+    if (Object.keys((schema as z.ZodObject<z.ZodRawShape>).shape).length === 0
+        && (format.schema as { additionalProperties?: unknown }).additionalProperties !== true) {
+        return { ok: false, message: 'response_format schema declares no properties' };
+    }
+    return { ok: true, schema };
+}
+
+/**
+ * The contract for the turn's final answer: the request's own format when it
+ * brought one (it replaces the agent's configured structured output for that
+ * turn), otherwise the agent's. Requests are checked when they come in; a
+ * stored format that still fails to convert fails the run rather than hand back
+ * free text where the caller asked for a contract.
+ */
+export function resolveTurnOutputSchema(
+    config: Pick<IAgentConfig, 'structuredOutput'>,
+    responseFormat?: AgentResponseFormat | null,
+): ZodTypeAny | undefined {
+    if (responseFormat) {
+        const resolved = resolveResponseFormatSchema(responseFormat);
+        if (!resolved.ok) throw new Error(resolved.message);
+        return resolved.schema;
+    }
+    return resolveStructuredOutputSchema(config.structuredOutput);
 }
 
 /**
