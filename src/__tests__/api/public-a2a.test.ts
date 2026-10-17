@@ -70,6 +70,8 @@ const findTenantById = vi.fn();
 const agentRunReservation = {
   create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
   remove: vi.fn(async () => true),
+  // The provider answers the row it finalized; null would mean another writer ended it first.
+  finalize: vi.fn(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({ _id: 'reservation-1', ...patch })),
 };
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
@@ -82,7 +84,7 @@ async function buildApp() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, listAgents, findTenantById, createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove } as never));
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, listAgents, findTenantById, createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove, finalizeAgentRun: agentRunReservation.finalize } as never));
   findTenantById.mockResolvedValue({ _id: 'tenant-1', dbName: 'tenant_acme' });
   listAgents.mockResolvedValue([PUBLIC_AGENT]);
 });
@@ -324,7 +326,7 @@ describe('public tasks and contexts are bound to the caller that created them', 
     requestAgentRunCancel.mockResolvedValue({ ...RUN, cancelRequestedAt: new Date() });
     mockFn(getDatabase).mockResolvedValue(createMockDb({
       runWithTenant, listAgents, findTenantById, getAgentRunById, requestAgentRunCancel,
-      createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove,
+      createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove, finalizeAgentRun: agentRunReservation.finalize,
     } as never));
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'a2a-public', messages: [], metadata: boundTo(NONCE) });
   });

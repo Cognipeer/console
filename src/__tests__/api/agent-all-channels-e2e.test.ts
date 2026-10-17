@@ -174,6 +174,8 @@ const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 const agentRunReservation = {
   create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
   remove: vi.fn(async () => true),
+  // The provider answers the row it finalized; null would mean another writer ended it first.
+  finalize: vi.fn(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({ _id: 'reservation-1', ...patch })),
 };
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
@@ -215,7 +217,7 @@ beforeEach(() => {
     mockFn(getDatabase).mockResolvedValue(createMockDb({
         runWithTenant,
         createAgentRun: agentRunReservation.create,
-        deleteAgentRun: agentRunReservation.remove,
+        deleteAgentRun: agentRunReservation.remove, finalizeAgentRun: agentRunReservation.finalize,
     } as never));
     mockFn(getModelByKey).mockResolvedValue(null);
     setAgentLookup(AGENT);
