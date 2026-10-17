@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
+import { drainAgentRunsBeforeHttpClose } from './httpShutdown';
 import { createLogger } from '@/lib/core/logger';
 import cookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -196,6 +197,9 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
       }
     });
   }
+
+  // Agent runs are drained before the server waits for open streams (see httpShutdown.ts).
+  drainAgentRunsBeforeHttpClose(app);
 
   registerShutdownHandler('http-server', async () => {
     logger.info('Closing Fastify server');
