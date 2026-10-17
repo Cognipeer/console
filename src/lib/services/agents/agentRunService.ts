@@ -522,6 +522,8 @@ export interface StartAgentRunInput {
    * system prompt and the Inputs block is closed (agentInputs.ts). Kept on the row.
    */
   externalContent?: boolean;
+  /** The request asked for `background: true`: kept on the row (a stream runs inline, yet reads back as background). */
+  background?: boolean;
   /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
   answersClientTools?: boolean;
   responseFormat?: AgentResponseFormat | null;
@@ -764,6 +766,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       inputs: input.inputs ?? null,
       ...(input.unattended ? { unattended: true } : {}),
       ...(input.externalContent ? { externalContent: true } : {}),
+      ...(input.background ? { background: true } : {}),
       queueGeneration: 1,
     };
 

@@ -21,7 +21,7 @@ export interface AgentResponseObjectOptions {
   agentModel?: string;
   /** `include_reasoning: false` narrows the output to the answer (it never brings back what the agent hid). */
   includeReasoning?: boolean;
-  /** What the request said; undefined = whether the run was queued. */
+  /** What the request said; undefined = what the run records (queued, or `background` on the row). */
   background?: boolean;
 }
 
@@ -118,7 +118,7 @@ export function toAgentResponseObject(
     metadata: run.metadata ?? {},
     text: { format: textFormatOf(run.responseFormat) },
     service_tier: run.runClass === 'deferred' ? 'flex' : 'default',
-    background: options.background ?? run.mode === 'background',
+    background: options.background ?? (run.mode === 'background' || run.background === true),
     previous_response_id: options.previousResponseId !== undefined
       ? options.previousResponseId
       : (typeof body?.previous_response_id === 'string' ? body.previous_response_id : null),
