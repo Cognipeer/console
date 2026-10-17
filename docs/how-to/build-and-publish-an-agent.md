@@ -19,10 +19,9 @@ the payload and the trap underneath it. Follow the click-path or skip to
 model ──┐
 prompt ─┼──► agent (draft) ──► Playground ──► Publish ──► version 1, 2, 3 …
 tools ──┤                          │                          │
-guards ─┘                          │                          ├─► POST /agents/responses
+guards ─┘                          │                          ├─► POST /responses (agent:<key>)
                                    │                          ├─► A2A (JSON-RPC)
-                                   └─ POST /responses         └─► evaluation + red-team targets
-                                      (draft)
+                                   └─ "version": "draft"      └─► evaluation + red-team targets
 ```
 
 The draft is what you edit and what the Playground runs. A published version is an immutable snapshot.
@@ -299,23 +298,23 @@ keys, and every tool binding. Version numbers are monotonic; publishing never ov
 | Caller | Definition it runs |
 |---|---|
 | Playground | The draft, always — and it saves the draft first |
-| `POST /api/client/v1/responses` | The draft |
-| `POST /api/client/v1/agents/responses` | The published version |
-| SDK `client.agents.responses.create()` | The draft — the helper posts to `/api/client/v1/responses` |
+| `POST /api/client/v1/responses` and `POST /api/client/v1/agents/responses` | The published version |
+| SDK `client.agents.responses.create()` | The published version |
 | Either endpoint with `"version": N` | Published version `N` exactly |
+| Either endpoint with `"version": "draft"` | The draft |
 | A2A — `/api/client/v1/a2a/:agentKey` and the public A2A endpoint | The published version |
 | An agent target in an evaluation suite or a red-team scan | The published version |
 
 ::: warning An unpublished agent does not fail — it silently serves the draft
-If `publishedVersion` is not set, `POST /agents/responses` falls back to the agent's current
-configuration rather than returning an error. So the "published" endpoint quietly tracks your live edits
-until the first publish, and looks like it is working perfectly. Publish once, immediately, so that the
-two paths mean different things from then on.
+If `publishedVersion` is not set, a call falls back to the agent's current configuration rather than
+returning an error. So the endpoint quietly tracks your live edits until the first publish, and looks
+like it is working perfectly. Publish once, immediately, so that published and draft mean different
+things from then on.
 :::
 
 Two consequences worth internalising:
 
-- Editing the Configuration card changes **nothing** for `/agents/responses` callers until you publish
+- Editing the Configuration card changes **nothing** for API callers until you publish
   again. That is a feature: it is how you edit a live agent safely.
 - Pinning `"version": N` in a client is the strongest guarantee available. New publishes cannot move it.
 
@@ -349,12 +348,13 @@ curl -X POST https://<your-host>/api/client/v1/agents/responses \
 ```
 
 ```bash [curl — draft]
-curl -X POST https://<your-host>/api/client/v1/responses \
+curl -X POST https://<your-host>/api/client/v1/agents/responses \
   -H "Authorization: Bearer cpeer_…" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "support-bot-a1b2c3",
-    "input": "How do I reset my password?"
+    "input": "How do I reset my password?",
+    "version": "draft"
   }'
 ```
 
@@ -369,7 +369,7 @@ curl -X POST https://<your-host>/api/client/v1/agents/responses \
   }'
 ```
 
-```js [SDK — draft]
+```js [SDK]
 import { ConsoleClient } from '@cognipeer/console-sdk';
 
 const client = new ConsoleClient({
@@ -393,12 +393,11 @@ const followUp = await client.agents.responses.create({
 :::
 
 `model` is the agent **key**, not its display name and not a model key. Multi-turn works by passing the
-previous response's `id` back as `previous_response_id`; the id has the form `resp_<conversationId>` and
+previous response's `id` back as `previous_response_id`; the id has the form `resp_<runId>` and
 the server rebuilds the history from it.
 
 Both the SDK helper `client.agents.responses.create()` and the REST snippets the **Usage** tab prints
-post to `/api/client/v1/responses` — that is the **draft**. Swap the path for `/agents/responses`, or
-add `version: N` to the body, when you want the published definition.
+run the **published** version. Add `version: N` to pin one, or `"version": "draft"` to run the draft.
 
 Full request and response contract: [Agents API](/api/agents).
 
@@ -477,9 +476,9 @@ Each of these is behaviour in the current code, not a caveat about the future.
 - **Output guardrails on agents block but do not redact.** A `redact` action rewrites the user message
   on the input side; on the output side only blocking findings are acted on, and the redacted text is
   discarded.
-- **`/responses` and `/agents/responses` need different permissions.** RBAC maps `/api/client/v1/agents*`
-  to the `agents` service and `/api/client/v1/responses` to `models`. A token owner with `agents:write`
-  but no `models:write` can call the published endpoint and gets 403 on the draft one.
+- **`/responses` checks the service of its target.** A token needs the Models or the Agents service to
+  reach `/responses`, and then the service of what `model` names: Agents for an agent, Models for a
+  model. `/agents/responses` needs Agents.
 - **A2A endpoints are gated by the `agents` service too.** `/api/client/v1/a2a/...` is mapped to
   `agents` (`read` for the agent card, `write` to send a message), on top of the A2A toggle and the
   access mode, which decide whether an agent is exposed and to whom.
@@ -511,8 +510,8 @@ managed from the dashboard only.
 | Update an agent | `PATCH /api/client/v1/agents/:agentKey` |
 | Delete an agent | `DELETE /api/client/v1/agents/:agentKey` |
 | Publish a version | `POST /api/client/v1/agents/:agentKey/publish` |
-| Run the published version | `POST /api/client/v1/agents/responses` |
-| Run the draft | `POST /api/client/v1/responses` |
+| Run the published version | `POST /api/client/v1/responses` with `model: "agent:<key>"` (or `POST /api/client/v1/agents/responses`) |
+| Run the draft | The same call with `"version": "draft"` |
 | Create an MCP server | `POST /api/client/v1/mcp` |
 | Update an MCP server, including `disabledTools` | `PATCH /api/client/v1/mcp/:serverKey` |
 | Re-discover an MCP server's tools | `POST /api/client/v1/mcp/:serverKey/refresh-tools` |

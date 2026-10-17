@@ -4,7 +4,7 @@ A session is a conversation that can go on for days through many turns. The per-
 
 ## Setting one
 
-- **For an agent.** **Configure → Execution → Session budget**: an amount in USD and what happens when it is reached. Every new session starts with it. Empty = no session budget.
+- **For an agent.** **Configure → Callback & budget → Session budget**: an amount in USD and what happens when it is reached. Every new session starts with it. Empty = no session budget.
 - **For one session.** Give `budget` in the request that starts the session, or change it later. A budget can be added after the session started, raised, lowered or removed; unlike a fixed cap, it is a setting of the session.
 - **In Studio.** The session header shows spent / budget. A session paused on its budget shows a banner with **New budget**, **Increase and continue** and **Remove budget**; a session whose budget *stops* offers **Increase budget** only, after which the message box is open again.
 
@@ -52,7 +52,7 @@ A turn that hits the budget part-way is returned like any stopped run: `status: 
 
 ### Who may change it
 
-When an agent has a session budget, it binds its API clients: a client token can lower a session's budget but cannot remove it or raise it past the agent's amount (`403`, `budget_override_forbidden`). Turn on **Let API clients change the budget** in the Execution settings to allow it. Dashboard users are not affected.
+When an agent has a session budget, it binds its API clients: a client token can lower a session's budget but cannot remove it or raise it past the agent's amount (`403`, `budget_override_forbidden`). Turn on **Let API clients change the budget** next to it (`config.budget.allowClientOverride`) to allow it. Dashboard users are not affected.
 
 ### A paused session and API-only clients
 

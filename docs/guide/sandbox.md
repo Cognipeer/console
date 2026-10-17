@@ -119,7 +119,7 @@ A live browser of the container filesystem (served through the in-container tool
 
 ![Templates](/screenshots/sandbox/07-templates.png)
 
-- **New template** registers a custom recipe — base image, runtime, isolation, default resources, env, entrypoint, and the toolbox port (default `8787`).
+- **New template** registers a custom recipe — base image, runtime, isolation, default resources, env, entrypoint, and the toolbox port (default `8787`). **Environment variables are write-only** (see [Environment variables](#environment-variables-of-templates-and-sandboxes)).
 - **Seed defaults** idempotently loads the built-in library (Python, Node, data-science, web, and the multi-runtime `cognipeer/sandbox-base` image).
 - Each row has **Edit** (update the recipe in place — the `key` stays fixed since other config resolves the template by it) and **Delete**.
 
@@ -179,6 +179,19 @@ An agent's sandbox settings (Agents → Configure → Sandbox → **Preloaded fi
 - The agent's system prompt gets a "Preloaded files" list (path and name). If a file cannot be written the turn still runs: the failure is logged and the first command result carries a `notice` naming the files that are not available.
 
 API: `POST /api/agents/:agentId/sandbox-seed-files?name=<file>` (raw body) returns the entry to add to `config.sandbox.seedFiles`; `DELETE` takes `bucketKey` and `objectKey` query parameters.
+
+## Agent secrets (agent sandbox)
+
+**Configure → Sandbox → Secrets** holds API keys, tokens and passwords an agent's sandbox commands need. Each `sandbox_exec` / `sandbox_run_code` call gets them as environment variables for that command only; they are not set on the sandbox machine. The agent is told the names, never the values.
+
+- **Write-only.** Secrets are sealed on save and shown back as names with a masked value (`••••••`). Sending a key back with the mask keeps the stored value, a new value replaces it, a key left out is removed. They are never part of version snapshots, publish responses, manifest exports or the agent's other configuration reads.
+- **Masked where they could leak.** A value (four characters or more) that appears in command output is replaced with `••••••` before the model sees it, and so it is in the **text files** collected from `/outputs/` before they become session files. Binary files (a NUL byte or invalid UTF-8) and zip-based formats and PDF are not scrubbed, and neither is a value that was transformed (base64, split, URL-encoded). Masking does not stop a script from sending a value over the network: use short-lived, least-privilege keys.
+- **Preloaded files are written without secrets.** The commands that write [preloaded files](#preloaded-files-agent-sandbox) at start run with no secrets in their environment; the agent's own commands afterwards get them.
+- **When the key changed.** Secrets are encrypted with the platform's encryption key. If it changed, the stored secrets cannot be read: the agent reads back with `config.sandbox.secretsUnreadable: true` and an empty secrets list, and the sandbox panel shows a warning. The agent's sandbox tools keep running **without** the secrets and say so in their result. A save that mixes masked values with new ones is refused with `409 sandbox_secrets_unreadable` (a mask stands for a value that cannot be recovered); a save that enters every value again replaces them.
+
+## Environment variables of templates and sandboxes
+
+The environment variables of a **template** or a **sandbox** are write-only too: stored encrypted, and every read returns the names with a masked value (`env`) plus the list of names (`env_keys`). A change keeps a key whose value is the mask (or one left out while `env_keys` still names it), replaces it with a new string, and removes it with `null`. Names are `[A-Za-z_][A-Za-z0-9_]{0,127}`, a value is at most 32 KiB and there are at most 100 per record. Records from earlier releases are sealed when they are first read. If the encryption key changed, a launch fails with a message naming the problem and the values have to be entered again. Use environment variables for what the sandbox needs to run; they are not a place to read values back from.
 
 ## Runtime architecture
 

@@ -5,10 +5,113 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ## Unreleased
 
-### Removed
+### Incompatible changes
 
-- OpenAI Assistants-compatible adapter (`/client/v1/assistants`, `/client/v1/threads`). Use the agent runs and sessions
-  API, the Responses API or chat completions instead.
+- The OpenAI Assistants-compatible adapter is removed (`/client/v1/assistants`, `/client/v1/threads`, and the Studio
+  card for it). Use the agent runs and sessions API, the Responses API or chat completions instead.
+- Agent **schedules** are replaced by [routines](docs/guide/agent-routines.md). Existing schedules are not converted:
+  create a routine with a `schedule` trigger. The `schedule.fired` and `schedule.failed` webhook events become
+  `routine.fired` and `routine.failed`.
+- The per-agent **Execution** settings are gone (background on/off, default mode, sync timeout, background timeout and
+  the callback fields that lived there). How long a call waits is `AGENT_SYNC_TIMEOUT_MS` and how long a run may take is
+  `AGENT_BACKGROUND_MAX_DURATION_MS`, for the whole deployment. The agent's default callback is `config.callback`
+  (Studio: Configure → Callback & budget) and its default session budget `config.budget`. The
+  `agent_background_disabled` error no longer exists.
+- A call that is still running when its wait window ends no longer fails: it answers `202` with a `Location` header and
+  the run carries on. Clients that treated a long call as an error should read the run instead.
+- `/responses` and `/chat/completions` run an agent's **published** version by default (the draft only while nothing is
+  published); `"version": "draft"` selects the draft. The id of an agent response is `resp_<runId>`.
+- The unused `/api/models/v1` prefix, the unmounted `src/server/api/routes/**` tree and the dashboard
+  `GET`/`POST /agents/:agentId/conversations` routes are removed; the live API is under `/api/client/v1` and the
+  Sessions routes.
+- `@cognipeer/console-sdk` 4 drops `agents.chat` (use `agents.responses` or the runs API).
+
+### Agent runs and run classes
+
+- Every agent turn from the API is a **run** (`run_<id>`) on one engine: Responses, chat completions, A2A, sessions,
+  routines and the runs API. A call waits up to `AGENT_SYNC_TIMEOUT_MS` (10 minutes) and then answers `202` with
+  `Location` and `Retry-After` while the run continues; a run may take up to `AGENT_BACKGROUND_MAX_DURATION_MS`
+  (30 minutes).
+- **Run classes.** `default` runs are capped per tenant (`AGENT_RUN_MAX_ACTIVE_PER_TENANT`, 250; per project, off by
+  default) and a run over the cap is `429 agent_run_concurrency_limit`. `deferred` runs use their own queue and workers
+  (2 running, up to 10000 queued or scheduled) and expire after 24 hours (`expired`).
+- **Scheduled runs**: `run_at` or `delay_seconds` (up to 30 days) start a run later (status `scheduled`).
+- **Idempotency** on every mode: `Idempotency-Key` (up to 255 characters), `409 idempotency_key_conflict` for a key used
+  with another request; the `routine:` and `hook:` prefixes are reserved (`400 idempotency_key_reserved`).
+- **Runs API** under `/api/client/v1/agents/runs`: create (`wait`, `Prefer: wait=N`), list with filters, queue view, get
+  (`?wait`), cancel, events (also as SSE) and actions for a run that waits on a person. Cancelling is one meaning on four
+  routes: the runs API, `POST /agents/sessions/{id}/cancel`, `POST /responses/{id}/cancel` and A2A `tasks/cancel`.
+- Callbacks (`callback_url`, or the agent's `config.callback`) and `agent_run.*` webhook events are for runs that ended
+  after the call returned; deliveries are signed (`x-cognipeer-signature`), retried 5 times and sent from their own queue.
+- A server that shuts down hands its runs over (`interrupted`), a run whose worker disappears is closed as `worker_lost`,
+  and retention (`AGENT_RUN_RETENTION_DAYS`) never deletes a queued, running, scheduled or waiting run.
+- `GET /responses/{id}` reports `background: true` for a run that was started with `background: true`, also when the
+  call streamed.
+
+### Responses, chat completions and models
+
+- `/responses` and `/chat/completions` serve **models and agents**. `model: "agent:<key>"` is an agent; a bare name is a
+  model of the project first, then an agent, and `404 model_not_found` when it is neither. Access follows the resolved
+  target: the Models service for a model, the Agents service for an agent. A model target is translated to a chat
+  completion and nothing of it is stored.
+- Agent responses stream (`response.*` events), take `previous_response_id`, `background`, `service_tier: "flex"` (a
+  `deferred` run), `GET` and `cancel`, and answer `202` past the wait window. Agent chat completions stream with a
+  keep-alive comment and `stream_options.include_usage`.
+- `GET /models` lists `agent:<key>` entries, so an OpenAI-compatible client can pick an agent from its model list.
+- **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact), and agents
+  that declare `config.inputs` take typed `inputs`. `GET /agents/{key}` returns `input_schema` and `output_schema`.
+  Studio: Configure → Inputs and Output.
+
+### A2A
+
+- `message/send` can answer without waiting (`blocking: false`), `message/stream` streams status and artifact updates,
+  messages take file and data parts, and the agent card lists the accepted file types.
+- A `message/stream` client that disconnects no longer cancels the task. `tasks/resubscribe` (`{ "id": … }`) reattaches:
+  the current Task, then status and artifact updates until the task is final (a finished task answers the Task and its
+  final status at once). `tasks/cancel` is unchanged and works in any non-final state.
+
+### Routines and webhook triggers
+
+- **Routines** (Studio: Deploy → Routines; `/agents/{key}/routines` on both APIs) start an agent from a trigger: a cron
+  `schedule` in an IANA timezone, `once`, `manual` or `webhook`. A fire is a queued, unattended run in a new session
+  owned by `system:routine:<id>`, with the idempotency key `routine:<id>:<slot>`; **Run now** and a run history per
+  routine. The scheduler runs on every node and the database picks one winner per slot
+  (`AGENT_ROUTINE_TICK_MS`, `AGENT_ROUTINE_MISFIRE_GRACE_MS`). `routine.fired` and `routine.failed` are webhook events.
+- **Webhook triggers**: a routine with a `webhook` trigger starts when something posts to
+  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the routine's secret). Presets for
+  GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
+  event-derived inputs, de-duplication, a per-routine run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
+  with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
+  the message, marked as external data, never in the system prompt.
+- Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
+  replicas.
+
+### File outputs
+
+- Agents can create files without a sandbox: the `session_files_create` and `session_files_append` tools write into the
+  session's bucket. File outputs are independent of uploads: with uploads on and a bucket set they are on by default,
+  with uploads off they stay off until turned on, and the read tools are offered when uploads **or** outputs are on.
+  `attachments.outputs` on `GET /agents/{key}` shows the effective setting.
+- Files an agent produced come back on Responses, chat completions (`output_files`, `file_path` annotations) and A2A
+  artifacts.
+
+### Sandbox
+
+- An agent's sandbox secrets are kept out of tool output, out of files written back into the session and out of publish
+  responses. A secret that can no longer be read (the key it was stored under changed) is marked
+  `config.sandbox.secretsUnreadable: true`: saving the agent with a mix of masked and new values answers
+  `409 sandbox_secrets_unreadable` (enter every value again to replace them), its tools run without secrets and say so,
+  and Studio shows a warning.
+- Environment fields of sandbox templates and instances are write-only: stored sealed and shown masked (Enterprise).
+
+### Configuration
+
+- New settings for the agent run engine, all in the *Agent Runs* table of
+  [Configuration](docs/guide/configuration.md#agent-runs): `AGENT_SYNC_TIMEOUT_MS`, `AGENT_BACKGROUND_MAX_DURATION_MS`,
+  `AGENT_RUN_MAX_ACTIVE_PER_TENANT` / `_PER_PROJECT` (replacing `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_*`), `AGENT_DEFERRED_*`, `AGENT_RUN_RETENTION_DAYS`, `AGENT_ROUTINE_*` and
+  `AGENT_WEBHOOK_*`. `.env.example` and `docker-compose.yml` list them.
+- `docs/public/openapi.yaml` is the one canonical OpenAPI description of the client API, and CI checks that its paths and
+  the registered routes agree.
 
 ### Authorization
 

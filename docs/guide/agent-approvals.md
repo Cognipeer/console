@@ -141,7 +141,9 @@ You can also read what a session is waiting on at any time with `GET /api/client
 
 A background run that pauses has the non-terminal status `requires_action`; its `result` carries the same `required_action`, and the `agent_run.requires_action` callback and webhook fire. Answering queues the same run again; it finishes as usual. Cancelling a paused run ends it and drops its open requests. Clients that poll until a terminal status should stop on `requires_action` too, or they wait for a person.
 
-Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids. A caller who may not answer those requests gets the JSON-RPC error `-32010` (with a `decision_id`) from `tasks/cancel` on such a task, and from a `message/send` that would cancel the request.
+Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`.
+
+`tasks/cancel` (`{ "id": "run_…" }`) works on a task in any non-final state: a task that is still running stops before its next step, and a task that waits on a person is ended and its open approvals and questions are cancelled, the same as cancelling the run on the [runs API](/guide/agent-background-execution#cancel). Ending an approval is answering it "no", so a caller who may not answer those requests gets the JSON-RPC error `-32010` (with a `decision_id`) from `tasks/cancel` on such a task, and from a `message/send` that would cancel the request. A task that is already finished answers `-32004`. You can also deny an approval, or answer a question with `cancelled: true`, through the actions endpoint above.
 
 ## Client tools (`client_tool`)
 
@@ -156,7 +158,7 @@ Where the tools are offered is explicit. *Configure → Client tools → Where t
 | **Dashboard playground** (`playground`) | The person testing | The call waits on its card | Type the result on the card, give up, or let an external system answer through the API |
 | **Portal embedded in a page** (`portal`) | The page that embeds the portal | The frame posts `cp:tool_call` | The host answers with `cp:tool_result` |
 
-**Never offered anywhere else**: A2A, MCP, realtime, schedules, evaluations and red-team cases, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
+**Never offered anywhere else**: A2A, MCP, realtime, routines, evaluations and red-team cases, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
 
 An embedded portal can also declare tools of its own for its page. Where both name the same tool, the agent's declaration wins.
 
@@ -204,11 +206,11 @@ while (res.status === 'requires_action') {
 }
 ```
 
-With `"background": true` (or the agent's default callback under *Execution*) nothing waits on the connection: the `requires_action` callback and the `action.required` webhook carry the same `required_action`, and the receiver answers on the same endpoint. A background run stays `requires_action` until every call is answered or times out.
+With `"background": true` (or a [callback](/guide/agent-background-execution#callbacks-and-webhooks), the agent's default one under *Configure → Callback & budget* included) nothing waits on the connection: the `requires_action` callback and the `action.required` webhook carry the same `required_action`, and the receiver answers on the same endpoint. A background run stays `requires_action` until every call is answered or times out.
 
 The caller runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
 
-- A caller that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on as a background job.
+- A caller that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on.
 - **Approval follows the agent's policy.** A call is treated like a call to any other tool of the agent: with *Approvals & questions* on and the default *ask*, a person approves it first (an ordinary `tool_approval`), and only then the page is asked; the *read-only* exemption of the agent's own lookup tools does not apply. Set a single tool to *always* or *never* in the per-tool table (`never` suits a harmless one, such as reading the page title).
 - `tool.pre` guardrails see the arguments before the page does. The audit trail (`agent.client_tool.resolve`) records the call and its result as digests and sizes, never as content; the session log has `action.required` / `action.resolved` and an `agent.tool_result` with `source: client`.
 - Only the person the chat belongs to, or an API token that is allowed to answer under *Who can answer*, can supply the `output` (it goes into the model's context as a tool result); an administrator or another project member answering from the dashboard can only give the call up with an `error`. Tool-access guardrails see the tool as `agent.client.<name>`.
@@ -216,7 +218,7 @@ The caller runs the tool and answers with `output` or `error` (table above). The
 
 ## Unattended runs
 
-Some runs have nobody to answer: schedules, evaluations and red-team cases, and the OpenAI-shaped endpoints, which have no way to send an answer. The *When nobody can answer* setting decides what a gated tool does there:
+Some runs have nobody to answer: [routines](/guide/agent-routines), evaluations and red-team cases, and the OpenAI-shaped endpoints, which have no way to send an answer. The *When nobody can answer* setting decides what a gated tool does there:
 
 - **Deny the tool call** (default): the tool does not run, the model is told no approver is available and the run goes on. Questions are not asked.
 - **Pause and wait for approval in Studio:** behaves like an attended run; the request waits in the session until someone answers it.

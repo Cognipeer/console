@@ -81,7 +81,7 @@ data: {"seq":42,"type":"agent.tool_use","data":{"tool_call_id":"call_2","name":"
 
 `data` has the same shape as an item of the event list. Besides the stored events, the stream carries `agent.message.delta` frames (`data: { "text": "…" }`) with the model's text as it is written. They have no `id` and are not stored, so a client that reconnects gets the finished `agent.message` instead.
 
-`agent.message.delta` frames exist only for a turn whose starter streams. A turn started with `POST /agents/responses` (synchronous or background) does not stream the model, so a follower sees the finished `agent.message` arrive at once, without deltas. Deltas appear when the caller that starts the turn asks for a streamed answer, for example the dashboard's chat stream in Studio. Do not wait for deltas: build a follower around the stored events, and treat deltas as a bonus when they come.
+`agent.message.delta` frames exist only for a turn whose starter streams. A turn started without `stream` (a synchronous call, a background run, a routine) does not stream the model, so a follower sees the finished `agent.message` arrive at once, without deltas. Deltas appear when the caller that starts the turn asks for a streamed answer, for example the dashboard's chat stream in Studio. Do not wait for deltas: build a follower around the stored events, and treat deltas as a bonus when they come.
 
 A `: ping` comment is sent every 15 seconds. The stream ends after an hour or when you close it; reconnect with the last `id` to pick up where you left off.
 

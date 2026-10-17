@@ -28,7 +28,7 @@ POST /api/client/v1/chat/completions
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `model` | string | Yes | Model key configured in the dashboard |
+| `model` | string | Yes | Model key configured in the dashboard, or `agent:<key>` ([below](#agents)) |
 | `messages` | array | Yes | Array of message objects |
 | `temperature` | number | No | Sampling temperature (0-2) |
 | `max_tokens` | number | No | Maximum tokens in response |
@@ -85,6 +85,10 @@ data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"delta":
 
 data: [DONE]
 ```
+
+## Agents
+
+`model` may also name an agent: `agent:<key>` (a bare agent key works when no model has that key). The call runs the agent's published version as a [run](/guide/agent-background-execution), takes `response_format` for [structured output](/api/agents#typed-inputs-and-structured-output), and answers `202` with a `Location` header when it is still running after the wait window. Details: [Calling an agent on chat completions](/guide/inference#calling-an-agent-on-chat-completions).
 
 ## Files the agent produced
 

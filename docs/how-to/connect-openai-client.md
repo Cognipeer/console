@@ -319,8 +319,8 @@ not match your build, look for the equivalent section:
   re-checked on every request and is not subject to the cache.
 - **There is no legacy `/completions` endpoint.** Only `/chat/completions`.
   Clients that fall back to the text-completion API will 404.
-- **`/api/models/v1` is a dead prefix.** It appears in some older material. It
-  is allowlisted but nothing serves it. The base URL is `/api/client/v1`.
+- **`/api/models/v1` is gone.** Older material mentions it; nothing serves it.
+  The base URL is `/api/client/v1`.
 - **A token is bound to one project.** It was fixed at creation time from the
   active project and cannot be repointed. A client that needs a second project
   needs a second token.

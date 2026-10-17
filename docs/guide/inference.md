@@ -84,6 +84,15 @@ Capability values come from the explicit Model Hub profile. Legacy model records
 - **Streaming** opens with a chunk whose `delta.role` is `assistant`, sends a `: ping` comment every 15 seconds while the agent works, and ends with `data: [DONE]`; `stream_options.include_usage` adds a final chunk with the run's `usage`. A failure is an error chunk followed by `[DONE]`. A client that disconnects cancels the run.
 - **A call that is still running when the wait window ends** answers `202` with an empty `chat.completion` (`choices: []`) whose `cognipeer` object names the run (`status`, `run_id`, `session_id`) and a `Location` header on the [runs API](/guide/agent-background-execution); the run carries on in the background.
 
+## Models and agents on `/responses`
+
+`POST /api/client/v1/responses` takes both. `model` is resolved the same way as on chat completions: `agent:<key>` is an agent; a bare name is a model of the project first, then an agent, and `404 model_not_found` when it is neither. (`/agents/responses` is the agents-only alias.) The token needs the Models **or** the Agents service to reach the route, and then the service of what it names.
+
+- **A model** is translated to a chat completion, run through the same gateway as `/chat/completions` (quota, rate limits, guardrails, routing, usage rows under the route `responses`) and translated back, with `response.*` events when `stream: true`. It takes `input`, `instructions`, `text.format`, function `tools`, `tool_choice`, `temperature`, `top_p`, `max_output_tokens`, `reasoning.effort`, `metadata` and `stream`. Nothing is stored, so `previous_response_id`, `conversation` and `background` are refused with `400 unsupported_parameter` and `GET /responses/{id}` does not know the response.
+- **An agent** runs its published version as a [run](/guide/agent-background-execution): `previous_response_id`, `background`, `service_tier`, streaming, `GET` and `cancel` all work, and a call past its wait window answers `202`. See [Agents API](/api/agents#invoke-an-agent-responses-api).
+
+`GET /api/client/v1/models` lists the agents too (above), so an OpenAI-compatible client can pick one from its model dropdown.
+
 ## Where inference is observed
 
 Operators monitor live inference through **Operate → Model Monitoring**. The page summarises every connected inference server, splitting them by status: `active`, `disabled`, or `errored`. From here you also wire up new self-hosted endpoints (vLLM, TGI, llama.cpp, Ollama) that don't fit the cloud-provider model.

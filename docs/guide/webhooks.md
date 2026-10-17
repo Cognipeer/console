@@ -36,14 +36,14 @@ Agents → Webhooks shows only what the person may do: without Admin the page is
 | `action.required` | `sessionId`, `conversationId`, `agentKey`, `actionId`, `kind`. Nothing of the request itself travels in a webhook: read it with `GET /api/client/v1/agents/sessions/{sessionId}` (`pending_actions`) and answer on `POST …/actions/{actionId}`. |
 | `budget.reached` | `sessionId`, `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd` |
 | `feedback.recorded` | `sessionId`, `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback)). The comment itself is never sent. |
-| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey` |
-| `routine.fired` | `routineId`, `agentKey`, `trigger`, `runId`, `event?` |
+| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId` (`run_…`), `sessionId`, `conversationId`, `agentKey`, `status`, `class`, `metadata`, `routineId`. Sent for [runs nobody waits on](/guide/agent-background-execution#callbacks-and-webhooks): queued runs and calls that outran their wait window |
+| `routine.fired` | `routineId`, `agentKey`, `trigger`, `runId`, `event?`: a [routine](/guide/agent-routines) started a run |
 | `routine.failed` | `routineId`, `agentKey`, `trigger`, `reason`, `event?` (at most one per routine and reason an hour) |
 | `alert.fired` | `ruleId`, `ruleName`, `metric`, `entityType`, `entityKey`, `value`, `threshold`, `baseline`, `severity`, `incidentId`, `firedAt`: an [alert rule](/guide/monitoring#alerts-incidents) fired for an entity |
 | `alert.resolved` | the same fields as `alert.fired`, plus `resolvedAt`: the alert recovered (two clean evaluation windows) |
 | `webhook.test` | none (sent by **Send test event**) |
 
-A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `alert.*`); `*` subscribes to everything.
+A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `routine.*`, `alert.*`); `*` subscribes to everything. The `schedule.fired` and `schedule.failed` events of the agent schedules of earlier releases no longer exist: subscribe to `routine.*`.
 
 **Alert events.** One event is published per rule and entity when its alert fires and again when it resolves (reminders are not published). The event belongs to the project of the rule: an endpoint of that project, or a tenant-wide endpoint, receives it. `entityType` is `agent`, `model`, `tool`, `mcp` or `kb`, and `entityKey` is the agent name, model key, tool key, MCP server key or knowledge base key. Both are `null` for a rule without an entity target (the project-wide metrics and rules created before per-entity alerting). `value` is the metric over the evaluation window and `null` when it could not be judged. `threshold` is the rule's threshold for a threshold rule and `null` for the other condition types, `baseline` is the normal value for a baseline rule and `null` otherwise, and `severity` is `critical`, `warning` or `info`. `incidentId` points to the incident (`GET /api/alerts/incidents/{incidentId}`) or is `null` when it could not be created. For `alert.resolved`, `value` is the value at recovery and `firedAt` the moment the alert had fired.
 
