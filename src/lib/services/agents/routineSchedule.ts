@@ -1,7 +1,7 @@
 /**
- * Time arithmetic of routine triggers — pure (no database, no Node APIs), so
- * the Studio editor previews a schedule with exactly the code the scheduler
- * fires it with.
+ * Time arithmetic of routines — pure (no database, no Node APIs), so the
+ * Studio editor previews a schedule with exactly the code the scheduler fires
+ * it with.
  *
  * A schedule is a 5-field cron expression evaluated in an IANA timezone, so
  * "09:00 on weekdays" stays 09:00 local across daylight-saving changes (a
@@ -75,27 +75,28 @@ export function latestCronSlot(cron: string, timezone: string, at: Date): Date |
   }
 }
 
-type TimedTrigger =
-  | { type: 'schedule'; cron: string; timezone: string }
-  | { type: 'once'; runAt: Date }
+/** What the time arithmetic reads of a routine: its `type` and, for a timed type, that type's settings object. */
+type TimedType =
+  | { type: 'schedule'; schedule: { cron: string; timezone: string } }
+  | { type: 'once'; once: { runAt: Date } }
   | { type: string };
 
 /**
  * `nextFireAt` for a routine saved now: the first cron slot after `now`; a
- * once trigger's time until it has fired; null for anything else (manual, a
- * disabled routine, a finished once). A once time already past is still
- * returned: the scheduler fires it within the misfire grace, else skips it.
+ * once routine's time until it has fired; null for anything else (manual,
+ * webhook, a disabled routine, a finished once). A once time already past is
+ * still returned: the scheduler fires it within the misfire grace, else skips
+ * it.
  */
 export function initialNextFireAt(
-  routine: { enabled: boolean; trigger: TimedTrigger; lastFireAt?: Date | null },
+  routine: { enabled: boolean; lastFireAt?: Date | null } & TimedType,
   now: Date,
 ): Date | null {
   if (!routine.enabled) return null;
-  const trigger = routine.trigger;
-  if (trigger.type === 'schedule' && 'cron' in trigger) return nextCronFire(trigger.cron, trigger.timezone, now);
-  if (trigger.type === 'once' && 'runAt' in trigger) {
+  if (routine.type === 'schedule' && 'schedule' in routine) return nextCronFire(routine.schedule.cron, routine.schedule.timezone, now);
+  if (routine.type === 'once' && 'once' in routine) {
     // Fired = a fire at (or after) its time; a Run now before it does not count.
-    const runAt = new Date(trigger.runAt);
+    const runAt = new Date(routine.once.runAt);
     return routine.lastFireAt && new Date(routine.lastFireAt).getTime() >= runAt.getTime() ? null : runAt;
   }
   return null;
@@ -112,15 +113,16 @@ export type DueRoutinePlan =
  * catch-up run: of several missed slots only the latest fires, and only while
  * it is younger than `graceMs`.
  */
-export function planDueRoutine(trigger: TimedTrigger, dueAt: Date, now: Date, graceMs: number): DueRoutinePlan {
-  if (trigger.type === 'schedule' && 'cron' in trigger) {
-    const next = nextCronFire(trigger.cron, trigger.timezone, now);
-    const latest = latestCronSlot(trigger.cron, trigger.timezone, now) ?? dueAt;
+export function planDueRoutine(routine: TimedType, dueAt: Date, now: Date, graceMs: number): DueRoutinePlan {
+  if (routine.type === 'schedule' && 'schedule' in routine) {
+    const { cron, timezone } = routine.schedule;
+    const next = nextCronFire(cron, timezone, now);
+    const latest = latestCronSlot(cron, timezone, now) ?? dueAt;
     const slot = latest.getTime() < dueAt.getTime() ? dueAt : latest;
     if (now.getTime() - slot.getTime() > graceMs) return { kind: 'missed', slot, next };
     return { kind: 'fire', fireAt: slot, next };
   }
-  const slot = trigger.type === 'once' && 'runAt' in trigger ? new Date(trigger.runAt) : dueAt;
+  const slot = routine.type === 'once' && 'once' in routine ? new Date(routine.once.runAt) : dueAt;
   if (now.getTime() - slot.getTime() > graceMs) return { kind: 'missed', slot, next: null };
   return { kind: 'fire', fireAt: slot, next: null };
 }

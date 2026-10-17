@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * The webhook parts of the routine editor (SPEC-webhooks W8): the trigger
+ * The webhook parts of the routine editor (SPEC-webhooks W8): the webhook
  * fields, the Connect card shown after a save (URL, the secret once, the
  * sender's setup steps, rotation), the Test tab (a sample delivery → dry run →
  * run) and the Deliveries tab (the delivery log).
@@ -82,9 +82,9 @@ async function errorMessage(res: Response): Promise<string> {
 
 const tag = (variable: string) => `{{${variable}}}`;
 
-// ── Trigger fields ───────────────────────────────────────────────────────
+// ── Webhook fields ───────────────────────────────────────────────────────
 
-export interface WebhookTriggerFieldsProps {
+export interface WebhookFieldsProps {
     form: RoutineForm;
     set: <K extends keyof RoutineForm>(key: K, value: RoutineForm[K]) => void;
     /** The stored routine already has a Standard Webhooks secret (an empty field keeps it). */
@@ -92,7 +92,7 @@ export interface WebhookTriggerFieldsProps {
     errorOf: (field: keyof RoutineForm) => string | undefined;
 }
 
-export function WebhookTriggerFields({ form, set, storedStandardSecret, errorOf }: WebhookTriggerFieldsProps) {
+export function WebhookFields({ form, set, storedStandardSecret, errorOf }: WebhookFieldsProps) {
     const t = useTranslations('agents.routines');
     const preset = form.webhookPreset;
     const auths = WEBHOOK_PRESET_AUTH[preset];
@@ -297,13 +297,14 @@ type GraceSeconds = (typeof GRACE_OPTIONS)[number]['value'];
 export interface WebhookConnectCardProps {
     agentId: string;
     routineId: string;
-    trigger: { url?: string; preset?: string; auth?: string; header_name?: string | null; secret_hint?: string; previous_secret_valid_until?: number | null };
+    /** The stored routine's `webhook` object. */
+    webhook: { url?: string; preset?: string; auth?: string; header_name?: string | null; secret_hint?: string; previous_secret_valid_until?: number | null };
     /** The secret from the answer that created / replaced it: shown this once. */
     revealedSecret: string | null;
     onSecret: (secret: string | null) => void;
 }
 
-export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret, onSecret }: WebhookConnectCardProps) {
+export function WebhookConnectCard({ agentId, routineId, webhook, revealedSecret, onSecret }: WebhookConnectCardProps) {
     const t = useTranslations('agents.routines');
     const locale = useLocale();
     const { confirm } = useConfirm();
@@ -312,13 +313,13 @@ export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret
     const [rotating, setRotating] = useState(false);
     // What the stored routine says is the source of truth; a rotation answers with newer values, which hold only
     // until the routine itself is read again (a save that replaced the secret brings its own hint and grace).
-    const storedState = `${trigger.secret_hint ?? ''}|${trigger.previous_secret_valid_until ?? ''}`;
+    const storedState = `${webhook.secret_hint ?? ''}|${webhook.previous_secret_valid_until ?? ''}`;
     const [rotated, setRotated] = useState<{ base: string; hint: string; previousUntil: number | null } | null>(null);
     const latest = rotated && rotated.base === storedState ? rotated : null;
-    const hint = latest ? latest.hint : trigger.secret_hint ?? '';
-    const previousUntil = latest ? latest.previousUntil : trigger.previous_secret_valid_until ?? null;
-    const preset = (WEBHOOK_PRESETS as readonly string[]).includes(trigger.preset ?? '') ? trigger.preset as WebhookPreset : 'generic';
-    const auth = (trigger.auth ?? WEBHOOK_PRESET_AUTH[preset][0]) as WebhookAuth;
+    const hint = latest ? latest.hint : webhook.secret_hint ?? '';
+    const previousUntil = latest ? latest.previousUntil : webhook.previous_secret_valid_until ?? null;
+    const preset = (WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset ?? '') ? webhook.preset as WebhookPreset : 'generic';
+    const auth = (webhook.auth ?? WEBHOOK_PRESET_AUTH[preset][0]) as WebhookAuth;
     const standard = auth === 'standard_webhooks';
 
     const rotate = async () => {
@@ -348,7 +349,7 @@ export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret
         <Card withBorder radius="md" padding="md">
             <Stack gap="sm">
                 <Text fw={600}>{t('connectTitle')}</Text>
-                {trigger.url ? <CopyValue label={t('connectUrl')} value={trigger.url} /> : null}
+                {webhook.url ? <CopyValue label={t('connectUrl')} value={webhook.url} /> : null}
                 {revealedSecret ? (
                     <Stack gap={4}>
                         <CopyValue label={t('connectSecret')} value={revealedSecret} />
@@ -360,7 +361,7 @@ export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret
                 {previousUntil ? (
                     <Text size="xs" c="dimmed">{t('connectPreviousUntil', { time: new Date(previousUntil * 1000).toLocaleString(locale) })}</Text>
                 ) : null}
-                <ConnectSteps preset={preset} auth={auth} headerName={trigger.header_name ?? ''} />
+                <ConnectSteps preset={preset} auth={auth} headerName={webhook.header_name ?? ''} />
 
                 <Stack gap={6}>
                     <Text size="sm" fw={500}>{t('rotate')}</Text>

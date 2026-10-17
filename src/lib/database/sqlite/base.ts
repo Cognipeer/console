@@ -1148,7 +1148,7 @@ export class SQLiteProviderBase {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status_class_created ON ${TABLES.agentRuns}(tenantId, status, runClass, createdAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_status_notBefore ON ${TABLES.agentRuns}(status, notBefore)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_routine_created ON ${TABLES.agentRuns}(tenantId, routineId, createdAt)`);
-    // An incoming webhook finds its routine by the URL's hook id (copied out of the trigger JSON).
+    // An incoming webhook finds its routine by the URL's hook id (copied out of the `webhook` JSON).
     this.ensureTableColumn(db, TABLES.agentRoutines, 'hookId', 'hookId TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_routines_hook ON ${TABLES.agentRoutines}(hookId)`);
     // Session files: ordinary file records tagged with the conversation they belong

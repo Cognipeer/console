@@ -20,7 +20,7 @@ import { ConfirmProvider } from '@/components/common/confirm';
 import AgentRunSettingsPanel from '@/components/agents/studio/AgentRunSettingsPanel';
 import AgentRunsTable, { ACTIVE_RUN_STATUSES } from '@/components/agents/studio/AgentRunsTable';
 import AgentRoutinesPanel from '@/components/agents/studio/AgentRoutinesPanel';
-import { WebhookConnectCard, WebhookDeliveriesPanel, WebhookTriggerFields } from '@/components/agents/studio/RoutineWebhookParts';
+import { WebhookConnectCard, WebhookDeliveriesPanel, WebhookFields } from '@/components/agents/studio/RoutineWebhookParts';
 import { emptyRoutineForm } from '@/components/agents/studio/routineForm';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import type { IAgentCallbackConfig } from '@/lib/database/provider/types.domain';
@@ -152,20 +152,20 @@ describe('the runs table and a scheduled run', () => {
 });
 
 describe('the webhook Connect card', () => {
-  const trigger = (overrides: Record<string, unknown> = {}) => ({ url: 'https://example.com/hook', preset: 'generic', auth: 'standard_webhooks', secret_hint: 'aaaa', previous_secret_valid_until: null, ...overrides });
-  const card = (stored: ReturnType<typeof trigger>) => h(WebhookConnectCard, { agentId: 'a1', routineId: 'r1', trigger: stored, revealedSecret: null, onSecret: () => undefined });
+  const webhook = (overrides: Record<string, unknown> = {}) => ({ url: 'https://example.com/hook', preset: 'generic', auth: 'standard_webhooks', secret_hint: 'aaaa', previous_secret_valid_until: null, ...overrides });
+  const card = (stored: ReturnType<typeof webhook>) => h(WebhookConnectCard, { agentId: 'a1', routineId: 'r1', webhook: stored, revealedSecret: null, onSecret: () => undefined });
 
   it('shows the hint and the grace of the routine as it is stored now, after a re-save with a new secret', () => {
-    mount(card(trigger()));
+    mount(card(webhook()));
     expect(text()).toContain('…aaaa');
     expect(text()).not.toContain('still accepted');
-    rerender(card(trigger({ secret_hint: 'bbbb' })));
+    rerender(card(webhook({ secret_hint: 'bbbb' })));
     expect(text()).toContain('…bbbb');
     expect(text()).not.toContain('…aaaa');
-    rerender(card(trigger({ secret_hint: 'cccc', previous_secret_valid_until: 1_760_000_000 })));
+    rerender(card(webhook({ secret_hint: 'cccc', previous_secret_valid_until: 1_760_000_000 })));
     expect(text()).toContain('…cccc');
     expect(text()).toContain('still accepted');
-    rerender(card(trigger({ secret_hint: 'dddd', previous_secret_valid_until: null })));
+    rerender(card(webhook({ secret_hint: 'dddd', previous_secret_valid_until: null })));
     expect(text()).toContain('…dddd');
     expect(text()).not.toContain('still accepted');
   });
@@ -186,10 +186,10 @@ describe('a failed load is not an empty list', () => {
     expect(text()).not.toContain('Could not load the routines.');
   });
 
-  it('routines: a saved list reads in full — trigger as text with an icon, status as a dot and a word', async () => {
+  it('routines: a saved list reads in full — type as text with an icon, status as a dot and a word', async () => {
     fetchMock.mockImplementation(() => json({ data: [{
       id: 'r1', object: 'agent.routine', agent: 'a', name: 'github-pr-review-with-a-rather-long-name', description: null, enabled: true,
-      trigger: { type: 'webhook', preset: 'github', events: ['pull_request'] }, prompt: 'x', inputs: null, version: null, class: 'default',
+      type: 'webhook', webhook: { preset: 'github', events: ['pull_request'] }, prompt: 'x', inputs: null, version: null, class: 'default',
       metadata: {}, callback: null, response_format: null, next_fire_at: null, last_fire_at: 1_760_000_000, last_run_id: 'run_1', last_status: 'failed', last_error: 'boom',
       created_at: null, updated_at: null,
     }] }));
@@ -229,7 +229,7 @@ describe('a failed load is not an empty list', () => {
 describe('chips a keyboard can reach', () => {
   it('the filter examples are buttons', () => {
     const form = { ...emptyRoutineForm(), triggerType: 'webhook' as const, webhookPreset: 'github' as const };
-    const markup = renderToStaticMarkup(wrap(h(WebhookTriggerFields, { form, set: () => undefined, storedStandardSecret: false, errorOf: () => undefined })));
+    const markup = renderToStaticMarkup(wrap(h(WebhookFields, { form, set: () => undefined, storedStandardSecret: false, errorOf: () => undefined })));
     expect(markup).toMatch(/<button[^>]*type="button"[^>]*>(<span[^>]*>)*Opened \/ synchronize/);
   });
 

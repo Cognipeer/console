@@ -1,5 +1,5 @@
 /**
- * Routine trigger time arithmetic (routineSchedule.ts): 5-field cron in an
+ * Routine time arithmetic (routineSchedule.ts): 5-field cron in an
  * IANA timezone across daylight-saving changes, the first fire of a saved
  * routine, and what the scheduler does with a due slot (misfire grace).
  */
@@ -72,24 +72,24 @@ describe('initialNextFireAt', () => {
   const now = new Date('2026-10-18T10:00:00Z');
 
   it('a schedule: the first slot strictly after now', () => {
-    expect(iso(initialNextFireAt({ enabled: true, trigger: { type: 'schedule', cron: '0 10 * * *', timezone: 'UTC' } }, now))).toBe('2026-10-19T10:00:00.000Z');
+    expect(iso(initialNextFireAt({ enabled: true, type: 'schedule', schedule: { cron: '0 10 * * *', timezone: 'UTC' } }, now))).toBe('2026-10-19T10:00:00.000Z');
   });
 
-  it('a once trigger: its time until it has fired (a Run now before it does not count)', () => {
+  it('a once routine: its time until it has fired (a Run now before it does not count)', () => {
     const runAt = new Date('2026-10-18T12:00:00Z');
-    expect(iso(initialNextFireAt({ enabled: true, trigger: { type: 'once', runAt } }, now))).toBe(runAt.toISOString());
-    expect(initialNextFireAt({ enabled: true, trigger: { type: 'once', runAt }, lastFireAt: new Date('2026-10-18T09:00:00Z') }, now)?.toISOString()).toBe(runAt.toISOString());
-    expect(initialNextFireAt({ enabled: true, trigger: { type: 'once', runAt }, lastFireAt: runAt }, now)).toBeNull();
+    expect(iso(initialNextFireAt({ enabled: true, type: 'once', once: { runAt } }, now))).toBe(runAt.toISOString());
+    expect(initialNextFireAt({ enabled: true, type: 'once', once: { runAt }, lastFireAt: new Date('2026-10-18T09:00:00Z') }, now)?.toISOString()).toBe(runAt.toISOString());
+    expect(initialNextFireAt({ enabled: true, type: 'once', once: { runAt }, lastFireAt: runAt }, now)).toBeNull();
   });
 
   it('manual and disabled routines have none', () => {
-    expect(initialNextFireAt({ enabled: true, trigger: { type: 'manual' } }, now)).toBeNull();
-    expect(initialNextFireAt({ enabled: false, trigger: { type: 'schedule', cron: '* * * * *', timezone: 'UTC' } }, now)).toBeNull();
+    expect(initialNextFireAt({ enabled: true, type: 'manual' }, now)).toBeNull();
+    expect(initialNextFireAt({ enabled: false, type: 'schedule', schedule: { cron: '* * * * *', timezone: 'UTC' } }, now)).toBeNull();
   });
 });
 
 describe('planDueRoutine (misfire grace)', () => {
-  const hourly = { type: 'schedule' as const, cron: '0 * * * *', timezone: 'UTC' };
+  const hourly = { type: 'schedule' as const, schedule: { cron: '0 * * * *', timezone: 'UTC' } };
 
   it('fires a slot that is due now and moves on to the next one', () => {
     expect(planDueRoutine(hourly, new Date('2026-10-18T09:00:00Z'), new Date('2026-10-18T09:00:05Z'), HOUR)).toEqual({
@@ -104,15 +104,15 @@ describe('planDueRoutine (misfire grace)', () => {
   });
 
   it('a latest slot older than the grace is missed', () => {
-    const daily = { type: 'schedule' as const, cron: '0 6 * * *', timezone: 'UTC' };
+    const daily = { type: 'schedule' as const, schedule: { cron: '0 6 * * *', timezone: 'UTC' } };
     expect(planDueRoutine(daily, new Date('2026-10-18T06:00:00Z'), new Date('2026-10-18T09:00:00Z'), HOUR)).toEqual({
       kind: 'missed', slot: new Date('2026-10-18T06:00:00Z'), next: new Date('2026-10-19T06:00:00Z'),
     });
   });
 
-  it('a once trigger fires within the grace, is missed after it, and never has a next slot', () => {
+  it('a once routine fires within the grace, is missed after it, and never has a next slot', () => {
     const runAt = new Date('2026-10-18T09:00:00Z');
-    expect(planDueRoutine({ type: 'once', runAt }, runAt, new Date('2026-10-18T09:30:00Z'), HOUR)).toEqual({ kind: 'fire', fireAt: runAt, next: null });
-    expect(planDueRoutine({ type: 'once', runAt }, runAt, new Date('2026-10-18T11:00:00Z'), HOUR)).toEqual({ kind: 'missed', slot: runAt, next: null });
+    expect(planDueRoutine({ type: 'once', once: { runAt } }, runAt, new Date('2026-10-18T09:30:00Z'), HOUR)).toEqual({ kind: 'fire', fireAt: runAt, next: null });
+    expect(planDueRoutine({ type: 'once', once: { runAt } }, runAt, new Date('2026-10-18T11:00:00Z'), HOUR)).toEqual({ kind: 'missed', slot: runAt, next: null });
   });
 });

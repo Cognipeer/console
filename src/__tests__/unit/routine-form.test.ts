@@ -1,7 +1,7 @@
 /**
  * The Studio routine editor's form ↔ API mapping (routineForm.ts): what a
- * save sends for each trigger type, what it refuses before sending, and how a
- * stored routine fills the form.
+ * save sends for each type (the `type` and the one settings object named after
+ * it), what it refuses before sending, and how a stored routine fills the form.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -29,36 +29,44 @@ import { WEBHOOK_CONTEXT_ROOTS, boundedView, firstFilterMiss, parseFilterRules, 
 const now = new Date('2026-10-18T10:00:00Z');
 const base = () => ({ ...emptyRoutineForm('Europe/Istanbul', now), name: 'Digest', prompt: 'Summarise.' });
 
-const stored = (overrides: Partial<RoutineRow> = {}): RoutineRow => ({
-  id: 'rt1', object: 'agent.routine', agent: 'report-bot', name: 'Digest', description: null, enabled: true,
-  trigger: { type: 'schedule', cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' }, prompt: 'Summarise.', inputs: { region: 'eu' },
-  version: 2, class: 'deferred', metadata: { team: 'ops' }, callback: { url: 'https://example.com/hook', signed: true },
+/** What every stored routine carries besides its type and the settings object of that type. */
+const rest = {
+  id: 'rt1', object: 'agent.routine' as const, agent: 'report-bot', name: 'Digest', description: null, enabled: true,
+  prompt: 'Summarise.', inputs: { region: 'eu' },
+  version: 2, class: 'deferred' as const, metadata: { team: 'ops' }, callback: { url: 'https://example.com/hook', signed: true },
   response_format: { type: 'json_object' }, next_fire_at: null, last_fire_at: null, last_run_id: null, last_status: null, last_error: null,
-  created_at: null, updated_at: null, ...overrides,
-});
+  created_at: null, updated_at: null,
+};
+
+/** A weekday schedule routine. */
+const stored = (): RoutineRow => ({ ...rest, type: 'schedule', schedule: { cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' } });
+/** A once routine: only its own settings object is present. */
+const storedOnce = (runAt: string): RoutineRow => ({ ...rest, type: 'once', once: { run_at: runAt } });
 
 describe('routineBodyFromForm', () => {
   it('a schedule sends cron + timezone and the run settings', () => {
     const built = routineBodyFromForm({ ...base(), metadataText: 'team=ops\n\nticket = OPS-1', runClass: 'deferred', version: 3 }, [], null, now);
     expect(built).toEqual({ ok: true, body: expect.objectContaining({
       name: 'Digest', enabled: true, prompt: 'Summarise.', version: 3, class: 'deferred', metadata: { team: 'ops', ticket: 'OPS-1' },
-      callback: null, response_format: null, inputs: null, trigger: { type: 'schedule', cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' },
+      callback: null, response_format: null, inputs: null, type: 'schedule', schedule: { cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' },
     }) });
   });
 
   it('once "in N" sends delay_seconds; once "at" sends run_at and refuses a past time', () => {
     const delay = routineBodyFromForm({ ...base(), triggerType: 'once', onceMode: 'in', delayAmount: 2, delayUnit: 'hours' }, [], null, now);
-    expect(delay.ok && delay.body.trigger).toEqual({ type: 'once', delay_seconds: 7200 });
+    expect(delay.ok && [delay.body.type, delay.body.once]).toEqual(['once', { delay_seconds: 7200 }]);
+    expect(delay.ok && ['schedule', 'webhook'].some((key) => key in delay.body)).toBe(false);
     const at = new Date('2026-10-18T12:00:00Z');
     const later = routineBodyFromForm({ ...base(), triggerType: 'once', onceMode: 'at', runAtLocal: toLocalInputValue(at) }, [], null, now);
-    expect(later.ok && later.body.trigger).toEqual({ type: 'once', run_at: at.toISOString() });
+    expect(later.ok && [later.body.type, later.body.once]).toEqual(['once', { run_at: at.toISOString() }]);
     const past = routineBodyFromForm({ ...base(), triggerType: 'once', onceMode: 'at', runAtLocal: toLocalInputValue(new Date('2026-10-18T08:00:00Z')) }, [], null, now);
     expect(past).toEqual({ ok: false, problem: { field: 'runAtLocal', key: 'oncePast' } });
   });
 
-  it('manual sends only the type', () => {
+  it('manual sends only the type, with no settings object', () => {
     const built = routineBodyFromForm({ ...base(), triggerType: 'manual' }, [], null, now);
-    expect(built.ok && built.body.trigger).toEqual({ type: 'manual' });
+    expect(built.ok && built.body.type).toBe('manual');
+    expect(built.ok && ['schedule', 'once', 'webhook'].some((key) => key in built.body)).toBe(false);
   });
 
   it('refuses a missing name, a bad cron, bad metadata lines and bad JSON before sending', () => {
@@ -81,17 +89,19 @@ describe('routineBodyFromForm', () => {
     expect(replaced.ok && replaced.body.callback).toEqual({ url: 'https://example.com/hook', secret: 'a-new-secret-12345' });
   });
 
-  it('editing a once routine whose time already passed, without touching it, leaves the trigger out', () => {
-    const row = stored({ trigger: { type: 'once', run_at: '2026-10-01T06:00:00.000Z' } });
+  it('editing a once routine whose time already passed, without touching it, leaves its type and time out', () => {
+    const row = storedOnce('2026-10-01T06:00:00.000Z');
     const built = routineBodyFromForm({ ...formFromRoutine(row, 'UTC'), name: 'Renamed' }, [], row, now);
     expect(built.ok).toBe(true);
-    expect(built.ok && 'trigger' in built.body).toBe(false);
+    expect(built.ok && ['type', 'once'].some((key) => key in built.body)).toBe(false);
   });
 });
 
-describe('webhook trigger', () => {
+describe('webhook routine', () => {
   const webhookForm = () => ({ ...base(), triggerType: 'webhook' as const });
-  const storedWebhook = (trigger: Record<string, unknown>) => stored({ trigger: { type: 'webhook', url: 'https://console.example.com/api/public/hooks/t/wh_x', ...trigger } });
+  const storedWebhook = (webhook: Record<string, unknown>): RoutineRow => ({
+    ...rest, type: 'webhook', webhook: { url: 'https://console.example.com/api/public/hooks/t/wh_x', ...webhook },
+  });
 
   it('the preset and auth lists match the server’s', () => {
     expect([...WEBHOOK_PRESETS]).toEqual([...SERVER_PRESETS]);
@@ -105,8 +115,9 @@ describe('webhook trigger', () => {
       ...webhookForm(), webhookEvents: ['pull_request'], webhookActions: ['opened', 'reopened'],
       webhookFilter: [{ path: 'payload.pull_request.draft', op: 'neq', value: 'true' }, { path: 'payload.labels.*.name', op: 'in', value: 'bug, ui ,' }, { path: '', op: 'eq', value: '' }],
     }, [], null, now);
-    expect(built.ok && built.body.trigger).toEqual({
-      type: 'webhook', preset: 'github', auth: 'github_signature', events: ['pull_request'], include_payload: true,
+    expect(built.ok && built.body.type).toBe('webhook');
+    expect(built.ok && built.body.webhook).toEqual({
+      preset: 'github', auth: 'github_signature', events: ['pull_request'], include_payload: true,
       filter: [
         { path: 'payload.action', op: 'in', value: ['opened', 'reopened'] },
         { path: 'payload.pull_request.draft', op: 'neq', value: 'true' },
@@ -120,34 +131,34 @@ describe('webhook trigger', () => {
       for (const example of WEBHOOK_FILTER_EXAMPLES[preset]) {
         const built = routineBodyFromForm({ ...webhookForm(), webhookPreset: preset, webhookAuth: WEBHOOK_PRESET_AUTH[preset][0], webhookSecret: 'whsec_x', webhookFilter: example.rows }, [], null, now);
         expect(built.ok, example.key).toBe(true);
-        expect(parseFilterRules((built.ok && (built.body.trigger as { filter: unknown }).filter)).ok, example.key).toBe(true);
+        expect(parseFilterRules((built.ok && (built.body.webhook as { filter: unknown }).filter)).ok, example.key).toBe(true);
       }
     }
   });
 
   it('header auth sends the header name; a rule without its value is refused', () => {
     const header = routineBodyFromForm({ ...webhookForm(), webhookPreset: 'generic', webhookAuth: 'header', webhookHeaderName: 'X-Token' }, [], null, now);
-    expect(header.ok && header.body.trigger).toMatchObject({ auth: 'header', header_name: 'X-Token' });
+    expect(header.ok && header.body.webhook).toMatchObject({ auth: 'header', header_name: 'X-Token' });
     const missing = routineBodyFromForm({ ...webhookForm(), webhookFilter: [{ path: 'payload.action', op: 'eq', value: '' }] }, [], null, now);
     expect(missing).toEqual({ ok: false, problem: { field: 'webhookFilter', key: 'filterRowInvalid' } });
     const exists = routineBodyFromForm({ ...webhookForm(), webhookFilter: [{ path: 'payload.sender', op: 'exists', value: '' }] }, [], null, now);
-    expect(exists.ok && (exists.body.trigger as { filter: unknown }).filter).toEqual([{ path: 'payload.sender', op: 'exists' }]);
+    expect(exists.ok && (exists.body.webhook as { filter: unknown }).filter).toEqual([{ path: 'payload.sender', op: 'exists' }]);
   });
 
   it('Standard Webhooks needs the sender’s secret unless the stored routine already has one', () => {
     const form = { ...webhookForm(), webhookPreset: 'gitlab' as const, webhookAuth: 'standard_webhooks' as const };
     expect(routineBodyFromForm(form, [], null, now)).toEqual({ ok: false, problem: { field: 'webhookSecret', key: 'standardSecretRequired' } });
     const pasted = routineBodyFromForm({ ...form, webhookSecret: ' whsec_abc ' }, [], null, now);
-    expect(pasted.ok && pasted.body.trigger).toMatchObject({ auth: 'standard_webhooks', secret: 'whsec_abc' });
+    expect(pasted.ok && pasted.body.webhook).toMatchObject({ auth: 'standard_webhooks', secret: 'whsec_abc' });
     const row = storedWebhook({ preset: 'gitlab', auth: 'standard_webhooks' });
     const kept = routineBodyFromForm(form, [], row, now);
-    expect(kept.ok && 'secret' in (kept.body.trigger as object)).toBe(false);
+    expect(kept.ok && 'secret' in (kept.body.webhook as object)).toBe(false);
     // A secret typed for another auth mode is never sent (the server generates those).
     const other = routineBodyFromForm({ ...webhookForm(), webhookSecret: 'whsec_abc' }, [], null, now);
-    expect(other.ok && 'secret' in (other.body.trigger as object)).toBe(false);
+    expect(other.ok && 'secret' in (other.body.webhook as object)).toBe(false);
   });
 
-  it('a stored trigger fills the form; its first action rule becomes the Actions chips', () => {
+  it('a stored webhook fills the form; its first action rule becomes the Actions chips', () => {
     const form = formFromRoutine(storedWebhook({
       preset: 'gitlab', auth: 'gitlab_token', header_name: null, events: ['merge_request'], include_payload: false,
       filter: [{ path: 'payload.object_attributes.action', op: 'in', value: ['open', 'update'] }, { path: 'payload.user.username', op: 'in', value: ['jane', 'joe'] }],
@@ -180,8 +191,10 @@ describe('formFromRoutine', () => {
     expect(JSON.parse(form.responseFormatText)).toEqual({ type: 'json_object' });
   });
 
-  it('an unknown trigger type opens as manual', () => {
-    expect(formFromRoutine(stored({ trigger: { type: 'something-new' } }), 'UTC').triggerType).toBe('manual');
+  it('an unknown type opens as manual', () => {
+    // A type a newer server knows: the form falls back to manual rather than failing.
+    const row = { ...rest, type: 'something-new' } as unknown as RoutineRow;
+    expect(formFromRoutine(row, 'UTC').triggerType).toBe('manual');
   });
 });
 
@@ -255,7 +268,7 @@ describe('the Test tab samples and the variables offered', () => {
       const example = WEBHOOK_FILTER_EXAMPLES[preset][0];
       if (!example) continue;
       const built = routineBodyFromForm({ ...base(), triggerType: 'webhook', webhookPreset: preset, webhookAuth: WEBHOOK_PRESET_AUTH[preset][0], webhookFilter: example.rows, webhookSecret: 'whsec_x'.padEnd(20, 'x') }, [], null, now);
-      const filter = built.ok ? (built.body.trigger as { filter?: Parameters<typeof firstFilterMiss>[1] }).filter : undefined;
+      const filter = built.ok ? (built.body.webhook as { filter?: Parameters<typeof firstFilterMiss>[1] }).filter : undefined;
       expect(firstFilterMiss(view(preset), filter), preset).toBeNull();
     }
   });

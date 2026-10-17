@@ -1,6 +1,6 @@
 /**
- * A routine's webhook trigger as the routines API writes and shows it: the
- * request shape → the stored trigger (with the secret rules of SPEC W1), the
+ * A routine's `webhook` settings as the routines API writes and shows them: the
+ * request shape → the stored settings (with the secret rules of SPEC W1), the
  * wire shape (never a sealed secret), the public URL, secret rotation and
  * opening the stored secrets for a delivery.
  *
@@ -12,7 +12,7 @@
 import { randomBytes } from 'node:crypto';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import type { AgentRoutineTrigger, AgentRoutineWebhookAuth, AgentRoutineWebhookPreset, AgentRoutineWebhookTrigger } from '@/lib/database';
+import type { AgentRoutineWebhook, AgentRoutineWebhookAuth, AgentRoutineWebhookPreset } from '@/lib/database';
 import { generateWebhookSecret } from '@/lib/services/webhooks/webhookEndpointService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import type { InputIssue } from './agentInputs';
@@ -31,10 +31,6 @@ const EVENT_NAME_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 const MAX_EVENTS = 50;
 export const MAX_ROTATION_GRACE_SECONDS = 86_400;
 
-export function isWebhookTrigger(trigger: AgentRoutineTrigger | null | undefined): trigger is AgentRoutineWebhookTrigger {
-  return trigger?.type === 'webhook';
-}
-
 /** `wh_` + 18 random bytes: the URL's locator. */
 export function newHookId(): string {
   return `wh_${randomBytes(18).toString('base64url')}`;
@@ -51,21 +47,22 @@ function sealed(secret: string, source: 'generated' | 'provided') {
   return { secretSealed: encryptObject(secret), secretHint: hintOf(secret), secretSource: source };
 }
 
-export type WebhookTriggerWrite =
-  | { ok: true; trigger: AgentRoutineWebhookTrigger; /** A new generated secret, shown once. */ secret?: string }
+export type WebhookWrite =
+  | { ok: true; webhook: AgentRoutineWebhook; /** A new generated secret, shown once. */ secret?: string }
   | { ok: false; errors: InputIssue[] };
 
 /**
- * A webhook trigger from a create / PATCH body. `existing` is the stored
- * trigger when it already is a webhook one: absent fields keep its values,
- * and its hook id and secret stay unless the secret rules replace the secret:
- * moving away from Standard Webhooks generates a new one, moving to it needs
- * the sender's `secret`. A new webhook trigger gets a new hook id and secret.
+ * The `webhook` settings from a create / PATCH body's `webhook` object.
+ * `existing` is the stored `webhook` when the routine already is a webhook
+ * one: absent fields keep its values, and its hook id and secret stay unless
+ * the secret rules replace the secret: moving away from Standard Webhooks
+ * generates a new one, moving to it needs the sender's `secret`. A routine that
+ * becomes a webhook one gets a new hook id and secret.
  */
-export function parseWebhookTriggerWrite(value: Record<string, unknown>, existing: AgentRoutineTrigger | null | undefined): WebhookTriggerWrite {
-  const prev = isWebhookTrigger(existing) ? existing : null;
+export function parseWebhookWrite(value: Record<string, unknown>, existing: AgentRoutineWebhook | null | undefined): WebhookWrite {
+  const prev = existing ?? null;
   const errors: InputIssue[] = [];
-  const issue = (field: string, message: string) => errors.push({ field: `trigger.${field}`, message });
+  const issue = (field: string, message: string) => errors.push({ field: `webhook.${field}`, message });
 
   const preset = (value.preset ?? prev?.preset) as AgentRoutineWebhookPreset | undefined;
   if (!preset || !WEBHOOK_PRESETS.includes(preset)) {
@@ -102,7 +99,7 @@ export function parseWebhookTriggerWrite(value: Record<string, unknown>, existin
   let filter = prev?.filter ?? [];
   if (value.filter !== undefined) {
     const parsed = parseFilterRules(value.filter);
-    if (!parsed.ok) errors.push(...parsed.errors.map((item) => ({ field: `trigger.${item.field}`, message: item.message })));
+    if (!parsed.ok) errors.push(...parsed.errors.map((item) => ({ field: `webhook.${item.field}`, message: item.message })));
     else filter = parsed.rules;
   }
 
@@ -114,7 +111,7 @@ export function parseWebhookTriggerWrite(value: Record<string, unknown>, existin
 
   // The secret (SPEC W1): generated unless the sender's Standard Webhooks secret is pasted in.
   const givenSecret = value.secret;
-  let secretFields: Pick<AgentRoutineWebhookTrigger, 'secretSealed' | 'secretHint' | 'secretSource'> | null = null;
+  let secretFields: Pick<AgentRoutineWebhook, 'secretSealed' | 'secretHint' | 'secretSource'> | null = null;
   let generated: string | undefined;
   let clearPrevious = false;
   if (auth === 'standard_webhooks') {
@@ -126,7 +123,7 @@ export function parseWebhookTriggerWrite(value: Record<string, unknown>, existin
         clearPrevious = true;
       }
     } else if (!prev || prev.auth !== 'standard_webhooks') {
-      issue('secret', 'a Standard Webhooks trigger needs the sender’s secret ("whsec_…")');
+      issue('secret', 'a Standard Webhooks webhook needs the sender’s secret ("whsec_…")');
     }
   } else {
     if (givenSecret !== undefined && givenSecret !== null && givenSecret !== '') {
@@ -139,8 +136,7 @@ export function parseWebhookTriggerWrite(value: Record<string, unknown>, existin
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  const trigger: AgentRoutineWebhookTrigger = {
-    type: 'webhook',
+  const webhook: AgentRoutineWebhook = {
     hookId: prev?.hookId ?? newHookId(),
     preset,
     auth,
@@ -154,32 +150,31 @@ export function parseWebhookTriggerWrite(value: Record<string, unknown>, existin
     filter,
     includePayload,
   };
-  return { ok: true, trigger, ...(generated ? { secret: generated } : {}) };
+  return { ok: true, webhook, ...(generated ? { secret: generated } : {}) };
 }
 
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
 
 /** The previous secret's end, while one is still accepted. */
-function previousValidUntil(trigger: AgentRoutineWebhookTrigger, now = new Date()): Date | null {
-  if (!trigger.previousSecretSealed || !trigger.previousSecretExpiresAt) return null;
-  const until = new Date(trigger.previousSecretExpiresAt);
+function previousValidUntil(webhook: AgentRoutineWebhook, now = new Date()): Date | null {
+  if (!webhook.previousSecretSealed || !webhook.previousSecretExpiresAt) return null;
+  const until = new Date(webhook.previousSecretExpiresAt);
   return until.getTime() > now.getTime() ? until : null;
 }
 
-/** The wire shape (§5.7 + SPEC W6): the URL and a hint of the secret, never a sealed value. */
-export function serializeWebhookTrigger(trigger: AgentRoutineWebhookTrigger, tenantId: string): Record<string, unknown> {
+/** The wire shape of a routine's `webhook` (§5.7 + SPEC W6): the URL and a hint of the secret, never a sealed value. */
+export function serializeWebhook(webhook: AgentRoutineWebhook, tenantId: string): Record<string, unknown> {
   return {
-    type: 'webhook',
-    url: webhookUrl(tenantId, trigger.hookId),
-    preset: trigger.preset,
-    auth: trigger.auth,
-    header_name: trigger.auth === 'header' ? trigger.headerName ?? DEFAULT_WEBHOOK_HEADER_NAME : null,
-    secret_hint: trigger.secretHint,
-    secret_source: trigger.secretSource,
-    previous_secret_valid_until: toEpochSeconds(previousValidUntil(trigger)),
-    events: trigger.events ?? [],
-    filter: trigger.filter ?? [],
-    include_payload: trigger.includePayload,
+    url: webhookUrl(tenantId, webhook.hookId),
+    preset: webhook.preset,
+    auth: webhook.auth,
+    header_name: webhook.auth === 'header' ? webhook.headerName ?? DEFAULT_WEBHOOK_HEADER_NAME : null,
+    secret_hint: webhook.secretHint,
+    secret_source: webhook.secretSource,
+    previous_secret_valid_until: toEpochSeconds(previousValidUntil(webhook)),
+    events: webhook.events ?? [],
+    filter: webhook.filter ?? [],
+    include_payload: webhook.includePayload,
   };
 }
 
@@ -189,13 +184,13 @@ export function serializeWebhookTrigger(trigger: AgentRoutineWebhookTrigger, ten
  * any earlier one.
  */
 export function rotateWebhookSecret(
-  trigger: AgentRoutineWebhookTrigger,
+  webhook: AgentRoutineWebhook,
   input: { graceSeconds: number; secret?: unknown },
   now = new Date(),
-): { ok: true; trigger: AgentRoutineWebhookTrigger; secret?: string } | { ok: false; field: string; message: string } {
+): { ok: true; webhook: AgentRoutineWebhook; secret?: string } | { ok: false; field: string; message: string } {
   let replacement: { secretSealed: string; secretHint: string; secretSource: 'generated' | 'provided' };
   let generated: string | undefined;
-  if (trigger.auth === 'standard_webhooks') {
+  if (webhook.auth === 'standard_webhooks') {
     const problem = standardSecretProblem(input.secret);
     if (problem) return { ok: false, field: 'secret', message: problem };
     replacement = sealed(input.secret as string, 'provided');
@@ -209,22 +204,22 @@ export function rotateWebhookSecret(
   const keepPrevious = input.graceSeconds > 0;
   return {
     ok: true,
-    trigger: {
-      ...trigger,
+    webhook: {
+      ...webhook,
       ...replacement,
-      previousSecretSealed: keepPrevious ? trigger.secretSealed : null,
+      previousSecretSealed: keepPrevious ? webhook.secretSealed : null,
       previousSecretExpiresAt: keepPrevious ? new Date(now.getTime() + input.graceSeconds * 1000) : null,
     },
     ...(generated ? { secret: generated } : {}),
   };
 }
 
-export function rotationAnswer(trigger: AgentRoutineWebhookTrigger, secret?: string) {
+export function rotationAnswer(webhook: AgentRoutineWebhook, secret?: string) {
   return {
     object: 'agent.routine.webhook_secret' as const,
     ...(secret ? { secret } : {}),
-    secret_hint: trigger.secretHint,
-    previous_valid_until: toEpochSeconds(previousValidUntil(trigger)),
+    secret_hint: webhook.secretHint,
+    previous_valid_until: toEpochSeconds(previousValidUntil(webhook)),
   };
 }
 
@@ -236,26 +231,26 @@ const lastSecretErrorAt = new Map<string, number>();
  * The secrets a delivery may prove: the current one, then the previous one
  * while its grace runs. Null when the current one cannot be opened.
  */
-export function openWebhookSecrets(routineId: string, trigger: AgentRoutineWebhookTrigger, now = new Date()): string[] | null {
+export function openWebhookSecrets(routineId: string, webhook: AgentRoutineWebhook, now = new Date()): string[] | null {
   let current: string;
   try {
-    current = decryptObject<string>(trigger.secretSealed);
+    current = decryptObject<string>(webhook.secretSealed);
     if (typeof current !== 'string' || current.length === 0) throw new Error('empty secret');
   } catch (error) {
     const last = lastSecretErrorAt.get(routineId);
     if (last === undefined || now.getTime() - last >= SECRET_ERROR_LOG_INTERVAL_MS) {
       if (lastSecretErrorAt.size > 10_000) lastSecretErrorAt.clear();
       lastSecretErrorAt.set(routineId, now.getTime());
-      logger.error('A webhook trigger secret cannot be opened; rotate the secret', {
+      logger.error('A webhook secret cannot be opened; rotate the secret', {
         routineId, error: error instanceof Error ? error.message : String(error),
       });
     }
     return null;
   }
   const secrets = [current];
-  if (previousValidUntil(trigger, now) && trigger.previousSecretSealed) {
+  if (previousValidUntil(webhook, now) && webhook.previousSecretSealed) {
     try {
-      const previous = decryptObject<string>(trigger.previousSecretSealed);
+      const previous = decryptObject<string>(webhook.previousSecretSealed);
       if (typeof previous === 'string' && previous.length > 0) secrets.push(previous);
     } catch {
       // The previous secret is only a grace; the current one still works.

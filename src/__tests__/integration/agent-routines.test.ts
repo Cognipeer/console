@@ -42,7 +42,7 @@ vi.mock('@/lib/services/agents/agentSpendLimits', async (importOriginal) => {
 });
 
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
-import type { IAgentRoutine } from '@/lib/database';
+import type { AgentRoutineOnce, AgentRoutineSchedule, AgentRoutineType, IAgentRoutine } from '@/lib/database';
 import { reloadConfig } from '@/lib/core/config';
 import { deleteAgentRecord } from '@/lib/services/agents/agentService';
 import {
@@ -51,6 +51,8 @@ import {
   resetRoutineEventThrottle,
   serializeAgentRoutine,
   updateAgentRoutine,
+  type NewRoutineWrite,
+  type RoutineFields,
 } from '@/lib/services/agents/agentRoutines';
 import { routineSlotKey, tickAgentRoutines } from '@/lib/services/agents/agentRoutineScheduler';
 import { encryptObject } from '@/lib/utils/crypto';
@@ -71,13 +73,17 @@ const conversations = () => db.listAgentConversations(AGENT_KEY, { projectId: PR
 const routineRuns = (routineId: string) => db.listAgentRuns({ tenantId, projectId: PROJECT_ID, routineId, excludeModes: ['sync'] });
 const reload = async (routine: IAgentRoutine) => (await db.getAgentRoutine(String(routine._id), tenantId, PROJECT_ID))!;
 
-function newRoutine(write: Partial<Parameters<typeof createAgentRoutine>[2]> = {}, now = new Date()) {
+/** A routine: manual unless `type` (with the settings object of that type) says otherwise. */
+function newRoutine(
+  write: RoutineFields & Partial<{ type: AgentRoutineType; schedule: AgentRoutineSchedule; once: AgentRoutineOnce }> = {},
+  now = new Date(),
+) {
   return createAgentRoutine(scope(), AGENT_KEY, {
     name: 'Nightly',
-    trigger: { type: 'manual' },
+    type: 'manual',
     prompt: 'Summarise.',
     ...write,
-  }, 'user-1', now);
+  } as NewRoutineWrite, 'user-1', now);
 }
 
 beforeEach(async () => {
@@ -261,7 +267,7 @@ describe('agent delete', () => {
 describe('the scheduler tick (§2.5)', () => {
   it('fires a due schedule slot once, advances nextFireAt, and keys the run by the slot', async () => {
     const created = new Date('2026-10-18T05:59:00.000Z');
-    const routine = await newRoutine({ trigger: { type: 'schedule', cron: '0 9 * * *', timezone: 'Europe/Istanbul' } }, created);
+    const routine = await newRoutine({ type: 'schedule', schedule: { cron: '0 9 * * *', timezone: 'Europe/Istanbul' } }, created);
     expect(new Date(routine.nextFireAt!).toISOString()).toBe('2026-10-18T06:00:00.000Z'); // 09:00 Istanbul (UTC+3)
 
     const result = await tickAgentRoutines(new Date('2026-10-18T06:00:10.000Z'));
@@ -276,7 +282,7 @@ describe('the scheduler tick (§2.5)', () => {
   });
 
   it('two schedulers on the same slot start ONE run', async () => {
-    const routine = await newRoutine({ trigger: { type: 'schedule', cron: '*/5 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:59:00.000Z'));
+    const routine = await newRoutine({ type: 'schedule', schedule: { cron: '*/5 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:59:00.000Z'));
     const now = new Date('2026-10-18T06:00:05.000Z');
     const [a, b] = await Promise.all([tickAgentRoutines(now), tickAgentRoutines(now)]);
     expect(a.fired + b.fired).toBe(1);
@@ -286,7 +292,7 @@ describe('the scheduler tick (§2.5)', () => {
 
   it('a once routine fires once and is finished', async () => {
     const runAt = new Date('2026-10-18T07:30:00.000Z');
-    const routine = await newRoutine({ trigger: { type: 'once', runAt } }, new Date('2026-10-18T07:00:00.000Z'));
+    const routine = await newRoutine({ type: 'once', once: { runAt } }, new Date('2026-10-18T07:00:00.000Z'));
     expect(await tickAgentRoutines(new Date('2026-10-18T07:29:00.000Z'))).toMatchObject({ fired: 0 });
     expect(await tickAgentRoutines(new Date('2026-10-18T07:30:01.000Z'))).toMatchObject({ fired: 1 });
     expect(await tickAgentRoutines(new Date('2026-10-18T07:31:00.000Z'))).toMatchObject({ fired: 0 });
@@ -300,7 +306,7 @@ describe('the scheduler tick (§2.5)', () => {
   });
 
   it('after downtime, only the latest missed slot within the grace fires; older ones are skipped', async () => {
-    const routine = await newRoutine({ trigger: { type: 'schedule', cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
+    const routine = await newRoutine({ type: 'schedule', schedule: { cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
     // Down from 05:30 to 09:20: slots 06:00, 07:00, 08:00, 09:00 missed; 09:00 is within the 1 h grace.
     expect(await tickAgentRoutines(new Date('2026-10-18T09:20:00.000Z'))).toMatchObject({ fired: 1 });
     const runs = await routineRuns(String(routine._id));
@@ -312,7 +318,7 @@ describe('the scheduler tick (§2.5)', () => {
   it('a slot older than the grace is skipped without a run', async () => {
     process.env.AGENT_ROUTINE_MISFIRE_GRACE_MS = '600000'; // 10 min
     reloadConfig();
-    const routine = await newRoutine({ trigger: { type: 'once', runAt: new Date('2026-10-18T06:00:00.000Z') } }, new Date('2026-10-18T05:00:00.000Z'));
+    const routine = await newRoutine({ type: 'once', once: { runAt: new Date('2026-10-18T06:00:00.000Z') } }, new Date('2026-10-18T05:00:00.000Z'));
     expect(await tickAgentRoutines(new Date('2026-10-18T07:00:00.000Z'))).toMatchObject({ fired: 0, skipped: 1 });
     expect(await routineRuns(String(routine._id))).toHaveLength(0);
     expect((await reload(routine)).nextFireAt ?? null).toBeNull();
@@ -320,7 +326,7 @@ describe('the scheduler tick (§2.5)', () => {
 
   it('a refused slot is skipped, not retried: the next tick waits for the next slot', async () => {
     hoisted.spendCheck.refuse = true;
-    const routine = await newRoutine({ trigger: { type: 'schedule', cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
+    const routine = await newRoutine({ type: 'schedule', schedule: { cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
     expect(await tickAgentRoutines(new Date('2026-10-18T06:00:01.000Z'))).toMatchObject({ fired: 0, skipped: 1 });
     hoisted.spendCheck.refuse = false;
     expect(await tickAgentRoutines(new Date('2026-10-18T06:00:30.000Z'))).toMatchObject({ fired: 0 });
@@ -329,8 +335,8 @@ describe('the scheduler tick (§2.5)', () => {
   });
 
   it('disabled and manual routines never fire on their own', async () => {
-    await newRoutine({ trigger: { type: 'schedule', cron: '* * * * *', timezone: 'UTC' }, enabled: false }, new Date('2026-10-18T05:30:00.000Z'));
-    await newRoutine({ trigger: { type: 'manual' } });
+    await newRoutine({ type: 'schedule', schedule: { cron: '* * * * *', timezone: 'UTC' }, enabled: false }, new Date('2026-10-18T05:30:00.000Z'));
+    await newRoutine({ type: 'manual' });
     expect(await tickAgentRoutines(new Date('2026-10-18T06:00:00.000Z'))).toMatchObject({ fired: 0, skipped: 0 });
   });
 });

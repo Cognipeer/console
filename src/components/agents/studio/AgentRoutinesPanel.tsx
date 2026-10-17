@@ -2,9 +2,9 @@
 
 /**
  * Routines of one agent: saved ways of starting it — a prompt (+ inputs) and a
- * trigger (a schedule, one time, by hand, or an incoming webhook). Each fire is
- * a background run; "Runs" opens Sessions → Background runs filtered to the
- * routine.
+ * type (a schedule, one time, by hand, or an incoming webhook) with that type's
+ * settings. Each fire is a background run; "Runs" opens Sessions → Background
+ * runs filtered to the routine.
  *
  * The editor is a full-screen FormShell; deleting asks through the shared
  * confirm dialog. A saved webhook routine's editor stays open with its Connect
@@ -55,7 +55,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import { upcomingCronFires, validateRoutineCron } from '@/lib/services/agents/routineSchedule';
 import {
     CRON_PRESETS,
-    ROUTINE_TRIGGER_TYPES,
+    ROUTINE_TYPES,
     emptyRoutineForm,
     formFromRoutine,
     routineBodyFromForm,
@@ -65,7 +65,7 @@ import {
     type RoutineForm,
     type RoutineFormProblem,
     type RoutineRow,
-    type RoutineTriggerType,
+    type RoutineType,
 } from './routineForm';
 import {
     WEBHOOK_PRESET_LABEL_KEY,
@@ -73,7 +73,7 @@ import {
     WebhookDeliveriesPanel,
     WebhookTemplateVariables,
     WebhookTestPanel,
-    WebhookTriggerFields,
+    WebhookFields,
 } from './RoutineWebhookParts';
 
 export interface AgentRoutinesPanelProps {
@@ -87,14 +87,14 @@ export interface AgentRoutinesPanelProps {
     onShowRuns: (routine: { id: string; name: string }) => void;
 }
 
-const TRIGGER_LABEL_KEY: Record<RoutineTriggerType, string> = {
+const TRIGGER_LABEL_KEY: Record<RoutineType, string> = {
     schedule: 'triggerSchedule',
     once: 'triggerOnce',
     manual: 'triggerManual',
     webhook: 'triggerWebhook',
 };
 
-const TRIGGER_ICON: Record<RoutineTriggerType, ReactNode> = {
+const TRIGGER_ICON: Record<RoutineType, ReactNode> = {
     schedule: <IconRepeat size={14} />,
     once: <IconClockPlay size={14} />,
     manual: <IconHandClick size={14} />,
@@ -103,7 +103,8 @@ const TRIGGER_ICON: Record<RoutineTriggerType, ReactNode> = {
 
 const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';
 
-type StoredTrigger = { type: string; cron?: string; timezone?: string; run_at?: string; preset?: string; events?: string[] };
+/** The `webhook` settings object of a stored routine, as far as the list summary reads it. */
+type StoredWebhookSummary = { preset?: string; events?: string[] };
 
 /** The message of an API error body (`{ error: { message } }`), else the status. */
 async function errorMessage(res: Response): Promise<string> {
@@ -149,14 +150,14 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
 
     useEffect(() => { void load(); }, [load]);
 
-    const triggerSummary = (routine: RoutineRow): string => {
-        const trigger = routine.trigger as StoredTrigger;
-        if (trigger.type === 'webhook') {
-            const preset = t(WEBHOOK_PRESET_LABEL_KEY[trigger.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
-            return trigger.events && trigger.events.length > 0 ? `${preset} · ${trigger.events.join(', ')}` : t('summaryWebhookAny', { preset });
+    const typeSummary = (routine: RoutineRow): string => {
+        if (routine.type === 'webhook') {
+            const webhook = routine.webhook as StoredWebhookSummary;
+            const preset = t(WEBHOOK_PRESET_LABEL_KEY[webhook.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
+            return webhook.events && webhook.events.length > 0 ? `${preset} · ${webhook.events.join(', ')}` : t('summaryWebhookAny', { preset });
         }
-        if (trigger.type === 'schedule') return t('summarySchedule', { cron: trigger.cron ?? '', timezone: trigger.timezone ?? '' });
-        if (trigger.type === 'once' && trigger.run_at) return t('summaryOnce', { time: formatInZone(new Date(trigger.run_at), locale) });
+        if (routine.type === 'schedule') return t('summarySchedule', { cron: routine.schedule.cron ?? '', timezone: routine.schedule.timezone ?? '' });
+        if (routine.type === 'once' && routine.once.run_at) return t('summaryOnce', { time: formatInZone(new Date(routine.once.run_at), locale) });
         return t('summaryManual');
     };
 
@@ -233,8 +234,8 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                     {routines.map((routine) => {
                         const next = fromEpoch(routine.next_fire_at);
                         const last = fromEpoch(routine.last_fire_at);
-                        const triggerType = (routine.trigger.type as RoutineTriggerType) in TRIGGER_LABEL_KEY ? routine.trigger.type as RoutineTriggerType : 'manual';
-                        const summary = triggerSummary(routine);
+                        const routineType: RoutineType = routine.type in TRIGGER_LABEL_KEY ? routine.type : 'manual';
+                        const summary = typeSummary(routine);
                         return (
                             <Group
                                 key={routine.id}
@@ -248,12 +249,12 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                                 <Stack gap={2} style={{ flex: '1 1 220px', minWidth: 0 }}>
                                     <Text size="sm" fw={500} truncate title={routine.name}>{routine.name}</Text>
                                     <Group gap={6} wrap="nowrap" c="dimmed" style={{ minWidth: 0 }}>
-                                        <Tooltip label={t(TRIGGER_LABEL_KEY[triggerType])} withArrow>
-                                            <Box component="span" role="img" aria-label={t(TRIGGER_LABEL_KEY[triggerType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
-                                                {TRIGGER_ICON[triggerType]}
+                                        <Tooltip label={t(TRIGGER_LABEL_KEY[routineType])} withArrow>
+                                            <Box component="span" role="img" aria-label={t(TRIGGER_LABEL_KEY[routineType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                                                {TRIGGER_ICON[routineType]}
                                             </Box>
                                         </Tooltip>
-                                        <Text size="xs" c="dimmed" ff={triggerType === 'schedule' ? 'monospace' : undefined} truncate title={summary}>{summary}</Text>
+                                        <Text size="xs" c="dimmed" ff={routineType === 'schedule' ? 'monospace' : undefined} truncate title={summary}>{summary}</Text>
                                     </Group>
                                     {routine.description ? <Text size="xs" c="dimmed" lineClamp={1}>{routine.description}</Text> : null}
                                 </Stack>
@@ -361,7 +362,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
     const [tab, setTab] = useState<EditorTab>('settings');
     /** The webhook secret from the last save / rotation: shown once, never read back. */
     const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
-    const storedWebhook = routine?.trigger.type === 'webhook' ? routine.trigger as Parameters<typeof WebhookConnectCard>[0]['trigger'] : null;
+    const storedWebhook = routine?.type === 'webhook' ? routine.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
     const zones = useMemo(() => timezoneOptions(), []);
     const set = <K extends keyof RoutineForm>(key: K, value: RoutineForm[K]) => {
         setForm((prev) => ({ ...prev, [key]: value }));
@@ -391,10 +392,12 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 notifications.show({ color: 'red', message: t('saveFailed', { message: await errorMessage(res) }) });
                 return;
             }
-            const saved = await res.json() as RoutineRow & { webhook?: { url: string; secret?: string } };
-            const keepOpen = saved.trigger.type === 'webhook';
-            if (keepOpen) {
-                if (saved.webhook?.secret) setRevealedSecret(saved.webhook.secret);
+            const saved = await res.json() as RoutineRow;
+            const keepOpen = saved.type === 'webhook';
+            if (saved.type === 'webhook') {
+                // The answer that created or replaced a generated secret carries it in `webhook.secret` — shown once.
+                const secret = (saved.webhook as { secret?: string }).secret;
+                if (secret) setRevealedSecret(secret);
                 setForm((prev) => ({ ...prev, webhookSecret: '' }));
             }
             onSaved(saved, keepOpen);
@@ -405,7 +408,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
         }
     };
 
-    const triggerSummary = form.triggerType === 'schedule'
+    const typeSummary = form.triggerType === 'schedule'
         ? `${form.cron} (${form.timezone})`
         : form.triggerType === 'once'
             ? (form.onceMode === 'in' ? `+${form.delayAmount} ${t(form.delayUnit)}` : form.runAtLocal.replace('T', ' '))
@@ -430,8 +433,8 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
             <FormSection number={2} title={t('sectionTrigger')} description={t('sectionTriggerDescription')}>
                 <SegmentedControl
                     value={form.triggerType}
-                    onChange={(value) => set('triggerType', value as RoutineTriggerType)}
-                    data={ROUTINE_TRIGGER_TYPES.map((type) => ({ value: type, label: t(TRIGGER_LABEL_KEY[type]) }))}
+                    onChange={(value) => set('triggerType', value as RoutineType)}
+                    data={ROUTINE_TYPES.map((type) => ({ value: type, label: t(TRIGGER_LABEL_KEY[type]) }))}
                 />
                 {form.triggerType === 'schedule' ? (
                     <Stack gap="sm">
@@ -505,7 +508,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 ) : null}
                 {form.triggerType === 'manual' ? <Text size="sm" c="dimmed">{t('manualHint')}</Text> : null}
                 {webhook ? (
-                    <WebhookTriggerFields
+                    <WebhookFields
                         form={form}
                         set={set}
                         storedStandardSecret={(storedWebhook as { auth?: string } | null)?.auth === 'standard_webhooks'}
@@ -614,7 +617,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
             secondaryAction={{ label: t('cancel'), onClick: onClose }}
             summary={(
                 <SummaryGroup title={t('summaryTitle')}>
-                    <SummaryKV label={t('summaryTrigger')} value={triggerSummary} mono={form.triggerType === 'schedule'} />
+                    <SummaryKV label={t('summaryTrigger')} value={typeSummary} mono={form.triggerType === 'schedule'} />
                     {preview && preview[0] ? <SummaryKV label={t('summaryNext')} value={formatInZone(preview[0], locale)} /> : null}
                     <SummaryKV label={t('summaryVersion')} value={form.version === null ? t('versionPublished') : t('versionN', { n: form.version })} />
                     <SummaryKV label={t('summaryClass')} value={t(form.runClass === 'deferred' ? 'classDeferred' : 'classDefault')} />
@@ -633,7 +636,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                             <WebhookConnectCard
                                 agentId={agentId}
                                 routineId={routine.id}
-                                trigger={storedWebhook}
+                                webhook={storedWebhook}
                                 revealedSecret={revealedSecret}
                                 onSecret={setRevealedSecret}
                             />

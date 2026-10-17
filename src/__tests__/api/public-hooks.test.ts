@@ -34,12 +34,12 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
-import type { AgentRoutineWebhookTrigger, IAgentRoutine } from '@/lib/database';
+import type { AgentRoutineWebhook, IAgentRoutine } from '@/lib/database';
 import { reloadConfig } from '@/lib/core/config';
-import { createAgentRoutine, resetRoutineEventThrottle, updateAgentRoutine } from '@/lib/services/agents/agentRoutines';
+import { createAgentRoutine, resetRoutineEventThrottle, updateAgentRoutine, type RoutineFields } from '@/lib/services/agents/agentRoutines';
 import { composeUserMessageWithInputs } from '@/lib/services/agents/agentInputs';
 import { resetDeliveryRecording } from '@/lib/services/agents/routineWebhookDelivery';
-import { parseWebhookTriggerWrite, rotateWebhookSecret } from '@/lib/services/agents/routineWebhookTrigger';
+import { parseWebhookWrite, rotateWebhookSecret } from '@/lib/services/agents/routineWebhookTrigger';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 import { publicHooksApiPlugin, resetPublicHookCaches } from '@/server/api/plugins/public-hooks';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -60,16 +60,23 @@ const runsOf = (routineId: string) => db.listAgentRuns({ tenantId, projectId: PR
 const deliveriesOf = (routineId: string) => db.listAgentRoutineDeliveries({ tenantId, projectId: PROJECT_ID, routineId, limit: 100 });
 const hmacHex = (secret: string, content: string) => createHmac('sha256', secret).update(content).digest('hex');
 
-async function webhookRoutine(trigger: Record<string, unknown>, write: Partial<Parameters<typeof createAgentRoutine>[2]> = {}) {
-  const parsed = parseWebhookTriggerWrite({ type: 'webhook', ...trigger }, null);
+/** A webhook routine from the `webhook` settings a request would carry. */
+async function webhookRoutine(settings: Record<string, unknown>, write: RoutineFields = {}) {
+  const parsed = parseWebhookWrite(settings, null);
   if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors));
   const routine = await createAgentRoutine(scope(), AGENT_KEY, {
-    name: 'PR review', trigger: parsed.trigger, prompt: 'Review PR {{payload.number}} ({{payload.action}}).', ...write,
+    name: 'PR review', type: 'webhook', webhook: parsed.webhook, prompt: 'Review PR {{payload.number}} ({{payload.action}}).', ...write,
   }, 'user-1');
-  return { routine, secret: parsed.secret ?? STANDARD, trigger: parsed.trigger };
+  return { routine, secret: parsed.secret ?? STANDARD, webhook: parsed.webhook };
 }
 
-const hookUrl = (routine: IAgentRoutine) => `/api/public/hooks/${tenantId}/${(routine.trigger as AgentRoutineWebhookTrigger).hookId}`;
+/** The `webhook` settings of a routine the test made as a webhook one. */
+function webhookOf(routine: IAgentRoutine): AgentRoutineWebhook {
+  if (routine.type !== 'webhook') throw new Error('not a webhook routine');
+  return routine.webhook;
+}
+
+const hookUrl = (routine: IAgentRoutine) => `/api/public/hooks/${tenantId}/${webhookOf(routine).hookId}`;
 
 function post(url: string, body: string, headers: Record<string, string> = {}) {
   return app.inject({ method: 'POST', url, headers: { 'content-type': 'application/json', ...headers }, payload: body });
@@ -159,9 +166,9 @@ describe('POST /api/public/hooks/:tenantId/:hookId — lookup', () => {
     expect((await github(routine, secret, PR)).statusCode).toBe(202);
   });
 
-  it('answers 404 once the routine is switched to another trigger or deleted', async () => {
+  it('answers 404 once the routine is switched to another type or deleted', async () => {
     const { routine, secret } = await webhookRoutine({ preset: 'github' });
-    await updateAgentRoutine(scope(), routine, { trigger: { type: 'manual' } }, 'user-1');
+    await updateAgentRoutine(scope(), routine, { type: 'manual' }, 'user-1');
     expect((await github(routine, secret, PR)).statusCode).toBe(404);
   });
 });
@@ -429,19 +436,19 @@ describe('generic', () => {
 describe('secret rotation', () => {
   it('keeps the previous secret during the grace, and refuses it after', async () => {
     const { routine, secret } = await webhookRoutine({ preset: 'generic' }, { inputs: { pr: '{{payload.n}}' } });
-    const rotated = rotateWebhookSecret(routine.trigger as AgentRoutineWebhookTrigger, { graceSeconds: 3600 });
+    const rotated = rotateWebhookSecret(webhookOf(routine), { graceSeconds: 3600 });
     if (!rotated.ok) throw new Error('rotate');
-    const updated = (await updateAgentRoutine(scope(), routine, { trigger: rotated.trigger }, 'user-1'))!;
+    const updated = (await updateAgentRoutine(scope(), routine, { type: 'webhook', webhook: rotated.webhook }, 'user-1'))!;
     expect((await post(hookUrl(updated), JSON.stringify({ n: 1 }), { authorization: `Bearer ${secret}` })).statusCode).toBe(202);
     expect((await post(hookUrl(updated), JSON.stringify({ n: 2 }), { authorization: `Bearer ${rotated.secret}` })).statusCode).toBe(202);
 
-    const expired = { ...rotated.trigger, previousSecretExpiresAt: new Date(Date.now() - 1000) };
-    await updateAgentRoutine(scope(), updated, { trigger: expired }, 'user-1');
+    const expired = { ...rotated.webhook, previousSecretExpiresAt: new Date(Date.now() - 1000) };
+    await updateAgentRoutine(scope(), updated, { type: 'webhook', webhook: expired }, 'user-1');
     expect((await post(hookUrl(updated), JSON.stringify({ n: 3 }), { authorization: `Bearer ${secret}` })).statusCode).toBe(401);
 
-    const instant = rotateWebhookSecret(rotated.trigger, { graceSeconds: 0 });
+    const instant = rotateWebhookSecret(rotated.webhook, { graceSeconds: 0 });
     if (!instant.ok) throw new Error('rotate');
-    await updateAgentRoutine(scope(), updated, { trigger: instant.trigger }, 'user-1');
+    await updateAgentRoutine(scope(), updated, { type: 'webhook', webhook: instant.webhook }, 'user-1');
     expect((await post(hookUrl(updated), JSON.stringify({ n: 4 }), { authorization: `Bearer ${rotated.secret}` })).statusCode).toBe(401);
     expect((await post(hookUrl(updated), JSON.stringify({ n: 5 }), { authorization: `Bearer ${instant.secret}` })).statusCode).toBe(202);
   });

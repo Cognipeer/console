@@ -17,7 +17,7 @@ describe('index manifest: agent runtime collections', () => {
     // The APIs read routines by agent; the scheduler tick reads the due ones tenant-wide.
     ['agent_routines', [{ tenantId: 1, projectId: 1, agentKey: 1 }, { enabled: 1, nextFireAt: 1 }]],
     // An incoming webhook finds its routine by hook id; the delivery log is read per routine and swept by expiresAt.
-    ['agent_routines', [{ 'trigger.hookId': 1 }]],
+    ['agent_routines', [{ 'webhook.hookId': 1 }]],
     ['agent_routine_deliveries', [{ tenantId: 1, routineId: 1, receivedAt: -1 }, { expiresAt: 1 }]],
   ])('%s has the indexes its queries need', (collection, wanted) => {
     for (const key of wanted) expect(keysOf(collection)).toContain(JSON.stringify(key));

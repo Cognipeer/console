@@ -750,8 +750,9 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_scheduler_claims_expires ON scheduler_claims(expires_at);
 
-  -- Agent routines (a saved prompt + trigger per agent). The trigger is JSON
-  -- (triggerSpec: TRIGGER is an SQL keyword); nextFireAt drives the scheduler.
+  -- Agent routines (a saved prompt + type per agent). The type is schedule, once,
+  -- manual or webhook; the settings of that type are JSON in the column named
+  -- after it (the others stay NULL). nextFireAt drives the scheduler.
   CREATE TABLE IF NOT EXISTS agent_routines (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
@@ -760,7 +761,10 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
-    triggerSpec TEXT NOT NULL,
+    type TEXT NOT NULL,
+    schedule TEXT,
+    once TEXT,
+    webhook TEXT,
     prompt TEXT NOT NULL,
     inputs TEXT,
     version INTEGER,
@@ -782,7 +786,7 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_agent_routines_scope ON agent_routines(tenantId, projectId, agentKey);
   CREATE INDEX IF NOT EXISTS idx_agent_routines_due ON agent_routines(enabled, nextFireAt);
 
-  -- A webhook trigger's delivery log: outcome and normalized ids only, never the payload.
+  -- A webhook routine's delivery log: outcome and normalized ids only, never the payload.
   CREATE TABLE IF NOT EXISTS agent_routine_deliveries (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,

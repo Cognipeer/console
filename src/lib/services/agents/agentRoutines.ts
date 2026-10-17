@@ -1,18 +1,26 @@
 /**
  * Agent routines — a saved way of starting an agent: a prompt (+ inputs) and a
- * trigger (a cron schedule in a timezone, one time, or by hand). Every fire is
- * an ordinary AgentRun (`channel: 'routine'`, `routineId`), started through
- * `startAgentRun` like any API run, so a routine's history is the runs list
- * filtered by routine and its runs get the queue, caps, callbacks and webhooks
- * every other run gets.
+ * `type` with that type's settings object (a cron `schedule` in a timezone,
+ * `once`, `manual`, or an incoming `webhook`). Every fire is an ordinary
+ * AgentRun (`channel: 'routine'`, `routineId`), started through `startAgentRun`
+ * like any API run, so a routine's history is the runs list filtered by
+ * routine and its runs get the queue, caps, callbacks and webhooks every other
+ * run gets.
  *
  * `fireRoutine` is the one way a routine starts a run — the scheduler tick
- * (`agentRoutineScheduler.ts`), Run now, and every other trigger type.
+ * (`agentRoutineScheduler.ts`), Run now, and every other type.
  */
 
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
-import type { AgentResponseFormat, AgentRoutineTrigger, IAgentConfig, IAgentRoutine, IAgentRun } from '@/lib/database';
+import type {
+  AgentResponseFormat,
+  AgentRoutineTypeSettings,
+  IAgentConfig,
+  IAgentRoutine,
+  IAgentRoutineBase,
+  IAgentRun,
+} from '@/lib/database';
 import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { agentDefaultCallback, openAgentCallbackSecret } from './agentCallbackConfig';
 import { AgentQuotaExceededError, AgentSpendLimitError } from './agentErrors';
@@ -21,7 +29,7 @@ import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentR
 import { createConversation, resolveAgentConfig } from './agentService';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { initialNextFireAt } from './routineSchedule';
-import { serializeWebhookTrigger } from './routineWebhookTrigger';
+import { serializeWebhook } from './routineWebhookTrigger';
 
 const logger = createLogger('agent-routine');
 
@@ -296,8 +304,29 @@ export function resolveRoutineInputs(
 
 // ── Store ────────────────────────────────────────────────────────────────
 
-export type RoutineWrite = Partial<Pick<IAgentRoutine,
-  'name' | 'description' | 'enabled' | 'trigger' | 'prompt' | 'inputs' | 'version' | 'runClass' | 'metadata' | 'callback' | 'responseFormat'>>;
+/** The fields of a write that do not depend on the routine's type. */
+export type RoutineFields = Partial<Pick<IAgentRoutineBase,
+  'name' | 'description' | 'enabled' | 'prompt' | 'inputs' | 'version' | 'runClass' | 'metadata' | 'callback' | 'responseFormat'>>;
+
+/**
+ * What a create or an update saves. A `type` always comes with its settings
+ * object (the other types' objects are dropped), so changing the type replaces
+ * them as a whole.
+ */
+export type RoutineWrite = RoutineFields & (AgentRoutineTypeSettings | { type?: undefined });
+
+/** A write that makes a new routine: it has a name, a prompt and a type with its settings. */
+export type NewRoutineWrite = RoutineWrite & Pick<IAgentRoutineBase, 'name' | 'prompt'> & AgentRoutineTypeSettings;
+
+/** `type` and its settings object, without any other field of a write or a routine. */
+function typeSettingsOf(source: AgentRoutineTypeSettings): AgentRoutineTypeSettings {
+  switch (source.type) {
+    case 'schedule': return { type: 'schedule', schedule: source.schedule };
+    case 'once': return { type: 'once', once: source.once };
+    case 'webhook': return { type: 'webhook', webhook: source.webhook };
+    default: return { type: 'manual' };
+  }
+}
 
 export interface RoutineScope {
   tenantDbName: string;
@@ -320,11 +349,12 @@ export async function getAgentRoutine(scope: RoutineScope, agentKey: string, rou
 export function createAgentRoutine(
   scope: RoutineScope,
   agentKey: string,
-  write: RoutineWrite & Pick<IAgentRoutine, 'name' | 'trigger' | 'prompt'>,
+  write: NewRoutineWrite,
   userId: string,
   now = new Date(),
 ): Promise<IAgentRoutine> {
   const enabled = write.enabled ?? true;
+  const typeSettings = typeSettingsOf(write);
   return runWithTenantScope(scope.tenantDbName, (db) => db.createAgentRoutine({
     tenantId: scope.tenantId,
     projectId: scope.projectId,
@@ -332,7 +362,7 @@ export function createAgentRoutine(
     name: write.name,
     description: write.description ?? null,
     enabled,
-    trigger: write.trigger,
+    ...typeSettings,
     prompt: write.prompt,
     inputs: write.inputs ?? null,
     version: write.version ?? null,
@@ -340,12 +370,12 @@ export function createAgentRoutine(
     metadata: write.metadata ?? null,
     callback: write.callback ?? null,
     responseFormat: write.responseFormat ?? null,
-    nextFireAt: initialNextFireAt({ enabled, trigger: write.trigger }, now),
+    nextFireAt: initialNextFireAt({ enabled, ...typeSettings }, now),
     createdBy: userId,
   }));
 }
 
-/** Saves a change; a new trigger or an enable / disable recomputes `nextFireAt` from now. */
+/** Saves a change; a new type (with its settings) or an enable / disable recomputes `nextFireAt` from now. */
 export function updateAgentRoutine(
   scope: RoutineScope,
   existing: IAgentRoutine,
@@ -353,11 +383,11 @@ export function updateAgentRoutine(
   userId: string,
   now = new Date(),
 ): Promise<IAgentRoutine | null> {
-  const timing = write.trigger !== undefined || write.enabled !== undefined
+  const timing = write.type !== undefined || write.enabled !== undefined
     ? {
       nextFireAt: initialNextFireAt({
         enabled: write.enabled ?? existing.enabled,
-        trigger: write.trigger ?? existing.trigger,
+        ...typeSettingsOf(write.type !== undefined ? write : existing),
         lastFireAt: existing.lastFireAt,
       }, now),
     }
@@ -380,12 +410,13 @@ export function deleteAgentRoutine(scope: RoutineScope, routine: IAgentRoutine):
 
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
 
-function serializeTrigger(trigger: AgentRoutineTrigger, tenantId: string): Record<string, unknown> {
-  switch (trigger.type) {
-    case 'schedule': return { type: 'schedule', cron: trigger.cron, timezone: trigger.timezone };
-    case 'once': return { type: 'once', run_at: new Date(trigger.runAt).toISOString() };
-    case 'webhook': return serializeWebhookTrigger(trigger, tenantId);
-    default: return { type: trigger.type };
+/** `type` and the one settings object of that type (manual has none), as the API spells them. */
+function serializeTypeSettings(routine: IAgentRoutine) {
+  switch (routine.type) {
+    case 'schedule': return { type: 'schedule' as const, schedule: { cron: routine.schedule.cron, timezone: routine.schedule.timezone } };
+    case 'once': return { type: 'once' as const, once: { run_at: new Date(routine.once.runAt).toISOString() } };
+    case 'webhook': return { type: 'webhook' as const, webhook: serializeWebhook(routine.webhook, routine.tenantId) };
+    default: return { type: 'manual' as const };
   }
 }
 
@@ -403,7 +434,7 @@ export function serializeResponseFormat(format: AgentResponseFormat | null | und
   };
 }
 
-/** A routine as the client API and the dashboard return it — never a sealed callback or webhook secret. */
+/** A routine as the client API and the dashboard return it — never a sealed callback or webhook secret. Only the settings object of its own type is present. */
 export function serializeAgentRoutine(routine: IAgentRoutine) {
   return {
     id: String(routine._id),
@@ -412,7 +443,7 @@ export function serializeAgentRoutine(routine: IAgentRoutine) {
     name: routine.name,
     description: routine.description ?? null,
     enabled: routine.enabled,
-    trigger: serializeTrigger(routine.trigger, routine.tenantId),
+    ...serializeTypeSettings(routine),
     prompt: routine.prompt,
     inputs: routine.inputs ?? null,
     version: routine.version ?? null,

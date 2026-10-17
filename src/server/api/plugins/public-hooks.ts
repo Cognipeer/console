@@ -23,12 +23,12 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
-import type { IAgentRoutine, ITenant } from '@/lib/database';
+import type { AgentRoutineOfType, IAgentRoutine, ITenant } from '@/lib/database';
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { isHeaderAuth, verifyHeaderAuth } from '@/lib/services/agents/routineWebhookAuth';
 import { processWebhookDelivery, recordDelivery, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/routineWebhookDelivery';
-import { isWebhookTrigger, openWebhookSecrets } from '@/lib/services/agents/routineWebhookTrigger';
+import { openWebhookSecrets } from '@/lib/services/agents/routineWebhookTrigger';
 import { countRequest } from '@/lib/services/auth/sharedRateCounter';
 
 const logger = createLogger('api:public-hooks');
@@ -39,7 +39,7 @@ const PUBLIC_HOOK_AUTHZ = authz.self(
 
 interface HookDelivery {
   tenant: ITenant;
-  routine: IAgentRoutine;
+  routine: AgentRoutineOfType<'webhook'>;
   secrets: string[];
 }
 
@@ -164,11 +164,11 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
     logger.warn('Webhook routine lookup failed', { error: error instanceof Error ? error.message : String(error) });
     return unavailable(reply);
   }
-  if (!routine || !isWebhookTrigger(routine.trigger) || routine.trigger.hookId !== hookId || routine.tenantId !== String(tenant._id)) {
+  if (!routine || routine.type !== 'webhook' || routine.webhook.hookId !== hookId || routine.tenantId !== String(tenant._id)) {
     return miss();
   }
 
-  const trigger = routine.trigger;
+  const webhook = routine.webhook;
   const tenantDbName = tenant.dbName;
   const found = routine;
   const receivedAt = new Date();
@@ -177,11 +177,11 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
   const record = (outcome: 'unauthorized' | 'rejected', httpStatus: number, reason: string) =>
     runWithTenantScope(tenantDbName, (db) => recordDelivery(db, found, { outcome, httpStatus, reason, bytes: contentLength(request), receivedAt }))
       .catch(() => undefined);
-  const secrets = openWebhookSecrets(String(routine._id), trigger, receivedAt);
+  const secrets = openWebhookSecrets(String(routine._id), webhook, receivedAt);
 
-  if (isHeaderAuth(trigger.auth)) {
+  if (isHeaderAuth(webhook.auth)) {
     const check = secrets
-      ? verifyHeaderAuth(trigger.auth, request.headers, trigger.headerName, secrets)
+      ? verifyHeaderAuth(webhook.auth, request.headers, webhook.headerName, secrets)
       : { ok: false as const, reason: 'secret unavailable; rotate the secret' };
     if (!check.ok) {
       // Only failed attempts count here: an authenticated request is never refused by the ceiling.

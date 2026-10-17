@@ -2996,7 +2996,7 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
-/** The sender an incoming webhook trigger is set up for (its event / delivery id headers and auth choices). */
+/** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
 export type AgentRoutineWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
 
 /**
@@ -3028,10 +3028,12 @@ export interface AgentRoutineWebhookFilterRule {
   value?: string | number | boolean | Array<string | number | boolean>;
 }
 
-/** An incoming webhook: each authenticated, matching delivery to its URL fires the routine. */
-export interface AgentRoutineWebhookTrigger {
-  type: 'webhook';
-  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook; never reused. */
+/**
+ * The settings of a `webhook` routine: each authenticated, matching delivery to
+ * its URL fires the routine. Stored in the routine's `webhook` object.
+ */
+export interface AgentRoutineWebhook {
+  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the routine stays a webhook one; never reused. */
   hookId: string;
   preset: AgentRoutineWebhookPreset;
   auth: AgentRoutineWebhookAuth;
@@ -3054,15 +3056,31 @@ export interface AgentRoutineWebhookTrigger {
   includePayload: boolean;
 }
 
+/** The settings of a `schedule` routine: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
+export interface AgentRoutineSchedule {
+  cron: string;
+  timezone: string;
+}
+
+/** The settings of a `once` routine: one run at a fixed time. */
+export interface AgentRoutineOnce {
+  runAt: Date;
+}
+
 /** What starts a routine's runs. */
-export type AgentRoutineTrigger =
-  /** A 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
-  | { type: 'schedule'; cron: string; timezone: string }
-  /** One run at a fixed time. */
-  | { type: 'once'; runAt: Date }
+export type AgentRoutineType = 'schedule' | 'once' | 'manual' | 'webhook';
+
+/**
+ * A routine's type and the ONE settings object named after it (`manual` has
+ * none): a union on `type`, the same shape the API shows and both stores keep.
+ * The other types' objects are absent.
+ */
+export type AgentRoutineTypeSettings =
+  | { type: 'schedule'; schedule: AgentRoutineSchedule }
+  | { type: 'once'; once: AgentRoutineOnce }
   /** Only started on request (Run now, `POST …/routines/{id}/run`). */
   | { type: 'manual' }
-  | AgentRoutineWebhookTrigger;
+  | { type: 'webhook'; webhook: AgentRoutineWebhook };
 
 export type AgentRoutineDeliveryOutcome =
   'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
@@ -3089,12 +3107,8 @@ export interface IAgentRoutineDelivery {
   bytes: number;
 }
 
-/**
- * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
- * trigger. Every fire is an ordinary AgentRun (`channel: 'routine'`,
- * `routineId`), so its history is the runs list filtered by routine.
- */
-export interface IAgentRoutine {
+/** The fields every routine has, whatever starts it (see `IAgentRoutine`). */
+export interface IAgentRoutineBase {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
@@ -3102,7 +3116,6 @@ export interface IAgentRoutine {
   name: string;
   description?: string | null;
   enabled: boolean;
-  trigger: AgentRoutineTrigger;
   /** The message each fire sends (≤ 32k chars). */
   prompt: string;
   inputs?: Record<string, unknown> | null;
@@ -3114,7 +3127,7 @@ export interface IAgentRoutine {
   /** Where each run's result is POSTed; the secret is sealed and never serialized. */
   callback?: { url: string; secretSealed?: string | null } | null;
   responseFormat?: AgentResponseFormat | null;
-  /** The next due slot; null for manual triggers, a finished once, or a disabled routine. */
+  /** The next due slot; null for manual and webhook routines, a finished once, or a disabled routine. */
   nextFireAt?: Date | null;
   lastFireAt?: Date | null;
   lastRunId?: string | null;
@@ -3125,6 +3138,25 @@ export interface IAgentRoutine {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/**
+ * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
+ * `type` (`schedule`, `once`, `manual`, `webhook`) with that type's settings
+ * object. Every fire is an ordinary AgentRun (`channel: 'routine'`,
+ * `routineId`), so its history is the runs list filtered by routine.
+ */
+export type IAgentRoutine = IAgentRoutineBase & AgentRoutineTypeSettings;
+
+/** The routine of one type (`AgentRoutineOfType<'webhook'>` has `webhook`). */
+export type AgentRoutineOfType<T extends AgentRoutineType> = Extract<IAgentRoutine, { type: T }>;
+
+/** A routine as `createAgentRoutine` takes it. */
+export type NewAgentRoutine = Omit<IAgentRoutineBase, '_id' | 'createdAt' | 'updatedAt'> & AgentRoutineTypeSettings;
+
+/** What `updateAgentRoutine` changes: a new `type` always comes with its settings object (the others are dropped). */
+export type AgentRoutinePatch =
+  & Partial<Omit<IAgentRoutineBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
+  & (AgentRoutineTypeSettings | { type?: undefined });
 
 export interface IAgent {
   _id?: ObjectId | string;

@@ -1,5 +1,5 @@
 /**
- * How a routine's webhook trigger checks and reads one delivery, per sender
+ * How a routine's webhook checks and reads one delivery, per sender
  * preset: the auth check (header modes before the body is read, signature
  * modes over the raw body), the event name and delivery id (normalized before
  * anything shows or stores them), the headers a filter or template may read

@@ -10,7 +10,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - The OpenAI Assistants-compatible adapter is removed (`/client/v1/assistants`, `/client/v1/threads`, and the Studio
   card for it). Use the agent runs and sessions API, the Responses API or chat completions instead.
 - Agent **schedules** are replaced by [routines](docs/guide/agent-routines.md). Existing schedules are not converted:
-  create a routine with a `schedule` trigger. The `schedule.fired` and `schedule.failed` webhook events become
+  create a routine of type `schedule`. The `schedule.fired` and `schedule.failed` webhook events become
   `routine.fired` and `routine.failed`.
 - The per-agent **Execution** settings are gone (background on/off, default mode, sync timeout, background timeout and
   the callback fields that lived there). How long a call waits is `AGENT_SYNC_TIMEOUT_MS` and how long a run may take is
@@ -119,16 +119,16 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   Public conversations created before this change can no longer be reached from the public route. The inputs of a
   public caller's `data` part are external content and never reach the system prompt.
 
-### Routines and webhook triggers
+### Routines and incoming webhooks
 
-- **Routines** (Studio: Deploy → Routines; `/agents/{key}/routines` on both APIs) start an agent from a trigger: a cron
-  `schedule` in an IANA timezone, `once`, `manual` or `webhook`. A fire is a queued, unattended run in a new session
+- **Routines** (Studio: Deploy → Routines; `/agents/{key}/routines` on both APIs) start an agent by their `type` and that
+  type's settings object: a cron `schedule` in an IANA timezone, `once`, `manual` or `webhook`. A fire is a queued, unattended run in a new session
   owned by `system:routine:<id>`, with the idempotency key `routine:<id>:<slot>`; **Run now** and a run history per
   routine. The scheduler runs on every node and the database picks one winner per slot
   (`AGENT_ROUTINE_TICK_MS`, `AGENT_ROUTINE_MISFIRE_GRACE_MS`). `routine.fired` and `routine.failed` are webhook events.
   The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the routine's last
   updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
-- **Webhook triggers**: a routine with a `webhook` trigger starts when something posts to
+- **Incoming webhooks**: a routine of type `webhook` starts when something posts to
   `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the routine's secret). Presets for
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
   event-derived inputs, de-duplication, a per-routine run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation

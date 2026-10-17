@@ -1,22 +1,33 @@
 /**
  * MongoDB Provider – Agent routines mixin
  *
- * A routine is a saved way of starting an agent (prompt + trigger). The
- * scheduler reads due routines tenant-wide (`(enabled, nextFireAt)`), the APIs
- * by agent (`(tenantId, projectId, agentKey)`), an incoming webhook by its hook
- * id (`trigger.hookId`). A webhook trigger's delivery log is
- * `agent_routine_deliveries`. Indexes are plain (Cosmos DB's Mongo API rejects
- * partial ones) and ensured on the write path, memoized per tenant DB, like
- * `ensureAgentRunsIndexes`.
+ * A routine is a saved way of starting an agent (prompt + type). The document
+ * keeps `type` and the one settings object named after it (`schedule`, `once`
+ * or `webhook`; manual has none). The scheduler reads due routines tenant-wide
+ * (`(enabled, nextFireAt)`), the APIs by agent (`(tenantId, projectId,
+ * agentKey)`), an incoming webhook by its hook id (`webhook.hookId`). A webhook
+ * routine's delivery log is `agent_routine_deliveries`. Indexes are plain
+ * (Cosmos DB's Mongo API rejects partial ones) and ensured on the write path,
+ * memoized per tenant DB, like `ensureAgentRunsIndexes`.
  */
 
 import { ObjectId, type Filter } from 'mongodb';
-import type { IAgentRoutine, IAgentRoutineDelivery } from '../provider.interface';
+import type {
+  AgentRoutinePatch,
+  AgentRoutineTypeSettings,
+  IAgentRoutine,
+  IAgentRoutineBase,
+  IAgentRoutineDelivery,
+  NewAgentRoutine,
+} from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
-type RoutineDoc = Omit<IAgentRoutine, '_id'> & { _id: ObjectId };
+type RoutineDoc = Omit<IAgentRoutineBase, '_id'> & AgentRoutineTypeSettings & { _id: ObjectId };
 type DeliveryDoc = Omit<IAgentRoutineDelivery, '_id'> & { _id: ObjectId };
+
+/** The settings objects a routine can carry, one per type (manual has none). */
+const TYPE_SETTINGS_KEYS = ['schedule', 'once', 'webhook'] as const;
 
 function toRoutine(doc: RoutineDoc): IAgentRoutine {
   return { ...doc, _id: doc._id.toString() };
@@ -40,7 +51,7 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
       for (const [keys, name] of [
         [{ tenantId: 1, projectId: 1, agentKey: 1 }, 'idx_tenant_project_agent'],
         [{ enabled: 1, nextFireAt: 1 }, 'idx_enabled_nextFireAt'],
-        [{ 'trigger.hookId': 1 }, 'idx_trigger_hookId'],
+        [{ 'webhook.hookId': 1 }, 'idx_webhook_hookId'],
       ] as Array<[Record<string, 1>, string]>) {
         try {
           await col.createIndex(keys, { name });
@@ -82,7 +93,7 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
       return this.getTenantDb().collection<RoutineDoc>(COLLECTIONS.agentRoutines);
     }
 
-    async createAgentRoutine(record: Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentRoutine> {
+    async createAgentRoutine(record: NewAgentRoutine): Promise<IAgentRoutine> {
       await this.ensureAgentRoutinesIndexes();
       const now = new Date();
       const doc: RoutineDoc = { ...record, _id: new ObjectId(), createdAt: now, updatedAt: now };
@@ -104,12 +115,7 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
       return docs.map(toRoutine);
     }
 
-    async updateAgentRoutine(
-      id: string,
-      tenantId: string,
-      projectId: string,
-      patch: Partial<Omit<IAgentRoutine, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>,
-    ): Promise<IAgentRoutine | null> {
+    async updateAgentRoutine(id: string, tenantId: string, projectId: string, patch: AgentRoutinePatch): Promise<IAgentRoutine | null> {
       const _id = objectIdOrNull(id);
       if (!_id) return null;
       await this.ensureAgentRoutinesIndexes();
@@ -117,9 +123,18 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
       for (const [key, value] of Object.entries(patch)) {
         if (value !== undefined) set[key] = value;
       }
+      // A new type replaces the settings as a whole: the objects of the other types go.
+      const unset: Record<string, ''> = {};
+      if (patch.type !== undefined) {
+        for (const key of TYPE_SETTINGS_KEYS) {
+          if (key === patch.type) continue;
+          delete set[key];
+          unset[key] = '';
+        }
+      }
       const doc = await this.agentRoutines().findOneAndUpdate(
         { _id, tenantId, projectId },
-        { $set: set },
+        { $set: set, ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}) },
         { returnDocument: 'after' },
       );
       return doc ? toRoutine(doc) : null;
@@ -179,7 +194,7 @@ export function AgentRoutineMixin<TBase extends Constructor<MongoDBProviderBase>
     }
 
     async findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null> {
-      const doc = await this.agentRoutines().findOne({ 'trigger.hookId': hookId } as Filter<RoutineDoc>);
+      const doc = await this.agentRoutines().findOne({ 'webhook.hookId': hookId } as Filter<RoutineDoc>);
       return doc ? toRoutine(doc) : null;
     }
 

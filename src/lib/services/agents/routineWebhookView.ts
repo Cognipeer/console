@@ -1,5 +1,5 @@
 /**
- * What a routine's webhook trigger reads from a delivery: one bounded view of
+ * What a routine's webhook reads from a delivery: one bounded view of
  * it (filters, the `events` check and the prompt template all see the same
  * copy), the filter rules over that view, the Mustache prompt template and the
  * mapping of declared inputs.

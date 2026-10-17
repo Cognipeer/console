@@ -1,17 +1,26 @@
 /**
  * Agent routines parity — the routine store behaves identically on SQLite and
- * MongoDB: CRUD scoped by tenant + project, the trigger round-trips (a once
- * time comes back a Date), the scheduler's due list, the CAS that moves
- * `nextFireAt` on, the newest-fire-wins record of the last fire, and the
- * agent-delete cascade. Plus the two run flags routines set
+ * MongoDB: CRUD scoped by tenant + project, the type and its settings object
+ * round-trip (a once time comes back a Date; a routine holds only the object
+ * of its own type, also after the type changed), the scheduler's due list, the
+ * CAS that moves `nextFireAt` on, the newest-fire-wins record of the last fire,
+ * and the agent-delete cascade. Plus the two run flags routines set
  * (`unattended`, `externalContent`), which a resume requeue keeps; the
- * webhook trigger (found by hook id, its dates round-trip) and its delivery
+ * webhook type (found by hook id, its dates round-trip) and its delivery
  * log (newest first with a cursor, batched retention, removal per routine);
  * the runs list's trigger filter.
  */
 
 import { beforeEach, expect, it } from 'vitest';
-import type { AgentRoutineWebhookTrigger, IAgentRoutine, IAgentRoutineDelivery } from '@/lib/database/provider.interface';
+import type {
+  AgentRoutineOnce,
+  AgentRoutineSchedule,
+  AgentRoutineType,
+  AgentRoutineWebhook,
+  IAgentRoutineBase,
+  IAgentRoutineDelivery,
+  NewAgentRoutine,
+} from '@/lib/database/provider.interface';
 import { describeForEachProvider } from './db-parity.helper';
 
 describeForEachProvider('Agent routines', (getDb) => {
@@ -28,18 +37,25 @@ describeForEachProvider('Agent routines', (getDb) => {
     await db.switchToTenant(dbName);
   });
 
-  const record = (overrides: Partial<Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>> = {}): Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'> => ({
+  /**
+   * A new routine: a nightly schedule unless the overrides bring their own `type`
+   * with the settings object of that type (a routine has only that one).
+   */
+  const record = (
+    overrides: Partial<Omit<IAgentRoutineBase, '_id' | 'createdAt' | 'updatedAt'>>
+      & Partial<{ type: AgentRoutineType; schedule: AgentRoutineSchedule; once: AgentRoutineOnce; webhook: AgentRoutineWebhook }> = {},
+  ): NewAgentRoutine => ({
     tenantId,
     projectId,
     agentKey: 'report-bot',
     name: 'Nightly',
     enabled: true,
-    trigger: { type: 'schedule', cron: '0 2 * * *', timezone: 'Europe/Istanbul' },
+    ...(overrides.type ? {} : { type: 'schedule', schedule: { cron: '0 2 * * *', timezone: 'Europe/Istanbul' } }),
     prompt: 'Summarise.',
     runClass: 'default',
     createdBy: 'user-1',
     ...overrides,
-  });
+  } as NewAgentRoutine);
 
   it('creates, reads, lists (oldest first), updates and deletes within the project', async () => {
     const db = getDb();
@@ -52,7 +68,7 @@ describeForEachProvider('Agent routines', (getDb) => {
       version: 3,
       nextFireAt: new Date('2026-10-18T23:00:00.000Z'),
     }));
-    const second = await db.createAgentRoutine(record({ name: 'Once', trigger: { type: 'once', runAt }, runClass: 'deferred' }));
+    const second = await db.createAgentRoutine(record({ name: 'Once', type: 'once', once: { runAt }, runClass: 'deferred' }));
     await db.createAgentRoutine(record({ name: 'Other agent', agentKey: 'other' }));
     await db.createAgentRoutine(record({ name: 'Other project', projectId: 'proj-2' }));
 
@@ -60,7 +76,8 @@ describeForEachProvider('Agent routines', (getDb) => {
     expect(got).toMatchObject({
       name: 'Nightly',
       enabled: true,
-      trigger: { type: 'schedule', cron: '0 2 * * *', timezone: 'Europe/Istanbul' },
+      type: 'schedule',
+      schedule: { cron: '0 2 * * *', timezone: 'Europe/Istanbul' },
       metadata: { team: 'ops' },
       inputs: { region: 'eu' },
       callback: { url: 'https://example.com/hook', secretSealed: 'sealed' },
@@ -71,9 +88,13 @@ describeForEachProvider('Agent routines', (getDb) => {
     });
     expect(new Date(got!.nextFireAt!).toISOString()).toBe('2026-10-18T23:00:00.000Z');
     const once = await db.getAgentRoutine(String(second._id), tenantId, projectId);
-    expect(once?.trigger).toEqual({ type: 'once', runAt });
-    expect(once?.trigger.type === 'once' && once.trigger.runAt instanceof Date).toBe(true);
+    expect(once).toMatchObject({ type: 'once', once: { runAt } });
+    expect(once?.type === 'once' && once.once.runAt instanceof Date).toBe(true);
     expect(once?.runClass).toBe('deferred');
+    // A routine holds only the settings object of its own type.
+    expect(once).not.toHaveProperty('schedule');
+    expect(once).not.toHaveProperty('webhook');
+    expect(got).not.toHaveProperty('once');
 
     expect(await db.getAgentRoutine(String(first._id), tenantId, 'proj-2')).toBeNull();
     expect(await db.getAgentRoutine('not-an-id', tenantId, projectId)).toBeNull();
@@ -81,9 +102,12 @@ describeForEachProvider('Agent routines', (getDb) => {
     expect(await db.listAgentRoutines({ tenantId, projectId })).toHaveLength(3);
 
     const updated = await db.updateAgentRoutine(String(first._id), tenantId, projectId, {
-      name: 'Renamed', enabled: false, trigger: { type: 'manual' }, nextFireAt: null, metadata: null, updatedBy: 'user-2',
+      name: 'Renamed', enabled: false, type: 'manual', nextFireAt: null, metadata: null, updatedBy: 'user-2',
     });
-    expect(updated).toMatchObject({ name: 'Renamed', enabled: false, trigger: { type: 'manual' }, metadata: null, updatedBy: 'user-2' });
+    expect(updated).toMatchObject({ name: 'Renamed', enabled: false, type: 'manual', metadata: null, updatedBy: 'user-2' });
+    // Changing the type drops the settings object of the type it left.
+    expect(updated).not.toHaveProperty('schedule');
+    expect(await db.getAgentRoutine(String(first._id), tenantId, projectId)).not.toHaveProperty('schedule');
     expect(updated?.nextFireAt ?? null).toBeNull();
     expect(await db.updateAgentRoutine(String(first._id), tenantId, 'proj-2', { name: 'x' })).toBeNull();
 
@@ -99,7 +123,7 @@ describeForEachProvider('Agent routines', (getDb) => {
     await db.createAgentRoutine(record({ name: 'early', nextFireAt: new Date('2026-10-18T09:00:00.000Z') }));
     await db.createAgentRoutine(record({ name: 'future', nextFireAt: new Date('2026-10-18T10:01:00.000Z') }));
     await db.createAgentRoutine(record({ name: 'disabled', enabled: false, nextFireAt: new Date('2026-10-18T09:00:00.000Z') }));
-    await db.createAgentRoutine(record({ name: 'manual', trigger: { type: 'manual' }, nextFireAt: null }));
+    await db.createAgentRoutine(record({ name: 'manual', type: 'manual', nextFireAt: null }));
     expect((await db.listDueRoutines(now, 10)).map((r) => r.name)).toEqual(['early', 'late']);
     expect(await db.listDueRoutines(now, 1)).toHaveLength(1);
   });
@@ -165,8 +189,7 @@ describeForEachProvider('Agent routines', (getDb) => {
     expect(requeued).toMatchObject({ status: 'queued', unattended: true, externalContent: true });
   });
 
-  const webhookTrigger = (overrides: Partial<AgentRoutineWebhookTrigger> = {}): AgentRoutineWebhookTrigger => ({
-    type: 'webhook',
+  const webhookSettings = (overrides: Partial<AgentRoutineWebhook> = {}): AgentRoutineWebhook => ({
     hookId: 'wh_abcdefghijklmnopqrstuvwx',
     preset: 'github',
     auth: 'github_signature',
@@ -182,22 +205,36 @@ describeForEachProvider('Agent routines', (getDb) => {
     ...overrides,
   });
 
-  it('finds a webhook routine by its hook id; its trigger dates round-trip; switching away drops the id', async () => {
+  it('finds a webhook routine by its hook id; its webhook dates round-trip; switching away drops the id', async () => {
     const db = getDb();
-    const routine = await db.createAgentRoutine(record({ trigger: webhookTrigger(), nextFireAt: null }));
-    await db.createAgentRoutine(record({ name: 'other', trigger: webhookTrigger({ hookId: 'wh_zzzzzzzzzzzzzzzzzzzzzzzz' }) }));
+    const routine = await db.createAgentRoutine(record({ type: 'webhook', webhook: webhookSettings(), nextFireAt: null }));
+    await db.createAgentRoutine(record({ name: 'other', type: 'webhook', webhook: webhookSettings({ hookId: 'wh_zzzzzzzzzzzzzzzzzzzzzzzz' }) }));
     const found = await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx');
     expect(String(found?._id)).toBe(String(routine._id));
-    expect(found?.trigger).toEqual(webhookTrigger());
-    expect(found?.trigger.type === 'webhook' && found.trigger.previousSecretExpiresAt instanceof Date).toBe(true);
+    expect(found?.type).toBe('webhook');
+    expect(found?.type === 'webhook' && found.webhook).toEqual(webhookSettings());
+    expect(found?.type === 'webhook' && found.webhook.previousSecretExpiresAt instanceof Date).toBe(true);
+    expect(found).not.toHaveProperty('schedule');
     expect(await db.findAgentRoutineByHookId('wh_unknownunknownunknown')).toBeNull();
 
-    await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { trigger: webhookTrigger({ previousSecretSealed: null, previousSecretExpiresAt: null }) });
+    await db.updateAgentRoutine(String(routine._id), tenantId, projectId, {
+      type: 'webhook', webhook: webhookSettings({ previousSecretSealed: null, previousSecretExpiresAt: null }),
+    });
     const rotated = await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx');
-    expect(rotated?.trigger).toMatchObject({ previousSecretSealed: null, previousSecretExpiresAt: null });
+    expect(rotated?.type === 'webhook' && rotated.webhook).toMatchObject({ previousSecretSealed: null, previousSecretExpiresAt: null });
 
-    await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { trigger: { type: 'manual' } });
+    const away = await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { type: 'manual' });
+    expect(away).toMatchObject({ type: 'manual' });
+    expect(away).not.toHaveProperty('webhook');
     expect(await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx')).toBeNull();
+
+    // And back again: a new type replaces the settings as a whole, here with a schedule in between.
+    const timed = await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { type: 'schedule', schedule: { cron: '*/5 * * * *', timezone: 'UTC' } });
+    expect(timed).toMatchObject({ type: 'schedule', schedule: { cron: '*/5 * * * *', timezone: 'UTC' } });
+    const rehooked = await db.updateAgentRoutine(String(routine._id), tenantId, projectId, { type: 'webhook', webhook: webhookSettings() });
+    expect(rehooked).toMatchObject({ type: 'webhook', webhook: { hookId: 'wh_abcdefghijklmnopqrstuvwx' } });
+    expect(rehooked).not.toHaveProperty('schedule');
+    expect(String((await db.findAgentRoutineByHookId('wh_abcdefghijklmnopqrstuvwx'))?._id)).toBe(String(routine._id));
   });
 
   const delivery = (overrides: Partial<Omit<IAgentRoutineDelivery, '_id'>> = {}): Omit<IAgentRoutineDelivery, '_id'> => ({

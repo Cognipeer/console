@@ -60,7 +60,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
 });
 
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
-import type { IAgentRoutine } from '@/lib/database';
+import type { NewAgentRoutine } from '@/lib/database';
 import { agentRoutinesApiPlugin } from '@/server/api/plugins/agent-routines';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -125,24 +125,27 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-const SCHEDULE = { type: 'schedule', cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' };
+/** A routine's type and the one settings object named after it. */
+const SCHEDULE = { type: 'schedule', schedule: { cron: '0 9 * * 1-5', timezone: 'Europe/Istanbul' } };
 
 describe('client API: /client/v1/agents/:agentKey/routines', () => {
   it('POST creates a routine (201) in the §5.7 shape; GET lists and reads it', async () => {
     const created = await client('POST', '', {
-      name: 'Morning digest', description: 'Weekdays', trigger: SCHEDULE, prompt: 'Summarise.', inputs: { region: 'eu' },
+      name: 'Morning digest', description: 'Weekdays', ...SCHEDULE, prompt: 'Summarise.', inputs: { region: 'eu' },
       class: 'deferred', metadata: { team: 'ops' }, callback: { url: 'https://example.com/hook', secret: 'a-signing-secret-1234' },
       response_format: { type: 'json_schema', json_schema: { name: 'digest', schema: { type: 'object', properties: { text: { type: 'string' } } } } },
     });
     expect(created.statusCode).toBe(201);
     const body = json(created);
     expect(body).toMatchObject({
-      object: 'agent.routine', agent: AGENT_KEY, name: 'Morning digest', description: 'Weekdays', enabled: true, trigger: SCHEDULE,
+      object: 'agent.routine', agent: AGENT_KEY, name: 'Morning digest', description: 'Weekdays', enabled: true, ...SCHEDULE,
       prompt: 'Summarise.', inputs: { region: 'eu' }, version: null, class: 'deferred', metadata: { team: 'ops' },
       callback: { url: 'https://example.com/hook', signed: true }, response_format: { type: 'json_schema', json_schema: { name: 'digest' } },
       last_fire_at: null, last_run_id: null, last_status: null, last_error: null,
     });
     expect(typeof body.next_fire_at).toBe('number');
+    // Only the settings object of the routine's own type is there.
+    expect(['once', 'webhook'].some((key) => key in body)).toBe(false);
     expect(JSON.stringify(body)).not.toContain('a-signing-secret-1234');
     expect(JSON.stringify(body)).not.toContain('secretSealed');
     const stored = (await db.listAgentRoutines({ tenantId, projectId: PROJECT_ID }))[0];
@@ -158,33 +161,46 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
     expect(json(one).id).toBe(body.id);
   });
 
-  it('a once trigger takes run_at or delay_seconds; manual has no next fire', async () => {
+  it('a once routine takes run_at or delay_seconds; manual has no settings object and no next fire', async () => {
     const at = new Date(Date.now() + 3_600_000);
-    const once = json(await client('POST', '', { name: 'Once', trigger: { type: 'once', run_at: at.toISOString() }, prompt: 'x' }));
-    expect(once.trigger).toEqual({ type: 'once', run_at: at.toISOString() });
+    const once = json(await client('POST', '', { name: 'Once', type: 'once', once: { run_at: at.toISOString() }, prompt: 'x' }));
+    expect(once).toMatchObject({ type: 'once', once: { run_at: at.toISOString() } });
+    expect(['schedule', 'webhook'].some((key) => key in once)).toBe(false);
     expect(once.next_fire_at).toBe(Math.floor(at.getTime() / 1000));
-    const delayed = json(await client('POST', '', { name: 'Later', trigger: { type: 'once', delay_seconds: 600 }, prompt: 'x' }));
+    const delayed = json(await client('POST', '', { name: 'Later', type: 'once', once: { delay_seconds: 600 }, prompt: 'x' }));
     expect(Math.abs(Number(delayed.next_fire_at) - (Date.now() / 1000 + 600))).toBeLessThan(5);
-    const manual = json(await client('POST', '', { name: 'By hand', trigger: { type: 'manual' }, prompt: 'x' }));
-    expect(manual).toMatchObject({ trigger: { type: 'manual' }, next_fire_at: null });
+    const manual = json(await client('POST', '', { name: 'By hand', type: 'manual', prompt: 'x' }));
+    expect(manual).toMatchObject({ type: 'manual', next_fire_at: null });
+    expect(['schedule', 'once', 'webhook'].some((key) => key in manual)).toBe(false);
+  });
+
+  it('a routine created without a type is manual', async () => {
+    const created = json(await client('POST', '', { name: 'Untyped', prompt: 'x' }));
+    expect(created).toMatchObject({ type: 'manual', next_fire_at: null });
+    expect(json(await client('POST', '', { name: 'Nulled', type: null, prompt: 'x' }))).toMatchObject({ type: 'manual' });
   });
 
   it.each([
-    [{ trigger: SCHEDULE, prompt: 'x' }, 'name'],
-    [{ name: 'a', trigger: { type: 'schedule', cron: '0 0 9 * * *' }, prompt: 'x' }, 'trigger.cron'],
-    [{ name: 'a', trigger: { type: 'schedule', cron: '0 9 * * *', timezone: 'Mars/Olympus' }, prompt: 'x' }, 'trigger.timezone'],
-    [{ name: 'a', trigger: { type: 'once', run_at: '2020-01-01T00:00:00Z' }, prompt: 'x' }, 'trigger.run_at'],
-    [{ name: 'a', trigger: { type: 'once' }, prompt: 'x' }, 'trigger.run_at'],
-    [{ name: 'a', trigger: { type: 'webhook', preset: 'bitbucket' }, prompt: 'x' }, 'trigger.preset'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: '' }, 'prompt'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x'.repeat(32_001) }, 'prompt'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', inputs: { region: 'mars' } }, 'inputs.region'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', inputs: { nope: 1 } }, 'inputs.nope'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', version: 9 }, 'version'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', class: 'urgent' }, 'class'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', metadata: { 'bad key': 'v' } }, 'metadata'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', callback: { url: 'https://10.0.0.1/hook' } }, 'callback'],
-    [{ name: 'a', trigger: SCHEDULE, prompt: 'x', response_format: { type: 'xml' } }, 'response_format'],
+    [{ ...SCHEDULE, prompt: 'x' }, 'name'],
+    [{ name: 'a', type: 'schedule', schedule: { cron: '0 0 9 * * *' }, prompt: 'x' }, 'schedule.cron'],
+    [{ name: 'a', type: 'schedule', prompt: 'x' }, 'schedule.cron'],
+    [{ name: 'a', type: 'schedule', schedule: { cron: '0 9 * * *', timezone: 'Mars/Olympus' }, prompt: 'x' }, 'schedule.timezone'],
+    [{ name: 'a', type: 'once', once: { run_at: '2020-01-01T00:00:00Z' }, prompt: 'x' }, 'once.run_at'],
+    [{ name: 'a', type: 'once', prompt: 'x' }, 'once.run_at'],
+    [{ name: 'a', type: 'webhook', webhook: { preset: 'bitbucket' }, prompt: 'x' }, 'webhook.preset'],
+    [{ name: 'a', type: 'bitbucket', prompt: 'x' }, 'type'],
+    [{ name: 'a', type: 'schedule', schedule: 'daily', prompt: 'x' }, 'schedule'],
+    [{ name: 'a', type: 'manual', schedule: { cron: '0 9 * * *' }, prompt: 'x' }, 'schedule'],
+    [{ name: 'a', ...SCHEDULE, once: { delay_seconds: 60 }, prompt: 'x' }, 'once'],
+    [{ name: 'a', ...SCHEDULE, prompt: '' }, 'prompt'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x'.repeat(32_001) }, 'prompt'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', inputs: { region: 'mars' } }, 'inputs.region'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', inputs: { nope: 1 } }, 'inputs.nope'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', version: 9 }, 'version'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', class: 'urgent' }, 'class'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', metadata: { 'bad key': 'v' } }, 'metadata'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', callback: { url: 'https://10.0.0.1/hook' } }, 'callback'],
+    [{ name: 'a', ...SCHEDULE, prompt: 'x', response_format: { type: 'xml' } }, 'response_format'],
   ])('refuses %j (400 invalid_routine on %s)', async (payload, field) => {
     const res = await client('POST', '', payload);
     expect(res.statusCode).toBe(400);
@@ -195,13 +211,13 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
   });
 
   it('an empty prompt is fine when the routine gives the inputs the agent declares', async () => {
-    const res = await client('POST', '', { name: 'Inputs only', trigger: SCHEDULE, inputs: { region: 'us', days: 7 } });
+    const res = await client('POST', '', { name: 'Inputs only', ...SCHEDULE, inputs: { region: 'us', days: 7 } });
     expect(res.statusCode).toBe(201);
     expect(json(res)).toMatchObject({ prompt: '', inputs: { region: 'us', days: 7 } });
   });
 
   it('a pinned version that exists is kept', async () => {
-    const res = await client('POST', '', { name: 'Pinned', trigger: SCHEDULE, prompt: 'x', version: 1 });
+    const res = await client('POST', '', { name: 'Pinned', ...SCHEDULE, prompt: 'x', version: 1 });
     expect(res.statusCode).toBe(201);
     expect(json(res).version).toBe(1);
   });
@@ -213,9 +229,9 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
     expect(json<{ error: { code: string } }>(res).error.code).toBe('agent_not_found');
   });
 
-  it('PATCH changes fields, recomputes nextFireAt on a new trigger or enable, and keeps the stored secret', async () => {
+  it('PATCH changes fields, recomputes nextFireAt on a new type or enable, and keeps the stored secret', async () => {
     const created = json(await client('POST', '', {
-      name: 'Digest', trigger: SCHEDULE, prompt: 'x', callback: { url: 'https://example.com/hook', secret: 'a-signing-secret-1234' },
+      name: 'Digest', ...SCHEDULE, prompt: 'x', callback: { url: 'https://example.com/hook', secret: 'a-signing-secret-1234' },
     }));
     const id = String(created.id);
     const sealed = (await db.getAgentRoutine(id, tenantId, PROJECT_ID))!.callback!.secretSealed;
@@ -228,32 +244,52 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
 
     const disabled = json(await client('PATCH', `/${id}`, { enabled: false }));
     expect(disabled).toMatchObject({ enabled: false, next_fire_at: null });
-    const manual = json(await client('PATCH', `/${id}`, { enabled: true, trigger: { type: 'manual' } }));
-    expect(manual).toMatchObject({ enabled: true, trigger: { type: 'manual' }, next_fire_at: null });
+    const manual = json(await client('PATCH', `/${id}`, { enabled: true, type: 'manual' }));
+    expect(manual).toMatchObject({ enabled: true, type: 'manual', next_fire_at: null });
+    // The settings object of the type it left is gone.
+    expect(manual).not.toHaveProperty('schedule');
+    const again = json(await client('PATCH', `/${id}`, { type: 'schedule', schedule: { cron: '30 8 * * *', timezone: 'UTC' } }));
+    expect(again).toMatchObject({ type: 'schedule', schedule: { cron: '30 8 * * *', timezone: 'UTC' } });
+    expect(typeof again.next_fire_at).toBe('number');
 
     const unsigned = json(await client('PATCH', `/${id}`, { callback: { url: 'https://example.com/other', secret: '' } }));
     expect(unsigned.callback).toEqual({ url: 'https://example.com/other', signed: false });
     expect(json(await client('PATCH', `/${id}`, { callback: null })).callback).toBeNull();
 
-    const bad = await client('PATCH', `/${id}`, { trigger: { type: 'schedule', cron: 'nope' } });
+    const bad = await client('PATCH', `/${id}`, { type: 'schedule', schedule: { cron: 'nope' } });
     expect(bad.statusCode).toBe(400);
+    expect(json<{ error: { errors: Array<{ field: string }> } }>(bad).error.errors.map((issue) => issue.field)).toContain('schedule.cron');
+    // Settings travel with their type: a settings object alone is refused, not guessed at.
+    const untyped = await client('PATCH', `/${id}`, { schedule: { cron: '0 7 * * *' } });
+    expect(untyped.statusCode).toBe(400);
+    expect(json<{ error: { errors: Array<{ field: string }> } }>(untyped).error.errors.map((issue) => issue.field)).toContain('type');
     expect((await client('PATCH', '/000000000000000000000000', { name: 'x' })).statusCode).toBe(404);
   });
 
-  it('PATCH with the stored once trigger sent back (a whole-form save) keeps its time even after it passed', async () => {
+  it('PATCH with the stored schedule sent back (a whole-form save) keeps nextFireAt; a new cron recomputes it', async () => {
+    const created = json(await client('POST', '', { name: 'Digest', ...SCHEDULE, prompt: 'x' }));
+    const id = String(created.id);
+    const same = json(await client('PATCH', `/${id}`, { name: 'Renamed', ...SCHEDULE }));
+    expect(same).toMatchObject({ name: 'Renamed', ...SCHEDULE, next_fire_at: created.next_fire_at });
+    const changed = json(await client('PATCH', `/${id}`, { type: 'schedule', schedule: { cron: '*/5 * * * *', timezone: 'UTC' } }));
+    expect(changed).toMatchObject({ type: 'schedule', schedule: { cron: '*/5 * * * *', timezone: 'UTC' } });
+    expect(Number(changed.next_fire_at)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 300);
+  });
+
+  it('PATCH with the stored once time sent back (a whole-form save) keeps its time even after it passed', async () => {
     const routine = await db.createAgentRoutine({
       tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, name: 'Fired', enabled: true, runClass: 'default', createdBy: 'user-1', prompt: 'x',
-      trigger: { type: 'once', runAt: new Date('2026-01-01T00:00:00Z') }, nextFireAt: null, lastFireAt: new Date('2026-01-01T00:00:00Z'),
-    } as Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>);
-    const res = await client('PATCH', `/${String(routine._id)}`, { name: 'Fired (renamed)', trigger: { type: 'once', run_at: '2026-01-01T00:00:00.000Z' } });
+      type: 'once', once: { runAt: new Date('2026-01-01T00:00:00Z') }, nextFireAt: null, lastFireAt: new Date('2026-01-01T00:00:00Z'),
+    } as NewAgentRoutine);
+    const res = await client('PATCH', `/${String(routine._id)}`, { name: 'Fired (renamed)', type: 'once', once: { run_at: '2026-01-01T00:00:00.000Z' } });
     expect(res.statusCode).toBe(200);
     expect(json(res)).toMatchObject({ name: 'Fired (renamed)', next_fire_at: null });
   });
 
   it('DELETE removes it; a routine of another agent is a 404', async () => {
-    const id = String(json(await client('POST', '', { name: 'Gone', trigger: SCHEDULE, prompt: 'x' })).id);
+    const id = String(json(await client('POST', '', { name: 'Gone', ...SCHEDULE, prompt: 'x' })).id);
     const other = await db.createAgentRoutine({
-      tenantId, projectId: PROJECT_ID, agentKey: 'other-agent', name: 'Other', enabled: true, runClass: 'default', createdBy: 'u', prompt: 'x', trigger: { type: 'manual' },
+      tenantId, projectId: PROJECT_ID, agentKey: 'other-agent', name: 'Other', enabled: true, runClass: 'default', createdBy: 'u', prompt: 'x', type: 'manual',
     });
     expect((await client('GET', `/${String(other._id)}`)).statusCode).toBe(404);
     expect((await client('DELETE', `/${String(other._id)}`)).statusCode).toBe(404);
@@ -266,7 +302,7 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
   describe('POST …/:routineId/run (Run now)', () => {
     let id: string;
     beforeEach(async () => {
-      id = String(json(await client('POST', '', { name: 'Digest', trigger: SCHEDULE, prompt: 'Summarise.', inputs: { region: 'eu' } })).id);
+      id = String(json(await client('POST', '', { name: 'Digest', ...SCHEDULE, prompt: 'Summarise.', inputs: { region: 'eu' } })).id);
     });
 
     it('fires the routine (trigger manual) with the merged inputs and metadata, and answers 202 with the run', async () => {
@@ -337,7 +373,7 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
 
 describe('dashboard: /agents/:agentId/routines', () => {
   it('GET, POST, PATCH, DELETE and POST …/run work the same way, as the signed-in user', async () => {
-    const created = await dashboard('POST', '', { name: 'Studio routine', trigger: SCHEDULE, prompt: 'x' });
+    const created = await dashboard('POST', '', { name: 'Studio routine', ...SCHEDULE, prompt: 'x' });
     expect(created.statusCode).toBe(201);
     const id = String(json(created).id);
     expect((await db.getAgentRoutine(id, tenantId, PROJECT_ID))!.createdBy).toBe('user-2');
@@ -363,31 +399,37 @@ describe('dashboard: /agents/:agentId/routines', () => {
   });
 });
 
-describe('webhook trigger (SPEC-webhooks W6)', () => {
+describe('webhook routine (SPEC-webhooks W6)', () => {
+  /** The `webhook` settings object of a request. */
   const WEBHOOK = {
-    type: 'webhook', preset: 'github', events: ['pull_request'],
+    preset: 'github', events: ['pull_request'],
     filter: [{ path: 'payload.action', op: 'in', value: ['opened', 'synchronize'] }],
   };
   const STANDARD = `whsec_${Buffer.alloc(32, 3).toString('base64')}`;
-  const create = async (trigger: Record<string, unknown> = WEBHOOK, extra: Record<string, unknown> = {}) => {
-    const res = await client('POST', '', { name: 'PR review', trigger, prompt: 'Review PR {{payload.number}}.', inputs: { days: '{{payload.number}}' }, ...extra });
+  type WebhookAnswer = { id: string; type: string; webhook: Record<string, unknown> & { url: string; secret?: string } };
+  const create = async (webhook: Record<string, unknown> = WEBHOOK, extra: Record<string, unknown> = {}) => {
+    const res = await client('POST', '', { name: 'PR review', type: 'webhook', webhook, prompt: 'Review PR {{payload.number}}.', inputs: { days: '{{payload.number}}' }, ...extra });
     expect(res.statusCode, res.body).toBe(201);
-    return json<{ id: string; trigger: Record<string, unknown>; webhook?: { url: string; secret: string } }>(res);
+    return json<WebhookAnswer>(res);
   };
 
-  it('create answers with the URL and the generated secret once; reads show only its hint', async () => {
+  it('create answers with the URL and the generated secret once (webhook.secret); reads show only its hint', async () => {
     const created = await create();
-    expect(created.webhook?.secret).toMatch(/^whsec_/);
-    expect(created.webhook?.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
-    expect(created.trigger).toEqual({
-      type: 'webhook', url: created.webhook?.url, preset: 'github', auth: 'github_signature', header_name: null,
-      secret_hint: created.webhook?.secret.slice(-4), secret_source: 'generated', previous_secret_valid_until: null,
+    const secret = created.webhook.secret!;
+    expect(created.type).toBe('webhook');
+    expect(secret).toMatch(/^whsec_/);
+    expect(created.webhook.url).toMatch(new RegExp(`/api/public/hooks/${tenantId}/wh_[A-Za-z0-9_-]{24}$`));
+    expect(created.webhook).toEqual({
+      url: created.webhook.url, preset: 'github', auth: 'github_signature', header_name: null,
+      secret, secret_hint: secret.slice(-4), secret_source: 'generated', previous_secret_valid_until: null,
       events: ['pull_request'], filter: WEBHOOK.filter, include_payload: true,
     });
+    expect(['schedule', 'once'].some((key) => key in created)).toBe(false);
     const read = await client('GET', `/${created.id}`);
-    expect(read.body).not.toContain(created.webhook!.secret);
+    expect(read.body).not.toContain(secret);
     expect(read.body).not.toMatch(/secretSealed|secret_sealed/);
-    expect(json(read)).not.toHaveProperty('webhook');
+    expect(json<WebhookAnswer>(read).webhook).toMatchObject({ url: created.webhook.url, secret_hint: secret.slice(-4) });
+    expect(json<WebhookAnswer>(read).webhook).not.toHaveProperty('secret');
     expect(json<{ next_fire_at: unknown }>(read).next_fire_at).toBeNull();
   });
 
@@ -396,61 +438,78 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
       [{ prompt: 'Hi {{{payload.title}}}' }, 'prompt'],
       [{ prompt: '{{> partial}}' }, 'prompt'],
       [{ prompt: '{{payload.labels.*.name}}' }, 'prompt'],
-      [{ trigger: { ...WEBHOOK, filter: [{ path: 'payload.constructor', op: 'exists' }] } }, 'trigger.filter[0].path'],
-      [{ trigger: { ...WEBHOOK, preset: 'gitlab', auth: 'standard_webhooks' } }, 'trigger.secret'],
-      [{ trigger: { ...WEBHOOK, auth: 'bearer' } }, 'trigger.auth'],
+      [{ webhook: { ...WEBHOOK, filter: [{ path: 'payload.constructor', op: 'exists' }] } }, 'webhook.filter[0].path'],
+      [{ webhook: { ...WEBHOOK, preset: 'gitlab', auth: 'standard_webhooks' } }, 'webhook.secret'],
+      [{ webhook: { ...WEBHOOK, auth: 'bearer' } }, 'webhook.auth'],
       [{ inputs: { days: '{{secret.x}}' } }, 'inputs.days'],
     ] as Array<[Record<string, unknown>, string]>) {
-      const res = await client('POST', '', { name: 'Bad', trigger: WEBHOOK, prompt: 'ok', inputs: { days: '{{payload.number}}' }, ...body });
+      const res = await client('POST', '', { name: 'Bad', type: 'webhook', webhook: WEBHOOK, prompt: 'ok', inputs: { days: '{{payload.number}}' }, ...body });
       expect(res.statusCode, JSON.stringify(body)).toBe(400);
       expect(json<{ error: { code: string; errors: Array<{ field: string }> } }>(res).error).toMatchObject({ code: 'invalid_routine', errors: [expect.objectContaining({ field })] });
     }
   });
 
   it('PATCH keeps the hook id and secret; to Standard Webhooks needs the sender’s secret; away from it generates one', async () => {
-    const created = await create({ type: 'webhook', preset: 'gitlab' });
-    const url = created.webhook!.url;
-    const kept = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', preset: 'gitlab', events: ['merge_request'] } });
-    expect(json<{ trigger: { url: string; events: string[] } }>(kept).trigger).toMatchObject({ url, events: ['merge_request'] });
-    expect(json(kept)).not.toHaveProperty('webhook');
+    const created = await create({ preset: 'gitlab' });
+    const url = created.webhook.url;
+    const kept = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { preset: 'gitlab', events: ['merge_request'] } });
+    expect(json<WebhookAnswer>(kept).webhook).toMatchObject({ url, events: ['merge_request'] });
+    expect(json<WebhookAnswer>(kept).webhook).not.toHaveProperty('secret');
 
-    const missing = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'standard_webhooks' } });
+    const missing = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { auth: 'standard_webhooks' } });
     expect(missing.statusCode).toBe(400);
-    const signing = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'standard_webhooks', secret: STANDARD } });
+    const signing = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { auth: 'standard_webhooks', secret: STANDARD } });
     expect(signing.statusCode).toBe(200);
-    expect(json<{ trigger: Record<string, unknown> }>(signing).trigger).toMatchObject({ url, auth: 'standard_webhooks', secret_source: 'provided' });
+    expect(json<WebhookAnswer>(signing).webhook).toMatchObject({ url, auth: 'standard_webhooks', secret_source: 'provided' });
     expect(signing.body).not.toContain(STANDARD);
-    expect(json(signing)).not.toHaveProperty('webhook');
+    expect(json<WebhookAnswer>(signing).webhook).not.toHaveProperty('secret');
 
-    const back = await client('PATCH', `/${created.id}`, { trigger: { type: 'webhook', auth: 'gitlab_token' } });
-    expect(json<{ webhook: { url: string; secret: string } }>(back).webhook).toMatchObject({ url, secret: expect.stringMatching(/^whsec_/) });
+    const back = await client('PATCH', `/${created.id}`, { type: 'webhook', webhook: { auth: 'gitlab_token' } });
+    expect(json<WebhookAnswer>(back).webhook).toMatchObject({ url, secret: expect.stringMatching(/^whsec_/) });
   });
 
-  it('switching to another trigger drops the hook id', async () => {
+  it('the type alone, or no type at all, leaves the webhook as it is; settings without their type are refused', async () => {
     const created = await create();
-    const switched = await client('PATCH', `/${created.id}`, { trigger: { type: 'manual' }, prompt: 'Plain prompt.', inputs: null });
+    const renamed = await client('PATCH', `/${created.id}`, { name: 'Renamed' });
+    expect(json<WebhookAnswer>(renamed).webhook).toMatchObject({ url: created.webhook.url, events: ['pull_request'] });
+    const same = await client('PATCH', `/${created.id}`, { type: 'webhook', name: 'Renamed again' });
+    expect(same.statusCode, same.body).toBe(200);
+    expect(json<WebhookAnswer>(same).webhook).toMatchObject({ url: created.webhook.url, events: ['pull_request'] });
+    expect(json<WebhookAnswer>(same).webhook).not.toHaveProperty('secret');
+    const untyped = await client('PATCH', `/${created.id}`, { webhook: { events: ['push'] } });
+    expect(untyped.statusCode).toBe(400);
+    expect(json<{ error: { errors: Array<{ field: string }> } }>(untyped).error.errors.map((issue) => issue.field)).toContain('type');
+    const foreign = await client('PATCH', `/${created.id}`, { type: 'webhook', schedule: { cron: '0 9 * * *' } });
+    expect(foreign.statusCode).toBe(400);
+    expect(json<{ error: { errors: Array<{ field: string }> } }>(foreign).error.errors.map((issue) => issue.field)).toContain('schedule');
+  });
+
+  it('switching to another type drops the hook id and the webhook object', async () => {
+    const created = await create();
+    const switched = await client('PATCH', `/${created.id}`, { type: 'manual', prompt: 'Plain prompt.', inputs: null });
     expect(switched.statusCode, switched.body).toBe(200);
-    expect(json<{ trigger: unknown }>(switched).trigger).toEqual({ type: 'manual' });
-    const hookId = created.webhook!.url.split('/').pop()!;
+    expect(json(switched)).toMatchObject({ type: 'manual' });
+    expect(json(switched)).not.toHaveProperty('webhook');
+    const hookId = created.webhook.url.split('/').pop()!;
     expect(await db.findAgentRoutineByHookId(hookId)).toBeNull();
   });
 
   it('rotate-secret answers the new secret and the end of the grace', async () => {
-    const created = await create({ type: 'webhook', preset: 'generic' });
+    const created = await create({ preset: 'generic' });
     const before = Math.floor(Date.now() / 1000);
     const res = await client('POST', `/${created.id}/webhook/rotate-secret`, { grace_seconds: 3600 });
     expect(res.statusCode).toBe(200);
     const body = json<{ object: string; secret: string; secret_hint: string; previous_valid_until: number }>(res);
     expect(body).toMatchObject({ object: 'agent.routine.webhook_secret', secret: expect.stringMatching(/^whsec_/) });
-    expect(body.secret).not.toBe(created.webhook!.secret);
+    expect(body.secret).not.toBe(created.webhook.secret);
     expect(body.secret_hint).toBe(body.secret.slice(-4));
     expect(body.previous_valid_until).toBeGreaterThanOrEqual(before + 3600);
-    expect(json<{ trigger: { previous_secret_valid_until: number } }>(await client('GET', `/${created.id}`)).trigger.previous_secret_valid_until).toBe(body.previous_valid_until);
+    expect(json<{ webhook: { previous_secret_valid_until: number } }>(await client('GET', `/${created.id}`)).webhook.previous_secret_valid_until).toBe(body.previous_valid_until);
     expect((await client('POST', `/${created.id}/webhook/rotate-secret`, { grace_seconds: 90_000 })).statusCode).toBe(400);
     const instant = json<{ previous_valid_until: unknown }>(await dashboard('POST', `/${created.id}/webhook/rotate-secret`, {}));
     expect(instant.previous_valid_until).toBeNull();
 
-    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', trigger: SCHEDULE, prompt: 'x' }));
+    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', ...SCHEDULE, prompt: 'x' }));
     const refused = await client('POST', `/${plain.id}/webhook/rotate-secret`, {});
     expect(json<{ error: { code: string } }>(refused).error.code).toBe('routine_not_webhook');
   });
@@ -480,7 +539,7 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     expect(input.message).toMatch(/^This run was started by an incoming webhook \(github · pull_request\)\./);
     expect(input.message).toContain('Webhook event (JSON):');
 
-    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', trigger: SCHEDULE, prompt: 'x' }));
+    const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', ...SCHEDULE, prompt: 'x' }));
     const refused = await client('POST', `/${plain.id}/run`, { payload });
     expect(refused.statusCode).toBe(400);
   });

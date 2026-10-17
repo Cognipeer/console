@@ -2645,7 +2645,7 @@ paths:
       tags: [Agent Routines]
       summary: List routines of an agent
       description: >-
-        The routines of the agent in the token's project, oldest first. There is no paging: `has_more` is always `false`. A routine is a saved way of starting the agent (a prompt, optional inputs and a trigger); every fire is an ordinary run (`channel: routine`), so a routine's history is `GET /agents/runs?routine_id={id}`. Needs the `agents` permission (Read).
+        The routines of the agent in the token's project, oldest first. There is no paging: `has_more` is always `false`. A routine is a saved way of starting the agent (a prompt, optional inputs and a `type` with that type's settings: a `schedule`, one `once` time, `manual` by hand, or an incoming `webhook`); every fire is an ordinary run (`channel: routine`), so a routine's history is `GET /agents/runs?routine_id={id}`. Needs the `agents` permission (Read).
       operationId: listAgentRoutines
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -2672,15 +2672,17 @@ paths:
       description: |-
         Saves a routine for the agent. Needs the `agents` permission (Write).
 
-        `name` is required; `trigger` defaults to `{"type":"manual"}` (the routine only starts on `POST …/run`).
+        `name` is required; `type` defaults to `manual` (the routine only starts on `POST …/run`). A `type` comes with
+        the one settings object named after it: `schedule`, `once` or `webhook` (`manual` has none); the settings object
+        of another type is `400`.
         The prompt, `inputs` and `version` are checked together against the inputs the agent (that version of it)
         declares, and `prompt` may be empty only when the agent declares inputs and the routine gives some. For a
-        webhook trigger the prompt is a template and `inputs` a mapping (see `AgentRoutineWebhookTriggerRequest`), and
-        the prompt may also be empty when `include_payload` is on.
+        webhook routine the prompt is a template and `inputs` a mapping (see `AgentRoutineWebhookRequest`), and
+        the prompt may also be empty when `webhook.include_payload` is on.
 
-        A webhook trigger answers `201` with `webhook: { url, secret }`: the generated secret is shown only in this
-        answer (never again, only its last four characters as `trigger.secret_hint`). With `auth: standard_webhooks`
-        the sender's own secret is sent in `trigger.secret` and nothing is generated.
+        A webhook routine answers `201` with the generated secret in `webhook.secret`: it is shown only in this
+        answer (never again, only its last four characters as `webhook.secret_hint`). With `auth: standard_webhooks`
+        the sender's own secret is sent in `webhook.secret` and nothing is generated.
 
         A schedule or once routine runs as a system actor (`system:routine:{id}`), unattended: no tool approvals
         or questions are waited for, and it needs no user token at fire time. Every fire counts against the agent's
@@ -2702,8 +2704,8 @@ paths:
                 summary: Weekday report at 09:00 Istanbul time
                 value:
                   name: Daily support digest
-                  trigger:
-                    type: schedule
+                  type: schedule
+                  schedule:
                     cron: 0 9 * * 1-5
                     timezone: Europe/Istanbul
                   prompt: Summarize yesterday's open support tickets and list the three most urgent.
@@ -2713,16 +2715,16 @@ paths:
                 summary: One run, one hour from now
                 value:
                   name: Follow up on the migration
-                  trigger:
-                    type: once
+                  type: once
+                  once:
                     delay_seconds: 3600
                   prompt: Check the migration status and report anything unfinished.
               webhook:
                 summary: Review every opened pull request (GitHub)
                 value:
                   name: PR reviewer
-                  trigger:
-                    type: webhook
+                  type: webhook
+                  webhook:
                     preset: github
                     events: [pull_request]
                     filter:
@@ -2733,7 +2735,7 @@ paths:
       responses:
         '201':
           description: >-
-            The routine. A webhook trigger also carries `webhook` (the hook URL and the generated secret, shown only here).
+            The routine. A webhook routine also carries the generated secret in `webhook.secret`, shown only here.
           content:
             application/json:
               schema:
@@ -2747,7 +2749,8 @@ paths:
                     name: Daily support digest
                     description: null
                     enabled: true
-                    trigger: {type: schedule, cron: 0 9 * * 1-5, timezone: Europe/Istanbul}
+                    type: schedule
+                    schedule: {cron: 0 9 * * 1-5, timezone: Europe/Istanbul}
                     prompt: Summarize yesterday's open support tickets and list the three most urgent.
                     inputs: null
                     version: null
@@ -2770,12 +2773,13 @@ paths:
                     name: PR reviewer
                     description: null
                     enabled: true
-                    trigger:
-                      type: webhook
+                    type: webhook
+                    webhook:
                       url: https://console.cognipeer.com/api/public/hooks/65f0c1d2a3b4c5d6e7f80001/wh_k3J9x0PqLm2VwYtR7sAeBnCd
                       preset: github
                       auth: github_signature
                       header_name: null
+                      secret: whsec_Zr8mC1vN5pQwX0dEoLk3JtYbAu9HsFg2Zq4T
                       secret_hint: Zq4T
                       secret_source: generated
                       previous_secret_valid_until: null
@@ -2798,9 +2802,6 @@ paths:
                     last_error: null
                     created_at: 1760636400
                     updated_at: 1760636400
-                    webhook:
-                      url: https://console.cognipeer.com/api/public/hooks/65f0c1d2a3b4c5d6e7f80001/wh_k3J9x0PqLm2VwYtR7sAeBnCd
-                      secret: whsec_Zr8mC1vN5pQwX0dEoLk3JtYbAu9HsFg2Zq4T
         '400':
           $ref: '#/components/responses/RoutineInvalid'
         '401':
@@ -2818,7 +2819,7 @@ paths:
       tags: [Agent Routines]
       summary: Get a routine
       description: >-
-        One routine of the agent. The callback secret and the webhook secret are never returned (`callback.signed` and `trigger.secret_hint` only). Needs the `agents` permission (Read).
+        One routine of the agent. The callback secret and the webhook secret are never returned (`callback.signed` and `webhook.secret_hint` only). Needs the `agents` permission (Read).
       operationId: getAgentRoutine
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -2848,17 +2849,19 @@ paths:
         (`description`, `version` = the published version, `inputs`, `metadata`, `response_format`, `callback`).
         Needs the `agents` permission (Write).
 
-        - `trigger` replaces the trigger as a whole, except that sending the stored trigger back unchanged (a form
-          saved as it was) changes nothing, so a once routine that already fired can still be edited. A new trigger
+        - `type` and its settings object (`schedule`, `once` or `webhook`) are sent together and replace the type and
+          its settings as a whole; the settings object of the type the routine leaves is dropped. A settings object
+          without its `type`, or one of another type, is `400`. Sending the stored type and settings back unchanged (a
+          form saved as it was) changes nothing, so a once routine that already fired can still be edited. A new type
           or a change to `enabled` recomputes `next_fire_at` from now.
-        - A webhook trigger that stays a webhook trigger keeps its URL and secret: absent trigger fields keep their
-          values, so `{"type":"webhook","events":["push"]}` changes only the event list. Moving a routine to a
-          webhook trigger creates a new URL and secret (answered once in `webhook`, like create); moving away from
-          `standard_webhooks` to another auth mode generates a new secret; supplying `trigger.secret` with
+        - A webhook routine that stays a webhook routine keeps its URL and secret: absent `webhook` fields keep their
+          values, so `{"type":"webhook","webhook":{"events":["push"]}}` changes only the event list. Moving a routine
+          to the webhook type creates a new URL and secret (answered once in `webhook.secret`, like create); moving
+          away from `standard_webhooks` to another auth mode generates a new secret; supplying `webhook.secret` with
           `standard_webhooks` replaces the sender's secret and ends any rotation grace.
         - `callback.secret` is write-only: absent (or the mask `"••••••"`) keeps the stored secret, `""` removes it, a new
           value replaces it; `callback: null` or an empty `callback.url` removes the callback.
-        - The prompt, `inputs`, `version` and trigger are checked together again whenever one of them changes.
+        - The prompt, `inputs`, `version` and type are checked together again whenever one of them changes.
       operationId: updateAgentRoutine
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -2877,13 +2880,13 @@ paths:
               retime:
                 summary: Move a schedule to Mondays 08:30
                 value:
-                  trigger:
-                    type: schedule
+                  type: schedule
+                  schedule:
                     cron: 30 8 * * 1
                     timezone: Europe/Istanbul
       responses:
         '200':
-          description: The routine. `webhook` is present only when this call created a new generated webhook secret.
+          description: The routine. `webhook.secret` is present only when this call created a new generated webhook secret.
           content:
             application/json:
               schema:
@@ -2904,7 +2907,7 @@ paths:
       tags: [Agent Routines]
       summary: Delete a routine
       description: >-
-        Removes the routine and, for a webhook trigger, its delivery log; the hook URL answers `404` from then on. Runs the routine already started are kept. Needs the `agents` permission (Write).
+        Removes the routine and, for a webhook routine, its delivery log; the hook URL answers `404` from then on. Runs the routine already started are kept. Needs the `agents` permission (Write).
       operationId: deleteAgentRoutine
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -2935,7 +2938,7 @@ paths:
       tags: [Agent Routines]
       summary: Run a routine now
       description: |-
-        One fire with the routine's prompt, whatever its trigger (the run's `trigger` is `manual`). It works on a
+        One fire with the routine's prompt, whatever its type (the run's `trigger` is `manual`). It works on a
         disabled routine too. The body is optional. Needs the `agents` permission (Write).
 
         The answer is the run (`AgentRun`): `200` when it finished within the wait window, else `202` with
@@ -2957,12 +2960,12 @@ paths:
         **Webhook routines.** `payload` (a JSON object or array) and `headers` (an object of at most 50 string
         values, each at most 8 KiB, names case-insensitive) are a sample delivery: the prompt template, the inputs
         mapping and `include_payload` build the message exactly as a real delivery would (the request's values are
-        data, never templates). The trigger's `events` list and `filter` are not applied and nothing is
+        data, never templates). The webhook's `events` list and `filter` are not applied and nothing is
         de-duplicated. Without `payload` the template is rendered over an empty event and nothing external is
         added. A template or mapping that cannot be applied is `400` with `code` `template_error` or
         `invalid_inputs`. `dry_run: true` only evaluates the sample and returns an `AgentRoutineDryRun`:
-        nothing is created, no run starts, no event is published. `payload`, `headers` and `dry_run` on any other
-        trigger type are `400 invalid_request`.
+        nothing is created, no run starts, no event is published. `payload`, `headers` and `dry_run` on a routine of
+        any other type are `400 invalid_request`.
       operationId: runAgentRoutine
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -3118,11 +3121,11 @@ paths:
       tags: [Agent Routines]
       summary: Rotate a routine's webhook secret
       description: |-
-        Replaces the secret of a routine with a webhook trigger; the URL stays. A generated secret is returned once
+        Replaces the secret of a webhook routine; the URL stays. A generated secret is returned once
         in `secret`; with `auth: standard_webhooks` the sender generates the secret, so the new one is sent in
         `secret` and is not echoed. With `grace_seconds` > 0 the previous secret keeps working until
         `previous_valid_until`, so the sender can be switched without a gap; 0 ends it (and any earlier grace) at
-        once. Needs the `agents` permission (Write). A routine without a webhook trigger is
+        once. Needs the `agents` permission (Write). A routine of another type is
         `400 routine_not_webhook`.
       operationId: rotateAgentRoutineWebhookSecret
       parameters:
@@ -3165,7 +3168,7 @@ paths:
       tags: [Agent Routines]
       summary: List a routine's webhook deliveries
       description: >-
-        The delivery log of a routine with a webhook trigger, newest first: one row per request that reached the hook URL and found the routine (outcome and normalized ids only, never the body, headers or secrets). Rows are kept 7 days. Requests that are not accepted are recorded up to 10 per minute per routine (per node); accepted ones always are. Page with `before` = the `id` of the last row of the previous page; an unknown `before` gives an empty page. A routine without a webhook trigger has no deliveries (an empty list). Needs the `agents` permission (Read).
+        The delivery log of a webhook routine, newest first: one row per request that reached the hook URL and found the routine (outcome and normalized ids only, never the body, headers or secrets). Rows are kept 7 days. Requests that are not accepted are recorded up to 10 per minute per routine (per node); accepted ones always are. Page with `before` = the `id` of the last row of the previous page; an unknown `before` gives an empty page. A routine of another type has no deliveries (an empty list). Needs the `agents` permission (Read).
       operationId: listAgentRoutineDeliveries
       parameters:
         - $ref: '#/components/parameters/RoutineAgentKey'
@@ -15415,9 +15418,9 @@ paths:
       tags: [Agent Routines]
       summary: Deliver an event to a routine's webhook
       description: |-
-        The URL of a routine with a webhook trigger (`trigger.url`): an event posted here starts a run of the
+        The URL of a webhook routine (`webhook.url`): an event posted here starts a run of the
         routine's agent. **No API token**: the URL names the tenant and a random hook id, and every request proves
-        the routine's secret in the way its `trigger.auth` says (see below). Senders configure the URL, a content type
+        the routine's secret in the way its `webhook.auth` says (see below). Senders configure the URL, a content type
         of `application/json` and the secret in their own webhook settings.
 
         **Authentication** (`401 webhook_unauthorized` with a constant body; the precise reason is only in the
@@ -15429,7 +15432,7 @@ paths:
         | `gitlab` | `gitlab_token` (default) | `X-Gitlab-Token: <secret>` |
         | `gitlab`, `generic` | `standard_webhooks` | Standard Webhooks: `webhook-id`, `webhook-timestamp` (unix seconds, within 5 minutes) and `webhook-signature: v1,<base64 HMAC-SHA256(key, "<id>.<timestamp>.<raw body>")>` (space-separated list; `key` is the base64-decoded part of the sender's `whsec_` secret) |
         | `azure_devops` | `basic` (default) | `Authorization: Basic base64(<any user name>:<secret>)` |
-        | `azure_devops`, `generic` | `header` | `<trigger.header_name>: <secret>` (default `x-cognipeer-token`) |
+        | `azure_devops`, `generic` | `header` | `<webhook.header_name>: <secret>` (default `x-cognipeer-token`) |
         | `generic` | `bearer` (default) | `Authorization: Bearer <secret>` |
         | `generic` | `signature` | `X-Cognipeer-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>` (`t` within 5 minutes; several `v1` allowed) |
 
@@ -15455,7 +15458,7 @@ paths:
         | `generic` | body `event`, else `type`, else `X-Cognipeer-Event` | `X-Cognipeer-Event-Id`, else `webhook-id`, else `Idempotency-Key` |
 
         In order, after authentication: the JSON check, the answers for a GitHub `ping` and an Azure DevOps test
-        notification, the routine being enabled (the agent must be active), the trigger's `events` list, its `filter`
+        notification, the routine being enabled (the agent must be active), the webhook's `events` list, its `filter`
         (all rules must match), de-duplication, the per-routine run rate, the turn (the prompt template rendered
         over the event, the inputs mapping, the payload block when `include_payload`) and the run. The run's
         `trigger` is `webhook`; its metadata gets `webhook_event` and `webhook_delivery` while it stays within 16
@@ -15484,14 +15487,14 @@ paths:
         - name: tenantId
           in: path
           required: true
-          description: The tenant id, as in `trigger.url`.
+          description: The tenant id, as in `webhook.url`.
           schema:
             type: string
             pattern: '^[A-Za-z0-9_-]{1,64}$'
         - name: hookId
           in: path
           required: true
-          description: The routine's hook id, `wh_` + 24 URL-safe characters (as in `trigger.url`).
+          description: The routine's hook id, `wh_` + 24 URL-safe characters (as in `webhook.url`).
           schema:
             type: string
             pattern: '^wh_[A-Za-z0-9_-]{16,64}$'
@@ -15500,7 +15503,7 @@ paths:
         - {name: X-GitHub-Delivery, in: header, required: false, description: GitHub preset - the delivery id. Sent by GitHub., schema: {type: string}}
         - {name: X-Gitlab-Token, in: header, required: false, description: '`gitlab_token` auth: the secret.', schema: {type: string}}
         - {name: X-Cognipeer-Signature, in: header, required: false, description: '`signature` auth: `t=<unix>,v1=<hex>`.', schema: {type: string}}
-        - {name: X-Cognipeer-Token, in: header, required: false, description: '`header` auth with the default header name: the secret. The name is `trigger.header_name`.', schema: {type: string}}
+        - {name: X-Cognipeer-Token, in: header, required: false, description: '`header` auth with the default header name: the secret. The name is `webhook.header_name`.', schema: {type: string}}
         - {name: X-Cognipeer-Event, in: header, required: false, description: Generic preset - the event name (when the body has no `event` / `type`)., schema: {type: string}}
         - {name: X-Cognipeer-Event-Id, in: header, required: false, description: Generic preset - the delivery id used for de-duplication., schema: {type: string}}
         - {name: webhook-id, in: header, required: false, description: '`standard_webhooks` auth: the message id (also the delivery id).', schema: {type: string}}
@@ -15585,7 +15588,7 @@ paths:
                   code: webhook_unauthorized
         '404':
           description: >-
-            `webhook_not_found`: no such tenant or hook (also a deleted routine or a routine that no longer has a webhook trigger). An unknown URL is remembered per node for a minute; a routine that exists is never cached, so disabling, rotating or deleting applies at once.
+            `webhook_not_found`: no such tenant or hook (also a deleted routine or a routine that is no longer a webhook one). An unknown URL is remembered per node for a minute; a routine that exists is never cached, so disabling, rotating or deleting applies at once.
           content:
             application/json:
               schema:
@@ -17472,7 +17475,7 @@ components:
             - once
             - manual
             - webhook
-          description: What started it. `request` for a client call; the others are routine triggers.
+          description: What started it. `request` for a client call; the others are the ways a routine starts (its `schedule`, a `once` time, Run now as `manual`, an incoming `webhook`).
         routine_id:
           type: string
           nullable: true
@@ -28848,7 +28851,7 @@ components:
     AgentRoutine:
       type: object
       description: >-
-        A saved way of starting an agent: a prompt (+ inputs) and a trigger. Timestamps are unix seconds, except `trigger.run_at`. The callback secret and the webhook secret are never part of it.
+        A saved way of starting an agent: a prompt (+ inputs) and a `type` with the one settings object named after it (`schedule`, `once` or `webhook`; `manual` has none). Timestamps are unix seconds, except `once.run_at`. The callback secret and the webhook secret are never part of it.
       properties:
         id:
           type: string
@@ -28870,18 +28873,27 @@ components:
           type: boolean
           description: >-
             A disabled routine never fires on its own (a webhook delivery is answered `accepted: false, reason: disabled`); Run now still works.
-        trigger:
-          $ref: '#/components/schemas/AgentRoutineTrigger'
+        type:
+          type: string
+          enum: [schedule, once, manual, webhook]
+          description: >-
+            What starts the routine. Only the settings object named after the type is present (`schedule`, `once` or `webhook`); the others are omitted, and `manual` has none.
+        schedule:
+          $ref: '#/components/schemas/AgentRoutineSchedule'
+        once:
+          $ref: '#/components/schemas/AgentRoutineOnce'
+        webhook:
+          $ref: '#/components/schemas/AgentRoutineWebhook'
         prompt:
           type: string
-          description: The message the run starts with (at most 32,000 characters). For a webhook trigger, a Mustache template over the event.
+          description: The message the run starts with (at most 32,000 characters). For a webhook routine, a Mustache template over the event.
         inputs:
           type: object
           allOf:
             - $ref: '#/components/schemas/AgentInputValues'
           nullable: true
           description: >-
-            Values for the inputs the agent declares. For a webhook trigger, a mapping: a value that is exactly one tag (`"{{payload.number}}"`) takes the value at that path (its type kept), other strings with tags are rendered, anything else is a literal. Checked against the agent's declared inputs again at fire time.
+            Values for the inputs the agent declares. For a webhook routine, a mapping: a value that is exactly one tag (`"{{payload.number}}"`) takes the value at that path (its type kept), other strings with tags are rendered, anything else is a literal. Checked against the agent's declared inputs again at fire time.
         version:
           type: integer
           nullable: true
@@ -28936,7 +28948,7 @@ components:
           type: integer
         updated_at:
           type: integer
-      required: [id, object, agent, name, enabled, trigger, prompt, class, created_at, updated_at]
+      required: [id, object, agent, name, enabled, type, prompt, class, created_at, updated_at]
       example:
         id: 6718a1c2f3b4a5d6e7f80912
         object: agent.routine
@@ -28944,7 +28956,8 @@ components:
         name: Daily support digest
         description: null
         enabled: true
-        trigger: {type: schedule, cron: 0 9 * * 1-5, timezone: Europe/Istanbul}
+        type: schedule
+        schedule: {cron: 0 9 * * 1-5, timezone: Europe/Istanbul}
         prompt: Summarize yesterday's open support tickets and list the three most urgent.
         inputs: null
         version: null
@@ -28960,23 +28973,19 @@ components:
         created_at: 1760636400
         updated_at: 1760636400
     AgentRoutineWithSecret:
-      description: A routine and, in the one answer that creates or replaces a generated webhook secret, `webhook`.
+      description: A routine and, in the one answer that creates or replaces a generated webhook secret, `webhook.secret`.
       allOf:
         - $ref: '#/components/schemas/AgentRoutine'
         - type: object
           properties:
             webhook:
               type: object
-              description: Shown once. Later reads carry only `trigger.url` and `trigger.secret_hint`.
+              description: Shown once. Later reads carry only `webhook.url` and `webhook.secret_hint`.
               properties:
-                url:
-                  type: string
-                  format: uri
-                  description: The hook URL (same as `trigger.url`).
                 secret:
                   type: string
                   description: The generated secret (`whsec_` + 32 characters). Store it now.
-              required: [url, secret]
+              required: [secret]
     AgentRoutineList:
       type: object
       properties:
@@ -29026,27 +29035,11 @@ components:
           type: string
           maxLength: 256
       required: [url]
-    AgentRoutineTrigger:
-      description: What starts the routine, as the API returns it.
-      oneOf:
-        - $ref: '#/components/schemas/AgentRoutineScheduleTrigger'
-        - $ref: '#/components/schemas/AgentRoutineOnceTrigger'
-        - $ref: '#/components/schemas/AgentRoutineManualTrigger'
-        - $ref: '#/components/schemas/AgentRoutineWebhookTrigger'
-      discriminator:
-        propertyName: type
-        mapping:
-          schedule: '#/components/schemas/AgentRoutineScheduleTrigger'
-          once: '#/components/schemas/AgentRoutineOnceTrigger'
-          manual: '#/components/schemas/AgentRoutineManualTrigger'
-          webhook: '#/components/schemas/AgentRoutineWebhookTrigger'
-    AgentRoutineScheduleTrigger:
+    AgentRoutineSchedule:
       type: object
-      description: A cron schedule evaluated in a timezone.
+      description: >-
+        The `schedule` of a routine of type `schedule`: a cron schedule evaluated in a timezone.
       properties:
-        type:
-          type: string
-          enum: [schedule]
         cron:
           type: string
           description: Five fields (minute hour day-of-month month day-of-week), single spaces.
@@ -29055,40 +29048,27 @@ components:
           type: string
           description: An IANA timezone name.
           example: Europe/Istanbul
-      required: [type, cron, timezone]
-    AgentRoutineOnceTrigger:
+      required: [cron, timezone]
+    AgentRoutineOnce:
       type: object
-      description: One fire at a time. A time missed by more than the misfire grace (1 hour by default) is skipped, not run late.
+      description: >-
+        The `once` of a routine of type `once`: one fire at a time. A time missed by more than the misfire grace (1 hour by default) is skipped, not run late.
       properties:
-        type:
-          type: string
-          enum: [once]
         run_at:
           type: string
           format: date-time
           description: ISO-8601, UTC.
           example: '2026-10-17T15:00:00.000Z'
-      required: [type, run_at]
-    AgentRoutineManualTrigger:
-      type: object
-      description: Only started by `POST …/run`.
-      properties:
-        type:
-          type: string
-          enum: [manual]
-      required: [type]
-    AgentRoutineWebhookTrigger:
+      required: [run_at]
+    AgentRoutineWebhook:
       type: object
       description: >-
-        An incoming webhook: each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`).
+        The `webhook` of a routine of type `webhook`: an incoming webhook. Each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`).
       properties:
-        type:
-          type: string
-          enum: [webhook]
         url:
           type: string
           format: uri
-          description: The public hook URL; its hook id never changes while the routine keeps a webhook trigger.
+          description: The public hook URL; its hook id never changes while the routine stays a webhook one.
         preset:
           type: string
           enum: [github, gitlab, azure_devops, generic]
@@ -29125,7 +29105,7 @@ components:
         include_payload:
           type: boolean
           description: Append the event payload (JSON, cut at 32 KiB) to the message.
-      required: [type, url, preset, auth, header_name, secret_hint, secret_source, previous_secret_valid_until, events, filter, include_payload]
+      required: [url, preset, auth, header_name, secret_hint, secret_source, previous_secret_valid_until, events, filter, include_payload]
     AgentRoutineWebhookFilterRule:
       type: object
       description: >-
@@ -29152,60 +29132,47 @@ components:
                   - type: number
                   - type: boolean
       required: [path, op]
-    AgentRoutineTriggerRequest:
-      description: >-
-        The trigger of a create / PATCH body. `schedule` takes `cron` (5 fields) and `timezone` (IANA name, default `UTC`); `once` takes `run_at` (ISO-8601 or unix seconds, at most 60 seconds in the past) or `delay_seconds` (whole seconds from now), exactly one of them; `manual` takes nothing.
-      oneOf:
-        - type: object
-          properties:
-            type:
-              type: string
-              enum: [schedule]
-            cron:
-              type: string
-              example: 0 9 * * 1-5
-            timezone:
-              type: string
-              default: UTC
-              example: Europe/Istanbul
-          required: [type, cron]
-        - type: object
-          properties:
-            type:
-              type: string
-              enum: [once]
-            run_at:
-              oneOf:
-                - type: string
-                  format: date-time
-                - type: number
-              description: ISO-8601 date or unix seconds.
-            delay_seconds:
-              type: integer
-              minimum: 0
-          required: [type]
-        - type: object
-          properties:
-            type:
-              type: string
-              enum: [manual]
-          required: [type]
-        - $ref: '#/components/schemas/AgentRoutineWebhookTriggerRequest'
-    AgentRoutineWebhookTriggerRequest:
+    AgentRoutineScheduleRequest:
       type: object
       description: >-
-        A webhook trigger to save. `preset` is required when the routine does not already have a webhook trigger; the other fields keep their stored values when absent. The routine's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `routine`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `inputs` maps declared inputs to literals or templates. Per preset the `auth` modes are: `github` - `github_signature`; `gitlab` - `gitlab_token` (default), `standard_webhooks`; `azure_devops` - `basic` (default), `header`; `generic` - `bearer` (default), `signature`, `header`, `standard_webhooks`.
+        The `schedule` of a create / PATCH body with `type: schedule`.
       properties:
-        type:
+        cron:
           type: string
-          enum: [webhook]
+          description: Five fields (minute hour day-of-month month day-of-week).
+          example: 0 9 * * 1-5
+        timezone:
+          type: string
+          default: UTC
+          description: An IANA timezone name.
+          example: Europe/Istanbul
+      required: [cron]
+    AgentRoutineOnceRequest:
+      type: object
+      description: >-
+        The `once` of a create / PATCH body with `type: once`: `run_at` (ISO-8601 or unix seconds, at most 60 seconds in the past) or `delay_seconds` (whole seconds from now), exactly one of them.
+      properties:
+        run_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: number
+          description: ISO-8601 date or unix seconds.
+        delay_seconds:
+          type: integer
+          minimum: 0
+    AgentRoutineWebhookRequest:
+      type: object
+      description: >-
+        The `webhook` of a create / PATCH body with `type: webhook`. `preset` is required when the routine is not a webhook one yet; the other fields keep their stored values when absent. The routine's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `routine`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `inputs` maps declared inputs to literals or templates. Per preset the `auth` modes are: `github` - `github_signature`; `gitlab` - `gitlab_token` (default), `standard_webhooks`; `azure_devops` - `basic` (default), `header`; `generic` - `bearer` (default), `signature`, `header`, `standard_webhooks`.
+      properties:
         preset:
           type: string
           enum: [github, gitlab, azure_devops, generic]
         auth:
           type: string
           enum: [github_signature, gitlab_token, standard_webhooks, basic, header, bearer, signature]
-          description: The preset's first mode when absent (for an existing trigger, its current one while the preset still offers it).
+          description: The preset's first mode when absent (for a routine that already is a webhook one, its current one while the preset still offers it).
         header_name:
           type: string
           pattern: '^x-[a-z0-9-]{1,62}$'
@@ -29214,7 +29181,7 @@ components:
         secret:
           type: string
           description: >-
-            `auth: standard_webhooks` only: the sender's secret (`whsec_` + base64, 24-64 bytes); required when the trigger becomes `standard_webhooks`. Every other mode generates the secret (sending one is `400`; use rotate-secret to replace it).
+            `auth: standard_webhooks` only: the sender's secret (`whsec_` + base64, 24-64 bytes); required when the routine becomes `standard_webhooks`. Every other mode generates the secret (sending one is `400`; use rotate-secret to replace it).
         events:
           type: array
           maxItems: 50
@@ -29232,7 +29199,6 @@ components:
         include_payload:
           type: boolean
           default: true
-      required: [type]
     AgentRoutineCreateRequest:
       type: object
       properties:
@@ -29247,8 +29213,18 @@ components:
         enabled:
           type: boolean
           default: true
-        trigger:
-          $ref: '#/components/schemas/AgentRoutineTriggerRequest'
+        type:
+          type: string
+          enum: [schedule, once, manual, webhook]
+          default: manual
+          description: >-
+            What starts the routine. It comes with the one settings object named after it (`schedule`, `once` or `webhook`; `manual` takes none); the settings object of another type is `400`.
+        schedule:
+          $ref: '#/components/schemas/AgentRoutineScheduleRequest'
+        once:
+          $ref: '#/components/schemas/AgentRoutineOnceRequest'
+        webhook:
+          $ref: '#/components/schemas/AgentRoutineWebhookRequest'
         prompt:
           type: string
           maxLength: 32000
@@ -29300,8 +29276,17 @@ components:
           maxLength: 2000
         enabled:
           type: boolean
-        trigger:
-          $ref: '#/components/schemas/AgentRoutineTriggerRequest'
+        type:
+          type: string
+          enum: [schedule, once, manual, webhook]
+          description: >-
+            Sent together with the settings object named after it (`schedule`, `once` or `webhook`; `manual` takes none): they replace the type and its settings as a whole. A settings object without its `type`, or one of another type, is `400`.
+        schedule:
+          $ref: '#/components/schemas/AgentRoutineScheduleRequest'
+        once:
+          $ref: '#/components/schemas/AgentRoutineOnceRequest'
+        webhook:
+          $ref: '#/components/schemas/AgentRoutineWebhookRequest'
         prompt:
           type: string
           nullable: true
@@ -29384,7 +29369,7 @@ components:
           enum: [agent.routine.dry_run]
         matched:
           type: boolean
-          description: The trigger's `events` list and `filter` let the sample through.
+          description: The webhook's `events` list and `filter` let the sample through.
         reason:
           type: string
           nullable: true
@@ -29929,7 +29914,7 @@ components:
               retryable: false
     RoutineInvalid:
       description: >-
-        `invalid_routine`: the body is not valid; `error.errors` lists every problem as `{ field, message }` (for example `name`, `trigger.cron`, `trigger.timezone`, `trigger.run_at`, `trigger.preset`, `trigger.filter[0].op`, `prompt`, `inputs.<name>`, `version`, `callback`). Also `invalid_request` (the body is not a JSON object), `invalid_json` and `routine_not_webhook` (rotate-secret on another trigger type).
+        `invalid_routine`: the body is not valid; `error.errors` lists every problem as `{ field, message }` (for example `name`, `type`, `schedule.cron`, `schedule.timezone`, `once.run_at`, `webhook.preset`, `webhook.filter[0].op`, `prompt`, `inputs.<name>`, `version`, `callback`; a settings object that does not belong to the `type` is reported under its own name, such as `schedule`). Also `invalid_request` (the body is not a JSON object), `invalid_json` and `routine_not_webhook` (rotate-secret on a routine of another type).
       content:
         application/json:
           schema:
@@ -29937,10 +29922,10 @@ components:
           example:
             error:
               type: invalid_request_error
-              message: 'Invalid routine - trigger.cron: cron must have 5 fields (minute hour day-of-month month day-of-week)'
+              message: 'Invalid routine - schedule.cron: cron must have 5 fields (minute hour day-of-month month day-of-week)'
               code: invalid_routine
               errors:
-                - field: trigger.cron
+                - field: schedule.cron
                   message: cron must have 5 fields (minute hour day-of-month month day-of-week)
     RoutineNotFound:
       description: '`agent_not_found` (no such agent in the token''s project) or `routine_not_found` (no such routine on this agent).'

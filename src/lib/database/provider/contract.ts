@@ -50,6 +50,8 @@ import type {
   IAgentRun,
   AgentRunClass,
   IAgentRoutine,
+  AgentRoutinePatch,
+  NewAgentRoutine,
   IAgentRoutineDelivery,
   IOcrJob,
   IOcrJobItem,
@@ -1139,18 +1141,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   cleanupSchedulerClaims(olderThan: Date): Promise<number>;
 
   // ── Agent routines (tenant-specific) ──
-  createAgentRoutine(record: Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentRoutine>;
+  createAgentRoutine(record: NewAgentRoutine): Promise<IAgentRoutine>;
   /** Scoped by tenant AND project: an id of another project's routine is not found. */
   getAgentRoutine(id: string, tenantId: string, projectId: string): Promise<IAgentRoutine | null>;
   /** Oldest first. */
   listAgentRoutines(filter: { tenantId: string; projectId: string; agentKey?: string }): Promise<IAgentRoutine[]>;
-  /** The updated routine, or null when it does not exist in that scope. */
-  updateAgentRoutine(
-    id: string,
-    tenantId: string,
-    projectId: string,
-    patch: Partial<Omit<IAgentRoutine, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>,
-  ): Promise<IAgentRoutine | null>;
+  /**
+   * The updated routine, or null when it does not exist in that scope. A patch
+   * with a `type` replaces the routine's type settings as a whole: the settings
+   * objects of its other types are dropped.
+   */
+  updateAgentRoutine(id: string, tenantId: string, projectId: string, patch: AgentRoutinePatch): Promise<IAgentRoutine | null>;
   deleteAgentRoutine(id: string, tenantId: string, projectId: string): Promise<boolean>;
   /** Removes every routine of an agent (the agent was deleted); returns the number removed. */
   deleteAgentRoutinesForAgent(tenantId: string, projectId: string, agentKey: string): Promise<number>;
@@ -1169,7 +1170,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     result: { fireAt: Date; status: 'started' | 'failed'; runId?: string | null; error?: string | null },
   ): Promise<boolean>;
-  /** The routine whose webhook trigger has this hook id (tenant DB), or null. */
+  /** The routine whose `webhook` has this hook id (tenant DB), or null. */
   findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null>;
 
   // ── Agent routine webhook deliveries (tenant-specific) ──

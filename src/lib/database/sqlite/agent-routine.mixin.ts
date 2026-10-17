@@ -1,36 +1,45 @@
 /**
  * SQLite Provider – Agent routines mixin
  *
- * The trigger is one JSON column (`triggerSpec`; TRIGGER is an SQL keyword),
- * its dates as ISO strings. `nextFireAt` is its own column: the scheduler's
- * `(enabled, nextFireAt)` index reads it; so is a webhook trigger's `hookId`
- * (the incoming webhook's lookup). A webhook trigger's delivery log is
- * `agent_routine_deliveries`.
+ * A routine's `type` is a column; the settings of that type are one JSON
+ * column named after it (`schedule`, `once`, `webhook`; manual has none, the
+ * others stay NULL), their dates as ISO strings. `nextFireAt` is its own
+ * column: the scheduler's `(enabled, nextFireAt)` index reads it; so is a
+ * webhook routine's `hookId` (the incoming webhook's lookup). A webhook
+ * routine's delivery log is `agent_routine_deliveries`.
  */
 
-import type { AgentRoutineTrigger, IAgentRoutine, IAgentRoutineDelivery } from '../provider.interface';
+import type {
+  AgentRoutinePatch,
+  AgentRoutineSchedule,
+  AgentRoutineType,
+  AgentRoutineTypeSettings,
+  AgentRoutineWebhook,
+  IAgentRoutine,
+  IAgentRoutineDelivery,
+  NewAgentRoutine,
+} from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
-
-type RoutinePatch = Partial<Omit<IAgentRoutine, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>;
 
 const iso = (value: Date | string | null | undefined): string | null => (value ? new Date(value).toISOString() : null);
 
 export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class AgentRoutineOps extends Base {
-    private routineColumns(record: RoutinePatch): Record<string, unknown> {
+    private routineColumns(record: AgentRoutinePatch): Record<string, unknown> {
       const out: Record<string, unknown> = {};
       if (record.name !== undefined) out.name = record.name;
       if (record.description !== undefined) out.description = record.description ?? null;
       if (record.enabled !== undefined) out.enabled = this.toBoolInt(record.enabled);
-      if (record.trigger !== undefined) {
-        const trigger = record.trigger;
-        out.triggerSpec = this.toJson(
-          trigger.type === 'once' ? { ...trigger, runAt: iso(trigger.runAt) }
-            : trigger.type === 'webhook' ? { ...trigger, previousSecretExpiresAt: iso(trigger.previousSecretExpiresAt) }
-              : trigger,
-        );
-        out.hookId = trigger.type === 'webhook' ? trigger.hookId : null;
+      if (record.type !== undefined) {
+        // A new type replaces the settings as a whole: only its own column is filled.
+        out.type = record.type;
+        out.schedule = record.type === 'schedule' ? this.toJson(record.schedule) : null;
+        out.once = record.type === 'once' ? this.toJson({ runAt: iso(record.once.runAt) }) : null;
+        out.webhook = record.type === 'webhook'
+          ? this.toJson({ ...record.webhook, previousSecretExpiresAt: iso(record.webhook.previousSecretExpiresAt) })
+          : null;
+        out.hookId = record.type === 'webhook' ? record.webhook.hookId : null;
       }
       if (record.prompt !== undefined) out.prompt = record.prompt;
       if (record.version !== undefined) out.version = record.version ?? null;
@@ -47,7 +56,7 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
       return out;
     }
 
-    async createAgentRoutine(record: Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentRoutine> {
+    async createAgentRoutine(record: NewAgentRoutine): Promise<IAgentRoutine> {
       const db = this.getTenantDb();
       const id = this.newId();
       const now = this.now();
@@ -94,7 +103,7 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
       return rows.map((row) => this.mapAgentRoutine(row));
     }
 
-    async updateAgentRoutine(id: string, tenantId: string, projectId: string, patch: RoutinePatch): Promise<IAgentRoutine | null> {
+    async updateAgentRoutine(id: string, tenantId: string, projectId: string, patch: AgentRoutinePatch): Promise<IAgentRoutine | null> {
       const columns = { ...this.routineColumns(patch), updatedAt: this.now() };
       const sets = Object.keys(columns).map((name) => `${name} = @${name}`);
       const res = this.getTenantDb()
@@ -239,12 +248,6 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
     }
 
     private mapAgentRoutine(row: SqliteRow): IAgentRoutine {
-      const spec = this.parseJson<Record<string, unknown>>(row.triggerSpec, { type: 'manual' });
-      const trigger = (spec.type === 'once'
-        ? { type: 'once', runAt: new Date(String(spec.runAt)) }
-        : spec.type === 'webhook'
-          ? { ...spec, previousSecretExpiresAt: spec.previousSecretExpiresAt ? new Date(String(spec.previousSecretExpiresAt)) : null }
-          : spec) as AgentRoutineTrigger;
       return {
         _id: row.id as string,
         tenantId: row.tenantId as string,
@@ -253,7 +256,6 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
         name: row.name as string,
         description: (row.description as string) ?? null,
         enabled: this.fromBoolInt(row.enabled),
-        trigger,
         prompt: (row.prompt as string) ?? '',
         inputs: row.inputs ? this.parseJson(row.inputs, null as Record<string, unknown> | null) : null,
         version: row.version === null || row.version === undefined ? null : Number(row.version),
@@ -270,7 +272,31 @@ export function AgentRoutineMixin<TBase extends Constructor<SQLiteProviderBase>>
         updatedBy: (row.updatedBy as string) ?? null,
         createdAt: this.toDate(row.createdAt),
         updatedAt: this.toDate(row.updatedAt),
+        ...this.mapRoutineTypeSettings(row),
       };
+    }
+
+    /** `type` and the settings object of that type; a missing type or settings read as manual. */
+    private mapRoutineTypeSettings(row: SqliteRow): AgentRoutineTypeSettings {
+      const manual: AgentRoutineTypeSettings = { type: 'manual' };
+      switch (row.type as AgentRoutineType | null | undefined) {
+        case 'schedule': {
+          const schedule = this.parseJson<AgentRoutineSchedule | null>(row.schedule, null);
+          return schedule ? { type: 'schedule', schedule } : manual;
+        }
+        case 'once': {
+          const once = this.parseJson<{ runAt: string } | null>(row.once, null);
+          return once ? { type: 'once', once: { runAt: new Date(String(once.runAt)) } } : manual;
+        }
+        case 'webhook': {
+          const webhook = this.parseJson<(Omit<AgentRoutineWebhook, 'previousSecretExpiresAt'> & { previousSecretExpiresAt?: string | null }) | null>(row.webhook, null);
+          return webhook
+            ? { type: 'webhook', webhook: { ...webhook, previousSecretExpiresAt: webhook.previousSecretExpiresAt ? new Date(String(webhook.previousSecretExpiresAt)) : null } }
+            : manual;
+        }
+        default:
+          return manual;
+      }
     }
   };
 }

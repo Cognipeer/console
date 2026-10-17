@@ -233,7 +233,7 @@ Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS
 | `AGENT_ROUTINE_TICK_MS` | How often the routine scheduler looks for due slots (minimum `5000`) | `30000` |
 | `AGENT_ROUTINE_MISFIRE_GRACE_MS` | A missed routine slot older than this is skipped; at most one catch-up run fires | `3600000` |
 | `AGENT_WEBHOOK_BODY_LIMIT_BYTES` | Largest body an incoming routine webhook accepts (min 16384, max 26214400); larger deliveries get 413 | `5242880` |
-| `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Runs one routine's webhook trigger starts per minute (`0` = off). Per node unless `RATE_LIMIT_PROVIDER=redis` | `60` |
+| `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Runs one webhook routine starts per minute (`0` = off). Per node unless `RATE_LIMIT_PROVIDER=redis` | `60` |
 | `AGENT_CHAT_CONCURRENCY` | Concurrent agent chat turns per node | `4` |
 | `AGENT_RUN_RETENTION_DAYS` | How long run records (`userMessage`, result) are kept, counted from when the run finished (a scheduled or deferred run is also kept until it was due) | `30` |
 | `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | How often a worker stamps the heartbeat of a running run (minimum `1000`) | `15000` |

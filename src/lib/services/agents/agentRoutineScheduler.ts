@@ -51,7 +51,7 @@ async function fireDueRoutine(
 ): Promise<void> {
   const routineId = String(routine._id);
   const dueAt = new Date(routine.nextFireAt!);
-  const plan = planDueRoutine(routine.trigger, dueAt, now, getConfig().agent.routineMisfireGraceMs);
+  const plan = planDueRoutine(routine, dueAt, now, getConfig().agent.routineMisfireGraceMs);
 
   if (plan.kind === 'missed') {
     if (await db.advanceRoutineNextFire(routineId, dueAt, plan.next)) {
@@ -82,7 +82,7 @@ async function fireDueRoutine(
   }
 
   const fired = await fireRoutine(routine, tenant, {
-    trigger: routine.trigger.type === 'once' ? 'once' : 'schedule',
+    trigger: routine.type === 'once' ? 'once' : 'schedule',
     message: routine.prompt,
     inputs: inputs.inputs,
     idempotencyKey: key,
