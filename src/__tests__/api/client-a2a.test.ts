@@ -56,14 +56,26 @@ vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
 
 // The caller's wait window: the real limits unless a test shortens it.
 const limits = vi.hoisted(() => ({ override: null as null | Record<string, number> }));
+// A queued start publishes to the job queue; a test that queues stands in for the whole start and reads what it was asked.
+const queuedStart = vi.hoisted(() => ({ run: null as null | ((input: Record<string, any>) => unknown) }));
 vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
   return {
     ...actual,
+    startAgentRun: (input: Parameters<typeof actual.startAgentRun>[0]) =>
+      (queuedStart.run && input.execution.kind === 'queued' ? queuedStart.run(input) : actual.startAgentRun(input)),
     resolveAgentRunLimits: async (...args: Parameters<typeof actual.resolveAgentRunLimits>) =>
       (limits.override ? { ...(await actual.resolveAgentRunLimits()), ...limits.override } : actual.resolveAgentRunLimits(...args)),
   };
 });
+
+// Files a message carries are stored through the session files (the real input reader and store run on top of these two).
+const files = vi.hoisted(() => ({ upload: vi.fn(), fetch: vi.fn() }));
+vi.mock('@/lib/services/agents/sessionFiles', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/agents/sessionFiles')>()),
+  uploadSessionFile: files.upload,
+}));
+vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: files.fetch }));
 
 vi.mock('@/lib/services/agents/agentService', () => ({
   getAgentByKey: vi.fn(),
@@ -81,6 +93,10 @@ import {
   getConversationById,
 } from '@/lib/services/agents/agentService';
 import { clientA2aApiPlugin } from '@/server/api/plugins/client-a2a';
+import * as spendLimits from '@/lib/services/agents/agentSpendLimits';
+import { abortLocalTurns } from '@/lib/services/agents/turnWatch';
+import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
+import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -127,6 +143,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
   limits.override = null;
+  queuedStart.run = null;
   createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'run-1', ...record }));
   deleteAgentRun.mockResolvedValue(true);
   finalizeAgentRun.mockImplementation(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({
@@ -171,7 +188,7 @@ describe('agent card', () => {
     expect(card.url).toBe('https://console.example.com/api/client/v1/a2a/support-bot');
     expect(card.preferredTransport).toBe('JSONRPC');
     expect(card.version).toBe('3');
-    expect((card.capabilities as { streaming: boolean }).streaming).toBe(false);
+    expect((card.capabilities as { streaming: boolean }).streaming).toBe(true);
     expect((card.securitySchemes as Record<string, { scheme: string }>).bearer.scheme).toBe('bearer');
     expect((card.skills as Array<{ tags: string[] }>)[0].tags).toContain('lookup');
   });
@@ -626,7 +643,7 @@ describe('tasks/get and unknown methods', () => {
       method: 'POST',
       url: '/api/client/v1/a2a/support-bot',
       headers: { authorization: 'Bearer tok' },
-      payload: { jsonrpc: '2.0', id: 5, method: 'message/stream', params: {} },
+      payload: { jsonrpc: '2.0', id: 5, method: 'tasks/resubscribe', params: {} },
     });
     expect(parseJsonBody<{ error: { code: number } }>(unknown.body).error.code).toBe(-32601);
   });
@@ -800,5 +817,327 @@ describe('message/send — agent inputs and structured output', () => {
     const body = parseJsonBody<{ result: { artifacts: Array<{ name: string; parts: Array<{ data?: unknown }> }> } }>(res.body);
     expect(body.result.artifacts.map((a) => a.name)).toEqual(['response', 'output']);
     expect(body.result.artifacts[1].parts[0].data).toEqual({ label: 'ok' });
+  });
+});
+
+describe('agent card — modes', () => {
+  const card = async (agent: Record<string, unknown>) => {
+    mockFn(getAgentByKey).mockResolvedValue(agent);
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/api/client/v1/a2a/support-bot/.well-known/agent-card.json', headers: { authorization: 'Bearer tok' } });
+    return parseJsonBody<{ defaultInputModes: string[]; defaultOutputModes: string[]; capabilities: { streaming: boolean }; skills: Array<{ inputModes: string[]; outputModes: string[] }> }>(res.body);
+  };
+
+  it('takes text and JSON, and gives text and JSON', async () => {
+    const body = await card(EXPOSED_AGENT);
+    expect(body.capabilities.streaming).toBe(true);
+    expect(body.defaultInputModes).toEqual(['text/plain', 'application/json']);
+    expect(body.defaultOutputModes).toEqual(['text/plain', 'application/json']);
+    expect(body.skills[0]).toMatchObject({ inputModes: body.defaultInputModes, outputModes: body.defaultOutputModes });
+  });
+
+  it('adds the file types the agent accepts once attachments are enabled', async () => {
+    const withTypes = await card({ ...EXPOSED_AGENT, config: { attachments: { enabled: true, bucketKey: 'files', allowedMimeTypes: ['application/pdf', 'image/*'] } } });
+    expect(withTypes.defaultInputModes).toEqual(['text/plain', 'application/json', 'application/pdf', 'image/*']);
+    const anyType = await card({ ...EXPOSED_AGENT, config: { attachments: { enabled: true, bucketKey: 'files' } } });
+    expect(anyType.defaultInputModes).toEqual(['text/plain', 'application/json', '*/*']);
+    const off = await card({ ...EXPOSED_AGENT, config: { attachments: { enabled: true, allowedMimeTypes: ['application/pdf'] } } });
+    expect(off.defaultInputModes).toEqual(['text/plain', 'application/json']);
+  });
+});
+
+describe('message/stream', () => {
+  const ANSWER = (text: string, extra: Record<string, unknown> = {}) => ({
+    output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }],
+    _conversation_messages: [{}, {}],
+    ...extra,
+  });
+  type Evt = Record<string, any>;
+  const parseEvents = (body: string): Evt[] => body.split('\n\n').filter((chunk) => chunk.startsWith('data: ')).map((chunk) => {
+    const frame = JSON.parse(chunk.slice('data: '.length));
+    expect(frame).toMatchObject({ jsonrpc: '2.0', id: 3 });
+    return frame.result;
+  });
+  const summary = (events: Evt[]) => events.map((e) => (e.kind === 'status-update' ? `status:${e.status.state}${e.final ? ':final' : ''}`
+    : e.kind === 'artifact-update' ? `artifact:${e.artifact.name ?? e.artifact.artifactId}${e.append ? ':append' : ''}${e.lastChunk ? ':last' : ''}` : e.kind));
+  const stream = async (parts: unknown[] = [{ kind: 'text', text: 'Hello' }], agent: Record<string, unknown> = EXPOSED_AGENT) => {
+    mockFn(getAgentByKey).mockResolvedValue(agent);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 3, method: 'message/stream', params: { message: { role: 'user', parts } } },
+    });
+    return res;
+  };
+
+  beforeEach(() => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+  });
+
+  it('opens with the Task, then working, streams the text as artifact chunks and closes with a completed status', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('Hel');
+      request.onTextChunk('lo');
+      return ANSWER('Hello');
+    });
+    const res = await stream();
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const events = parseEvents(res.body);
+    expect(summary(events)).toEqual([
+      'task', 'status:working', 'artifact:response', 'artifact:response:append', 'artifact:response:append:last', 'status:completed:final',
+    ]);
+    expect(events[0]).toMatchObject({ id: 'run_run-1', contextId: 'conv-1', status: { state: 'submitted' } });
+    expect(events.slice(1).every((e) => e.taskId === 'run_run-1' && e.contextId === 'conv-1')).toBe(true);
+    expect(events.filter((e) => e.kind === 'artifact-update').map((e) => e.artifact.parts[0].text)).toEqual(['Hel', 'lo', '']);
+    expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'a2a' }));
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'succeeded' }));
+  });
+
+  it('a model that does not stream still gets its answer as one closed artifact', async () => {
+    mockFn(executeAgentChat).mockResolvedValue(ANSWER('All at once'));
+    const events = parseEvents((await stream()).body);
+    expect(summary(events)).toEqual(['task', 'status:working', 'artifact:response:last', 'status:completed:final']);
+    expect(events[2].artifact.parts[0].text).toBe('All at once');
+  });
+
+  it('closes with the files and the structured answer as artifacts, and what the run stopped on', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('{"label":"bug"}');
+      return ANSWER('{"label":"bug"}', {
+        output_parsed: { label: 'bug' },
+        output_files: [{ id: 'f1', name: 'report.md', mime_type: 'text/markdown', size: 12, download_url: '/client/v1/agents/sessions/conv-1/files/f1/content' }],
+        stop_reason: 'max_tokens',
+        stop_detail: 'The answer was cut off.',
+      });
+    });
+    const events = parseEvents((await stream()).body);
+    expect(summary(events)).toEqual([
+      'task', 'status:working', 'artifact:response', 'artifact:response:append:last', 'artifact:output:last', 'artifact:report.md:last', 'status:completed:final',
+    ]);
+    expect(events[4].artifact.parts[0]).toEqual({ kind: 'data', data: { label: 'bug' } });
+    expect(events[5].artifact.parts[0].file).toMatchObject({ name: 'report.md', mimeType: 'text/markdown' });
+    expect(events[6].metadata).toMatchObject({ stopReason: 'max_tokens' });
+  });
+
+  it('a turn that waits for a person ends the stream input-required, with the actions to answer', async () => {
+    mockFn(executeAgentChat).mockResolvedValue(ANSWER('May I?', {
+      status: 'requires_action',
+      required_action: { type: 'tool_approval', actions: [{ id: 'act-1', tool_name: 'send_email' }] },
+    }));
+    const events = parseEvents((await stream()).body);
+    expect(summary(events).slice(-2)).toEqual(['artifact:response:last', 'status:input-required:final']);
+    expect(events[events.length - 1].metadata).toMatchObject({ stopReason: 'requires_action', pendingActions: [{ id: 'act-1' }] });
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'requires_action' }));
+  });
+
+  it('a turn that fails after the stream opened ends it failed, with the public message', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('Part');
+      throw new Error('upstream exploded');
+    });
+    const res = await stream();
+    expect(res.statusCode).toBe(200);
+    const events = parseEvents(res.body);
+    const last = events[events.length - 1];
+    expect(summary(events)).toEqual(['task', 'status:working', 'artifact:response', 'status:failed:final']);
+    expect(last.status.message.parts[0].text).not.toContain('upstream exploded');
+    expect(last.status.message.parts[0].text.length).toBeGreaterThan(0);
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed' }));
+  });
+
+  it('a stopped turn ends the stream canceled', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('Half');
+      abortLocalTurns('tenant-1', 'conv-1');
+      return ANSWER('Half');
+    });
+    const events = parseEvents((await stream()).body);
+    expect(summary(events)).toEqual(['task', 'status:working', 'artifact:response', 'artifact:response:append:last', 'status:canceled:final']);
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'canceled' }));
+  });
+
+  it('a refusal before the run starts is a plain JSON-RPC error, not a stream', async () => {
+    mockFn(createAgentRun).mockRejectedValue(new AgentRunConflictError('busy'));
+    const res = await stream();
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(parseJsonBody<{ error: { code: number; data: { code: string } } }>(res.body).error).toMatchObject({ code: -32603, data: { code: 'agent_run_conflict' } });
+    expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+
+  it('declared inputs and data parts reach the run like they do on message/send', async () => {
+    mockFn(executeAgentChat).mockResolvedValue(ANSWER('ok'));
+    await stream(
+      [{ kind: 'text', text: 'Triage' }, { kind: 'data', data: { customer_id: 'c-1' } }],
+      { ...EXPOSED_AGENT, config: { inputs: [{ name: 'customer_id', type: 'string', required: true }] } },
+    );
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: 'Triage', inputs: { customer_id: 'c-1' } });
+  });
+
+  it('the client going away stops the run', async () => {
+    let aborted!: () => void;
+    const turnAborted = new Promise<void>((resolve) => { aborted = resolve; });
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void; signal: AbortSignal }) => {
+      request.onTextChunk('Working');
+      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
+      aborted();
+      return ANSWER('Working');
+    });
+    const app = await buildApp();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = app.server.address() as { port: number };
+    const controller = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${port}/api/client/v1/a2a/support-bot`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'message/stream', params: { message: { parts: [{ kind: 'text', text: 'Hi' }] } } }),
+      signal: controller.signal,
+    });
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('"kind":"task"');
+    controller.abort();
+    await turnAborted;
+    await vi.waitFor(() => expect(requestAgentRunCancel).toHaveBeenCalledWith('run-1', 'tenant-1', 'proj-1'));
+    await vi.waitFor(() => expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'canceled' })));
+    await app.close();
+  });
+});
+
+describe('message/send — configuration.blocking', () => {
+  const send = async (configuration?: Record<string, unknown>) => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Later' }] }, ...(configuration ? { configuration } : {}) } },
+    });
+    return parseJsonBody<{ result?: Record<string, any>; error?: { code: number } }>(res.body);
+  };
+
+  beforeEach(() => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+  });
+
+  it('blocking:false queues the run and answers with its submitted task; tasks/get follows it', async () => {
+    const queued = { _id: 'run-7', mode: 'background', status: 'queued', agentKey: 'support-bot', conversationId: 'conv-1', projectId: 'proj-1', tenantId: 'tenant-1' };
+    queuedStart.run = vi.fn(async () => ({ kind: 'accepted', run: queued }));
+    const body = await send({ blocking: false });
+    expect(body.result).toMatchObject({ kind: 'task', id: 'run_run-7', contextId: 'conv-1', status: { state: 'submitted' } });
+    expect(queuedStart.run).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'a2a', usePublished: true, userMessage: 'Later', conversationId: 'conv-1', execution: { kind: 'queued' },
+    }));
+    expect(executeAgentChat).not.toHaveBeenCalled();
+
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    getAgentRunById.mockResolvedValue({ ...queued, status: 'running' });
+    const app = await buildApp();
+    const polled = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 2, method: 'tasks/get', params: { id: 'run_run-7' } },
+    });
+    expect(parseJsonBody<{ result: Record<string, any> }>(polled.body).result).toMatchObject({ id: 'run_run-7', status: { state: 'working' } });
+    getAgentRunById.mockResolvedValue({ ...queued, status: 'succeeded', result: { output: [{ type: 'message', content: [{ text: 'Done' }] }] } });
+    const done = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 2, method: 'tasks/get', params: { id: 'run_run-7' } },
+    });
+    expect(parseJsonBody<{ result: Record<string, any> }>(done.body).result).toMatchObject({ status: { state: 'completed' }, artifacts: [{ parts: [{ text: 'Done' }] }] });
+  });
+
+  it('blocking:true (and no configuration) waits for the answer', async () => {
+    mockFn(executeAgentChat).mockResolvedValue({ output: [], _conversation_messages: [{}, {}] });
+    for (const configuration of [undefined, { blocking: true }]) {
+      const body = await send(configuration);
+      expect(body.result).toMatchObject({ status: { state: 'completed' } });
+    }
+    expect(createAgentRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('a queued turn over a spent tenant limit is refused before a session is created', async () => {
+    queuedStart.run = vi.fn();
+    mockFn(getDatabase).mockResolvedValue(createMockDb({
+      runWithTenant, findAgentByKey: vi.fn(async () => ({ key: 'support-bot', config: { modelKey: 'm1' } })),
+    } as never));
+    // The spend gate itself is tested with the agent spend limits; here only that the A2A surface asks it first.
+    vi.spyOn(spendLimits, 'assertQueuedTurnSpendAllowed').mockRejectedValueOnce(new Error('limit reached'));
+    const body = await send({ blocking: false });
+    expect(body.error?.code).toBe(-32603);
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(queuedStart.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('message/send — file parts', () => {
+  const FILE_AGENT = { ...EXPOSED_AGENT, config: { attachments: { enabled: true, bucketKey: 'files' } } };
+  const send = async (parts: unknown[], agent: Record<string, unknown> = FILE_AGENT) => {
+    mockFn(getAgentByKey).mockResolvedValue(agent);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { role: 'user', parts } } },
+    });
+    return parseJsonBody<{ result?: Record<string, any>; error?: { code: number; message: string; data?: Record<string, any> } }>(res.body);
+  };
+
+  beforeEach(() => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    mockFn(executeAgentChat).mockResolvedValue({ output: [], _conversation_messages: [{}, {}] });
+    files.upload.mockResolvedValue({ id: 'file-1' });
+  });
+
+  it('inline bytes become a file of the session, and the turn attaches it', async () => {
+    const body = await send([
+      { kind: 'text', text: 'Read this' },
+      { kind: 'file', file: { bytes: Buffer.from('hello').toString('base64'), name: 'a.txt', mimeType: 'text/plain' } },
+    ]);
+    expect(body.error).toBeUndefined();
+    expect(files.upload).toHaveBeenCalledWith(expect.objectContaining({
+      fileName: 'a.txt',
+      contentType: 'text/plain',
+      data: Buffer.from('hello').toString('base64'),
+      conversation: { _id: 'conv-1', agentKey: 'support-bot' },
+      actor: { userId: 'user-1', licenseType: 'STARTER', tokenId: 'tok-1' },
+    }));
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: 'Read this', attachments: ['file-1'] });
+  });
+
+  it('a uri is fetched through the outbound guard and stored; a message of only a file is a turn', async () => {
+    files.fetch.mockResolvedValue(new Response('%PDF-1.4', { headers: { 'content-type': 'application/pdf' } }));
+    const body = await send([{ kind: 'file', file: { uri: 'https://files.example.com/docs/report.pdf' } }]);
+    expect(body.error).toBeUndefined();
+    expect(files.fetch).toHaveBeenCalledWith('https://files.example.com/docs/report.pdf', { method: 'GET' });
+    expect(files.upload).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report.pdf', contentType: 'application/pdf' }));
+    expect(Buffer.isBuffer(files.upload.mock.calls[0][0].data)).toBe(true);
+    expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: '', attachments: ['file-1'] });
+  });
+
+  it('a uri that is not http(s) is invalid params; nothing is fetched or run', async () => {
+    const body = await send([{ kind: 'file', file: { uri: 'file:///etc/passwd' } }]);
+    expect(body.error).toMatchObject({ code: -32602, data: { code: 'invalid_file_url' } });
+    expect(files.fetch).not.toHaveBeenCalled();
+    expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+
+  it('an agent that takes no files refuses them before a session is created', async () => {
+    const body = await send([{ kind: 'text', text: 'Hi' }, { kind: 'file', file: { bytes: 'aGk=', name: 'a.txt' } }], EXPOSED_AGENT);
+    expect(body.error).toMatchObject({ code: -32602, data: { code: 'attachments_disabled' } });
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+
+  it('a file the agent limits refuse is invalid params with the limit named', async () => {
+    files.upload.mockRejectedValue(new AgentAttachmentError(413, 'file_too_large', 'The file exceeds the 20 MB limit of this agent.'));
+    const body = await send([{ kind: 'file', file: { bytes: 'aGk=', name: 'big.bin' } }]);
+    expect(body.error).toMatchObject({ code: -32602, data: { code: 'file_too_large' } });
+    expect(executeAgentChat).not.toHaveBeenCalled();
   });
 });

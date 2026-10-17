@@ -194,6 +194,58 @@ describe('public message/send', () => {
   });
 });
 
+describe('public message/send and message/stream — blocking and streaming', () => {
+  const REPLY = {
+    output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hi there' }] }],
+    _conversation_messages: [{ role: 'user' }, { role: 'assistant' }],
+  };
+  const call = async (method: string, params: Record<string, unknown>) => {
+    const app = await buildApp();
+    return app.inject({
+      method: 'POST',
+      url: `/api/public/a2a/tenant-1/${SLUG}`,
+      payload: { jsonrpc: '2.0', id: 3, method, params: { message: { role: 'user', parts: [{ kind: 'text', text: 'Hello' }] }, ...params } },
+    });
+  };
+
+  beforeEach(() => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    mockFn(executeAgentChat).mockResolvedValue(REPLY);
+  });
+
+  it('stays blocking: configuration.blocking false does not queue a public caller\'s run', async () => {
+    const res = await call('message/send', { configuration: { blocking: false } });
+    const body = parseJsonBody<{ result: { status: { state: string }; artifacts: Array<{ parts: Array<{ text: string }> }> } }>(res.body);
+    expect(body.result.status.state).toBe('completed');
+    expect(body.result.artifacts[0].parts[0].text).toBe('Hi there');
+    expect(agentRunReservation.create).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'a2a' }));
+  });
+
+  it('streams the turn as events, attributed to the public sentinel user', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('Hi there');
+      return REPLY;
+    });
+    const res = await call('message/stream', {});
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const kinds = res.body.split('\n\n').filter((chunk) => chunk.startsWith('data: ')).map((chunk) => {
+      const result = JSON.parse(chunk.slice(6)).result;
+      return result.kind === 'status-update' ? `${result.status.state}${result.final ? ':final' : ''}` : result.kind;
+    });
+    expect(kinds).toEqual(['task', 'working', 'artifact-update', 'artifact-update', 'completed:final']);
+    expect(mockFn(executeAgentChat).mock.calls[0][0].userId).toBe('a2a-public');
+  });
+
+  it('advertises streaming and the text and JSON modes on its card', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: `/api/public/a2a/tenant-1/${SLUG}/.well-known/agent-card.json` });
+    const card = parseJsonBody<{ capabilities: { streaming: boolean }; defaultInputModes: string[]; defaultOutputModes: string[] }>(res.body);
+    expect(card.capabilities.streaming).toBe(true);
+    expect(card.defaultInputModes).toEqual(['text/plain', 'application/json']);
+    expect(card.defaultOutputModes).toEqual(['text/plain', 'application/json']);
+  });
+});
+
 describe('a2a metadata normalization (dashboard PATCH)', () => {
   it('mints a slug on first exposure and coerces fields', () => {
     const normalized = normalizeA2aMetadataUpdate({ enabled: true, accessMode: 'public' }, null);
