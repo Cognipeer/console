@@ -3,7 +3,7 @@
  *
  * One module for everything about them: the save-time check of the declaration,
  * the validation of the values a request supplies (every entry point: runs API,
- * Responses, chat completions, A2A, routines), the JSON Schema the client API
+ * Responses, chat completions, A2A, triggers), the JSON Schema the client API
  * publishes (`input_schema`), and how a turn delivers them to the model:
  *
  *   - as prompt variables `{{input.<name>}}` (the agent author's own prompt), and

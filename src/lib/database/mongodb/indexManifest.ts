@@ -99,16 +99,16 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   scheduler_claims: [
     { key: { expiresAt: 1 }, options: { name: 'idx_scheduler_claims_expiresAt' } },
   ],
-  // Agent routines: the APIs list by agent; the scheduler reads due ones tenant-wide.
-  agent_routines: [
+  // Agent triggers: the APIs list by agent; the scheduler reads due ones tenant-wide.
+  agent_triggers: [
     { key: { tenantId: 1, projectId: 1, agentKey: 1 }, options: { name: 'idx_tenant_project_agent' } },
     { key: { enabled: 1, nextFireAt: 1 }, options: { name: 'idx_enabled_nextFireAt' } },
-    // An incoming webhook finds its routine by the URL's hook id.
+    // An incoming webhook finds its trigger by the URL's hook id.
     { key: { 'webhook.hookId': 1 }, options: { name: 'idx_webhook_hookId' } },
   ],
-  // Webhook delivery log: listed per routine newest first; expiresAt serves the retention sweep.
-  agent_routine_deliveries: [
-    { key: { tenantId: 1, routineId: 1, receivedAt: -1 }, options: { name: 'idx_tenant_routine_receivedAt' } },
+  // Webhook delivery log: listed per trigger newest first; expiresAt serves the retention sweep.
+  agent_trigger_deliveries: [
+    { key: { tenantId: 1, triggerId: 1, receivedAt: -1 }, options: { name: 'idx_tenant_trigger_receivedAt' } },
     { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
   ],
   browser_session_events: [
@@ -149,7 +149,7 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, options: { name: 'idx_tenant_status_class_createdAt' } },
     // The scheduled-run promotion sweep.
     { key: { status: 1, notBefore: 1 }, options: { name: 'idx_status_notBefore' } },
-    { key: { tenantId: 1, routineId: 1, createdAt: -1 }, options: { name: 'idx_tenant_routine_createdAt' } },
+    { key: { tenantId: 1, triggerId: 1, createdAt: -1 }, options: { name: 'idx_tenant_trigger_createdAt' } },
   ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },

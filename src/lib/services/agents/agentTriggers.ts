@@ -1,24 +1,24 @@
 /**
- * Agent routines — a saved way of starting an agent: a prompt (+ inputs) and a
+ * Agent triggers — a saved way of starting an agent: a prompt (+ inputs) and a
  * `type` with that type's settings object (a cron `schedule` in a timezone,
  * `once`, `manual`, or an incoming `webhook`). Every fire is an ordinary
- * AgentRun (`channel: 'routine'`, `routineId`), started through `startAgentRun`
- * like any API run, so a routine's history is the runs list filtered by
- * routine and its runs get the queue, caps, callbacks and webhooks every other
+ * AgentRun (`channel: 'trigger'`, `triggerId`), started through `startAgentRun`
+ * like any API run, so a trigger's history is the runs list filtered by
+ * trigger and its runs get the queue, caps, callbacks and webhooks every other
  * run gets.
  *
- * `fireRoutine` is the one way a routine starts a run — the scheduler tick
- * (`agentRoutineScheduler.ts`), Run now, and every other type.
+ * `fireTrigger` is the one way a trigger starts a run — the scheduler tick
+ * (`agentTriggerScheduler.ts`), Run now, and every other type.
  */
 
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
 import type {
   AgentResponseFormat,
-  AgentRoutineTypeSettings,
+  AgentTriggerTypeSettings,
   IAgentConfig,
-  IAgentRoutine,
-  IAgentRoutineBase,
+  IAgentTrigger,
+  IAgentTriggerBase,
   IAgentRun,
 } from '@/lib/database';
 import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
@@ -28,36 +28,37 @@ import { resolveRunInputs, type InputIssue } from './agentInputs';
 import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentRunService';
 import { createConversation, resolveAgentConfig } from './agentService';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
-import { initialNextFireAt } from './routineSchedule';
-import { serializeWebhook } from './routineWebhookTrigger';
+import { initialNextFireAt } from './agentTriggerSchedule';
+import { serializeWebhook } from './agentTriggerWebhookIntake';
 
-const logger = createLogger('agent-routine');
+const logger = createLogger('agent-trigger');
 
-/** The run owner of every routine fire: a synthetic actor, never a person (no token, no delegation). */
-export const ROUTINE_ACTOR_PREFIX = 'system:routine:';
+/** The run owner of every trigger fire: a synthetic actor, never a person (no token, no delegation). */
+export const TRIGGER_ACTOR_PREFIX = 'system:trigger:';
 
-export function routineActorId(routineId: string): string {
-  return `${ROUTINE_ACTOR_PREFIX}${routineId}`;
+export function triggerActorId(triggerId: string): string {
+  return `${TRIGGER_ACTOR_PREFIX}${triggerId}`;
 }
 
-/** What starts a fire (a request never does). */
-export type RoutineFireTrigger = Exclude<NonNullable<IAgentRun['trigger']>, 'request'>;
+/** What started a fire: the run's `trigger` field (a request never starts a fire). */
+export type TriggerFireSource = Exclude<NonNullable<IAgentRun['trigger']>, 'request'>;
 
-export interface RoutineTenant {
+export interface TriggerTenant {
   tenantId: string;
   tenantDbName: string;
   licenseType?: string;
 }
 
-export interface FireRoutineInput {
-  trigger: RoutineFireTrigger;
+export interface FireTriggerInput {
+  /** What started this fire: the run's `trigger` and the `trigger` of the `trigger.fired` / `trigger.failed` events. */
+  trigger: TriggerFireSource;
   /** The final user message. */
   message: string;
   /** Already validated against the agent's declared inputs. */
   inputs?: Record<string, unknown> | null;
   /** The message / inputs came from an external payload: inputs stay out of the system prompt. */
   externalContent?: boolean;
-  /** Merged over the routine's metadata (≤ 16 keys together). */
+  /** Merged over the trigger's metadata (≤ 16 keys together). */
   metadata?: Record<string, string> | null;
   idempotencyKey?: string;
   /** The slot this fire is for (the scheduler's); default now. */
@@ -66,24 +67,24 @@ export interface FireRoutineInput {
   event?: string;
   /**
    * Who the fire counts against (spend limits, run quota, run caps): the
-   * person and token that pressed Run now. Default: the routine's accountable
-   * person (`routineAccountableUserId`).
+   * person and token that pressed Run now. Default: the trigger's accountable
+   * person (`triggerAccountableUserId`).
    */
   principal?: { userId: string; apiTokenId?: string };
 }
 
 /**
- * The person a routine's own fires (schedule, once, webhook) count against:
+ * The person a trigger's own fires (schedule, once, webhook) count against:
  * whoever last changed it, else whoever created it. The run itself stays owned
- * by the routine's synthetic actor.
+ * by the trigger's synthetic actor.
  */
-export function routineAccountableUserId(routine: Pick<IAgentRoutine, 'createdBy' | 'updatedBy'>): string {
-  return routine.updatedBy || routine.createdBy;
+export function triggerAccountableUserId(trigger: Pick<IAgentTrigger, 'createdBy' | 'updatedBy'>): string {
+  return trigger.updatedBy || trigger.createdBy;
 }
 
-export type FireRoutineResult =
+export type FireTriggerResult =
   | { kind: 'accepted'; run: IAgentRun }
-  /** The idempotency key already started a run of this routine (pre-check, or the engine's replay). */
+  /** The idempotency key already started a run of this trigger (pre-check, or the engine's replay). */
   | { kind: 'duplicate'; run?: IAgentRun }
   | { kind: 'concurrency_limit' | 'spend_limit' | 'quota_exceeded'; reason: string; retryAfterSeconds: number }
   | { kind: 'failed'; reason: string };
@@ -92,19 +93,19 @@ const RUN_METADATA_MAX_KEYS = 16;
 
 // ── Catalog events ───────────────────────────────────────────────────────
 
-/** `routine.failed` is sent at most once per routine and reason per hour (a schedule over a limit refuses every tick). */
+/** `trigger.failed` is sent at most once per trigger and reason per hour (a schedule over a limit refuses every tick). */
 const FAILED_EVENT_THROTTLE_MS = 60 * 60 * 1000;
 const lastFailedEventAt = new Map<string, number>();
 
-async function publishRoutineEvent(
-  routine: IAgentRoutine,
-  tenant: RoutineTenant,
-  type: 'routine.fired' | 'routine.failed',
-  data: { trigger: RoutineFireTrigger; runId?: string; event?: string; reason?: string },
+async function publishTriggerEvent(
+  trigger: IAgentTrigger,
+  tenant: TriggerTenant,
+  type: 'trigger.fired' | 'trigger.failed',
+  data: { trigger: TriggerFireSource; runId?: string; event?: string; reason?: string },
 ): Promise<void> {
-  const routineId = String(routine._id);
-  if (type === 'routine.failed') {
-    const key = `${tenant.tenantId}:${routineId}:${data.reason ?? ''}`;
+  const triggerId = String(trigger._id);
+  if (type === 'trigger.failed') {
+    const key = `${tenant.tenantId}:${triggerId}:${data.reason ?? ''}`;
     const last = lastFailedEventAt.get(key);
     if (last !== undefined && Date.now() - last < FAILED_EVENT_THROTTLE_MS) return;
     lastFailedEventAt.set(key, Date.now());
@@ -113,66 +114,66 @@ async function publishRoutineEvent(
   await publishWebhookEvent({
     tenantDbName: tenant.tenantDbName,
     tenantId: tenant.tenantId,
-    projectId: routine.projectId,
+    projectId: trigger.projectId,
     type,
     data: {
-      routineId,
-      agentKey: routine.agentKey,
+      triggerId,
+      agentKey: trigger.agentKey,
       trigger: data.trigger,
       ...(data.runId ? { runId: data.runId } : {}),
       ...(data.event ? { event: data.event } : {}),
       ...(data.reason ? { reason: data.reason } : {}),
     },
   }).catch((error) => {
-    logger.warn('Could not publish a routine event', { routineId, type, error: error instanceof Error ? error.message : String(error) });
+    logger.warn('Could not publish a trigger event', { triggerId, type, error: error instanceof Error ? error.message : String(error) });
   });
 }
 
 /** Test seam: forget which failure events were sent. */
-export function resetRoutineEventThrottle(): void {
+export function resetTriggerEventThrottle(): void {
   lastFailedEventAt.clear();
 }
 
 // ── Fire ─────────────────────────────────────────────────────────────────
 
 /**
- * Starts one run of a routine. Never throws. In order (§2.4a): the idempotency
- * pre-check (a run found counts only when it is this routine's), the spend
- * pre-check, a new session (source `routine`, the agent's own budget), the run
- * (queued; owned by the routine's synthetic actor; unattended; counted against
+ * Starts one run of a trigger. Never throws. In order (§2.4a): the idempotency
+ * pre-check (a run found counts only when it is this trigger's), the spend
+ * pre-check, a new session (source `trigger`, the agent's own budget), the run
+ * (queued; owned by the trigger's synthetic actor; unattended; counted against
  * the accountable principal's spend and quota policies), the session
  * removed again for anything but an accepted run, the outcome recorded on the
- * routine (accepted / failed only — the newest fire wins), the catalog event.
+ * trigger (accepted / failed only — the newest fire wins), the catalog event.
  */
-export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant, input: FireRoutineInput): Promise<FireRoutineResult> {
-  const routineId = String(routine._id);
+export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant, input: FireTriggerInput): Promise<FireTriggerResult> {
+  const triggerId = String(trigger._id);
   const fireAt = input.fireAt ?? new Date();
-  const userId = routineActorId(routineId);
-  const principal = input.principal ?? { userId: routineAccountableUserId(routine) };
-  const scope = { tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, projectId: routine.projectId };
-  let result: FireRoutineResult;
+  const userId = triggerActorId(triggerId);
+  const principal = input.principal ?? { userId: triggerAccountableUserId(trigger) };
+  const scope = { tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, projectId: trigger.projectId };
+  let result: FireTriggerResult;
   try {
-    result = await runWithTenantScope(tenant.tenantDbName, async (db): Promise<FireRoutineResult> => {
+    result = await runWithTenantScope(tenant.tenantDbName, async (db): Promise<FireTriggerResult> => {
       // The session made for this fire, removed again when no run starts on it.
       let conversationId: string | null = null;
-      const outcome = await (async (): Promise<FireRoutineResult> => {
+      const outcome = await (async (): Promise<FireTriggerResult> => {
         if (input.idempotencyKey) {
-          const existing = await db.getAgentRunByIdempotencyKey(tenant.tenantId, routine.projectId, input.idempotencyKey);
+          const existing = await db.getAgentRunByIdempotencyKey(tenant.tenantId, trigger.projectId, input.idempotencyKey);
           if (existing) {
-            return existing.routineId === routineId ? { kind: 'duplicate', run: existing } : { kind: 'failed', reason: 'idempotency key in use' };
+            return existing.triggerId === triggerId ? { kind: 'duplicate', run: existing } : { kind: 'failed', reason: 'idempotency key in use' };
           }
         }
 
-        const agent = await db.findAgentByKey(routine.agentKey, routine.projectId);
+        const agent = await db.findAgentByKey(trigger.agentKey, trigger.projectId);
         if (!agent || agent.status !== 'active') return { kind: 'failed', reason: 'agent is not active' };
 
-        const metadata = { ...(routine.metadata ?? {}), ...(input.metadata ?? {}) };
+        const metadata = { ...(trigger.metadata ?? {}), ...(input.metadata ?? {}) };
         if (Object.keys(metadata).length > RUN_METADATA_MAX_KEYS) {
           return { kind: 'failed', reason: `metadata can hold at most ${RUN_METADATA_MAX_KEYS} keys` };
         }
 
         try {
-          await assertQueuedTurnSpendAllowed({ ...scope, agentKey: routine.agentKey, userId: principal.userId });
+          await assertQueuedTurnSpendAllowed({ ...scope, agentKey: trigger.agentKey, userId: principal.userId });
         } catch (error) {
           if (error instanceof AgentSpendLimitError) return { kind: 'spend_limit', reason: 'spend limit reached', retryAfterSeconds: 3600 };
           throw error;
@@ -181,34 +182,34 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
         const conversation = await createConversation(
           tenant.tenantDbName,
           tenant.tenantId,
-          routine.projectId,
+          trigger.projectId,
           userId,
-          routine.agentKey,
-          `${routine.name} · ${fireAt.toISOString().slice(0, 16).replace('T', ' ')}`,
-          { source: 'routine', routineId, trigger: input.trigger },
+          trigger.agentKey,
+          `${trigger.name} · ${fireAt.toISOString().slice(0, 16).replace('T', ' ')}`,
+          { source: 'trigger', triggerId, trigger: input.trigger },
         );
         conversationId = String(conversation._id);
 
-        const callback = routine.callback?.url
-          ? { url: routine.callback.url, secret: openAgentCallbackSecret({ secretSealed: routine.callback.secretSealed ?? undefined }) }
+        const callback = trigger.callback?.url
+          ? { url: trigger.callback.url, secret: openAgentCallbackSecret({ secretSealed: trigger.callback.secretSealed ?? undefined }) }
           : agentDefaultCallback(agent.config);
         try {
           const started = await startAgentRun({
             ...scope,
-            agentKey: routine.agentKey,
+            agentKey: trigger.agentKey,
             conversationId,
             userMessage: input.message,
             userId,
             actorType: 'system',
             accountable: principal,
-            ...(routine.version != null ? { version: routine.version } : {}),
-            usePublished: routine.version == null,
-            responseFormat: routine.responseFormat ?? null,
+            ...(trigger.version != null ? { version: trigger.version } : {}),
+            usePublished: trigger.version == null,
+            responseFormat: trigger.responseFormat ?? null,
             inputs: input.inputs ?? null,
-            runClass: routine.runClass ?? 'default',
-            channel: 'routine',
+            runClass: trigger.runClass ?? 'default',
+            channel: 'trigger',
             metadata: Object.keys(metadata).length > 0 ? metadata : null,
-            routineId,
+            triggerId,
             trigger: input.trigger,
             unattended: true,
             ...(input.externalContent ? { externalContent: true } : {}),
@@ -229,7 +230,7 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
             case 'accepted':
               return { kind: 'accepted', run: started.run };
             case 'replay':
-              return started.run.routineId === routineId ? { kind: 'duplicate', run: started.run } : { kind: 'failed', reason: 'idempotency key in use' };
+              return started.run.triggerId === triggerId ? { kind: 'duplicate', run: started.run } : { kind: 'failed', reason: 'idempotency key in use' };
             case 'idempotency_conflict':
               return { kind: 'duplicate' };
             case 'concurrency_limit':
@@ -241,20 +242,20 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
           if (error instanceof AgentQuotaExceededError) return { kind: 'quota_exceeded', reason: 'quota exceeded', retryAfterSeconds: 60 };
           throw error;
         }
-      })().catch((error: unknown): FireRoutineResult => {
-        logger.error('Routine fire failed', { routineId, error: error instanceof Error ? error.message : String(error) });
+      })().catch((error: unknown): FireTriggerResult => {
+        logger.error('Trigger fire failed', { triggerId, error: error instanceof Error ? error.message : String(error) });
         return { kind: 'failed', reason: 'internal error' };
       });
 
       if (outcome.kind !== 'accepted' && conversationId) {
         await db.deleteAgentConversation(conversationId).catch((error) => {
-          logger.warn('Could not remove the session of a routine fire that started no run', {
-            routineId, conversationId, error: error instanceof Error ? error.message : String(error),
+          logger.warn('Could not remove the session of a trigger fire that started no run', {
+            triggerId, conversationId, error: error instanceof Error ? error.message : String(error),
           });
         });
       }
       if (outcome.kind === 'accepted' || outcome.kind === 'failed') {
-        await db.setRoutineFireResult(routineId, outcome.kind === 'accepted'
+        await db.setTriggerFireResult(triggerId, outcome.kind === 'accepted'
           ? { fireAt, status: 'started', runId: String(outcome.run._id) }
           : { fireAt, status: 'failed', error: outcome.reason });
       }
@@ -262,40 +263,40 @@ export async function fireRoutine(routine: IAgentRoutine, tenant: RoutineTenant,
     });
   } catch (error) {
     // The tenant scope itself, or recording the result, failed.
-    logger.error('Routine fire failed', { routineId, error: error instanceof Error ? error.message : String(error) });
+    logger.error('Trigger fire failed', { triggerId, error: error instanceof Error ? error.message : String(error) });
     result = { kind: 'failed', reason: 'internal error' };
   }
 
   if (result.kind === 'accepted') {
-    await publishRoutineEvent(routine, tenant, 'routine.fired', { trigger: input.trigger, runId: publicAgentRunId(result.run), event: input.event });
+    await publishTriggerEvent(trigger, tenant, 'trigger.fired', { trigger: input.trigger, runId: publicAgentRunId(result.run), event: input.event });
   } else if (result.kind !== 'duplicate') {
-    await publishRoutineEvent(routine, tenant, 'routine.failed', { trigger: input.trigger, event: input.event, reason: result.reason });
+    await publishTriggerEvent(trigger, tenant, 'trigger.failed', { trigger: input.trigger, event: input.event, reason: result.reason });
   }
   return result;
 }
 
 // ── Inputs at fire time ──────────────────────────────────────────────────
 
-/** The config a routine's runs execute: its pinned version, else the published one (the draft while none is). */
-export async function routineAgentConfig(tenantDbName: string, routine: Pick<IAgentRoutine, 'agentKey' | 'projectId' | 'version'>): Promise<IAgentConfig | null> {
+/** The config a trigger's runs execute: its pinned version, else the published one (the draft while none is). */
+export async function triggerAgentConfig(tenantDbName: string, trigger: Pick<IAgentTrigger, 'agentKey' | 'projectId' | 'version'>): Promise<IAgentConfig | null> {
   try {
-    return (await resolveAgentConfig(tenantDbName, routine.agentKey, routine.projectId, routine.version ?? undefined)).config;
+    return (await resolveAgentConfig(tenantDbName, trigger.agentKey, trigger.projectId, trigger.version ?? undefined)).config;
   } catch {
     return null;
   }
 }
 
 /**
- * The routine's inputs (+ a Run now's overrides), checked against the inputs
+ * The trigger's inputs (+ a Run now's overrides), checked against the inputs
  * the agent declares NOW — the agent may have been republished since the
- * routine was saved. Defaults applied.
+ * trigger was saved. Defaults applied.
  */
-export function resolveRoutineInputs(
+export function resolveTriggerInputs(
   config: Pick<IAgentConfig, 'inputs'> | null,
-  routine: Pick<IAgentRoutine, 'inputs'>,
+  trigger: Pick<IAgentTrigger, 'inputs'>,
   overrides?: Record<string, unknown> | null,
 ): { ok: true; inputs: Record<string, unknown> | null } | { ok: false; errors: InputIssue[]; reason: string } {
-  const merged = { ...(routine.inputs ?? {}), ...(overrides ?? {}) };
+  const merged = { ...(trigger.inputs ?? {}), ...(overrides ?? {}) };
   const resolved = resolveRunInputs(config?.inputs, Object.keys(merged).length > 0 ? merged : null);
   if (resolved.ok) return resolved;
   const first = resolved.errors[0];
@@ -304,8 +305,8 @@ export function resolveRoutineInputs(
 
 // ── Store ────────────────────────────────────────────────────────────────
 
-/** The fields of a write that do not depend on the routine's type. */
-export type RoutineFields = Partial<Pick<IAgentRoutineBase,
+/** The fields of a write that do not depend on the trigger's type. */
+export type TriggerFields = Partial<Pick<IAgentTriggerBase,
   'name' | 'description' | 'enabled' | 'prompt' | 'inputs' | 'version' | 'runClass' | 'metadata' | 'callback' | 'responseFormat'>>;
 
 /**
@@ -313,13 +314,13 @@ export type RoutineFields = Partial<Pick<IAgentRoutineBase,
  * object (the other types' objects are dropped), so changing the type replaces
  * them as a whole.
  */
-export type RoutineWrite = RoutineFields & (AgentRoutineTypeSettings | { type?: undefined });
+export type TriggerWrite = TriggerFields & (AgentTriggerTypeSettings | { type?: undefined });
 
-/** A write that makes a new routine: it has a name, a prompt and a type with its settings. */
-export type NewRoutineWrite = RoutineWrite & Pick<IAgentRoutineBase, 'name' | 'prompt'> & AgentRoutineTypeSettings;
+/** A write that makes a new trigger: it has a name, a prompt and a type with its settings. */
+export type NewTriggerWrite = TriggerWrite & Pick<IAgentTriggerBase, 'name' | 'prompt'> & AgentTriggerTypeSettings;
 
-/** `type` and its settings object, without any other field of a write or a routine. */
-function typeSettingsOf(source: AgentRoutineTypeSettings): AgentRoutineTypeSettings {
+/** `type` and its settings object, without any other field of a write or a trigger. */
+function typeSettingsOf(source: AgentTriggerTypeSettings): AgentTriggerTypeSettings {
   switch (source.type) {
     case 'schedule': return { type: 'schedule', schedule: source.schedule };
     case 'once': return { type: 'once', once: source.once };
@@ -328,34 +329,34 @@ function typeSettingsOf(source: AgentRoutineTypeSettings): AgentRoutineTypeSetti
   }
 }
 
-export interface RoutineScope {
+export interface TriggerScope {
   tenantDbName: string;
   tenantId: string;
   projectId: string;
 }
 
-export function listAgentRoutines(scope: RoutineScope, agentKey?: string): Promise<IAgentRoutine[]> {
-  return runWithTenantScope(scope.tenantDbName, (db) => db.listAgentRoutines({
+export function listAgentTriggers(scope: TriggerScope, agentKey?: string): Promise<IAgentTrigger[]> {
+  return runWithTenantScope(scope.tenantDbName, (db) => db.listAgentTriggers({
     tenantId: scope.tenantId, projectId: scope.projectId, ...(agentKey ? { agentKey } : {}),
   }));
 }
 
-/** The routine `routineId` names, of this agent in this project, or null. */
-export async function getAgentRoutine(scope: RoutineScope, agentKey: string, routineId: string): Promise<IAgentRoutine | null> {
-  const routine = await runWithTenantScope(scope.tenantDbName, (db) => db.getAgentRoutine(routineId, scope.tenantId, scope.projectId));
-  return routine && routine.agentKey === agentKey ? routine : null;
+/** The trigger `triggerId` names, of this agent in this project, or null. */
+export async function getAgentTrigger(scope: TriggerScope, agentKey: string, triggerId: string): Promise<IAgentTrigger | null> {
+  const trigger = await runWithTenantScope(scope.tenantDbName, (db) => db.getAgentTrigger(triggerId, scope.tenantId, scope.projectId));
+  return trigger && trigger.agentKey === agentKey ? trigger : null;
 }
 
-export function createAgentRoutine(
-  scope: RoutineScope,
+export function createAgentTrigger(
+  scope: TriggerScope,
   agentKey: string,
-  write: NewRoutineWrite,
+  write: NewTriggerWrite,
   userId: string,
   now = new Date(),
-): Promise<IAgentRoutine> {
+): Promise<IAgentTrigger> {
   const enabled = write.enabled ?? true;
   const typeSettings = typeSettingsOf(write);
-  return runWithTenantScope(scope.tenantDbName, (db) => db.createAgentRoutine({
+  return runWithTenantScope(scope.tenantDbName, (db) => db.createAgentTrigger({
     tenantId: scope.tenantId,
     projectId: scope.projectId,
     agentKey,
@@ -376,13 +377,13 @@ export function createAgentRoutine(
 }
 
 /** Saves a change; a new type (with its settings) or an enable / disable recomputes `nextFireAt` from now. */
-export function updateAgentRoutine(
-  scope: RoutineScope,
-  existing: IAgentRoutine,
-  write: RoutineWrite,
+export function updateAgentTrigger(
+  scope: TriggerScope,
+  existing: IAgentTrigger,
+  write: TriggerWrite,
   userId: string,
   now = new Date(),
-): Promise<IAgentRoutine | null> {
+): Promise<IAgentTrigger | null> {
   const timing = write.type !== undefined || write.enabled !== undefined
     ? {
       nextFireAt: initialNextFireAt({
@@ -392,16 +393,16 @@ export function updateAgentRoutine(
       }, now),
     }
     : {};
-  return runWithTenantScope(scope.tenantDbName, (db) => db.updateAgentRoutine(
+  return runWithTenantScope(scope.tenantDbName, (db) => db.updateAgentTrigger(
     String(existing._id), scope.tenantId, scope.projectId, { ...write, ...timing, updatedBy: userId },
   ));
 }
 
-/** Removes the routine and its webhook delivery log. */
-export function deleteAgentRoutine(scope: RoutineScope, routine: IAgentRoutine): Promise<boolean> {
+/** Removes the trigger and its webhook delivery log. */
+export function deleteAgentTrigger(scope: TriggerScope, trigger: IAgentTrigger): Promise<boolean> {
   return runWithTenantScope(scope.tenantDbName, async (db) => {
-    const deleted = await db.deleteAgentRoutine(String(routine._id), scope.tenantId, scope.projectId);
-    if (deleted) await db.deleteAgentRoutineDeliveries(String(routine._id));
+    const deleted = await db.deleteAgentTrigger(String(trigger._id), scope.tenantId, scope.projectId);
+    if (deleted) await db.deleteAgentTriggerDeliveries(String(trigger._id));
     return deleted;
   });
 }
@@ -411,11 +412,11 @@ export function deleteAgentRoutine(scope: RoutineScope, routine: IAgentRoutine):
 const toEpochSeconds = (value: Date | string | null | undefined) => (value ? Math.floor(new Date(value).getTime() / 1000) : null);
 
 /** `type` and the one settings object of that type (manual has none), as the API spells them. */
-function serializeTypeSettings(routine: IAgentRoutine) {
-  switch (routine.type) {
-    case 'schedule': return { type: 'schedule' as const, schedule: { cron: routine.schedule.cron, timezone: routine.schedule.timezone } };
-    case 'once': return { type: 'once' as const, once: { run_at: new Date(routine.once.runAt).toISOString() } };
-    case 'webhook': return { type: 'webhook' as const, webhook: serializeWebhook(routine.webhook, routine.tenantId) };
+function serializeTypeSettings(trigger: IAgentTrigger) {
+  switch (trigger.type) {
+    case 'schedule': return { type: 'schedule' as const, schedule: { cron: trigger.schedule.cron, timezone: trigger.schedule.timezone } };
+    case 'once': return { type: 'once' as const, once: { run_at: new Date(trigger.once.runAt).toISOString() } };
+    case 'webhook': return { type: 'webhook' as const, webhook: serializeWebhook(trigger.webhook, trigger.tenantId) };
     default: return { type: 'manual' as const };
   }
 }
@@ -434,29 +435,29 @@ export function serializeResponseFormat(format: AgentResponseFormat | null | und
   };
 }
 
-/** A routine as the client API and the dashboard return it — never a sealed callback or webhook secret. Only the settings object of its own type is present. */
-export function serializeAgentRoutine(routine: IAgentRoutine) {
+/** A trigger as the client API and the dashboard return it — never a sealed callback or webhook secret. Only the settings object of its own type is present. */
+export function serializeAgentTrigger(trigger: IAgentTrigger) {
   return {
-    id: String(routine._id),
-    object: 'agent.routine' as const,
-    agent: routine.agentKey,
-    name: routine.name,
-    description: routine.description ?? null,
-    enabled: routine.enabled,
-    ...serializeTypeSettings(routine),
-    prompt: routine.prompt,
-    inputs: routine.inputs ?? null,
-    version: routine.version ?? null,
-    class: routine.runClass ?? 'default',
-    metadata: routine.metadata ?? {},
-    callback: routine.callback?.url ? { url: routine.callback.url, signed: Boolean(routine.callback.secretSealed) } : null,
-    response_format: serializeResponseFormat(routine.responseFormat),
-    next_fire_at: toEpochSeconds(routine.nextFireAt),
-    last_fire_at: toEpochSeconds(routine.lastFireAt),
-    last_run_id: routine.lastRunId ? publicAgentRunId({ _id: routine.lastRunId }) : null,
-    last_status: routine.lastStatus ?? null,
-    last_error: routine.lastError ?? null,
-    created_at: toEpochSeconds(routine.createdAt),
-    updated_at: toEpochSeconds(routine.updatedAt),
+    id: String(trigger._id),
+    object: 'agent.trigger' as const,
+    agent: trigger.agentKey,
+    name: trigger.name,
+    description: trigger.description ?? null,
+    enabled: trigger.enabled,
+    ...serializeTypeSettings(trigger),
+    prompt: trigger.prompt,
+    inputs: trigger.inputs ?? null,
+    version: trigger.version ?? null,
+    class: trigger.runClass ?? 'default',
+    metadata: trigger.metadata ?? {},
+    callback: trigger.callback?.url ? { url: trigger.callback.url, signed: Boolean(trigger.callback.secretSealed) } : null,
+    response_format: serializeResponseFormat(trigger.responseFormat),
+    next_fire_at: toEpochSeconds(trigger.nextFireAt),
+    last_fire_at: toEpochSeconds(trigger.lastFireAt),
+    last_run_id: trigger.lastRunId ? publicAgentRunId({ _id: trigger.lastRunId }) : null,
+    last_status: trigger.lastStatus ?? null,
+    last_error: trigger.lastError ?? null,
+    created_at: toEpochSeconds(trigger.createdAt),
+    updated_at: toEpochSeconds(trigger.updatedAt),
   };
 }

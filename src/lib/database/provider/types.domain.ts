@@ -2784,7 +2784,7 @@ export interface IAgentConfig {
   sandbox?: IAgentSandboxConfig;
   /**
    * Callback for runs started without their own `callback_url` (every dialect,
-   * routines included). The secret is write-only: plaintext in, masked out;
+   * triggers included). The secret is write-only: plaintext in, masked out;
    * only the sealed form is stored.
    */
   callback?: IAgentCallbackConfig;
@@ -2803,7 +2803,7 @@ export interface IAgentConfig {
   };
   /**
    * Declared inputs of the agent (a form for a human, a validated object for an
-   * API / routine caller). Absent = the agent takes free text only. At most 32.
+   * API / trigger caller). Absent = the agent takes free text only. At most 32.
    */
   inputs?: IAgentInputField[];
   /**
@@ -2997,14 +2997,14 @@ export interface IAgentToolBinding {
 }
 
 /** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
-export type AgentRoutineWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+export type AgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
 
 /**
- * How a delivery proves it knows the routine's secret. The first three sign
+ * How a delivery proves it knows the trigger's secret. The first three sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
  */
-export type AgentRoutineWebhookAuth =
+export type AgentTriggerWebhookAuth =
   /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
   | 'github_signature'
   /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
@@ -3021,7 +3021,7 @@ export type AgentRoutineWebhookAuth =
   | 'header';
 
 /** One filter rule over the delivery (all rules must match). */
-export interface AgentRoutineWebhookFilterRule {
+export interface AgentTriggerWebhookFilterRule {
   /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
   path: string;
   op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
@@ -3029,14 +3029,14 @@ export interface AgentRoutineWebhookFilterRule {
 }
 
 /**
- * The settings of a `webhook` routine: each authenticated, matching delivery to
- * its URL fires the routine. Stored in the routine's `webhook` object.
+ * The settings of a `webhook` trigger: each authenticated, matching delivery to
+ * its URL fires the trigger. Stored in the trigger's `webhook` object.
  */
-export interface AgentRoutineWebhook {
-  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the routine stays a webhook one; never reused. */
+export interface AgentTriggerWebhook {
+  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentRoutineWebhookPreset;
-  auth: AgentRoutineWebhookAuth;
+  preset: AgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */
@@ -3051,53 +3051,53 @@ export interface AgentRoutineWebhook {
   /** Normalized event names to accept; empty / absent = every event. */
   events?: string[] | null;
   /** All must match (≤ 20). */
-  filter?: AgentRoutineWebhookFilterRule[] | null;
+  filter?: AgentTriggerWebhookFilterRule[] | null;
   /** Append the event payload (JSON) to the message. */
   includePayload: boolean;
 }
 
-/** The settings of a `schedule` routine: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
-export interface AgentRoutineSchedule {
+/** The settings of a `schedule` trigger: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
+export interface AgentTriggerSchedule {
   cron: string;
   timezone: string;
 }
 
-/** The settings of a `once` routine: one run at a fixed time. */
-export interface AgentRoutineOnce {
+/** The settings of a `once` trigger: one run at a fixed time. */
+export interface AgentTriggerOnce {
   runAt: Date;
 }
 
-/** What starts a routine's runs. */
-export type AgentRoutineType = 'schedule' | 'once' | 'manual' | 'webhook';
+/** What starts a trigger's runs. */
+export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook';
 
 /**
- * A routine's type and the ONE settings object named after it (`manual` has
+ * A trigger's type and the ONE settings object named after it (`manual` has
  * none): a union on `type`, the same shape the API shows and both stores keep.
  * The other types' objects are absent.
  */
-export type AgentRoutineTypeSettings =
-  | { type: 'schedule'; schedule: AgentRoutineSchedule }
-  | { type: 'once'; once: AgentRoutineOnce }
-  /** Only started on request (Run now, `POST …/routines/{id}/run`). */
+export type AgentTriggerTypeSettings =
+  | { type: 'schedule'; schedule: AgentTriggerSchedule }
+  | { type: 'once'; once: AgentTriggerOnce }
+  /** Only started on request (Run now, `POST …/triggers/{id}/run`). */
   | { type: 'manual' }
-  | { type: 'webhook'; webhook: AgentRoutineWebhook };
+  | { type: 'webhook'; webhook: AgentTriggerWebhook };
 
-export type AgentRoutineDeliveryOutcome =
+export type AgentTriggerDeliveryOutcome =
   'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
 
 /**
- * One request to a routine's webhook URL, as its delivery log keeps it: the
+ * One request to a trigger's webhook URL, as its delivery log keeps it: the
  * outcome and normalized ids only — never the payload, headers or a secret.
  */
-export interface IAgentRoutineDelivery {
+export interface IAgentTriggerDelivery {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
-  routineId: string;
+  triggerId: string;
   receivedAt: Date;
   /** `receivedAt` + 7 days; the reconciler's retention removes it after. */
   expiresAt: Date;
-  outcome: AgentRoutineDeliveryOutcome;
+  outcome: AgentTriggerDeliveryOutcome;
   httpStatus: number;
   event?: string | null;
   deliveryId?: string | null;
@@ -3107,8 +3107,8 @@ export interface IAgentRoutineDelivery {
   bytes: number;
 }
 
-/** The fields every routine has, whatever starts it (see `IAgentRoutine`). */
-export interface IAgentRoutineBase {
+/** The fields every trigger has, whatever starts it (see `IAgentTrigger`). */
+export interface IAgentTriggerBase {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
@@ -3127,7 +3127,7 @@ export interface IAgentRoutineBase {
   /** Where each run's result is POSTed; the secret is sealed and never serialized. */
   callback?: { url: string; secretSealed?: string | null } | null;
   responseFormat?: AgentResponseFormat | null;
-  /** The next due slot; null for manual and webhook routines, a finished once, or a disabled routine. */
+  /** The next due slot; null for manual and webhook triggers, a finished once, or a disabled trigger. */
   nextFireAt?: Date | null;
   lastFireAt?: Date | null;
   lastRunId?: string | null;
@@ -3140,23 +3140,23 @@ export interface IAgentRoutineBase {
 }
 
 /**
- * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
+ * A trigger: a saved way of starting an agent — a prompt (+ inputs) and a
  * `type` (`schedule`, `once`, `manual`, `webhook`) with that type's settings
- * object. Every fire is an ordinary AgentRun (`channel: 'routine'`,
- * `routineId`), so its history is the runs list filtered by routine.
+ * object. Every fire is an ordinary AgentRun (`channel: 'trigger'`,
+ * `triggerId`), so its history is the runs list filtered by trigger.
  */
-export type IAgentRoutine = IAgentRoutineBase & AgentRoutineTypeSettings;
+export type IAgentTrigger = IAgentTriggerBase & AgentTriggerTypeSettings;
 
-/** The routine of one type (`AgentRoutineOfType<'webhook'>` has `webhook`). */
-export type AgentRoutineOfType<T extends AgentRoutineType> = Extract<IAgentRoutine, { type: T }>;
+/** The trigger of one type (`AgentTriggerOfType<'webhook'>` has `webhook`). */
+export type AgentTriggerOfType<T extends AgentTriggerType> = Extract<IAgentTrigger, { type: T }>;
 
-/** A routine as `createAgentRoutine` takes it. */
-export type NewAgentRoutine = Omit<IAgentRoutineBase, '_id' | 'createdAt' | 'updatedAt'> & AgentRoutineTypeSettings;
+/** A trigger as `createAgentTrigger` takes it. */
+export type NewAgentTrigger = Omit<IAgentTriggerBase, '_id' | 'createdAt' | 'updatedAt'> & AgentTriggerTypeSettings;
 
-/** What `updateAgentRoutine` changes: a new `type` always comes with its settings object (the others are dropped). */
-export type AgentRoutinePatch =
-  & Partial<Omit<IAgentRoutineBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
-  & (AgentRoutineTypeSettings | { type?: undefined });
+/** What `updateAgentTrigger` changes: a new `type` always comes with its settings object (the others are dropped). */
+export type AgentTriggerPatch =
+  & Partial<Omit<IAgentTriggerBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
+  & (AgentTriggerTypeSettings | { type?: undefined });
 
 export interface IAgent {
   _id?: ObjectId | string;
@@ -4781,11 +4781,11 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */
-  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'routine' | null;
-  routineId?: string | null;
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | null;
+  triggerId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**
-   * No interactive user on the run (a routine fire): a gated tool follows the
+   * No interactive user on the run (a trigger fire): a gated tool follows the
    * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
    */
   unattended?: boolean;
@@ -4825,7 +4825,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   resumeApiTokenId?: string | null;
   /**
    * The principal whose spend and quota policies the run counts against when
-   * its owner is a synthetic actor (a routine fire): the routine's last
+   * its owner is a synthetic actor (a trigger fire): the trigger's last
    * updater (or creator), or the person and token that pressed Run now.
    */
   accountableUserId?: string | null;

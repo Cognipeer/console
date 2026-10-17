@@ -3,7 +3,7 @@
  * in-memory limiter (`rateLimiter.ts`) always, plus a Redis counter when
  * RATE_LIMIT_PROVIDER=redis. Without Redis (or while it cannot be reached) the
  * count is per node. Used by the public, unauthenticated endpoints (public MCP,
- * incoming routine webhooks), which key their counters on stored record ids.
+ * incoming trigger webhooks), which key their counters on stored record ids.
  */
 
 import { getCache } from '@/lib/core/cache';

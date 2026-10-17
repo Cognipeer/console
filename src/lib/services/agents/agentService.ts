@@ -2712,11 +2712,11 @@ export async function deleteAgentRecord(
     return runWithTenantScope(tenantDbName, async (db) => {
         const agent = await db.findAgentById(agentId);
         const deleted = await db.deleteAgent(agentId);
-        // Its routines (and their webhook delivery logs) go with it: nothing could fire them any more.
+        // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
         if (deleted && agent) {
-            const routines = await db.listAgentRoutines({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
-            for (const routine of routines) await db.deleteAgentRoutineDeliveries(String(routine._id));
-            await db.deleteAgentRoutinesForAgent(agent.tenantId, agent.projectId, agent.key);
+            const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
+            await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
         }
         return deleted;
     });
@@ -3001,7 +3001,7 @@ export async function checkAgentModel(
  * existed carry no source. `portal` is end-user traffic through an enterprise
  * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'routine' | 'evaluation' | 'redteam' | 'portal';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,
@@ -3188,7 +3188,7 @@ export interface AgentChatRequest {
     userId: string;
     /**
      * Whose spend limits the turn counts against when `userId` is a synthetic
-     * owner (a routine run): the routine's accountable person.
+     * owner (a trigger run): the trigger's accountable person.
      */
     accountableUserId?: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
@@ -5828,7 +5828,7 @@ export interface AgentResumeRequest {
     conversationId: string;
     /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
     userId: string;
-    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a routine run). */
+    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a trigger run). */
     accountableUserId?: string;
     trigger: 'resume' | 'timeout';
     /** The background run executing this continuation, when there is one. */

@@ -9,9 +9,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 - The OpenAI Assistants-compatible adapter is removed (`/client/v1/assistants`, `/client/v1/threads`, and the Studio
   card for it). Use the agent runs and sessions API, the Responses API or chat completions instead.
-- Agent **schedules** are replaced by [routines](docs/guide/agent-routines.md). Existing schedules are not converted:
-  create a routine of type `schedule`. The `schedule.fired` and `schedule.failed` webhook events become
-  `routine.fired` and `routine.failed`.
+- Agent **schedules** are replaced by [triggers](docs/guide/agent-triggers.md). Existing schedules are not converted:
+  create a trigger of type `schedule`. The `schedule.fired` and `schedule.failed` webhook events become
+  `trigger.fired` and `trigger.failed`.
 - The per-agent **Execution** settings are gone (background on/off, default mode, sync timeout, background timeout and
   the callback fields that lived there). How long a call waits is `AGENT_SYNC_TIMEOUT_MS` and how long a run may take is
   `AGENT_BACKGROUND_MAX_DURATION_MS`, for the whole deployment. The agent's default callback is `config.callback`
@@ -29,7 +29,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 ### Agent runs and run classes
 
 - Every agent turn from the API is a **run** (`run_<id>`) on one engine: Responses, chat completions, A2A, sessions,
-  routines and the runs API. A call waits up to `AGENT_SYNC_TIMEOUT_MS` (10 minutes) and then answers `202` with
+  triggers and the runs API. A call waits up to `AGENT_SYNC_TIMEOUT_MS` (10 minutes) and then answers `202` with
   `Location` and `Retry-After` while the run continues; a run may take up to `AGENT_BACKGROUND_MAX_DURATION_MS`
   (30 minutes).
 - **Run classes.** `default` runs are capped per tenant (`AGENT_RUN_MAX_ACTIVE_PER_TENANT`, 250; per project, off by
@@ -37,7 +37,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   (2 running, up to 10000 queued or scheduled) and expire after 24 hours (`expired`).
 - **Scheduled runs**: `run_at` or `delay_seconds` (up to 30 days) start a run later (status `scheduled`).
 - **Idempotency** on every mode: `Idempotency-Key` (up to 255 characters), `409 idempotency_key_conflict` for a key used
-  with another request; the `routine:` and `hook:` prefixes are reserved (`400 idempotency_key_reserved`).
+  with another request; the `trigger:` and `hook:` prefixes are reserved (`400 idempotency_key_reserved`).
 - **Runs API** under `/api/client/v1/agents/runs`: create (`wait`, `Prefer: wait=N`), list with filters, queue view, get
   (`?wait`), cancel, events (also as SSE) and actions for a run that waits on a person. Cancelling is one meaning on four
   routes: the runs API, `POST /agents/sessions/{id}/cancel`, `POST /responses/{id}/cancel` and A2A `tasks/cancel`.
@@ -70,7 +70,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   before it claims its run is no longer lost: the reconciler republishes it.
 - Streams (runs API, `/responses`, chat completions) check the active-run caps and the agent quota before they open: over
   a limit the answer is a plain JSON `429` (`Retry-After` 30 s for the cap, 60 s for the quota), not an `error` event;
-  non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a routine's Run now) stop when the
+  non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a trigger's Run now) stop when the
   client disconnects.
 - A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses` and `/agents/responses`; an
   `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
@@ -119,19 +119,20 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   Public conversations created before this change can no longer be reached from the public route. The inputs of a
   public caller's `data` part are external content and never reach the system prompt.
 
-### Routines and incoming webhooks
+### Triggers and incoming webhooks
 
-- **Routines** (Studio: Deploy → Routines; `/agents/{key}/routines` on both APIs) start an agent by their `type` and that
-  type's settings object: a cron `schedule` in an IANA timezone, `once`, `manual` or `webhook`. A fire is a queued, unattended run in a new session
-  owned by `system:routine:<id>`, with the idempotency key `routine:<id>:<slot>`; **Run now** and a run history per
-  routine. The scheduler runs on every node and the database picks one winner per slot
-  (`AGENT_ROUTINE_TICK_MS`, `AGENT_ROUTINE_MISFIRE_GRACE_MS`). `routine.fired` and `routine.failed` are webhook events.
-  The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the routine's last
+- **Triggers** (Studio: Deploy → Triggers; `/agents/{key}/triggers` on both APIs) start an agent by their `type` and that
+  type's settings object: a cron `schedule` in an IANA timezone, `once`, `manual` or `webhook`. An agent can have several
+  triggers (a schedule one and a webhook one, say); each has one type. A fire is a queued, unattended run in a new session
+  owned by `system:trigger:<id>`, with the idempotency key `trigger:<id>:<slot>`; **Run now** and a run history per
+  trigger. The scheduler runs on every node and the database picks one winner per slot
+  (`AGENT_TRIGGER_TICK_MS`, `AGENT_TRIGGER_MISFIRE_GRACE_MS`). `trigger.fired` and `trigger.failed` are webhook events.
+  The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the trigger's last
   updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
-- **Incoming webhooks**: a routine of type `webhook` starts when something posts to
-  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the routine's secret). Presets for
+- **Incoming webhooks**: a trigger of type `webhook` starts when something posts to
+  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). Presets for
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
-  event-derived inputs, de-duplication, a per-routine run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
+  event-derived inputs, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
   with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
   the message, marked as external data, never in the system prompt.
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
@@ -165,7 +166,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 - New settings for the agent run engine, all in the *Agent Runs* table of
   [Configuration](docs/guide/configuration.md#agent-runs): `AGENT_SYNC_TIMEOUT_MS`, `AGENT_BACKGROUND_MAX_DURATION_MS`,
-  `AGENT_RUN_MAX_ACTIVE_PER_TENANT` / `_PER_PROJECT` (replacing `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_*`), `AGENT_DEFERRED_*`, `AGENT_RUN_RETENTION_DAYS`, `AGENT_ROUTINE_*` and
+  `AGENT_RUN_MAX_ACTIVE_PER_TENANT` / `_PER_PROJECT` (replacing `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_*`), `AGENT_DEFERRED_*`, `AGENT_RUN_RETENTION_DAYS`, `AGENT_TRIGGER_*` and
   `AGENT_WEBHOOK_*`. `.env.example` and `docker-compose.yml` list them.
 - `openapi.yaml` in the repository root is the one canonical OpenAPI description of the client API (the copy under
   `docs/public` is gone; the docs build publishes the root file), and CI (`npm run test:openapi`) checks that its

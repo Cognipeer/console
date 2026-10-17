@@ -55,9 +55,9 @@ export interface AgentRunsTableProps {
     onOpenConversation: (conversationId: string) => void;
     /** Reports how many runs are queued/running, for a badge elsewhere. */
     onActiveCountChange?: (count: number) => void;
-    /** Only the runs this routine started (its history), with a way back to all runs. */
-    routine?: { id: string; name: string } | null;
-    onClearRoutine?: () => void;
+    /** Only the runs this trigger started (its history), with a way back to all runs. */
+    trigger?: { id: string; name: string } | null;
+    onClearTrigger?: () => void;
 }
 
 function durationOf(run: AgentRunRow): number | null {
@@ -66,23 +66,23 @@ function durationOf(run: AgentRunRow): number | null {
     return Math.max(0, end - run.started_at) * 1000;
 }
 
-export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, routine, onClearRoutine }: AgentRunsTableProps) {
-    const tRoutines = useTranslations('agents.routines');
+export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, trigger, onClearTrigger }: AgentRunsTableProps) {
+    const tTriggers = useTranslations('agents.triggers');
     const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const routineQuery = routine ? `&routineId=${encodeURIComponent(routine.id)}` : '';
-            const res = await fetch(`/api/agents/${agentId}/runs?limit=200${routineQuery}`, { cache: 'no-store' });
+            const triggerQuery = trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : '';
+            const res = await fetch(`/api/agents/${agentId}/runs?limit=200${triggerQuery}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json() as { runs: AgentRunRow[] };
             setRuns(data.runs ?? []);
         } catch {
             setRuns((prev) => prev ?? []);
         }
-    }, [agentId, routine]);
+    }, [agentId, trigger]);
 
     useEffect(() => { void load(); }, [load]);
 
@@ -121,26 +121,26 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
         return <Stack gap="xs">{[0, 1, 2].map((i) => <Skeleton key={i} h={36} />)}</Stack>;
     }
 
-    const routineFilter = routine ? (
+    const triggerFilter = trigger ? (
         <Group gap={6}>
             <Badge
                 variant="light"
-                rightSection={onClearRoutine ? (
-                    <ActionIcon size="xs" variant="transparent" color="gray" aria-label={tRoutines('runsFilterClear')} onClick={onClearRoutine}>
+                rightSection={onClearTrigger ? (
+                    <ActionIcon size="xs" variant="transparent" color="gray" aria-label={tTriggers('runsFilterClear')} onClick={onClearTrigger}>
                         <IconX size={10} />
                     </ActionIcon>
                 ) : null}
             >
-                {tRoutines('runsFilter', { name: routine.name })}
+                {tTriggers('runsFilter', { name: trigger.name })}
             </Badge>
         </Group>
     ) : null;
 
     if (runs.length === 0) {
-        if (routineFilter) {
+        if (triggerFilter) {
             return (
                 <Stack gap="sm">
-                    {routineFilter}
+                    {triggerFilter}
                     <Text size="sm" c="dimmed" ta="center" py="lg">No runs match this filter.</Text>
                 </Stack>
             );
@@ -156,7 +156,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
 
     return (
         <Stack gap="sm">
-            {routineFilter}
+            {triggerFilter}
             <Group justify="space-between">
                 <SegmentedControl
                     size="xs"

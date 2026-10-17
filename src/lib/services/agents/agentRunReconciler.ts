@@ -344,11 +344,11 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           retentionDeleted += events.deletedCount;
           retentionDeleted += await cleanupWebhookDeliveries(tenantDb, new Date(now));
           // Incoming webhook delivery logs: each row carries its own expiresAt (7 days).
-          retentionDeleted += (await tenantDb.cleanupAgentRoutineDeliveryRetention({ olderThan: new Date(now), batchSize: 1000 })).deletedCount;
+          retentionDeleted += (await tenantDb.cleanupAgentTriggerDeliveryRetention({ olderThan: new Date(now), batchSize: 1000 })).deletedCount;
           // Files attached to sessions live as long as the agent's `attachments.retentionDays`
           // (stamped on each file as `expiresAt` when it was uploaded).
           retentionDeleted += await cleanupExpiredSessionFiles(tenantDb, tenant.dbName!, new Date(now));
-          // Exactly-once claims (routine fires, crawler slots) only matter until they expire.
+          // Exactly-once claims (trigger fires, crawler slots) only matter until they expire.
           retentionDeleted += await tenantDb.cleanupSchedulerClaims(new Date(now)).catch((error) => {
             logger.warn('Scheduler claim cleanup failed', {
               tenantDbName: tenant.dbName,
@@ -398,7 +398,7 @@ async function runOnce(): Promise<SweepResult> {
   try {
     const cache = await getCache();
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
-    // Single coordinated task, not per-entity work (unlike the routine
+    // Single coordinated task, not per-entity work (unlike the trigger
     // scheduler's per-slot claims) — only the node holding the global
     // lock sweeps on a given tick, exactly like crawlerScheduler's
     // unassigned-bucket lock.

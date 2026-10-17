@@ -1,5 +1,5 @@
 /**
- * Time arithmetic of routines — pure (no database, no Node APIs), so the
+ * Time arithmetic of triggers — pure (no database, no Node APIs), so the
  * Studio editor previews a schedule with exactly the code the scheduler fires
  * it with.
  *
@@ -11,12 +11,12 @@
 
 import cronParser from 'cron-parser';
 
-export const DEFAULT_ROUTINE_TIMEZONE = 'UTC';
+export const DEFAULT_TRIGGER_TIMEZONE = 'UTC';
 
 let knownZones: Set<string> | null = null;
 
 /** An IANA timezone the runtime knows (`UTC` is accepted although `Intl` lists it only as `Etc/UTC`). */
-export function isValidRoutineTimezone(value: unknown): value is string {
+export function isValidTriggerTimezone(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 64) return false;
   if (value === 'UTC') return true;
   if (!knownZones) {
@@ -30,13 +30,13 @@ export function isValidRoutineTimezone(value: unknown): value is string {
 }
 
 /** Null when `cron` is a valid 5-field expression, else why not. */
-export function validateRoutineCron(cron: unknown): string | null {
+export function validateTriggerCron(cron: unknown): string | null {
   if (typeof cron !== 'string' || cron.trim() === '') return 'cron is required';
   const fields = cron.trim().split(/\s+/);
-  // cron-parser also takes a seconds field; a routine fires on minutes.
+  // cron-parser also takes a seconds field; a trigger fires on minutes.
   if (fields.length !== 5) return 'cron must have 5 fields (minute hour day-of-month month day-of-week)';
   try {
-    cronParser.parseExpression(cron.trim(), { tz: DEFAULT_ROUTINE_TIMEZONE });
+    cronParser.parseExpression(cron.trim(), { tz: DEFAULT_TRIGGER_TIMEZONE });
   } catch (error) {
     return `invalid cron expression: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -75,54 +75,54 @@ export function latestCronSlot(cron: string, timezone: string, at: Date): Date |
   }
 }
 
-/** What the time arithmetic reads of a routine: its `type` and, for a timed type, that type's settings object. */
+/** What the time arithmetic reads of a trigger: its `type` and, for a timed type, that type's settings object. */
 type TimedType =
   | { type: 'schedule'; schedule: { cron: string; timezone: string } }
   | { type: 'once'; once: { runAt: Date } }
   | { type: string };
 
 /**
- * `nextFireAt` for a routine saved now: the first cron slot after `now`; a
- * once routine's time until it has fired; null for anything else (manual,
- * webhook, a disabled routine, a finished once). A once time already past is
+ * `nextFireAt` for a trigger saved now: the first cron slot after `now`; a
+ * once trigger's time until it has fired; null for anything else (manual,
+ * webhook, a disabled trigger, a finished once). A once time already past is
  * still returned: the scheduler fires it within the misfire grace, else skips
  * it.
  */
 export function initialNextFireAt(
-  routine: { enabled: boolean; lastFireAt?: Date | null } & TimedType,
+  trigger: { enabled: boolean; lastFireAt?: Date | null } & TimedType,
   now: Date,
 ): Date | null {
-  if (!routine.enabled) return null;
-  if (routine.type === 'schedule' && 'schedule' in routine) return nextCronFire(routine.schedule.cron, routine.schedule.timezone, now);
-  if (routine.type === 'once' && 'once' in routine) {
+  if (!trigger.enabled) return null;
+  if (trigger.type === 'schedule' && 'schedule' in trigger) return nextCronFire(trigger.schedule.cron, trigger.schedule.timezone, now);
+  if (trigger.type === 'once' && 'once' in trigger) {
     // Fired = a fire at (or after) its time; a Run now before it does not count.
-    const runAt = new Date(routine.once.runAt);
-    return routine.lastFireAt && new Date(routine.lastFireAt).getTime() >= runAt.getTime() ? null : runAt;
+    const runAt = new Date(trigger.once.runAt);
+    return trigger.lastFireAt && new Date(trigger.lastFireAt).getTime() >= runAt.getTime() ? null : runAt;
   }
   return null;
 }
 
-export type DueRoutinePlan =
+export type DueTriggerPlan =
   /** Fire `fireAt` (the latest due slot; older missed ones are skipped) and move on to `next`. */
   | { kind: 'fire'; fireAt: Date; next: Date | null }
   /** The due slot is older than the misfire grace: no run; move on to `next`. */
   | { kind: 'missed'; slot: Date; next: Date | null };
 
 /**
- * What the scheduler does with a routine whose `nextFireAt` is due. At most one
+ * What the scheduler does with a trigger whose `nextFireAt` is due. At most one
  * catch-up run: of several missed slots only the latest fires, and only while
  * it is younger than `graceMs`.
  */
-export function planDueRoutine(routine: TimedType, dueAt: Date, now: Date, graceMs: number): DueRoutinePlan {
-  if (routine.type === 'schedule' && 'schedule' in routine) {
-    const { cron, timezone } = routine.schedule;
+export function planDueTrigger(trigger: TimedType, dueAt: Date, now: Date, graceMs: number): DueTriggerPlan {
+  if (trigger.type === 'schedule' && 'schedule' in trigger) {
+    const { cron, timezone } = trigger.schedule;
     const next = nextCronFire(cron, timezone, now);
     const latest = latestCronSlot(cron, timezone, now) ?? dueAt;
     const slot = latest.getTime() < dueAt.getTime() ? dueAt : latest;
     if (now.getTime() - slot.getTime() > graceMs) return { kind: 'missed', slot, next };
     return { kind: 'fire', fireAt: slot, next };
   }
-  const slot = routine.type === 'once' && 'once' in routine ? new Date(routine.once.runAt) : dueAt;
+  const slot = trigger.type === 'once' && 'once' in trigger ? new Date(trigger.once.runAt) : dueAt;
   if (now.getTime() - slot.getTime() > graceMs) return { kind: 'missed', slot, next: null };
   return { kind: 'fire', fireAt: slot, next: null };
 }

@@ -49,10 +49,10 @@ import type {
   CrawlerStatus,
   IAgentRun,
   AgentRunClass,
-  IAgentRoutine,
-  AgentRoutinePatch,
-  NewAgentRoutine,
-  IAgentRoutineDelivery,
+  IAgentTrigger,
+  AgentTriggerPatch,
+  NewAgentTrigger,
+  IAgentTriggerDelivery,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1140,53 +1140,53 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Retention: removes claims whose expiresAt is before `olderThan`; returns the number removed. */
   cleanupSchedulerClaims(olderThan: Date): Promise<number>;
 
-  // ── Agent routines (tenant-specific) ──
-  createAgentRoutine(record: NewAgentRoutine): Promise<IAgentRoutine>;
-  /** Scoped by tenant AND project: an id of another project's routine is not found. */
-  getAgentRoutine(id: string, tenantId: string, projectId: string): Promise<IAgentRoutine | null>;
+  // ── Agent triggers (tenant-specific) ──
+  createAgentTrigger(record: NewAgentTrigger): Promise<IAgentTrigger>;
+  /** Scoped by tenant AND project: an id of another project's trigger is not found. */
+  getAgentTrigger(id: string, tenantId: string, projectId: string): Promise<IAgentTrigger | null>;
   /** Oldest first. */
-  listAgentRoutines(filter: { tenantId: string; projectId: string; agentKey?: string }): Promise<IAgentRoutine[]>;
+  listAgentTriggers(filter: { tenantId: string; projectId: string; agentKey?: string }): Promise<IAgentTrigger[]>;
   /**
-   * The updated routine, or null when it does not exist in that scope. A patch
-   * with a `type` replaces the routine's type settings as a whole: the settings
+   * The updated trigger, or null when it does not exist in that scope. A patch
+   * with a `type` replaces the trigger's type settings as a whole: the settings
    * objects of its other types are dropped.
    */
-  updateAgentRoutine(id: string, tenantId: string, projectId: string, patch: AgentRoutinePatch): Promise<IAgentRoutine | null>;
-  deleteAgentRoutine(id: string, tenantId: string, projectId: string): Promise<boolean>;
-  /** Removes every routine of an agent (the agent was deleted); returns the number removed. */
-  deleteAgentRoutinesForAgent(tenantId: string, projectId: string, agentKey: string): Promise<number>;
-  /** Enabled routines whose `nextFireAt` is at or before `now`, the most overdue first. */
-  listDueRoutines(now: Date, limit: number): Promise<IAgentRoutine[]>;
+  updateAgentTrigger(id: string, tenantId: string, projectId: string, patch: AgentTriggerPatch): Promise<IAgentTrigger | null>;
+  deleteAgentTrigger(id: string, tenantId: string, projectId: string): Promise<boolean>;
+  /** Removes every trigger of an agent (the agent was deleted); returns the number removed. */
+  deleteAgentTriggersForAgent(tenantId: string, projectId: string, agentKey: string): Promise<number>;
+  /** Enabled triggers whose `nextFireAt` is at or before `now`, the most overdue first. */
+  listDueTriggers(now: Date, limit: number): Promise<IAgentTrigger[]>;
   /**
    * Moves `nextFireAt` from `from` to `next` (CAS: false when it is no longer
    * `from` — another scheduler advanced it, or an edit recomputed it).
    */
-  advanceRoutineNextFire(id: string, from: Date, next: Date | null): Promise<boolean>;
+  advanceTriggerNextFire(id: string, from: Date, next: Date | null): Promise<boolean>;
   /**
    * Records the outcome of one fire (CAS on `lastFireAt`: an older fire landing
    * late never overwrites a newer one). False when a newer fire is recorded.
    */
-  setRoutineFireResult(
+  setTriggerFireResult(
     id: string,
     result: { fireAt: Date; status: 'started' | 'failed'; runId?: string | null; error?: string | null },
   ): Promise<boolean>;
-  /** The routine whose `webhook` has this hook id (tenant DB), or null. */
-  findAgentRoutineByHookId(hookId: string): Promise<IAgentRoutine | null>;
+  /** The trigger whose `webhook` has this hook id (tenant DB), or null. */
+  findAgentTriggerByHookId(hookId: string): Promise<IAgentTrigger | null>;
 
-  // ── Agent routine webhook deliveries (tenant-specific) ──
-  recordAgentRoutineDelivery(record: Omit<IAgentRoutineDelivery, '_id'>): Promise<IAgentRoutineDelivery>;
+  // ── Agent trigger webhook deliveries (tenant-specific) ──
+  recordAgentTriggerDelivery(record: Omit<IAgentTriggerDelivery, '_id'>): Promise<IAgentTriggerDelivery>;
   /** Newest first; `before` = a delivery id of the previous page (the rows after it). */
-  listAgentRoutineDeliveries(filter: {
+  listAgentTriggerDeliveries(filter: {
     tenantId: string;
     projectId: string;
-    routineId: string;
+    triggerId: string;
     limit: number;
     before?: string;
-  }): Promise<IAgentRoutineDelivery[]>;
+  }): Promise<IAgentTriggerDelivery[]>;
   /** Retention: removes up to `batchSize` deliveries whose `expiresAt` is before `olderThan`. */
-  cleanupAgentRoutineDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }>;
-  /** Removes a routine's delivery log (the routine, or its agent, was deleted). */
-  deleteAgentRoutineDeliveries(routineId: string): Promise<number>;
+  cleanupAgentTriggerDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }>;
+  /** Removes a trigger's delivery log (the trigger, or its agent, was deleted). */
+  deleteAgentTriggerDeliveries(triggerId: string): Promise<number>;
 
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
@@ -2222,7 +2222,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     excludeModes?: IAgentRun['mode'][];
     /** `default` also matches rows with no class. */
     runClass?: AgentRunClass;
-    routineId?: string;
+    triggerId?: string;
     channel?: NonNullable<IAgentRun['channel']>;
     trigger?: NonNullable<IAgentRun['trigger']>;
     /** Exact `key = value` pairs the run's metadata must carry. */

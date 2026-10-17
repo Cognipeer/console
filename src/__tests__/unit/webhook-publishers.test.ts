@@ -1,7 +1,7 @@
 /**
  * Where webhook events come from: the session event writer (idle, work done,
  * action required, budget reached — every path that writes the log), a turn's
- * finish / fail. Routine fires are covered with fireRoutine. The webhook service is faked; what is
+ * finish / fail. Trigger fires are covered with fireTrigger. The webhook service is faked; what is
  * checked is which events are published, in what order, and that a failure
  * there never reaches the code that published.
  */

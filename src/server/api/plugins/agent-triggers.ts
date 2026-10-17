@@ -1,25 +1,25 @@
 /**
- * The routines API (§5.7): a routine is a saved way of starting an agent — a
+ * The triggers API (§5.7): a trigger is a saved way of starting an agent — a
  * prompt (+ inputs) and a `type` with that type's settings object (`schedule`:
  * a cron in a timezone, `once`: one time, `manual`: by hand, `webhook`: an
- * incoming webhook). Every fire is an ordinary run (`channel: 'routine'`), so a
- * routine's history is `GET /client/v1/agents/runs?routine_id=`.
+ * incoming webhook). Every fire is an ordinary run (`channel: 'trigger'`), so a
+ * trigger's history is `GET /client/v1/agents/runs?trigger_id=`.
  *
- * Two mounts of the same handlers: the client API (`/client/v1/agents/:agentKey/routines…`,
- * API token) and the dashboard (`/agents/:agentId/routines…`, session). Both are
+ * Two mounts of the same handlers: the client API (`/client/v1/agents/:agentKey/triggers…`,
+ * API token) and the dashboard (`/agents/:agentId/triggers…`, session). Both are
  * the `agents` service (GET read, everything else write) through the route
  * prefix map, and both answer in the client envelope `{ error: { type, message, code } }`.
  *
  * The callback secret is write-only: sealed on save, shown as `{ url, signed }`.
- * A webhook routine's secret is shown once — in the answer that created or
+ * A webhook trigger's secret is shown once — in the answer that created or
  * replaced it (`webhook.secret`, or rotate-secret) — and only its last four
- * characters after that. Its delivery log is `…/routines/{id}/deliveries`.
+ * characters after that. Its delivery log is `…/triggers/{id}/deliveries`.
  */
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
-import type { AgentRoutineType, AgentRoutineTypeSettings, AgentRunClass, IAgent, IAgentRoutine } from '@/lib/database';
+import type { AgentTriggerType, AgentTriggerTypeSettings, AgentRunClass, IAgent, IAgentTrigger } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { getAgentByKey } from '@/lib/services/agents';
 import { AGENT_CALLBACK_SECRET_MASK, sealAgentCallbackConfig } from '@/lib/services/agents/agentCallbackConfig';
@@ -35,32 +35,32 @@ import {
   waitForAgentRun,
 } from '@/lib/services/agents/agentRunService';
 import {
-  createAgentRoutine,
-  deleteAgentRoutine,
-  fireRoutine,
-  getAgentRoutine,
-  listAgentRoutines,
-  resolveRoutineInputs,
-  routineAgentConfig,
-  serializeAgentRoutine,
-  updateAgentRoutine,
-  type NewRoutineWrite,
-  type RoutineFields,
-  type RoutineScope,
-  type RoutineTenant,
-  type RoutineWrite,
-} from '@/lib/services/agents/agentRoutines';
+  createAgentTrigger,
+  deleteAgentTrigger,
+  fireTrigger,
+  getAgentTrigger,
+  listAgentTriggers,
+  resolveTriggerInputs,
+  triggerAgentConfig,
+  serializeAgentTrigger,
+  updateAgentTrigger,
+  type NewTriggerWrite,
+  type TriggerFields,
+  type TriggerScope,
+  type TriggerTenant,
+  type TriggerWrite,
+} from '@/lib/services/agents/agentTriggers';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
-import { DEFAULT_ROUTINE_TIMEZONE, isValidRoutineTimezone, validateRoutineCron } from '@/lib/services/agents/routineSchedule';
-import { dryRunAnswer, manualWebhookTurn, serializeDelivery } from '@/lib/services/agents/routineWebhookDelivery';
+import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
+import { dryRunAnswer, manualWebhookTurn, serializeDelivery } from '@/lib/services/agents/agentTriggerWebhookDelivery';
 import {
   MAX_ROTATION_GRACE_SECONDS,
   openWebhookSecrets,
   parseWebhookWrite,
   rotateWebhookSecret,
   rotationAnswer,
-} from '@/lib/services/agents/routineWebhookTrigger';
-import { inputMappingProblems, templateProblem } from '@/lib/services/agents/routineWebhookView';
+} from '@/lib/services/agents/agentTriggerWebhookIntake';
+import { inputMappingProblems, templateProblem } from '@/lib/services/agents/agentTriggerWebhookView';
 import { getHeaderValue, readJsonBody, withApiRequestContext, withClientApiRequestContext } from '../fastify-utils';
 import {
   parseResponseFormat,
@@ -74,13 +74,13 @@ import {
 import { requireScopedAgent } from './agents';
 import { parsePreferHeader, parseTimestamp, parseWaitSeconds } from './client-agent-runs';
 
-const logger = createLogger('api:agent-routines');
+const logger = createLogger('api:agent-triggers');
 
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
 
-export const ROUTINE_NAME_MAX_LENGTH = 200;
-export const ROUTINE_DESCRIPTION_MAX_LENGTH = 2000;
-export const ROUTINE_PROMPT_MAX_LENGTH = 32_000;
+export const TRIGGER_NAME_MAX_LENGTH = 200;
+export const TRIGGER_DESCRIPTION_MAX_LENGTH = 2000;
+export const TRIGGER_PROMPT_MAX_LENGTH = 32_000;
 /** A `run_at` this far in the past still counts as "now" (the caller's clock, the request's time in flight). */
 const RUN_AT_PAST_TOLERANCE_MS = 60_000;
 
@@ -88,9 +88,9 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** Who is asking, about which agent: the same for both mounts. */
-interface RoutineCaller {
-  scope: RoutineScope;
-  tenant: RoutineTenant;
+interface TriggerCaller {
+  scope: TriggerScope;
+  tenant: TriggerTenant;
   agent: IAgent;
   userId: string;
   /** The API token of a client call (Run now counts against it). */
@@ -105,7 +105,7 @@ interface RoutineCaller {
 
 /** The request keys that carry a type's settings: each is accepted only with its own `type` (`manual` has none). */
 const TYPE_SETTINGS_KEYS = ['schedule', 'once', 'webhook'] as const;
-const ROUTINE_TYPES: readonly AgentRoutineType[] = ['schedule', 'once', 'manual', 'webhook'];
+const TRIGGER_TYPES: readonly AgentTriggerType[] = ['schedule', 'once', 'manual', 'webhook'];
 
 /**
  * A request's `type` and the settings object named after it (an empty one when
@@ -114,10 +114,10 @@ const ROUTINE_TYPES: readonly AgentRoutineType[] = ['schedule', 'once', 'manual'
  */
 function readTypeSettings(
   body: Record<string, unknown>,
-): { ok: true; type: AgentRoutineType; settings: Record<string, unknown> } | { ok: false; issue: InputIssue } {
+): { ok: true; type: AgentTriggerType; settings: Record<string, unknown> } | { ok: false; issue: InputIssue } {
   const issue = (field: string, message: string) => ({ ok: false as const, issue: { field, message } });
   const type = body.type;
-  if (typeof type !== 'string' || !ROUTINE_TYPES.includes(type as AgentRoutineType)) {
+  if (typeof type !== 'string' || !TRIGGER_TYPES.includes(type as AgentTriggerType)) {
     return issue('type', 'type must be "schedule", "once", "manual" or "webhook"');
   }
   for (const key of TYPE_SETTINGS_KEYS) {
@@ -125,36 +125,36 @@ function readTypeSettings(
   }
   if (type === 'manual') return { ok: true, type, settings: {} };
   const settings = body[type];
-  if (settings === undefined || settings === null) return { ok: true, type: type as AgentRoutineType, settings: {} };
+  if (settings === undefined || settings === null) return { ok: true, type: type as AgentTriggerType, settings: {} };
   if (!isPlainObject(settings)) return issue(type, `${type} must be an object`);
-  return { ok: true, type: type as AgentRoutineType, settings };
+  return { ok: true, type: type as AgentTriggerType, settings };
 }
 
 /**
- * The `type` and settings of a `schedule`, `once` or `manual` routine from a
+ * The `type` and settings of a `schedule`, `once` or `manual` trigger from a
  * request. `schedule` takes `cron` and `timezone`; `once` takes `run_at`
  * (ISO-8601 or unix seconds, not in the past) or `delay_seconds`. A webhook is
  * read by `parseWebhookWrite`. Another type is added here and in
- * `serializeAgentRoutine`.
+ * `serializeAgentTrigger`.
  */
-export function parseRoutineTypeSettings(
-  type: Exclude<AgentRoutineType, 'webhook'>,
+export function parseTriggerTypeSettings(
+  type: Exclude<AgentTriggerType, 'webhook'>,
   settings: Record<string, unknown>,
   now: Date,
-): { ok: true; settings: AgentRoutineTypeSettings } | { ok: false; issue: InputIssue } {
+): { ok: true; settings: AgentTriggerTypeSettings } | { ok: false; issue: InputIssue } {
   const issue = (field: string, message: string) => ({ ok: false as const, issue: { field, message } });
   switch (type) {
     case 'schedule': {
-      const cronError = validateRoutineCron(settings.cron);
+      const cronError = validateTriggerCron(settings.cron);
       if (cronError) return issue('schedule.cron', cronError);
-      const timezone = settings.timezone === undefined || settings.timezone === null || settings.timezone === '' ? DEFAULT_ROUTINE_TIMEZONE : settings.timezone;
-      if (!isValidRoutineTimezone(timezone)) return issue('schedule.timezone', 'timezone must be an IANA timezone name, like "Europe/Istanbul"');
+      const timezone = settings.timezone === undefined || settings.timezone === null || settings.timezone === '' ? DEFAULT_TRIGGER_TIMEZONE : settings.timezone;
+      if (!isValidTriggerTimezone(timezone)) return issue('schedule.timezone', 'timezone must be an IANA timezone name, like "Europe/Istanbul"');
       return { ok: true, settings: { type, schedule: { cron: String(settings.cron).trim().split(/\s+/).join(' '), timezone } } };
     }
     case 'once': {
       const hasRunAt = settings.run_at !== undefined && settings.run_at !== null;
       const hasDelay = settings.delay_seconds !== undefined && settings.delay_seconds !== null;
-      if (hasRunAt === hasDelay) return issue('once.run_at', 'a once routine needs run_at or delay_seconds (one of them)');
+      if (hasRunAt === hasDelay) return issue('once.run_at', 'a once trigger needs run_at or delay_seconds (one of them)');
       if (hasDelay) {
         const delay = settings.delay_seconds;
         if (typeof delay !== 'number' || !Number.isInteger(delay) || delay < 0) {
@@ -177,14 +177,14 @@ export function parseRoutineTypeSettings(
  * settings back unchanged — an editor saving the whole form? Then nothing about
  * the timing changes, even for a once time that has passed since.
  */
-function isStoredTypeSettings(body: Record<string, unknown>, stored: IAgentRoutine): boolean {
+function isStoredTypeSettings(body: Record<string, unknown>, stored: IAgentTrigger): boolean {
   const read = readTypeSettings(body);
   if (!read.ok || read.type !== stored.type) return false;
   const settings = read.settings;
   switch (stored.type) {
     case 'schedule':
       return typeof settings.cron === 'string' && settings.cron.trim().split(/\s+/).join(' ') === stored.schedule.cron
-        && (settings.timezone ?? DEFAULT_ROUTINE_TIMEZONE) === stored.schedule.timezone;
+        && (settings.timezone ?? DEFAULT_TRIGGER_TIMEZONE) === stored.schedule.timezone;
     case 'once': {
       if (settings.delay_seconds !== undefined && settings.delay_seconds !== null) return false;
       const runAt = parseTimestamp(settings.run_at);
@@ -200,34 +200,34 @@ function isStoredTypeSettings(body: Record<string, unknown>, stored: IAgentRouti
  * A create (`existing` absent) or PATCH body → the fields to save. Absent =
  * unchanged; `null` clears a nullable field. The prompt / inputs / version are
  * checked together against the inputs the agent (that version of it) declares:
- * the prompt may be empty only when the agent declares inputs and the routine
+ * the prompt may be empty only when the agent declares inputs and the trigger
  * gives some.
  */
-export async function prepareRoutineWrite(input: {
+export async function prepareTriggerWrite(input: {
   body: Record<string, unknown>;
   agent: IAgent;
-  scope: RoutineScope;
-  existing?: IAgentRoutine | null;
+  scope: TriggerScope;
+  existing?: IAgentTrigger | null;
   now?: Date;
-}): Promise<{ ok: true; write: RoutineWrite; /** A new generated webhook secret, shown once. */ webhookSecret?: string } | { ok: false; errors: InputIssue[] }> {
+}): Promise<{ ok: true; write: TriggerWrite; /** A new generated webhook secret, shown once. */ webhookSecret?: string } | { ok: false; errors: InputIssue[] }> {
   const { body, agent, scope, existing } = input;
   const now = input.now ?? new Date();
   const errors: InputIssue[] = [];
-  const fields: RoutineFields = {};
-  let typeSettings: AgentRoutineTypeSettings | undefined;
+  const fields: TriggerFields = {};
+  let typeSettings: AgentTriggerTypeSettings | undefined;
   const given = (key: string) => body[key] !== undefined;
   let webhookSecret: string | undefined;
 
   if (given('name') || !existing) {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name) errors.push({ field: 'name', message: 'name is required' });
-    else if (name.length > ROUTINE_NAME_MAX_LENGTH) errors.push({ field: 'name', message: `name can be at most ${ROUTINE_NAME_MAX_LENGTH} characters` });
+    else if (name.length > TRIGGER_NAME_MAX_LENGTH) errors.push({ field: 'name', message: `name can be at most ${TRIGGER_NAME_MAX_LENGTH} characters` });
     else fields.name = name;
   }
   if (given('description')) {
     if (body.description === null || body.description === '') fields.description = null;
-    else if (typeof body.description !== 'string' || body.description.length > ROUTINE_DESCRIPTION_MAX_LENGTH) {
-      errors.push({ field: 'description', message: `description must be a string of at most ${ROUTINE_DESCRIPTION_MAX_LENGTH} characters` });
+    else if (typeof body.description !== 'string' || body.description.length > TRIGGER_DESCRIPTION_MAX_LENGTH) {
+      errors.push({ field: 'description', message: `description must be a string of at most ${TRIGGER_DESCRIPTION_MAX_LENGTH} characters` });
     } else fields.description = body.description;
   }
   if (given('enabled')) {
@@ -237,7 +237,7 @@ export async function prepareRoutineWrite(input: {
   // A body names its type with `type` and that type's settings object (`schedule`, `once`, `webhook`).
   const settingsGiven = TYPE_SETTINGS_KEYS.some((key) => body[key] !== undefined && body[key] !== null);
   if (!existing || ((given('type') || settingsGiven) && !isStoredTypeSettings(body, existing))) {
-    // A new routine without a type (or settings) is manual (Run now / the API).
+    // A new trigger without a type (or settings) is manual (Run now / the API).
     const read = readTypeSettings(!existing && (body.type === undefined || body.type === null) && !settingsGiven ? { type: 'manual' } : body);
     if (!read.ok) errors.push(read.issue);
     else if (read.type === 'webhook') {
@@ -249,15 +249,15 @@ export async function prepareRoutineWrite(input: {
         webhookSecret = parsed.secret;
       }
     } else {
-      const parsed = parseRoutineTypeSettings(read.type, read.settings, now);
+      const parsed = parseTriggerTypeSettings(read.type, read.settings, now);
       if (!parsed.ok) errors.push(parsed.issue);
       else typeSettings = parsed.settings;
     }
   }
   if (given('prompt')) {
     if (body.prompt !== null && typeof body.prompt !== 'string') errors.push({ field: 'prompt', message: 'prompt must be a string' });
-    else if (typeof body.prompt === 'string' && body.prompt.length > ROUTINE_PROMPT_MAX_LENGTH) {
-      errors.push({ field: 'prompt', message: `prompt can be at most ${ROUTINE_PROMPT_MAX_LENGTH} characters` });
+    else if (typeof body.prompt === 'string' && body.prompt.length > TRIGGER_PROMPT_MAX_LENGTH) {
+      errors.push({ field: 'prompt', message: `prompt can be at most ${TRIGGER_PROMPT_MAX_LENGTH} characters` });
     } else fields.prompt = typeof body.prompt === 'string' ? body.prompt : '';
   }
   if (given('version')) {
@@ -295,13 +295,13 @@ export async function prepareRoutineWrite(input: {
     else shapedInputs = fields.inputs = parsed.inputs;
   }
   if (given('callback')) {
-    const callback = await prepareRoutineCallback(body.callback, existing?.callback ?? null);
+    const callback = await prepareTriggerCallback(body.callback, existing?.callback ?? null);
     if (!callback.ok) errors.push({ field: 'callback', message: callback.message });
     else fields.callback = callback.callback;
   }
 
   // Prompt + inputs against the declaration of the version that runs — on create, and whenever one of them
-  // (or the type: a webhook routine's prompt is a template and its inputs a mapping) changes.
+  // (or the type: a webhook trigger's prompt is a template and its inputs a mapping) changes.
   if (errors.length === 0 && (!existing || given('prompt') || given('inputs') || given('version') || typeSettings !== undefined)) {
     const version = fields.version !== undefined ? fields.version : existing?.version ?? null;
     const config = await resolvePublishedAgentConfig(scope.tenantDbName, agent, scope.projectId, version ?? undefined);
@@ -316,13 +316,13 @@ export async function prepareRoutineWrite(input: {
       errors.push(...inputMappingProblems(config.inputs, inputs).map((issue) => ({ field: `inputs.${issue.field}`, message: issue.message })));
       // The event payload alone can be the whole message.
       if (prompt.trim() === '' && !webhook.includePayload && !givesInputs) {
-        errors.push({ field: 'prompt', message: 'prompt is required unless the routine includes the event payload or gives inputs' });
+        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger includes the event payload or gives inputs' });
       }
     } else {
       const resolved = resolveRunInputs(config.inputs, inputs);
       if (!resolved.ok) errors.push(...resolved.errors.map((issue) => ({ field: `inputs.${issue.field}`, message: issue.message })));
       if (prompt.trim() === '' && !givesInputs) {
-        errors.push({ field: 'prompt', message: 'prompt is required unless the routine gives the inputs the agent declares' });
+        errors.push({ field: 'prompt', message: 'prompt is required unless the trigger gives the inputs the agent declares' });
       }
     }
     if (!existing && fields.prompt === undefined) fields.prompt = prompt;
@@ -335,10 +335,10 @@ export async function prepareRoutineWrite(input: {
  * `callback: { url, secret? } | null`. The secret is write-only: absent (or the
  * mask) keeps the stored one, `""` removes it, a new value replaces it.
  */
-async function prepareRoutineCallback(
+async function prepareTriggerCallback(
   value: unknown,
-  current: IAgentRoutine['callback'],
-): Promise<{ ok: true; callback: IAgentRoutine['callback'] } | { ok: false; message: string }> {
+  current: IAgentTrigger['callback'],
+): Promise<{ ok: true; callback: IAgentTrigger['callback'] } | { ok: false; message: string }> {
   if (value === null) return { ok: true, callback: null };
   if (!isPlainObject(value)) return { ok: false, message: 'callback must be an object { url, secret? } or null' };
   if (value.url === undefined || value.url === null || value.url === '') return { ok: true, callback: null };
@@ -354,19 +354,19 @@ async function prepareRoutineCallback(
   return { ok: true, callback: { url: checked.url!, secretSealed: sealed?.secretSealed ?? null } };
 }
 
-/** A routine, with `webhook.secret` in the one answer that carries a new generated secret. */
-function routineAnswer(routine: IAgentRoutine, webhookSecret?: string) {
-  const serialized = serializeAgentRoutine(routine);
+/** A trigger, with `webhook.secret` in the one answer that carries a new generated secret. */
+function triggerAnswer(trigger: IAgentTrigger, webhookSecret?: string) {
+  const serialized = serializeAgentTrigger(trigger);
   if (!webhookSecret || serialized.type !== 'webhook') return serialized;
   return { ...serialized, webhook: { ...serialized.webhook, secret: webhookSecret } };
 }
 
-function invalidRoutineBody(errors: InputIssue[]) {
+function invalidTriggerBody(errors: InputIssue[]) {
   const summary = errors.slice(0, 5).map((issue) => `${issue.field}: ${issue.message}`).join('; ');
-  return apiErrorBody('invalid_request_error', `Invalid routine - ${summary}`, 'invalid_routine', { errors });
+  return apiErrorBody('invalid_request_error', `Invalid trigger - ${summary}`, 'invalid_trigger', { errors });
 }
 
-const routineNotFoundBody = () => apiErrorBody('not_found_error', 'Routine not found', 'routine_not_found');
+const triggerNotFoundBody = () => apiErrorBody('not_found_error', 'Trigger not found', 'trigger_not_found');
 
 /** A body that may be empty (Run now), else the parsed JSON object. Null when it is not an object. */
 function readOptionalBody(request: FastifyRequest): Record<string, unknown> | null {
@@ -377,57 +377,57 @@ function readOptionalBody(request: FastifyRequest): Record<string, unknown> | nu
 
 // ── Handlers (shared by both mounts) ─────────────────────────────────────
 
-async function loadRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller): Promise<IAgentRoutine | null> {
-  const { routineId } = request.params as { routineId: string };
-  const routine = await getAgentRoutine(caller.scope, caller.agent.key, routineId);
-  if (!routine) void reply.code(404).send(routineNotFoundBody());
-  return routine;
+async function loadTrigger(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller): Promise<IAgentTrigger | null> {
+  const { triggerId } = request.params as { triggerId: string };
+  const trigger = await getAgentTrigger(caller.scope, caller.agent.key, triggerId);
+  if (!trigger) void reply.code(404).send(triggerNotFoundBody());
+  return trigger;
 }
 
-async function listRoutines(reply: FastifyReply, caller: RoutineCaller) {
-  const routines = await listAgentRoutines(caller.scope, caller.agent.key);
-  return reply.code(200).send({ object: 'list', data: routines.map(serializeAgentRoutine), has_more: false });
+async function listTriggers(reply: FastifyReply, caller: TriggerCaller) {
+  const triggers = await listAgentTriggers(caller.scope, caller.agent.key);
+  return reply.code(200).send({ object: 'list', data: triggers.map(serializeAgentTrigger), has_more: false });
 }
 
-async function createRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+async function createTrigger(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
   const body = readOptionalBody(request);
   if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
-  const prepared = await prepareRoutineWrite({ body, agent: caller.agent, scope: caller.scope });
-  if (!prepared.ok) return reply.code(400).send(invalidRoutineBody(prepared.errors));
+  const prepared = await prepareTriggerWrite({ body, agent: caller.agent, scope: caller.scope });
+  if (!prepared.ok) return reply.code(400).send(invalidTriggerBody(prepared.errors));
   const { write } = prepared;
   // Create always names its type (a missing one is manual) and its name.
-  const routine = await createAgentRoutine(
+  const trigger = await createAgentTrigger(
     caller.scope,
     caller.agent.key,
-    { ...write, name: write.name!, prompt: write.prompt ?? '' } as NewRoutineWrite,
+    { ...write, name: write.name!, prompt: write.prompt ?? '' } as NewTriggerWrite,
     caller.userId,
   );
-  return reply.code(201).send(routineAnswer(routine, prepared.webhookSecret));
+  return reply.code(201).send(triggerAnswer(trigger, prepared.webhookSecret));
 }
 
-async function getRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const routine = await loadRoutine(request, reply, caller);
-  if (!routine) return reply;
-  return reply.code(200).send(serializeAgentRoutine(routine));
+async function getTrigger(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const trigger = await loadTrigger(request, reply, caller);
+  if (!trigger) return reply;
+  return reply.code(200).send(serializeAgentTrigger(trigger));
 }
 
-async function patchRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const existing = await loadRoutine(request, reply, caller);
+async function patchTrigger(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const existing = await loadTrigger(request, reply, caller);
   if (!existing) return reply;
   const body = readOptionalBody(request);
   if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
-  const prepared = await prepareRoutineWrite({ body, agent: caller.agent, scope: caller.scope, existing });
-  if (!prepared.ok) return reply.code(400).send(invalidRoutineBody(prepared.errors));
-  const updated = await updateAgentRoutine(caller.scope, existing, prepared.write, caller.userId);
-  if (!updated) return reply.code(404).send(routineNotFoundBody());
-  return reply.code(200).send(routineAnswer(updated, prepared.webhookSecret));
+  const prepared = await prepareTriggerWrite({ body, agent: caller.agent, scope: caller.scope, existing });
+  if (!prepared.ok) return reply.code(400).send(invalidTriggerBody(prepared.errors));
+  const updated = await updateAgentTrigger(caller.scope, existing, prepared.write, caller.userId);
+  if (!updated) return reply.code(404).send(triggerNotFoundBody());
+  return reply.code(200).send(triggerAnswer(updated, prepared.webhookSecret));
 }
 
-async function removeRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const routine = await loadRoutine(request, reply, caller);
-  if (!routine) return reply;
-  await deleteAgentRoutine(caller.scope, routine);
-  return reply.code(200).send({ id: String(routine._id), object: 'agent.routine.deleted', deleted: true });
+async function removeTrigger(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const trigger = await loadTrigger(request, reply, caller);
+  if (!trigger) return reply;
+  await deleteAgentTrigger(caller.scope, trigger);
+  return reply.code(200).send({ id: String(trigger._id), object: 'agent.trigger.deleted', deleted: true });
 }
 
 const MAX_SAMPLE_HEADERS = 50;
@@ -446,17 +446,17 @@ function parseSampleHeaders(value: unknown): { ok: true; headers: Record<string,
 }
 
 /**
- * Run now: one fire (trigger `manual`) with the routine's prompt; the body may
- * override `inputs` (merged over the routine's) and `metadata`. Answers like the
+ * Run now: one fire (trigger `manual`) with the trigger's prompt; the body may
+ * override `inputs` (merged over the trigger's) and `metadata`. Answers like the
  * runs API create: 200 with a run that finished within `wait`, else 202.
  *
- * A webhook routine also takes a sample `payload` (+ `headers`) and builds the
+ * A webhook trigger also takes a sample `payload` (+ `headers`) and builds the
  * turn a delivery would (its events and filter are not applied, nothing is
  * de-duplicated); `dry_run: true` only evaluates it and creates nothing.
  */
-async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const routine = await loadRoutine(request, reply, caller);
-  if (!routine) return reply;
+async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const trigger = await loadTrigger(request, reply, caller);
+  if (!trigger) return reply;
   const body = readOptionalBody(request);
   if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
   const bad = (message: string, code: string) => reply.code(400).send(invalidRequestErrorBody(message, code));
@@ -476,8 +476,8 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
     idempotencyKey = idempotency.key;
   }
 
-  if (routine.type !== 'webhook' && (body.payload !== undefined || body.headers !== undefined || body.dry_run !== undefined)) {
-    return bad('payload, headers and dry_run are only accepted by a routine of type "webhook"', 'invalid_request');
+  if (trigger.type !== 'webhook' && (body.payload !== undefined || body.headers !== undefined || body.dry_run !== undefined)) {
+    return bad('payload, headers and dry_run are only accepted by a trigger of type "webhook"', 'invalid_request');
   }
   if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return bad('dry_run must be a boolean', 'invalid_request');
   if (body.payload !== undefined && (body.payload === null || typeof body.payload !== 'object')) {
@@ -486,38 +486,38 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
   const sampleHeaders = parseSampleHeaders(body.headers);
   if (!sampleHeaders.ok) return bad(sampleHeaders.message, 'invalid_headers');
 
-  let message = routine.prompt;
+  let message = trigger.prompt;
   let runInputs: Record<string, unknown> | null;
   let runMetadata = metadata.metadata;
   let externalContent = false;
-  if (routine.type === 'webhook') {
+  if (trigger.type === 'webhook') {
     const built = await manualWebhookTurn({
-      routine,
+      trigger,
       tenantDbName: caller.tenant.tenantDbName,
       payload: body.payload,
       headers: sampleHeaders.headers,
       overrides: overrides.inputs,
       metadata: metadata.metadata,
-      secrets: openWebhookSecrets(String(routine._id), routine.webhook) ?? [],
+      secrets: openWebhookSecrets(String(trigger._id), trigger.webhook) ?? [],
     });
     if (body.dry_run === true) return reply.code(200).send(dryRunAnswer(built));
     if (!built.turn.ok) {
-      return reply.code(400).send(apiErrorBody('invalid_request_error', `The routine did not start a run: ${built.turn.reason}`, built.turn.code, { errors: built.turn.errors }));
+      return reply.code(400).send(apiErrorBody('invalid_request_error', `The trigger did not start a run: ${built.turn.reason}`, built.turn.code, { errors: built.turn.errors }));
     }
     message = built.turn.message;
     runInputs = built.turn.inputs;
     runMetadata = built.metadata;
     externalContent = body.payload !== undefined;
   } else {
-    const config = await routineAgentConfig(caller.tenant.tenantDbName, routine);
-    const inputs = resolveRoutineInputs(config, routine, overrides.inputs);
+    const config = await triggerAgentConfig(caller.tenant.tenantDbName, trigger);
+    const inputs = resolveTriggerInputs(config, trigger, overrides.inputs);
     if (!inputs.ok) {
       return reply.code(400).send(apiErrorBody('invalid_request_error', `Invalid inputs - ${inputs.reason.replace(/^invalid inputs: /, '')}`, 'invalid_inputs', { errors: inputs.errors }));
     }
     runInputs = inputs.inputs;
   }
 
-  const fired = await fireRoutine(routine, caller.tenant, {
+  const fired = await fireTrigger(trigger, caller.tenant, {
     trigger: 'manual',
     message,
     inputs: runInputs,
@@ -547,7 +547,7 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
       return reply
         .code(429)
         .header('Retry-After', String(fired.retryAfterSeconds))
-        .send(apiErrorBody('rate_limit_error', `The routine did not start a run: ${fired.reason}`, codes[fired.kind]));
+        .send(apiErrorBody('rate_limit_error', `The trigger did not start a run: ${fired.reason}`, codes[fired.kind]));
     }
     default:
       if (fired.reason === 'idempotency key in use') return reply.code(409).send(idempotencyKeyConflictErrorBody());
@@ -562,22 +562,22 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
  * sender's for Standard Webhooks. `grace_seconds` (0 – 86400, default 0) keeps
  * the current secret accepted for that long.
  */
-async function rotateRoutineWebhookSecret(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const routine = await loadRoutine(request, reply, caller);
-  if (!routine) return reply;
-  if (routine.type !== 'webhook') {
-    return reply.code(400).send(invalidRequestErrorBody('This routine is not of type "webhook"', 'routine_not_webhook'));
+async function rotateTriggerWebhookSecret(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const trigger = await loadTrigger(request, reply, caller);
+  if (!trigger) return reply;
+  if (trigger.type !== 'webhook') {
+    return reply.code(400).send(invalidRequestErrorBody('This trigger is not of type "webhook"', 'trigger_not_webhook'));
   }
   const body = readOptionalBody(request);
   if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
   const grace = body.grace_seconds ?? 0;
   if (typeof grace !== 'number' || !Number.isInteger(grace) || grace < 0 || grace > MAX_ROTATION_GRACE_SECONDS) {
-    return reply.code(400).send(invalidRoutineBody([{ field: 'grace_seconds', message: `grace_seconds must be a whole number from 0 to ${MAX_ROTATION_GRACE_SECONDS}` }]));
+    return reply.code(400).send(invalidTriggerBody([{ field: 'grace_seconds', message: `grace_seconds must be a whole number from 0 to ${MAX_ROTATION_GRACE_SECONDS}` }]));
   }
-  const rotated = rotateWebhookSecret(routine.webhook, { graceSeconds: grace, secret: body.secret });
-  if (!rotated.ok) return reply.code(400).send(invalidRoutineBody([{ field: rotated.field, message: rotated.message }]));
-  const updated = await updateAgentRoutine(caller.scope, routine, { type: 'webhook', webhook: rotated.webhook }, caller.userId);
-  if (!updated) return reply.code(404).send(routineNotFoundBody());
+  const rotated = rotateWebhookSecret(trigger.webhook, { graceSeconds: grace, secret: body.secret });
+  if (!rotated.ok) return reply.code(400).send(invalidTriggerBody([{ field: rotated.field, message: rotated.message }]));
+  const updated = await updateAgentTrigger(caller.scope, trigger, { type: 'webhook', webhook: rotated.webhook }, caller.userId);
+  if (!updated) return reply.code(404).send(triggerNotFoundBody());
   return reply.code(200).send(rotationAnswer(rotated.webhook, rotated.secret));
 }
 
@@ -585,31 +585,31 @@ const DELIVERIES_DEFAULT_LIMIT = 20;
 const DELIVERIES_MAX_LIMIT = 100;
 
 /** The webhook delivery log, newest first (`?limit=` 1–100, `?before=<delivery id>` for the next page). */
-async function listRoutineDeliveries(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
-  const routine = await loadRoutine(request, reply, caller);
-  if (!routine) return reply;
+async function listTriggerDeliveries(request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) {
+  const trigger = await loadTrigger(request, reply, caller);
+  if (!trigger) return reply;
   const query = (request.query ?? {}) as { limit?: string; before?: string };
   const limit = query.limit === undefined || query.limit === '' ? DELIVERIES_DEFAULT_LIMIT : Number(query.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > DELIVERIES_MAX_LIMIT) {
     return reply.code(400).send(invalidRequestErrorBody(`limit must be a whole number from 1 to ${DELIVERIES_MAX_LIMIT}`, 'invalid_limit'));
   }
-  const rows = await runWithTenantScope(caller.scope.tenantDbName, (db) => db.listAgentRoutineDeliveries({
+  const rows = await runWithTenantScope(caller.scope.tenantDbName, (db) => db.listAgentTriggerDeliveries({
     tenantId: caller.scope.tenantId,
     projectId: caller.scope.projectId,
-    routineId: String(routine._id),
+    triggerId: String(trigger._id),
     limit: limit + 1,
     ...(typeof query.before === 'string' && query.before ? { before: query.before } : {}),
   }));
   return reply.code(200).send({ object: 'list', data: rows.slice(0, limit).map(serializeDelivery), has_more: rows.length > limit });
 }
 
-type RoutineHandler = (request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) => Promise<unknown>;
+type TriggerHandler = (request: FastifyRequest, reply: FastifyReply, caller: TriggerCaller) => Promise<unknown>;
 
 // ── Plugin ───────────────────────────────────────────────────────────────
 
-export const agentRoutinesApiPlugin: FastifyPluginAsync = async (app) => {
+export const agentTriggersApiPlugin: FastifyPluginAsync = async (app) => {
   // Client API: the agent `:agentKey` names in the token's project.
-  const client = (handler: RoutineHandler, logMessage: string) => withClientApiRequestContext(async (request, reply, ctx) => {
+  const client = (handler: TriggerHandler, logMessage: string) => withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { agentKey } = request.params as { agentKey: string };
       const agent = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
@@ -639,7 +639,7 @@ export const agentRoutinesApiPlugin: FastifyPluginAsync = async (app) => {
   });
 
   // Dashboard: the agent `:agentId` names in the session's project.
-  const dashboard = (handler: RoutineHandler, logMessage: string) => withApiRequestContext(async (request, reply) => {
+  const dashboard = (handler: TriggerHandler, logMessage: string) => withApiRequestContext(async (request, reply) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
@@ -666,21 +666,21 @@ export const agentRoutinesApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get('/client/v1/agents/:agentKey/routines', client((_request, reply, caller) => listRoutines(reply, caller), 'List routines error'));
-  app.post('/client/v1/agents/:agentKey/routines', client(createRoutine, 'Create routine error'));
-  app.get('/client/v1/agents/:agentKey/routines/:routineId', client(getRoutine, 'Get routine error'));
-  app.patch('/client/v1/agents/:agentKey/routines/:routineId', client(patchRoutine, 'Update routine error'));
-  app.delete('/client/v1/agents/:agentKey/routines/:routineId', client(removeRoutine, 'Delete routine error'));
-  app.post('/client/v1/agents/:agentKey/routines/:routineId/run', client(runRoutineNow, 'Run routine error'));
-  app.post('/client/v1/agents/:agentKey/routines/:routineId/webhook/rotate-secret', client(rotateRoutineWebhookSecret, 'Rotate routine webhook secret error'));
-  app.get('/client/v1/agents/:agentKey/routines/:routineId/deliveries', client(listRoutineDeliveries, 'List routine deliveries error'));
+  app.get('/client/v1/agents/:agentKey/triggers', client((_request, reply, caller) => listTriggers(reply, caller), 'List triggers error'));
+  app.post('/client/v1/agents/:agentKey/triggers', client(createTrigger, 'Create trigger error'));
+  app.get('/client/v1/agents/:agentKey/triggers/:triggerId', client(getTrigger, 'Get trigger error'));
+  app.patch('/client/v1/agents/:agentKey/triggers/:triggerId', client(patchTrigger, 'Update trigger error'));
+  app.delete('/client/v1/agents/:agentKey/triggers/:triggerId', client(removeTrigger, 'Delete trigger error'));
+  app.post('/client/v1/agents/:agentKey/triggers/:triggerId/run', client(runTriggerNow, 'Run trigger error'));
+  app.post('/client/v1/agents/:agentKey/triggers/:triggerId/webhook/rotate-secret', client(rotateTriggerWebhookSecret, 'Rotate trigger webhook secret error'));
+  app.get('/client/v1/agents/:agentKey/triggers/:triggerId/deliveries', client(listTriggerDeliveries, 'List trigger deliveries error'));
 
-  app.get('/agents/:agentId/routines', dashboard((_request, reply, caller) => listRoutines(reply, caller), 'List routines error'));
-  app.post('/agents/:agentId/routines', dashboard(createRoutine, 'Create routine error'));
-  app.get('/agents/:agentId/routines/:routineId', dashboard(getRoutine, 'Get routine error'));
-  app.patch('/agents/:agentId/routines/:routineId', dashboard(patchRoutine, 'Update routine error'));
-  app.delete('/agents/:agentId/routines/:routineId', dashboard(removeRoutine, 'Delete routine error'));
-  app.post('/agents/:agentId/routines/:routineId/run', dashboard(runRoutineNow, 'Run routine error'));
-  app.post('/agents/:agentId/routines/:routineId/webhook/rotate-secret', dashboard(rotateRoutineWebhookSecret, 'Rotate routine webhook secret error'));
-  app.get('/agents/:agentId/routines/:routineId/deliveries', dashboard(listRoutineDeliveries, 'List routine deliveries error'));
+  app.get('/agents/:agentId/triggers', dashboard((_request, reply, caller) => listTriggers(reply, caller), 'List triggers error'));
+  app.post('/agents/:agentId/triggers', dashboard(createTrigger, 'Create trigger error'));
+  app.get('/agents/:agentId/triggers/:triggerId', dashboard(getTrigger, 'Get trigger error'));
+  app.patch('/agents/:agentId/triggers/:triggerId', dashboard(patchTrigger, 'Update trigger error'));
+  app.delete('/agents/:agentId/triggers/:triggerId', dashboard(removeTrigger, 'Delete trigger error'));
+  app.post('/agents/:agentId/triggers/:triggerId/run', dashboard(runTriggerNow, 'Run trigger error'));
+  app.post('/agents/:agentId/triggers/:triggerId/webhook/rotate-secret', dashboard(rotateTriggerWebhookSecret, 'Rotate trigger webhook secret error'));
+  app.get('/agents/:agentId/triggers/:triggerId/deliveries', dashboard(listTriggerDeliveries, 'List trigger deliveries error'));
 };

@@ -286,7 +286,7 @@ Answer with `POST /api/client/v1/agents/sessions/{conversationId}/actions/{actio
 
 ### Typed inputs and structured output
 
-An agent can declare **inputs**, typed arguments of a call (**Configure → Inputs**: a name, a type of `string`, `number`, `integer`, `boolean` or `json`, a label, an enum, a default, required or not; up to 32 of them). A request sends values in `inputs` (the runs API, `/responses`, chat completions, A2A data parts and routines all take them); they are checked (`400 invalid_inputs` with `errors: [{ field, message }]`, each string at most 8 KiB, all of them at most 32 KiB), defaults are applied, and the turn gets them as the prompt variables <span v-pre>`{{input.<name>}}`</span> and as an `Inputs` JSON block after the user message. `GET /agents/{key}` publishes them as `input_schema`.
+An agent can declare **inputs**, typed arguments of a call (**Configure → Inputs**: a name, a type of `string`, `number`, `integer`, `boolean` or `json`, a label, an enum, a default, required or not; up to 32 of them). A request sends values in `inputs` (the runs API, `/responses`, chat completions, A2A data parts and triggers all take them); they are checked (`400 invalid_inputs` with `errors: [{ field, message }]`, each string at most 8 KiB, all of them at most 32 KiB), defaults are applied, and the turn gets them as the prompt variables <span v-pre>`{{input.<name>}}`</span> and as an `Inputs` JSON block after the user message. `GET /agents/{key}` publishes them as `input_schema`.
 
 A call can ask for **structured output** instead of free text, in each API's own spelling:
 
@@ -294,7 +294,7 @@ A call can ask for **structured output** instead of free text, in each API's own
 |-----|-------|
 | Responses | `text.format`: `{ "type": "json_schema", "name": "ticket", "schema": {…}, "strict": true }` or `{ "type": "json_object" }` |
 | Chat completions | `response_format` (the OpenAI shape); `message.content` is then the JSON text |
-| Runs API and routines | `response_format`: `{ "type": "json_schema", "json_schema": { "name", "schema", "strict" } }` |
+| Runs API and triggers | `response_format`: `{ "type": "json_schema", "json_schema": { "name", "schema", "strict" } }` |
 | A2A | A `data` artifact with the parsed object |
 
 It replaces the agent's own structured-output setting (**Configure → Output**) for that call. A schema the platform cannot enforce is `400 invalid_response_format`. The parsed object comes back as `output_parsed` (runs API, Responses), or `output_error` when the answer did not validate: the run still succeeded, so check it.
@@ -329,12 +329,12 @@ Use `previous_response_id` to continue a conversation:
 
 The id resolves to the run, and the run to its session, so the history is rebuilt from the session. Ids of the form `resp_<sessionId>` (from earlier releases) still work. A `previous_response_id` of another agent or project is `404`.
 
-## Runs, routines and cancelling
+## Runs, triggers and cancelling
 
 | | |
 |---|---|
 | **Runs API** | `POST /agents/{agentKey}/runs` starts a run (async-first, `wait`, `class`, `run_at` / `delay_seconds`, `callback`, `metadata`, `response_format`, `stream`); `GET /agents/runs` lists them, `GET /agents/runs/{runId}` reads one (`?wait=`), `GET /agents/runs/queue` shows the queue, `…/events` and `…/events/stream` follow it, `…/actions/{actionId}` answers it. See [Agent runs](/guide/agent-background-execution). |
-| **Routines** | `…/agents/{agentKey}/routines` (list, create, get, update, delete, `…/run`, and for webhook routines `…/webhook/rotate-secret` and `…/deliveries`). See [Agent routines](/guide/agent-routines). |
+| **Triggers** | `…/agents/{agentKey}/triggers` (list, create, get, update, delete, `…/run`, and for webhook triggers `…/webhook/rotate-secret` and `…/deliveries`). See [Agent triggers](/guide/agent-triggers). |
 | **Models** | `GET /models` lists the project's models and its active agents (`agent:<key>`); a token with only the Agents service lists the agents alone. See [Inference](/guide/inference#model-discovery). |
 | **A2A** | `POST /a2a/{agentKey}`: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`. A run that was canceled answers a Task `canceled`, one that failed after it started (the quota refusal, a request that is still pending) a Task `failed` with `metadata.errorType` / `errorCode`; `tasks/cancel` of a task that cannot be canceled is `-32002`. The public route (`/api/public/a2a/{tenantId}/{slug}`) binds a task to its caller: the ids are `run_<runId>.<nonce>` and `<sessionId>.<nonce>`, to be handed back whole (see the OpenAPI description). See [Approvals](/guide/agent-approvals#background-runs-and-a2a) and [Session files](/guide/session-files#files-the-agent-produces). |
 
@@ -370,4 +370,4 @@ Agents configured in the dashboard can include:
 | 500 | Internal error during agent execution |
 | 503 | The permission engine could not decide (`authorization_unavailable`), or the run a call waited on was ended elsewhere before it finished (`agent_run_interrupted`, retryable) |
 
-The runs, sessions and routines APIs answer `{ "error": { "type", "message", "code" } }`; the OpenAI routes use OpenAI's envelope with `param`. The full list for runs is in [Agent runs](/guide/agent-background-execution#errors).
+The runs, sessions and triggers APIs answer `{ "error": { "type", "message", "code" } }`; the OpenAI routes use OpenAI's envelope with `param`. The full list for runs is in [Agent runs](/guide/agent-background-execution#errors).

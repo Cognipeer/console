@@ -46,7 +46,7 @@ export function stepFailed(step: PlaygroundStep): boolean {
 /** Who started a session, as the server describes it (a person's name, or the kind of traffic that did). */
 export interface SessionOwnerView {
     id: string;
-    kind: 'user' | 'routine' | 'public_a2a' | 'evaluation' | 'redteam' | 'system' | 'unknown';
+    kind: 'user' | 'trigger' | 'public_a2a' | 'evaluation' | 'redteam' | 'system' | 'unknown';
     name?: string;
     email?: string;
 }

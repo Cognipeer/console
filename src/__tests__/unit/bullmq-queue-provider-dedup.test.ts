@@ -36,7 +36,7 @@ describe('BullMQ dedup key', () => {
   });
 
   it('replaces ":" so BullMQ accepts the job id', () => {
-    expect(sanitizeBullmqJobId('routine:abc:2026-10-17T10:00:00.000Z')).toBe('routine_abc_2026-10-17T10_00_00.000Z');
+    expect(sanitizeBullmqJobId('trigger:abc:2026-10-17T10:00:00.000Z')).toBe('trigger_abc_2026-10-17T10_00_00.000Z');
     expect(sanitizeBullmqJobId('ar_run1_2')).toBe('ar_run1_2');
     expect(sanitizeBullmqJobId(undefined)).toBeUndefined();
   });

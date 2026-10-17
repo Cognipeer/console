@@ -292,7 +292,7 @@ describe('startAgentRun — inline runs (§4.2)', () => {
     expect(callbackJobs()[0][2]).toMatchObject({ event: 'succeeded' });
     expect(hoisted.publishWebhookEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'agent_run.succeeded',
-      data: expect.objectContaining({ status: 'succeeded', class: 'default', metadata: {}, routineId: null }),
+      data: expect.objectContaining({ status: 'succeeded', class: 'default', metadata: {}, triggerId: null }),
     }));
   });
 

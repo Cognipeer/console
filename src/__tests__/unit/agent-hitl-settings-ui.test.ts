@@ -103,7 +103,7 @@ describe('the unattended policy select', () => {
   it('is worded for the owner in both languages', () => {
     const english = en.agents.hitl as Record<string, string>;
     const turkish = tr.agents.hitl as Record<string, string>;
-    expect(english.unattended).toBe('When nobody can answer (routines, API bridges, evaluations)');
+    expect(english.unattended).toBe('When nobody can answer (triggers, API bridges, evaluations)');
     expect(english.unattendedDeny).toBe('Deny the tool call');
     expect(english.unattendedPause).toBe('Pause and wait for approval in Studio');
     expect(english.unattendedAllow).toBe('Run without approval');

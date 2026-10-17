@@ -1,13 +1,13 @@
 /**
- * Incoming routine webhooks (SPEC-webhooks W2):
+ * Incoming trigger webhooks (SPEC-webhooks W2):
  *
  *   POST /api/public/hooks/:tenantId/:hookId
  *
- * No API token: the URL names the tenant and the routine's random hook id, and
- * every delivery proves the routine's secret — in a header (checked in
+ * No API token: the URL names the tenant and the trigger's random hook id, and
+ * every delivery proves the trigger's secret — in a header (checked in
  * `onRequest`, before the body is read) or as a signature over the raw body
  * (checked once it is read). An unknown URL is 404 and remembered per node for
- * a minute; a found routine is never cached, so disabling, rotating or deleting
+ * a minute; a found trigger is never cached, so disabling, rotating or deleting
  * applies at once on every replica. A failed lookup is 503 (Azure DevOps
  * retries it) and is not remembered.
  *
@@ -23,29 +23,29 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
-import type { AgentRoutineOfType, IAgentRoutine, ITenant } from '@/lib/database';
+import type { AgentTriggerOfType, IAgentTrigger, ITenant } from '@/lib/database';
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
-import { isHeaderAuth, verifyHeaderAuth } from '@/lib/services/agents/routineWebhookAuth';
-import { processWebhookDelivery, recordDelivery, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/routineWebhookDelivery';
-import { openWebhookSecrets } from '@/lib/services/agents/routineWebhookTrigger';
+import { isHeaderAuth, verifyHeaderAuth } from '@/lib/services/agents/agentTriggerWebhookAuth';
+import { processWebhookDelivery, recordDelivery, unauthorizedAnswer, type WebhookAnswer } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { openWebhookSecrets } from '@/lib/services/agents/agentTriggerWebhookIntake';
 import { countRequest } from '@/lib/services/auth/sharedRateCounter';
 
 const logger = createLogger('api:public-hooks');
 
 const PUBLIC_HOOK_AUTHZ = authz.self(
-  'unauthenticated by design: addressed by tenant id + random hook id; every delivery is authenticated with the routine secret',
+  'unauthenticated by design: addressed by tenant id + random hook id; every delivery is authenticated with the trigger secret',
 );
 
 interface HookDelivery {
   tenant: ITenant;
-  routine: AgentRoutineOfType<'webhook'>;
+  trigger: AgentTriggerOfType<'webhook'>;
   secrets: string[];
 }
 
 declare module 'fastify' {
   interface FastifyRequest {
-    /** The routine an incoming webhook resolved to (public-hooks.ts). */
+    /** The trigger an incoming webhook resolved to (public-hooks.ts). */
     hookDelivery?: HookDelivery;
     /** A header auth mode verified the request before its body was read. */
     hookAuthenticated?: boolean;
@@ -60,7 +60,7 @@ const TENANT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/;
 const HOOK_ID_RE = /^wh_[A-Za-z0-9_-]{16,64}$/;
 
-/** The abuse ceiling per routine and minute: max(600, 10 × the run limit). */
+/** The abuse ceiling per trigger and minute: max(600, 10 × the run limit). */
 const ABUSE_FLOOR_PER_MINUTE = 600;
 
 // ── Per-node caches ──────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ class ExpiringMap<V> {
 
 /** Unknown (tenant, hook id) pairs. Only misses are remembered. */
 const unknownHooks = new ExpiringMap<true>(10_000, 60_000);
-/** Tenants by id (the tenant record changes rarely; the routine is read on every request). */
+/** Tenants by id (the tenant record changes rarely; the trigger is read on every request). */
 const tenants = new ExpiringMap<ITenant>(1_000, 60_000);
 
 /** Test seam: forget both caches. */
@@ -134,7 +134,7 @@ function contentLength(request: FastifyRequest): number {
   return Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-// ── onRequest: find the routine, check a header secret (no body read yet) ──
+// ── onRequest: find the trigger, check a header secret (no body read yet) ──
 
 async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | void> {
   const { tenantId, hookId } = request.params as { tenantId: string; hookId: string };
@@ -157,27 +157,27 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
   }
   if (!tenant?.dbName) return miss();
 
-  let routine: IAgentRoutine | null;
+  let trigger: IAgentTrigger | null;
   try {
-    routine = await runWithTenantScope(tenant.dbName, (db) => db.findAgentRoutineByHookId(hookId));
+    trigger = await runWithTenantScope(tenant.dbName, (db) => db.findAgentTriggerByHookId(hookId));
   } catch (error) {
-    logger.warn('Webhook routine lookup failed', { error: error instanceof Error ? error.message : String(error) });
+    logger.warn('Webhook trigger lookup failed', { error: error instanceof Error ? error.message : String(error) });
     return unavailable(reply);
   }
-  if (!routine || routine.type !== 'webhook' || routine.webhook.hookId !== hookId || routine.tenantId !== String(tenant._id)) {
+  if (!trigger || trigger.type !== 'webhook' || trigger.webhook.hookId !== hookId || trigger.tenantId !== String(tenant._id)) {
     return miss();
   }
 
-  const webhook = routine.webhook;
+  const webhook = trigger.webhook;
   const tenantDbName = tenant.dbName;
-  const found = routine;
+  const found = trigger;
   const receivedAt = new Date();
   const ceiling = Math.max(ABUSE_FLOOR_PER_MINUTE, 10 * getConfig().agent.webhooks.rateLimitPerMinute);
-  const ceilingKey = `hook-abuse:${String(tenant._id)}:${String(routine._id)}`;
+  const ceilingKey = `hook-abuse:${String(tenant._id)}:${String(trigger._id)}`;
   const record = (outcome: 'unauthorized' | 'rejected', httpStatus: number, reason: string) =>
     runWithTenantScope(tenantDbName, (db) => recordDelivery(db, found, { outcome, httpStatus, reason, bytes: contentLength(request), receivedAt }))
       .catch(() => undefined);
-  const secrets = openWebhookSecrets(String(routine._id), webhook, receivedAt);
+  const secrets = openWebhookSecrets(String(trigger._id), webhook, receivedAt);
 
   if (isHeaderAuth(webhook.auth)) {
     const check = secrets
@@ -206,7 +206,7 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
       return send(reply, unauthorizedAnswer());
     }
   }
-  request.hookDelivery = { tenant, routine, secrets: secrets! };
+  request.hookDelivery = { tenant, trigger, secrets: secrets! };
 }
 
 // ── Plugin ───────────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ export const publicHooksApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       // Everything from the body check on — de-duplication, the delivery rows, the fire — in one tenant scope.
       const answer = await runWithTenantScope(hook.tenant.dbName!, (db) => processWebhookDelivery(db, {
-        routine: hook.routine,
+        trigger: hook.trigger,
         tenant: { tenantId: String(hook.tenant._id), tenantDbName: hook.tenant.dbName!, licenseType: hook.tenant.licenseType },
         headers: request.headers,
         body,

@@ -51,7 +51,7 @@ import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { EntityMetricsMixin } from './sqlite/entity-metrics.mixin';
 import { AlertStateMixin } from './sqlite/alert-state.mixin';
 import { SchedulerClaimMixin } from './sqlite/scheduler-claim.mixin';
-import { AgentRoutineMixin } from './sqlite/agent-routine.mixin';
+import { AgentTriggerMixin } from './sqlite/agent-trigger.mixin';
 import { AlertChannelLibraryMixin } from './sqlite/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './sqlite/external-model-pricing.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
@@ -98,7 +98,7 @@ const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- an interface (not an alias) is what caps the depth
 interface BulkInstance extends InstanceType<typeof BulkBase> {}
 const BulkFlat: Constructor<BulkInstance> = BulkBase;
-const PricingBase = AgentRoutineMixin(SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkFlat))));
+const PricingBase = AgentTriggerMixin(SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkFlat))));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the

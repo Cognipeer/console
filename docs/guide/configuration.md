@@ -215,7 +215,7 @@ See [Cluster](/guide/cluster) for the full topology / assignment model.
 
 ### Agent Runs
 
-Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS` and then answers `202` while the run keeps going; runs can also be queued (`background`), deferred (low priority) or scheduled, and an agent's routines start runs on a cron schedule (in a timezone), once at a set time, or on Run now. See [Agent background execution](/guide/agent-background-execution).
+Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS` and then answers `202` while the run keeps going; runs can also be queued (`background`), deferred (low priority) or scheduled, and an agent's triggers start runs on a cron schedule (in a timezone), once at a set time, or on Run now. See [Agent background execution](/guide/agent-background-execution).
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -230,10 +230,10 @@ Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS
 | `AGENT_DEFERRED_MAX_WAIT_MS` | A deferred or scheduled run that has not started this long after it became due fails with reason `expired` (minimum `60000`) | `86400000` |
 | `AGENT_RUN_CALLBACK_CONCURRENCY` | Callback delivery workers per node | `4` |
 | `AGENT_RUN_DRAIN_TIMEOUT_MS` | On shutdown: how long to wait for runs executing on this node before marking the rest `interrupted`. The drain runs before the HTTP server waits for its open connections, so a caller waiting on such a run is answered (`503 agent_run_interrupted`) and open streams end. Kept below `SHUTDOWN_TIMEOUT_MS` minus 3 seconds | `10000` |
-| `AGENT_ROUTINE_TICK_MS` | How often the routine scheduler looks for due slots (minimum `5000`) | `30000` |
-| `AGENT_ROUTINE_MISFIRE_GRACE_MS` | A missed routine slot older than this is skipped; at most one catch-up run fires | `3600000` |
-| `AGENT_WEBHOOK_BODY_LIMIT_BYTES` | Largest body an incoming routine webhook accepts (min 16384, max 26214400); larger deliveries get 413 | `5242880` |
-| `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Runs one webhook routine starts per minute (`0` = off). Per node unless `RATE_LIMIT_PROVIDER=redis` | `60` |
+| `AGENT_TRIGGER_TICK_MS` | How often the trigger scheduler looks for due slots (minimum `5000`) | `30000` |
+| `AGENT_TRIGGER_MISFIRE_GRACE_MS` | A missed trigger slot older than this is skipped; at most one catch-up run fires | `3600000` |
+| `AGENT_WEBHOOK_BODY_LIMIT_BYTES` | Largest body an incoming trigger webhook accepts (min 16384, max 26214400); larger deliveries get 413 | `5242880` |
+| `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Runs one webhook trigger starts per minute (`0` = off). Per node unless `RATE_LIMIT_PROVIDER=redis` | `60` |
 | `AGENT_CHAT_CONCURRENCY` | Concurrent agent chat turns per node | `4` |
 | `AGENT_RUN_RETENTION_DAYS` | How long run records (`userMessage`, result) are kept, counted from when the run finished (a scheduled or deferred run is also kept until it was due) | `30` |
 | `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | How often a worker stamps the heartbeat of a running run (minimum `1000`) | `15000` |

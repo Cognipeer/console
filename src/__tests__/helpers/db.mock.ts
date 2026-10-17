@@ -266,25 +266,25 @@ function buildPrimers(): Record<string, Mock> {
     expireWaitingAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunPublished: vi.fn().mockResolvedValue(null),
 
-    // Agent routines: a real provider answers a miss with `null` / `false` / a count.
-    createAgentRoutine: vi.fn((record: Record<string, unknown>) => Promise.resolve({
-      _id: `mock-routine-${Math.random().toString(36).slice(2, 10)}`,
+    // Agent triggers: a real provider answers a miss with `null` / `false` / a count.
+    createAgentTrigger: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+      _id: `mock-trigger-${Math.random().toString(36).slice(2, 10)}`,
       createdAt: new Date(),
       updatedAt: new Date(),
       ...record,
     })),
-    getAgentRoutine: vi.fn().mockResolvedValue(null),
-    updateAgentRoutine: vi.fn().mockResolvedValue(null),
-    deleteAgentRoutinesForAgent: vi.fn().mockResolvedValue(0),
-    advanceRoutineNextFire: vi.fn().mockResolvedValue(false),
-    setRoutineFireResult: vi.fn().mockResolvedValue(false),
+    getAgentTrigger: vi.fn().mockResolvedValue(null),
+    updateAgentTrigger: vi.fn().mockResolvedValue(null),
+    deleteAgentTriggersForAgent: vi.fn().mockResolvedValue(0),
+    advanceTriggerNextFire: vi.fn().mockResolvedValue(false),
+    setTriggerFireResult: vi.fn().mockResolvedValue(false),
     // The webhook delivery log: a recorded row, a count, the retention result.
-    recordAgentRoutineDelivery: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+    recordAgentTriggerDelivery: vi.fn((record: Record<string, unknown>) => Promise.resolve({
       _id: `mock-delivery-${Math.random().toString(36).slice(2, 10)}`,
       ...record,
     })),
-    cleanupAgentRoutineDeliveryRetention: vi.fn().mockResolvedValue({ deletedCount: 0 }),
-    deleteAgentRoutineDeliveries: vi.fn().mockResolvedValue(0),
+    cleanupAgentTriggerDeliveryRetention: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    deleteAgentTriggerDeliveries: vi.fn().mockResolvedValue(0),
   };
 }
 

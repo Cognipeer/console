@@ -5,7 +5,7 @@
  *
  * Each row is one input: name, label, type, required, default, description and
  * (for text / number types) the allowed values. A caller sends them as `inputs`
- * on a run, a routine stores them with its prompt; the prompt reads them as
+ * on a run, a trigger stores them with its prompt; the prompt reads them as
  * `{{input.<name>}}` and the model also gets them as an Inputs block. The same
  * rules the server applies on save (`validateInputDeclaration`) mark a row here
  * as the person types, so a save is not the first they hear of a bad name.

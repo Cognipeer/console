@@ -145,7 +145,7 @@ beforeEach(async () => {
   } as never);
   conversations.own = await conversation(String(users.starter._id));
   conversations.public = await conversation('a2a-public');
-  conversations.schedule = await conversation('system:routine:rt1');
+  conversations.schedule = await conversation('system:trigger:trg1');
   conversations.elsewhere = await conversation(String(users.starter._id), { projectId: p2 });
   conversations.otherAgent = await conversation(String(users.starter._id), { agentKey: 'another-agent' });
   conversations.waiting = await conversation(String(users.starter._id), { runtimeStatus: 'requires_action' });

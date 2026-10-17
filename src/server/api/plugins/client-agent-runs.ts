@@ -90,7 +90,7 @@ const logger = createLogger('api:client-agent-runs');
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
 
 const RUN_STATUSES: ReadonlyArray<IAgentRun['status']> = ['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled'];
-const RUN_CHANNELS: ReadonlyArray<NonNullable<IAgentRun['channel']>> = ['runs', 'responses', 'chat_completions', 'a2a', 'routine'];
+const RUN_CHANNELS: ReadonlyArray<NonNullable<IAgentRun['channel']>> = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger'];
 const LIST_DEFAULT_LIMIT = 20;
 const LIST_MAX_LIMIT = 100;
 const LIST_MAX_METADATA_FILTERS = 3;
@@ -454,7 +454,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(text('session_id') ? { conversationId: text('session_id') } : {}),
         ...(status ? { status } : {}),
         ...(runClass ? { runClass: runClass as AgentRunClass } : {}),
-        ...(text('routine_id') ? { routineId: text('routine_id') } : {}),
+        ...(text('trigger_id') ? { triggerId: text('trigger_id') } : {}),
         ...(channel ? { channel: channel as NonNullable<IAgentRun['channel']> } : {}),
         ...(trigger ? { trigger: trigger as NonNullable<IAgentRun['trigger']> } : {}),
         ...(Object.keys(metadata).length > 0 ? { metadata } : {}),

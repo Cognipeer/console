@@ -122,9 +122,9 @@ tags:
     description: Run an agent as a recorded unit of work you can wait for, queue, schedule, stream, follow and cancel
   - name: Model Discovery
     description: OpenAI-compatible model listing with versioned Cognipeer capability metadata
-  - name: Agent Routines
+  - name: Agent Triggers
     description: >-
-      Saved ways of starting an agent - on a cron schedule, once, by hand, or when an external system posts an event (GitHub, GitLab, Azure DevOps or any sender) - and the public webhook URL that receives those events. Every fire is an ordinary run (`channel: routine`), listed by `GET /agents/runs?routine_id=`.
+      Saved ways of starting an agent - on a cron schedule, once, by hand, or when an external system posts an event (GitHub, GitLab, Azure DevOps or any sender) - and the public webhook URL that receives those events. Every fire is an ordinary run (`channel: trigger`), listed by `GET /agents/runs?trigger_id=`.
 paths:
   /a2a/{agentKey}:
     post:
@@ -832,7 +832,7 @@ paths:
         - Agent Runs
       summary: List agent runs
       description: >-
-        The runs of the token's project, newest first, whatever started them (this API, `/responses`, chat completions, A2A, a routine). The dashboard's own turn reservations are not runs and are never listed. A caller who may not view other people's sessions sees only the runs they started. Page with `after` set to the `last_id` of the previous page while `has_more` is true.
+        The runs of the token's project, newest first, whatever started them (this API, `/responses`, chat completions, A2A, a trigger). The dashboard's own turn reservations are not runs and are never listed. A caller who may not view other people's sessions sees only the runs they started. Page with `after` set to the `last_id` of the previous page while `has_more` is true.
       operationId: listAgentRuns
       parameters:
         - name: agent
@@ -862,10 +862,10 @@ paths:
           description: Only runs on this session.
           schema:
             type: string
-        - name: routine_id
+        - name: trigger_id
           in: query
           required: false
-          description: Only runs a routine started - a routine's history.
+          description: Only runs a trigger started - a trigger's history.
           schema:
             type: string
         - name: channel
@@ -878,10 +878,11 @@ paths:
               - responses
               - chat_completions
               - a2a
-              - routine
+              - trigger
         - name: trigger
           in: query
           required: false
+          description: What started the run - `request` for a client call, otherwise how a trigger fired (`schedule`, `once`, `manual`, `webhook`). To follow one trigger, use `trigger_id`.
           schema:
             type: string
             enum:
@@ -2263,7 +2264,7 @@ paths:
         - Agents
       summary: Delete an agent
       description: >-
-        Delete an agent definition resolved by key within the token's project. Its routines (and their webhook delivery logs) are deleted with it. Requires an API token with `write` permission for this service.
+        Delete an agent definition resolved by key within the token's project. Its triggers (and their webhook delivery logs) are deleted with it. Requires an API token with `write` permission for this service.
       operationId: deleteAgent
       parameters:
         - name: agentKey
@@ -2358,7 +2359,7 @@ paths:
         **Streaming.** `stream: true` runs the turn inline and answers `200` with Server-Sent Events in the OpenAI Responses vocabulary: `response.created` (names the run: `resp_{runId}`, `cognipeer.run_id`), `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, reasoning events (`response.reasoning_summary_*`), then `response.completed` (the full response), `response.failed` or `response.incomplete`; a failure or a refusal that arrives after the stream opened is an `error` event. `: ping` comments every 15 s. There is no wait window: the stream lasts for the whole turn, bounded by the run limit. If the client goes away the run keeps running detached (`on_disconnect: continue`, default) and can be followed through the run, or is cancelled (`on_disconnect: cancel`). A stream cannot be `deferred` or scheduled. Before the stream opens the active-run caps and the agent quota are checked: over a limit the answer is a plain JSON `429` (`agent_run_concurrency_limit`, or `agent_quota_exceeded` with `Retry-After: 60`; the concurrency limit carries `Retry-After: 30`) and no session is created; a limit reached in the instant between that check and the start still arrives as an `error` event on the open stream. A run that is ended elsewhere while the stream is open (the server shut down and handed its runs over, a lost worker) ends the stream with an `error` event (`agent_run_interrupted`) and `response.failed`. `reasoning` is applied to a streamed run only; a queued run (the default, `deferred`, scheduled) runs with the agent's own effort.
 
 
-        **Idempotency.** `Idempotency-Key` (at most 255 characters; keys starting with `hook:` or `routine:` are reserved) works on every call, waited or not. The same key with the same request (agent, session when continuing, message, version and the files named by id) returns the stored run - `200` once it finished, `202` while it goes on (the call waits like a new one first) - and creates no new session; a different request is `409` `idempotency_key_conflict`. A replay of a `stream: true` request answers `text/event-stream` too, in the same Responses events (`response.created`, `response.in_progress` and the stored terminal event of a finished run; a run that is still going ends with a further `response.in_progress` and no terminal event, follow it with `GET /agents/runs/{runId}`), not JSON. Two requests with the same key that arrive together: the second waits briefly (about half a second) for the first one's run and replays it, instead of answering a conflict.
+        **Idempotency.** `Idempotency-Key` (at most 255 characters; keys starting with `hook:` or `trigger:` are reserved) works on every call, waited or not. The same key with the same request (agent, session when continuing, message, version and the files named by id) returns the stored run - `200` once it finished, `202` while it goes on (the call waits like a new one first) - and creates no new session; a different request is `409` `idempotency_key_conflict`. A replay of a `stream: true` request answers `text/event-stream` too, in the same Responses events (`response.created`, `response.in_progress` and the stored terminal event of a finished run; a run that is still going ends with a further `response.in_progress` and no terminal event, follow it with `GET /agents/runs/{runId}`), not JSON. Two requests with the same key that arrive together: the second waits briefly (about half a second) for the first one's run and replays it, instead of answering a conflict.
 
 
         **Retention.** A finished run stays readable for `AGENT_RUN_RETENTION_DAYS` counted from the moment it finished, whatever the way it ended. Until then a scheduled or deferred run is kept at least until it is due (plus, for a deferred run, the maximum wait) and then for the retention period, so a run scheduled far ahead is not removed soon after it ends.
@@ -2467,7 +2468,7 @@ paths:
                 conversation_id: 6710f3a2c1d4e5b8a9c0d1e1
                 channel: runs
                 trigger: request
-                routine_id: null
+                trigger_id: null
                 metadata:
                   ticket: OPS-12
                 stop_reason: end_turn
@@ -2543,7 +2544,7 @@ paths:
                 conversation_id: 6710f3a2c1d4e5b8a9c0d1e4
                 channel: runs
                 trigger: request
-                routine_id: null
+                trigger_id: null
                 metadata: {}
                 stop_reason: null
                 result: null
@@ -2640,65 +2641,65 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
-  /agents/{agentKey}/routines:
+  /agents/{agentKey}/triggers:
     get:
-      tags: [Agent Routines]
-      summary: List routines of an agent
+      tags: [Agent Triggers]
+      summary: List triggers of an agent
       description: >-
-        The routines of the agent in the token's project, oldest first. There is no paging: `has_more` is always `false`. A routine is a saved way of starting the agent (a prompt, optional inputs and a `type` with that type's settings: a `schedule`, one `once` time, `manual` by hand, or an incoming `webhook`); every fire is an ordinary run (`channel: routine`), so a routine's history is `GET /agents/runs?routine_id={id}`. Needs the `agents` permission (Read).
-      operationId: listAgentRoutines
+        The triggers of the agent in the token's project, oldest first. There is no paging: `has_more` is always `false`. A trigger is a saved way of starting the agent (a prompt, optional inputs and a `type` with that type's settings: a `schedule`, one `once` time, `manual` by hand, or an incoming `webhook`); every fire is an ordinary run (`channel: trigger`), so a trigger's history is `GET /agents/runs?trigger_id={id}`. Needs the `agents` permission (Read).
+      operationId: listAgentTriggers
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
+        - $ref: '#/components/parameters/TriggerAgentKey'
       responses:
         '200':
-          description: The routines.
+          description: The triggers.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineList'
+                $ref: '#/components/schemas/AgentTriggerList'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
     post:
-      tags: [Agent Routines]
-      summary: Create a routine
+      tags: [Agent Triggers]
+      summary: Create a trigger
       description: |-
-        Saves a routine for the agent. Needs the `agents` permission (Write).
+        Saves a trigger for the agent. Needs the `agents` permission (Write).
 
-        `name` is required; `type` defaults to `manual` (the routine only starts on `POST …/run`). A `type` comes with
+        `name` is required; `type` defaults to `manual` (the trigger only starts on `POST …/run`). A `type` comes with
         the one settings object named after it: `schedule`, `once` or `webhook` (`manual` has none); the settings object
         of another type is `400`.
         The prompt, `inputs` and `version` are checked together against the inputs the agent (that version of it)
-        declares, and `prompt` may be empty only when the agent declares inputs and the routine gives some. For a
-        webhook routine the prompt is a template and `inputs` a mapping (see `AgentRoutineWebhookRequest`), and
+        declares, and `prompt` may be empty only when the agent declares inputs and the trigger gives some. For a
+        webhook trigger the prompt is a template and `inputs` a mapping (see `AgentTriggerWebhookRequest`), and
         the prompt may also be empty when `webhook.include_payload` is on.
 
-        A webhook routine answers `201` with the generated secret in `webhook.secret`: it is shown only in this
+        A webhook trigger answers `201` with the generated secret in `webhook.secret`: it is shown only in this
         answer (never again, only its last four characters as `webhook.secret_hint`). With `auth: standard_webhooks`
         the sender's own secret is sent in `webhook.secret` and nothing is generated.
 
-        A schedule or once routine runs as a system actor (`system:routine:{id}`), unattended: no tool approvals
+        A schedule or once trigger runs as a system actor (`system:trigger:{id}`), unattended: no tool approvals
         or questions are waited for, and it needs no user token at fire time. Every fire counts against the agent's
-        run limits, spend limits and quotas like any run. The session stays owned by `system:routine:{id}`, but the
-        limits, quotas, spend and usage of a scheduled, once or webhook fire are counted against the routine's last
-        updater (the person who last changed it), or its creator while nobody has changed it. A routine run's
-        spend therefore shows up under that person, not under the routine.
-      operationId: createAgentRoutine
+        run limits, spend limits and quotas like any run. The session stays owned by `system:trigger:{id}`, but the
+        limits, quotas, spend and usage of a scheduled, once or webhook fire are counted against the trigger's last
+        updater (the person who last changed it), or its creator while nobody has changed it. A trigger run's
+        spend therefore shows up under that person, not under the trigger.
+      operationId: createAgentTrigger
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
+        - $ref: '#/components/parameters/TriggerAgentKey'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AgentRoutineCreateRequest'
+              $ref: '#/components/schemas/AgentTriggerCreateRequest'
             examples:
               schedule:
                 summary: Weekday report at 09:00 Istanbul time
@@ -2735,16 +2736,16 @@ paths:
       responses:
         '201':
           description: >-
-            The routine. A webhook routine also carries the generated secret in `webhook.secret`, shown only here.
+            The trigger. A webhook trigger also carries the generated secret in `webhook.secret`, shown only here.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineWithSecret'
+                $ref: '#/components/schemas/AgentTriggerWithSecret'
               examples:
                 schedule:
                   value:
                     id: 6718a1c2f3b4a5d6e7f80912
-                    object: agent.routine
+                    object: agent.trigger
                     agent: support-triage
                     name: Daily support digest
                     description: null
@@ -2768,7 +2769,7 @@ paths:
                 webhook:
                   value:
                     id: 6718a2d9f3b4a5d6e7f80913
-                    object: agent.routine
+                    object: agent.trigger
                     agent: code-reviewer
                     name: PR reviewer
                     description: null
@@ -2803,78 +2804,78 @@ paths:
                     created_at: 1760636400
                     updated_at: 1760636400
         '400':
-          $ref: '#/components/responses/RoutineInvalid'
+          $ref: '#/components/responses/TriggerInvalid'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
-  /agents/{agentKey}/routines/{routineId}:
+  /agents/{agentKey}/triggers/{triggerId}:
     get:
-      tags: [Agent Routines]
-      summary: Get a routine
+      tags: [Agent Triggers]
+      summary: Get a trigger
       description: >-
-        One routine of the agent. The callback secret and the webhook secret are never returned (`callback.signed` and `webhook.secret_hint` only). Needs the `agents` permission (Read).
-      operationId: getAgentRoutine
+        One trigger of the agent. The callback secret and the webhook secret are never returned (`callback.signed` and `webhook.secret_hint` only). Needs the `agents` permission (Read).
+      operationId: getAgentTrigger
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
       responses:
         '200':
-          description: The routine.
+          description: The trigger.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutine'
+                $ref: '#/components/schemas/AgentTrigger'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
     patch:
-      tags: [Agent Routines]
-      summary: Update a routine
+      tags: [Agent Triggers]
+      summary: Update a trigger
       description: |-
         Changes the fields that are sent; absent fields stay as they are, `null` clears a nullable field
         (`description`, `version` = the published version, `inputs`, `metadata`, `response_format`, `callback`).
         Needs the `agents` permission (Write).
 
         - `type` and its settings object (`schedule`, `once` or `webhook`) are sent together and replace the type and
-          its settings as a whole; the settings object of the type the routine leaves is dropped. A settings object
+          its settings as a whole; the settings object of the type the trigger leaves is dropped. A settings object
           without its `type`, or one of another type, is `400`. Sending the stored type and settings back unchanged (a
-          form saved as it was) changes nothing, so a once routine that already fired can still be edited. A new type
+          form saved as it was) changes nothing, so a once trigger that already fired can still be edited. A new type
           or a change to `enabled` recomputes `next_fire_at` from now.
-        - A webhook routine that stays a webhook routine keeps its URL and secret: absent `webhook` fields keep their
-          values, so `{"type":"webhook","webhook":{"events":["push"]}}` changes only the event list. Moving a routine
+        - A webhook trigger that stays a webhook trigger keeps its URL and secret: absent `webhook` fields keep their
+          values, so `{"type":"webhook","webhook":{"events":["push"]}}` changes only the event list. Moving a trigger
           to the webhook type creates a new URL and secret (answered once in `webhook.secret`, like create); moving
           away from `standard_webhooks` to another auth mode generates a new secret; supplying `webhook.secret` with
           `standard_webhooks` replaces the sender's secret and ends any rotation grace.
         - `callback.secret` is write-only: absent (or the mask `"••••••"`) keeps the stored secret, `""` removes it, a new
           value replaces it; `callback: null` or an empty `callback.url` removes the callback.
         - The prompt, `inputs`, `version` and type are checked together again whenever one of them changes.
-      operationId: updateAgentRoutine
+      operationId: updateAgentTrigger
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AgentRoutineUpdateRequest'
+              $ref: '#/components/schemas/AgentTriggerUpdateRequest'
             examples:
               pause:
-                summary: Pause a routine
+                summary: Pause a trigger
                 value:
                   enabled: false
               retime:
@@ -2886,90 +2887,90 @@ paths:
                     timezone: Europe/Istanbul
       responses:
         '200':
-          description: The routine. `webhook.secret` is present only when this call created a new generated webhook secret.
+          description: The trigger. `webhook.secret` is present only when this call created a new generated webhook secret.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineWithSecret'
+                $ref: '#/components/schemas/AgentTriggerWithSecret'
         '400':
-          $ref: '#/components/responses/RoutineInvalid'
+          $ref: '#/components/responses/TriggerInvalid'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
     delete:
-      tags: [Agent Routines]
-      summary: Delete a routine
+      tags: [Agent Triggers]
+      summary: Delete a trigger
       description: >-
-        Removes the routine and, for a webhook routine, its delivery log; the hook URL answers `404` from then on. Runs the routine already started are kept. Needs the `agents` permission (Write).
-      operationId: deleteAgentRoutine
+        Removes the trigger and, for a webhook trigger, its delivery log; the hook URL answers `404` from then on. Runs the trigger already started are kept. Needs the `agents` permission (Write).
+      operationId: deleteAgentTrigger
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
       responses:
         '200':
-          description: The routine is deleted.
+          description: The trigger is deleted.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineDeleted'
+                $ref: '#/components/schemas/AgentTriggerDeleted'
               example:
                 id: 6718a1c2f3b4a5d6e7f80912
-                object: agent.routine.deleted
+                object: agent.trigger.deleted
                 deleted: true
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
-  /agents/{agentKey}/routines/{routineId}/run:
+  /agents/{agentKey}/triggers/{triggerId}/run:
     post:
-      tags: [Agent Routines]
-      summary: Run a routine now
+      tags: [Agent Triggers]
+      summary: Run a trigger now
       description: |-
-        One fire with the routine's prompt, whatever its type (the run's `trigger` is `manual`). It works on a
-        disabled routine too. The body is optional. Needs the `agents` permission (Write).
+        One fire with the trigger's prompt, whatever its type (the run's `trigger` is `manual`). It works on a
+        disabled trigger too. The body is optional. Needs the `agents` permission (Write).
 
         The answer is the run (`AgentRun`): `200` when it finished within the wait window, else `202` with
         `Location` (the run's URL) and `Retry-After`. The wait is `wait` (seconds, body) or `Prefer: wait=N`
         (`Prefer: respond-async` = do not wait); it is capped at the longest synchronous wait the token may use and
         defaults to 0. When a `Prefer` token applied, `Preference-Applied` says which. `Idempotency-Key` (at most
-        255 characters) replays the run an earlier call with the same key started for this routine; a key that
-        belongs to another routine or request is `409 idempotency_key_conflict`. Keys that start with `hook:` or
-        `routine:` are reserved (`400 idempotency_key_reserved`).
+        255 characters) replays the run an earlier call with the same key started for this trigger; a key that
+        belongs to another trigger or request is `409 idempotency_key_conflict`. Keys that start with `hook:` or
+        `trigger:` are reserved (`400 idempotency_key_reserved`).
 
         The run counts against the caller: its spend, limits, quota and usage are attributed to the person who
-        pressed Run now and to the API token they used, not to the routine's last updater. The session stays owned
-        by `system:routine:{id}`. The wait ends early when the client disconnects (the run carries on).
+        pressed Run now and to the API token they used, not to the trigger's last updater. The session stays owned
+        by `system:trigger:{id}`. The wait ends early when the client disconnects (the run carries on).
 
         Refusals answer `429` with `Retry-After` when the agent's run concurrency limit
         (`agent_run_concurrency_limit`, 30 s), spend limit (`spend_limit_exceeded`, 3600 s) or quota
         (`agent_quota_exceeded`, 60 s) is reached, and `400 agent_inactive` while the agent is not active.
 
-        **Webhook routines.** `payload` (a JSON object or array) and `headers` (an object of at most 50 string
+        **Webhook triggers.** `payload` (a JSON object or array) and `headers` (an object of at most 50 string
         values, each at most 8 KiB, names case-insensitive) are a sample delivery: the prompt template, the inputs
         mapping and `include_payload` build the message exactly as a real delivery would (the request's values are
         data, never templates). The webhook's `events` list and `filter` are not applied and nothing is
         de-duplicated. Without `payload` the template is rendered over an empty event and nothing external is
         added. A template or mapping that cannot be applied is `400` with `code` `template_error` or
-        `invalid_inputs`. `dry_run: true` only evaluates the sample and returns an `AgentRoutineDryRun`:
-        nothing is created, no run starts, no event is published. `payload`, `headers` and `dry_run` on a routine of
+        `invalid_inputs`. `dry_run: true` only evaluates the sample and returns an `AgentTriggerDryRun`:
+        nothing is created, no run starts, no event is published. `payload`, `headers` and `dry_run` on a trigger of
         any other type are `400 invalid_request`.
-      operationId: runAgentRoutine
+      operationId: runAgentTrigger
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
         - name: Idempotency-Key
           in: header
           required: false
@@ -2989,7 +2990,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AgentRoutineRunRequest'
+              $ref: '#/components/schemas/AgentTriggerRunRequest'
             examples:
               override:
                 summary: Override one input and wait up to 20 seconds
@@ -3000,7 +3001,7 @@ paths:
                     requested_by: ops
                   wait: 20
               webhook_sample:
-                summary: Test a webhook routine with a sample delivery
+                summary: Test a webhook trigger with a sample delivery
                 value:
                   payload:
                     action: opened
@@ -3023,12 +3024,12 @@ paths:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/AgentRun'
-                  - $ref: '#/components/schemas/AgentRoutineDryRun'
+                  - $ref: '#/components/schemas/AgentTriggerDryRun'
               examples:
                 dry_run:
-                  summary: Dry run of a webhook routine
+                  summary: Dry run of a webhook trigger
                   value:
-                    object: agent.routine.dry_run
+                    object: agent.trigger.dry_run
                     matched: true
                     reason: null
                     event: pull_request
@@ -3082,7 +3083,7 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '409':
           description: >-
             `idempotency_key_conflict`: the `Idempotency-Key` was used with a different request, or an earlier call with it started no run.
@@ -3110,33 +3111,33 @@ paths:
               example:
                 error:
                   type: rate_limit_error
-                  message: 'The routine did not start a run: agent run limit reached'
+                  message: 'The trigger did not start a run: agent run limit reached'
                   code: agent_run_concurrency_limit
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
-  /agents/{agentKey}/routines/{routineId}/webhook/rotate-secret:
+  /agents/{agentKey}/triggers/{triggerId}/webhook/rotate-secret:
     post:
-      tags: [Agent Routines]
-      summary: Rotate a routine's webhook secret
+      tags: [Agent Triggers]
+      summary: Rotate a trigger's webhook secret
       description: |-
-        Replaces the secret of a webhook routine; the URL stays. A generated secret is returned once
+        Replaces the secret of a webhook trigger; the URL stays. A generated secret is returned once
         in `secret`; with `auth: standard_webhooks` the sender generates the secret, so the new one is sent in
         `secret` and is not echoed. With `grace_seconds` > 0 the previous secret keeps working until
         `previous_valid_until`, so the sender can be switched without a gap; 0 ends it (and any earlier grace) at
-        once. Needs the `agents` permission (Write). A routine of another type is
-        `400 routine_not_webhook`.
-      operationId: rotateAgentRoutineWebhookSecret
+        once. Needs the `agents` permission (Write). A trigger of another type is
+        `400 trigger_not_webhook`.
+      operationId: rotateAgentTriggerWebhookSecret
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
       requestBody:
         required: false
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AgentRoutineRotateSecretRequest'
+              $ref: '#/components/schemas/AgentTriggerRotateSecretRequest'
             example:
               grace_seconds: 3600
       responses:
@@ -3145,34 +3146,34 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineWebhookSecret'
+                $ref: '#/components/schemas/AgentTriggerWebhookSecret'
               example:
-                object: agent.routine.webhook_secret
+                object: agent.trigger.webhook_secret
                 secret: whsec_Pl7sQ0cVb2NxK5eYhTa9RmDuWj3GfXo1Ab8c
                 secret_hint: Ab8c
                 previous_valid_until: 1760640000
         '400':
-          $ref: '#/components/responses/RoutineInvalid'
+          $ref: '#/components/responses/TriggerInvalid'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/AuthorizationUnavailable'
-  /agents/{agentKey}/routines/{routineId}/deliveries:
+  /agents/{agentKey}/triggers/{triggerId}/deliveries:
     get:
-      tags: [Agent Routines]
-      summary: List a routine's webhook deliveries
+      tags: [Agent Triggers]
+      summary: List a trigger's webhook deliveries
       description: >-
-        The delivery log of a webhook routine, newest first: one row per request that reached the hook URL and found the routine (outcome and normalized ids only, never the body, headers or secrets). Rows are kept 7 days. Requests that are not accepted are recorded up to 10 per minute per routine (per node); accepted ones always are. Page with `before` = the `id` of the last row of the previous page; an unknown `before` gives an empty page. A routine of another type has no deliveries (an empty list). Needs the `agents` permission (Read).
-      operationId: listAgentRoutineDeliveries
+        The delivery log of a webhook trigger, newest first: one row per request that reached the hook URL and found the trigger (outcome and normalized ids only, never the body, headers or secrets). Rows are kept 7 days. Requests that are not accepted are recorded up to 10 per minute per trigger (per node); accepted ones always are. Page with `before` = the `id` of the last row of the previous page; an unknown `before` gives an empty page. A trigger of another type has no deliveries (an empty list). Needs the `agents` permission (Read).
+      operationId: listAgentTriggerDeliveries
       parameters:
-        - $ref: '#/components/parameters/RoutineAgentKey'
-        - $ref: '#/components/parameters/RoutineId'
+        - $ref: '#/components/parameters/TriggerAgentKey'
+        - $ref: '#/components/parameters/TriggerId'
         - name: limit
           in: query
           required: false
@@ -3194,12 +3195,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineDeliveryList'
+                $ref: '#/components/schemas/AgentTriggerDeliveryList'
               example:
                 object: list
                 data:
                   - id: 6718b7a0f3b4a5d6e7f80a01
-                    object: agent.routine.delivery
+                    object: agent.trigger.delivery
                     received_at: 1760637012
                     outcome: accepted
                     http_status: 202
@@ -3209,7 +3210,7 @@ paths:
                     reason: null
                     bytes: 18312
                   - id: 6718b79ef3b4a5d6e7f809ff
-                    object: agent.routine.delivery
+                    object: agent.trigger.delivery
                     received_at: 1760636998
                     outcome: filtered
                     http_status: 200
@@ -3230,7 +3231,7 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/RoutineNotFound'
+          $ref: '#/components/responses/TriggerNotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -14917,7 +14918,7 @@ paths:
       tags: [Webhooks]
       summary: List webhook event types
       description: >-
-        The event types an endpoint can subscribe to. Needs the `webhooks` permission (Read). A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `routine.*`); `*` subscribes to everything. `webhook.test` is only ever sent by the test call. The `data` of each event is described on `WebhookEventPayload`.
+        The event types an endpoint can subscribe to. Needs the `webhooks` permission (Read). A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `trigger.*`); `*` subscribes to everything. `webhook.test` is only ever sent by the test call. The `data` of each event is described on `WebhookEventPayload`.
       operationId: listWebhookEventTypes
       responses:
         '200':
@@ -14934,11 +14935,11 @@ paths:
                       properties:
                         type:
                           type: string
-                          example: routine.fired
+                          example: trigger.fired
                         group:
                           type: string
                           description: The `prefix.*` family of the type.
-                          enum: [session, action, budget, feedback, agent_run, routine, alert]
+                          enum: [session, action, budget, feedback, agent_run, trigger, alert]
               example:
                 events:
                   - {type: session.idled, group: session}
@@ -14950,8 +14951,8 @@ paths:
                   - {type: agent_run.failed, group: agent_run}
                   - {type: agent_run.canceled, group: agent_run}
                   - {type: agent_run.requires_action, group: agent_run}
-                  - {type: routine.fired, group: routine}
-                  - {type: routine.failed, group: routine}
+                  - {type: trigger.fired, group: trigger}
+                  - {type: trigger.failed, group: trigger}
                   - {type: alert.fired, group: alert}
                   - {type: alert.resolved, group: alert}
         '401':
@@ -15415,12 +15416,12 @@ paths:
             default: http://localhost:3000
             description: Scheme and host of your Console gateway
     post:
-      tags: [Agent Routines]
-      summary: Deliver an event to a routine's webhook
+      tags: [Agent Triggers]
+      summary: Deliver an event to a trigger's webhook
       description: |-
-        The URL of a webhook routine (`webhook.url`): an event posted here starts a run of the
-        routine's agent. **No API token**: the URL names the tenant and a random hook id, and every request proves
-        the routine's secret in the way its `webhook.auth` says (see below). Senders configure the URL, a content type
+        The URL of a webhook trigger (`webhook.url`): an event posted here starts a run of the
+        trigger's agent. **No API token**: the URL names the tenant and a random hook id, and every request proves
+        the trigger's secret in the way its `webhook.auth` says (see below). Senders configure the URL, a content type
         of `application/json` and the secret in their own webhook settings.
 
         **Authentication** (`401 webhook_unauthorized` with a constant body; the precise reason is only in the
@@ -15446,7 +15447,7 @@ paths:
         content type). The default limit is 5 MiB (`AGENT_WEBHOOK_BODY_LIMIT_BYTES`, between 16 KiB and 25 MiB);
         larger bodies are `413`.
 
-        **What the routine sees.** The event name and delivery id are normalized per preset (`event`: letters,
+        **What the trigger sees.** The event name and delivery id are normalized per preset (`event`: letters,
         digits and `. _ : -`, at most 64 characters; `delivery_id`: the same, at most 128; a value that does not
         match is treated as absent):
 
@@ -15458,8 +15459,8 @@ paths:
         | `generic` | body `event`, else `type`, else `X-Cognipeer-Event` | `X-Cognipeer-Event-Id`, else `webhook-id`, else `Idempotency-Key` |
 
         In order, after authentication: the JSON check, the answers for a GitHub `ping` and an Azure DevOps test
-        notification, the routine being enabled (the agent must be active), the webhook's `events` list, its `filter`
-        (all rules must match), de-duplication, the per-routine run rate, the turn (the prompt template rendered
+        notification, the trigger being enabled (the agent must be active), the webhook's `events` list, its `filter`
+        (all rules must match), de-duplication, the per-trigger run rate, the turn (the prompt template rendered
         over the event, the inputs mapping, the payload block when `include_payload`) and the run. The run's
         `trigger` is `webhook`; its metadata gets `webhook_event` and `webhook_delivery` while it stays within 16
         keys. Everything taken from the event is external data: the message says so, and mapped inputs stay out of
@@ -15478,10 +15479,10 @@ paths:
         with `Retry-After`, `400`, `500`). Before the run step every preset gets the same codes, so a sender set up
         wrong fails loudly. Floods from many addresses are the ingress's job; the endpoint itself counts failed
         header-mode attempts (every request in signature modes) against a ceiling of max(600, 10 x the run rate)
-        per routine per minute (`429 webhook_rate_limited`), and an authenticated request is never refused by that
-        ceiling. The run rate is `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` (default 60, 0 = off) runs per routine per
+        per trigger per minute (`429 webhook_rate_limited`), and an authenticated request is never refused by that
+        ceiling. The run rate is `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` (default 60, 0 = off) runs per trigger per
         minute.
-      operationId: receiveAgentRoutineWebhook
+      operationId: receiveAgentTriggerWebhook
       security: []
       parameters:
         - name: tenantId
@@ -15494,7 +15495,7 @@ paths:
         - name: hookId
           in: path
           required: true
-          description: The routine's hook id, `wh_` + 24 URL-safe characters (as in `webhook.url`).
+          description: The trigger's hook id, `wh_` + 24 URL-safe characters (as in `webhook.url`).
           schema:
             type: string
             pattern: '^wh_[A-Za-z0-9_-]{16,64}$'
@@ -15535,7 +15536,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineHookAnswer'
+                $ref: '#/components/schemas/AgentTriggerHookAnswer'
               examples:
                 filtered:
                   summary: A filter rule did not match
@@ -15557,14 +15558,14 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AgentRoutineHookAccepted'
+                $ref: '#/components/schemas/AgentTriggerHookAccepted'
               example:
                 accepted: true
                 run_id: run_6718b7a0f3b4a5d6e7f80a02
                 status: queued
         '400':
           description: >-
-            `invalid_json` (the body is not UTF-8 JSON, an object or an array within 64 levels), or - GitHub and generic presets - `template_error` / `invalid_inputs` (the routine's template or inputs mapping cannot be applied to this event), or `invalid_request` (a malformed request).
+            `invalid_json` (the body is not UTF-8 JSON, an object or an array within 64 levels), or - GitHub and generic presets - `template_error` / `invalid_inputs` (the trigger's template or inputs mapping cannot be applied to this event), or `invalid_request` (a malformed request).
           content:
             application/json:
               schema:
@@ -15576,7 +15577,7 @@ paths:
                   code: invalid_json
         '401':
           description: >-
-            `webhook_unauthorized`: the credentials or signature are missing or wrong, or the routine's secret cannot be read (rotate it). The body is the same for every reason.
+            `webhook_unauthorized`: the credentials or signature are missing or wrong, or the trigger's secret cannot be read (rotate it). The body is the same for every reason.
           content:
             application/json:
               schema:
@@ -15588,7 +15589,7 @@ paths:
                   code: webhook_unauthorized
         '404':
           description: >-
-            `webhook_not_found`: no such tenant or hook (also a deleted routine or a routine that is no longer a webhook one). An unknown URL is remembered per node for a minute; a routine that exists is never cached, so disabling, rotating or deleting applies at once.
+            `webhook_not_found`: no such tenant or hook (also a deleted trigger or a trigger that is no longer a webhook one). An unknown URL is remembered per node for a minute; a trigger that exists is never cached, so disabling, rotating or deleting applies at once.
           content:
             application/json:
               schema:
@@ -15623,7 +15624,7 @@ paths:
                   code: unsupported_media_type
         '429':
           description: >-
-            `webhook_rate_limited` (the routine's abuse ceiling or run rate), or - GitHub and generic presets - `agent_run_concurrency_limit`, `spend_limit_exceeded` or `agent_quota_exceeded`.
+            `webhook_rate_limited` (the trigger's abuse ceiling or run rate), or - GitHub and generic presets - `agent_run_concurrency_limit`, `spend_limit_exceeded` or `agent_quota_exceeded`.
           headers:
             Retry-After:
               description: Seconds to wait before retrying.
@@ -15786,7 +15787,7 @@ components:
       in: header
       required: false
       description: |-
-        Agent target only, any mode (at most 255 characters; `idempotency_key_too_long` otherwise). Repeating a key with the same request (agent key, input text, `version`, the file ids it names and, when it continues one, the session) returns the existing run instead of starting another: `200` once it finished, `202` while it is still going (a waited call waits up to the window first). The same key with a different request is `409` `idempotency_key_conflict`. Keys starting with `hook:` or `routine:` are reserved (`400` `idempotency_key_reserved`).
+        Agent target only, any mode (at most 255 characters; `idempotency_key_too_long` otherwise). Repeating a key with the same request (agent key, input text, `version`, the file ids it names and, when it continues one, the session) returns the existing run instead of starting another: `200` once it finished, `202` while it is still going (a waited call waits up to the window first). The same key with a different request is `409` `idempotency_key_conflict`. Keys starting with `hook:` or `trigger:` are reserved (`400` `idempotency_key_reserved`).
       schema:
         type: string
         maxLength: 255
@@ -15804,18 +15805,18 @@ components:
       description: '`resp_<runId>` or `run_<runId>` of an agent run. Model responses are not stored.'
       schema:
         type: string
-    RoutineAgentKey:
+    TriggerAgentKey:
       name: agentKey
       in: path
       required: true
       description: The agent key.
       schema:
         type: string
-    RoutineId:
-      name: routineId
+    TriggerId:
+      name: triggerId
       in: path
       required: true
-      description: The routine id (a bare id, no prefix).
+      description: The trigger id (a bare id, no prefix).
       schema:
         type: string
   schemas:
@@ -17464,7 +17465,7 @@ components:
             - responses
             - chat_completions
             - a2a
-            - routine
+            - trigger
           description: Which API started the run.
         trigger:
           type: string
@@ -17475,11 +17476,11 @@ components:
             - once
             - manual
             - webhook
-          description: What started it. `request` for a client call; the others are the ways a routine starts (its `schedule`, a `once` time, Run now as `manual`, an incoming `webhook`).
-        routine_id:
+          description: What started it. `request` for a client call; the others are the ways a trigger starts (its `schedule`, a `once` time, Run now as `manual`, an incoming `webhook`).
+        trigger_id:
           type: string
           nullable: true
-          description: The routine that started the run.
+          description: The trigger that started the run.
         metadata:
           type: object
           additionalProperties:
@@ -20873,7 +20874,7 @@ components:
                   description: "OpenAI-dialect envelope: the request field the error is about."
                 errors:
                   type: array
-                  description: Per-field validation problems (`invalid_routine`, `invalid_inputs`, `template_error`, ...).
+                  description: Per-field validation problems (`invalid_trigger`, `invalid_inputs`, `template_error`, ...).
                   items:
                     type: object
                     properties:
@@ -27333,12 +27334,12 @@ components:
             - `budget.reached`: `sessionId`, `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd`.
             - `feedback.recorded`: see `WebhookFeedbackEventData`.
             - `agent_run.succeeded` / `failed` / `canceled` / `requires_action`: `runId` (`run_{id}`), `sessionId`,
-              `conversationId`, `agentKey`, `status`, `class`, `metadata` (the run's labels), `routineId` (null unless a
-              routine started the run). Only runs nobody waited on (background, queued or detached) emit them.
-            - `routine.fired` / `routine.failed`: see `WebhookRoutineEventData`.
+              `conversationId`, `agentKey`, `status`, `class`, `metadata` (the run's labels), `triggerId` (null unless a
+              trigger started the run). Only runs nobody waited on (background, queued or detached) emit them.
+            - `trigger.fired` / `trigger.failed`: see `WebhookTriggerEventData`.
             - `alert.fired` / `alert.resolved`: see `WebhookAlertEventData`.
             - `webhook.test`: `data` is `{}`.
-          example: routine.fired
+          example: trigger.fired
         createdAt:
           type: string
           format: date-time
@@ -27348,18 +27349,18 @@ components:
         data:
           description: The fields of the event type (see `type`).
           anyOf:
-            - $ref: '#/components/schemas/WebhookRoutineEventData'
+            - $ref: '#/components/schemas/WebhookTriggerEventData'
             - $ref: '#/components/schemas/WebhookFeedbackEventData'
             - $ref: '#/components/schemas/WebhookAlertEventData'
             - type: object
               additionalProperties: true
       example:
         id: evt_3f9c1a7e5b2d4c8091ab2c3d
-        type: routine.fired
+        type: trigger.fired
         createdAt: '2026-10-17T06:00:00.412Z'
         projectId: 6710f0aa1b2c3d4e5f607182
         data:
-          routineId: 6718a1c2f3b4a5d6e7f80912
+          triggerId: 6718a1c2f3b4a5d6e7f80912
           agentKey: support-triage
           trigger: schedule
           runId: run_6718c0e5f3b4a5d6e7f80b10
@@ -28010,7 +28011,7 @@ components:
     AgentConfigCallback:
       type: object
       description: >-
-        The agent's default callback: where the outcome of a run nobody waited for is POSTed when the request names no `callback` of its own (every API; routines too). Delivery format and signature: `AgentRunCallbackRequest`. The secret is write-only: send plaintext to set it, the mask `••••••` to keep the stored one, `""` to remove it; reads return the mask when one is stored, never the secret. A callback is removed by saving the config without `callback`, or with a `callback` that has no `url`: the stored secret goes with it, so a client that reads the config back (mask included), clears the URL and saves it again removes the whole callback; the mask next to no `url` is accepted (it is not a `callback.secret` that needs a callback URL) and drops the stored secret. If the stored secret cannot be decrypted (the server's encryption key changed) callbacks go out unsigned until it is entered again.
+        The agent's default callback: where the outcome of a run nobody waited for is POSTed when the request names no `callback` of its own (every API; triggers too). Delivery format and signature: `AgentRunCallbackRequest`. The secret is write-only: send plaintext to set it, the mask `••••••` to keep the stored one, `""` to remove it; reads return the mask when one is stored, never the secret. A callback is removed by saving the config without `callback`, or with a `callback` that has no `url`: the stored secret goes with it, so a client that reads the config back (mask included), clears the URL and saves it again removes the whole callback; the mask next to no `url` is accepted (it is not a `callback.secret` that needs a callback URL) and drops the stored secret. If the stored secret cannot be decrypted (the server's encryption key changed) callbacks go out unsigned until it is entered again.
       properties:
         url:
           type: string
@@ -28024,7 +28025,7 @@ components:
           description: Write-only HMAC secret (16-256 characters; needs `url`).
     AgentConfigInputField:
       type: object
-      description: 'One declared input of an agent. Declared inputs turn the agent into a typed function: `input_schema` on `GET /agents/{agentKey}`, validated `inputs` on every run, routine and dialect.'
+      description: 'One declared input of an agent. Declared inputs turn the agent into a typed function: `input_schema` on `GET /agents/{agentKey}`, validated `inputs` on every run, trigger and dialect.'
       properties:
         name:
           type: string
@@ -28848,17 +28849,17 @@ components:
             - type: integer
         result:
           $ref: '#/components/schemas/AgentA2aStreamEvent'
-    AgentRoutine:
+    AgentTrigger:
       type: object
       description: >-
         A saved way of starting an agent: a prompt (+ inputs) and a `type` with the one settings object named after it (`schedule`, `once` or `webhook`; `manual` has none). Timestamps are unix seconds, except `once.run_at`. The callback secret and the webhook secret are never part of it.
       properties:
         id:
           type: string
-          description: The routine id (a bare id, no prefix).
+          description: The trigger id (a bare id, no prefix).
         object:
           type: string
-          enum: [agent.routine]
+          enum: [agent.trigger]
         agent:
           type: string
           description: The agent key.
@@ -28872,28 +28873,28 @@ components:
         enabled:
           type: boolean
           description: >-
-            A disabled routine never fires on its own (a webhook delivery is answered `accepted: false, reason: disabled`); Run now still works.
+            A disabled trigger never fires on its own (a webhook delivery is answered `accepted: false, reason: disabled`); Run now still works.
         type:
           type: string
           enum: [schedule, once, manual, webhook]
           description: >-
-            What starts the routine. Only the settings object named after the type is present (`schedule`, `once` or `webhook`); the others are omitted, and `manual` has none.
+            What starts the trigger. Only the settings object named after the type is present (`schedule`, `once` or `webhook`); the others are omitted, and `manual` has none.
         schedule:
-          $ref: '#/components/schemas/AgentRoutineSchedule'
+          $ref: '#/components/schemas/AgentTriggerSchedule'
         once:
-          $ref: '#/components/schemas/AgentRoutineOnce'
+          $ref: '#/components/schemas/AgentTriggerOnce'
         webhook:
-          $ref: '#/components/schemas/AgentRoutineWebhook'
+          $ref: '#/components/schemas/AgentTriggerWebhook'
         prompt:
           type: string
-          description: The message the run starts with (at most 32,000 characters). For a webhook routine, a Mustache template over the event.
+          description: The message the run starts with (at most 32,000 characters). For a webhook trigger, a Mustache template over the event.
         inputs:
           type: object
           allOf:
             - $ref: '#/components/schemas/AgentInputValues'
           nullable: true
           description: >-
-            Values for the inputs the agent declares. For a webhook routine, a mapping: a value that is exactly one tag (`"{{payload.number}}"`) takes the value at that path (its type kept), other strings with tags are rendered, anything else is a literal. Checked against the agent's declared inputs again at fire time.
+            Values for the inputs the agent declares. For a webhook trigger, a mapping: a value that is exactly one tag (`"{{payload.number}}"`) takes the value at that path (its type kept), other strings with tags are rendered, anything else is a literal. Checked against the agent's declared inputs again at fire time.
         version:
           type: integer
           nullable: true
@@ -28913,7 +28914,7 @@ components:
         callback:
           type: object
           allOf:
-            - $ref: '#/components/schemas/AgentRoutineCallback'
+            - $ref: '#/components/schemas/AgentTriggerCallback'
           nullable: true
           description: Where the finished runs are reported (the agent's own callback when null).
         response_format:
@@ -28926,7 +28927,7 @@ components:
           type: integer
           nullable: true
           description: >-
-            The next slot (unix seconds) of an enabled schedule routine, or the time of a once routine that has not fired. Null for manual and webhook routines, disabled routines and a once routine that fired.
+            The next slot (unix seconds) of an enabled schedule trigger, or the time of a once trigger that has not fired. Null for manual and webhook triggers, disabled triggers and a once trigger that fired.
         last_fire_at:
           type: integer
           nullable: true
@@ -28951,7 +28952,7 @@ components:
       required: [id, object, agent, name, enabled, type, prompt, class, created_at, updated_at]
       example:
         id: 6718a1c2f3b4a5d6e7f80912
-        object: agent.routine
+        object: agent.trigger
         agent: support-triage
         name: Daily support digest
         description: null
@@ -28972,10 +28973,10 @@ components:
         last_error: null
         created_at: 1760636400
         updated_at: 1760636400
-    AgentRoutineWithSecret:
-      description: A routine and, in the one answer that creates or replaces a generated webhook secret, `webhook.secret`.
+    AgentTriggerWithSecret:
+      description: A trigger and, in the one answer that creates or replaces a generated webhook secret, `webhook.secret`.
       allOf:
-        - $ref: '#/components/schemas/AgentRoutine'
+        - $ref: '#/components/schemas/AgentTrigger'
         - type: object
           properties:
             webhook:
@@ -28986,7 +28987,7 @@ components:
                   type: string
                   description: The generated secret (`whsec_` + 32 characters). Store it now.
               required: [secret]
-    AgentRoutineList:
+    AgentTriggerList:
       type: object
       properties:
         object:
@@ -28995,25 +28996,25 @@ components:
         data:
           type: array
           items:
-            $ref: '#/components/schemas/AgentRoutine'
+            $ref: '#/components/schemas/AgentTrigger'
         has_more:
           type: boolean
           description: Always `false`.
       required: [object, data, has_more]
-    AgentRoutineDeleted:
+    AgentTriggerDeleted:
       type: object
       properties:
         id:
           type: string
         object:
           type: string
-          enum: [agent.routine.deleted]
+          enum: [agent.trigger.deleted]
         deleted:
           type: boolean
       required: [id, object, deleted]
-    AgentRoutineCallback:
+    AgentTriggerCallback:
       type: object
-      description: The routine's callback as stored; the secret is write-only.
+      description: The trigger's callback as stored; the secret is write-only.
       properties:
         url:
           type: string
@@ -29022,7 +29023,7 @@ components:
           type: boolean
           description: Whether deliveries are signed with a callback secret.
       required: [url, signed]
-    AgentRoutineCallbackRequest:
+    AgentTriggerCallbackRequest:
       type: object
       description: >-
         Where the finished runs are reported. `url` is `http(s)` and resolves to a public address (at most 2,048 characters). `secret` (16-256 characters) signs the deliveries; it is write-only: absent or the mask `"••••••"` keeps the stored one, `""` removes it.
@@ -29035,10 +29036,10 @@ components:
           type: string
           maxLength: 256
       required: [url]
-    AgentRoutineSchedule:
+    AgentTriggerSchedule:
       type: object
       description: >-
-        The `schedule` of a routine of type `schedule`: a cron schedule evaluated in a timezone.
+        The `schedule` of a trigger of type `schedule`: a cron schedule evaluated in a timezone.
       properties:
         cron:
           type: string
@@ -29049,10 +29050,10 @@ components:
           description: An IANA timezone name.
           example: Europe/Istanbul
       required: [cron, timezone]
-    AgentRoutineOnce:
+    AgentTriggerOnce:
       type: object
       description: >-
-        The `once` of a routine of type `once`: one fire at a time. A time missed by more than the misfire grace (1 hour by default) is skipped, not run late.
+        The `once` of a trigger of type `once`: one fire at a time. A time missed by more than the misfire grace (1 hour by default) is skipped, not run late.
       properties:
         run_at:
           type: string
@@ -29060,15 +29061,15 @@ components:
           description: ISO-8601, UTC.
           example: '2026-10-17T15:00:00.000Z'
       required: [run_at]
-    AgentRoutineWebhook:
+    AgentTriggerWebhook:
       type: object
       description: >-
-        The `webhook` of a routine of type `webhook`: an incoming webhook. Each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`).
+        The `webhook` of a trigger of type `webhook`: an incoming webhook. Each authenticated, matching request to `url` starts a run (`POST /hooks/{tenantId}/{hookId}` on `/api/public`).
       properties:
         url:
           type: string
           format: uri
-          description: The public hook URL; its hook id never changes while the routine stays a webhook one.
+          description: The public hook URL; its hook id never changes while the trigger stays a webhook one.
         preset:
           type: string
           enum: [github, gitlab, azure_devops, generic]
@@ -29100,16 +29101,16 @@ components:
         filter:
           type: array
           items:
-            $ref: '#/components/schemas/AgentRoutineWebhookFilterRule'
+            $ref: '#/components/schemas/AgentTriggerWebhookFilterRule'
           description: All rules must match (at most 20).
         include_payload:
           type: boolean
           description: Append the event payload (JSON, cut at 32 KiB) to the message.
       required: [url, preset, auth, header_name, secret_hint, secret_source, previous_secret_valid_until, events, filter, include_payload]
-    AgentRoutineWebhookFilterRule:
+    AgentTriggerWebhookFilterRule:
       type: object
       description: >-
-        One condition over the delivery. `path` starts at `payload`, `headers` (the preset's allow-list: GitHub `x-github-event`, `x-github-delivery`, `x-github-hook-id`, `user-agent`...; GitLab `x-gitlab-event`, `x-gitlab-instance`, `webhook-id`...; generic `x-cognipeer-event`, `x-cognipeer-event-id`, `webhook-id`...; Azure DevOps `user-agent`), `event`, `delivery_id`, `preset`, `received_at`, `routine` or `agent`, with dot-separated segments (at most 16, 256 characters) and `*` for every element of a list (`payload.pull_request.labels.*.name`). Values are compared as text; `neq` / `not_in` hold when no element matches; an absent path matches only `not_exists`.
+        One condition over the delivery. `path` starts at `payload`, `headers` (the preset's allow-list: GitHub `x-github-event`, `x-github-delivery`, `x-github-hook-id`, `user-agent`...; GitLab `x-gitlab-event`, `x-gitlab-instance`, `webhook-id`...; generic `x-cognipeer-event`, `x-cognipeer-event-id`, `webhook-id`...; Azure DevOps `user-agent`), `event`, `delivery_id`, `preset`, `received_at`, `trigger` or `agent`, with dot-separated segments (at most 16, 256 characters) and `*` for every element of a list (`payload.pull_request.labels.*.name`). Values are compared as text; `neq` / `not_in` hold when no element matches; an absent path matches only `not_exists`.
       properties:
         path:
           type: string
@@ -29132,7 +29133,7 @@ components:
                   - type: number
                   - type: boolean
       required: [path, op]
-    AgentRoutineScheduleRequest:
+    AgentTriggerScheduleRequest:
       type: object
       description: >-
         The `schedule` of a create / PATCH body with `type: schedule`.
@@ -29147,7 +29148,7 @@ components:
           description: An IANA timezone name.
           example: Europe/Istanbul
       required: [cron]
-    AgentRoutineOnceRequest:
+    AgentTriggerOnceRequest:
       type: object
       description: >-
         The `once` of a create / PATCH body with `type: once`: `run_at` (ISO-8601 or unix seconds, at most 60 seconds in the past) or `delay_seconds` (whole seconds from now), exactly one of them.
@@ -29161,10 +29162,10 @@ components:
         delay_seconds:
           type: integer
           minimum: 0
-    AgentRoutineWebhookRequest:
+    AgentTriggerWebhookRequest:
       type: object
       description: >-
-        The `webhook` of a create / PATCH body with `type: webhook`. `preset` is required when the routine is not a webhook one yet; the other fields keep their stored values when absent. The routine's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `routine`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `inputs` maps declared inputs to literals or templates. Per preset the `auth` modes are: `github` - `github_signature`; `gitlab` - `gitlab_token` (default), `standard_webhooks`; `azure_devops` - `basic` (default), `header`; `generic` - `bearer` (default), `signature`, `header`, `standard_webhooks`.
+        The `webhook` of a create / PATCH body with `type: webhook`. `preset` is required when the trigger is not a webhook one yet; the other fields keep their stored values when absent. The trigger's `prompt` is a Mustache template over the event (at most 16 KiB; values are inserted as JSON; roots `payload`, `headers`, `event`, `delivery_id`, `preset`, `received_at`, `trigger`, `agent`; sections nest at most 2 deep; partials, delimiter changes and unescaped tags are refused) and `inputs` maps declared inputs to literals or templates. Per preset the `auth` modes are: `github` - `github_signature`; `gitlab` - `gitlab_token` (default), `standard_webhooks`; `azure_devops` - `basic` (default), `header`; `generic` - `bearer` (default), `signature`, `header`, `standard_webhooks`.
       properties:
         preset:
           type: string
@@ -29172,7 +29173,7 @@ components:
         auth:
           type: string
           enum: [github_signature, gitlab_token, standard_webhooks, basic, header, bearer, signature]
-          description: The preset's first mode when absent (for a routine that already is a webhook one, its current one while the preset still offers it).
+          description: The preset's first mode when absent (for a trigger that already is a webhook one, its current one while the preset still offers it).
         header_name:
           type: string
           pattern: '^x-[a-z0-9-]{1,62}$'
@@ -29181,7 +29182,7 @@ components:
         secret:
           type: string
           description: >-
-            `auth: standard_webhooks` only: the sender's secret (`whsec_` + base64, 24-64 bytes); required when the routine becomes `standard_webhooks`. Every other mode generates the secret (sending one is `400`; use rotate-secret to replace it).
+            `auth: standard_webhooks` only: the sender's secret (`whsec_` + base64, 24-64 bytes); required when the trigger becomes `standard_webhooks`. Every other mode generates the secret (sending one is `400`; use rotate-secret to replace it).
         events:
           type: array
           maxItems: 50
@@ -29195,11 +29196,11 @@ components:
           maxItems: 20
           nullable: true
           items:
-            $ref: '#/components/schemas/AgentRoutineWebhookFilterRule'
+            $ref: '#/components/schemas/AgentTriggerWebhookFilterRule'
         include_payload:
           type: boolean
           default: true
-    AgentRoutineCreateRequest:
+    AgentTriggerCreateRequest:
       type: object
       properties:
         name:
@@ -29218,18 +29219,18 @@ components:
           enum: [schedule, once, manual, webhook]
           default: manual
           description: >-
-            What starts the routine. It comes with the one settings object named after it (`schedule`, `once` or `webhook`; `manual` takes none); the settings object of another type is `400`.
+            What starts the trigger. It comes with the one settings object named after it (`schedule`, `once` or `webhook`; `manual` takes none); the settings object of another type is `400`.
         schedule:
-          $ref: '#/components/schemas/AgentRoutineScheduleRequest'
+          $ref: '#/components/schemas/AgentTriggerScheduleRequest'
         once:
-          $ref: '#/components/schemas/AgentRoutineOnceRequest'
+          $ref: '#/components/schemas/AgentTriggerOnceRequest'
         webhook:
-          $ref: '#/components/schemas/AgentRoutineWebhookRequest'
+          $ref: '#/components/schemas/AgentTriggerWebhookRequest'
         prompt:
           type: string
           maxLength: 32000
           description: >-
-            Required unless the agent declares inputs and the routine gives some (a webhook routine: unless it includes the payload or gives inputs).
+            Required unless the agent declares inputs and the trigger gives some (a webhook trigger: unless it includes the payload or gives inputs).
         inputs:
           type: object
           allOf:
@@ -29254,7 +29255,7 @@ components:
         callback:
           type: object
           allOf:
-            - $ref: '#/components/schemas/AgentRoutineCallbackRequest'
+            - $ref: '#/components/schemas/AgentTriggerCallbackRequest'
           nullable: true
         response_format:
           type: object
@@ -29262,7 +29263,7 @@ components:
             - $ref: '#/components/schemas/AgentResponseFormat'
           nullable: true
       required: [name]
-    AgentRoutineUpdateRequest:
+    AgentTriggerUpdateRequest:
       type: object
       description: Every field is optional; see the operation for the rules.
       properties:
@@ -29282,11 +29283,11 @@ components:
           description: >-
             Sent together with the settings object named after it (`schedule`, `once` or `webhook`; `manual` takes none): they replace the type and its settings as a whole. A settings object without its `type`, or one of another type, is `400`.
         schedule:
-          $ref: '#/components/schemas/AgentRoutineScheduleRequest'
+          $ref: '#/components/schemas/AgentTriggerScheduleRequest'
         once:
-          $ref: '#/components/schemas/AgentRoutineOnceRequest'
+          $ref: '#/components/schemas/AgentTriggerOnceRequest'
         webhook:
-          $ref: '#/components/schemas/AgentRoutineWebhookRequest'
+          $ref: '#/components/schemas/AgentTriggerWebhookRequest'
         prompt:
           type: string
           nullable: true
@@ -29313,14 +29314,14 @@ components:
         callback:
           type: object
           allOf:
-            - $ref: '#/components/schemas/AgentRoutineCallbackRequest'
+            - $ref: '#/components/schemas/AgentTriggerCallbackRequest'
           nullable: true
         response_format:
           type: object
           allOf:
             - $ref: '#/components/schemas/AgentResponseFormat'
           nullable: true
-    AgentRoutineRunRequest:
+    AgentTriggerRunRequest:
       type: object
       description: The body of Run now; every field is optional.
       properties:
@@ -29329,7 +29330,7 @@ components:
           allOf:
             - $ref: '#/components/schemas/AgentInputValues'
           nullable: true
-          description: Merged over the routine's `inputs`; literal values, never rendered as templates.
+          description: Merged over the trigger's `inputs`; literal values, never rendered as templates.
         metadata:
           type: object
           nullable: true
@@ -29337,13 +29338,13 @@ components:
           additionalProperties:
             type: string
             maxLength: 512
-          description: Merged over the routine's `metadata` (at most 16 keys together).
+          description: Merged over the trigger's `metadata` (at most 16 keys together).
         wait:
           type: number
           minimum: 0
           description: Seconds to wait for the run (capped at the token's synchronous wait limit). Takes precedence over `Prefer`.
         payload:
-          description: 'Webhook routines only: a sample delivery body (a JSON object or array).'
+          description: 'Webhook triggers only: a sample delivery body (a JSON object or array).'
           oneOf:
             - type: object
               additionalProperties: true
@@ -29356,17 +29357,17 @@ components:
           additionalProperties:
             type: string
             maxLength: 8192
-          description: 'Webhook routines only: sample request headers (only the preset''s allow-list is visible to filters and templates).'
+          description: 'Webhook triggers only: sample request headers (only the preset''s allow-list is visible to filters and templates).'
         dry_run:
           type: boolean
-          description: 'Webhook routines only: evaluate the sample and answer `AgentRoutineDryRun`; creates nothing.'
-    AgentRoutineDryRun:
+          description: 'Webhook triggers only: evaluate the sample and answer `AgentTriggerDryRun`; creates nothing.'
+    AgentTriggerDryRun:
       type: object
       description: What a delivery with the sample would do, without creating anything.
       properties:
         object:
           type: string
-          enum: [agent.routine.dry_run]
+          enum: [agent.trigger.dry_run]
         matched:
           type: boolean
           description: The webhook's `events` list and `filter` let the sample through.
@@ -29402,7 +29403,7 @@ components:
                 type: string
             required: [field, message]
       required: [object, matched, reason, event, delivery_id, prompt, inputs, errors]
-    AgentRoutineRotateSecretRequest:
+    AgentTriggerRotateSecretRequest:
       type: object
       properties:
         grace_seconds:
@@ -29414,12 +29415,12 @@ components:
         secret:
           type: string
           description: '`auth: standard_webhooks` only (required there): the sender''s new `whsec_` secret.'
-    AgentRoutineWebhookSecret:
+    AgentTriggerWebhookSecret:
       type: object
       properties:
         object:
           type: string
-          enum: [agent.routine.webhook_secret]
+          enum: [agent.trigger.webhook_secret]
         secret:
           type: string
           description: The generated secret, shown once. Absent with `standard_webhooks` (you supplied it).
@@ -29431,15 +29432,15 @@ components:
           nullable: true
           description: Unix seconds until which the previous secret is still accepted; null when none is.
       required: [object, secret_hint, previous_valid_until]
-    AgentRoutineDelivery:
+    AgentTriggerDelivery:
       type: object
-      description: One request to a routine's webhook URL, as the delivery log keeps it (no body, headers or secrets).
+      description: One request to a trigger's webhook URL, as the delivery log keeps it (no body, headers or secrets).
       properties:
         id:
           type: string
         object:
           type: string
-          enum: [agent.routine.delivery]
+          enum: [agent.trigger.delivery]
         received_at:
           type: integer
           description: Unix seconds.
@@ -29447,7 +29448,7 @@ components:
           type: string
           enum: [accepted, duplicate, filtered, ignored, unauthorized, rejected, failed]
           description: >-
-            `accepted` a run started; `duplicate` a repeat of a delivery that already has a run; `filtered` the `events` list or `filter` did not match; `ignored` a `ping` / test notification or a disabled routine; `unauthorized` credentials or signature wrong; `rejected` a rate, concurrency, spend or quota limit; `failed` invalid JSON, a template / inputs error or an internal error.
+            `accepted` a run started; `duplicate` a repeat of a delivery that already has a run; `filtered` the `events` list or `filter` did not match; `ignored` a `ping` / test notification or a disabled trigger; `unauthorized` credentials or signature wrong; `rejected` a rate, concurrency, spend or quota limit; `failed` invalid JSON, a template / inputs error or an internal error.
         http_status:
           type: integer
           description: The status the sender received.
@@ -29469,7 +29470,7 @@ components:
           type: integer
           description: The body size.
       required: [id, object, received_at, outcome, http_status, event, delivery_id, run_id, reason, bytes]
-    AgentRoutineDeliveryList:
+    AgentTriggerDeliveryList:
       type: object
       properties:
         object:
@@ -29478,12 +29479,12 @@ components:
         data:
           type: array
           items:
-            $ref: '#/components/schemas/AgentRoutineDelivery'
+            $ref: '#/components/schemas/AgentTriggerDelivery'
         has_more:
           type: boolean
           description: More (older) rows exist; pass the last `id` as `before`.
       required: [object, data, has_more]
-    AgentRoutineHookAccepted:
+    AgentTriggerHookAccepted:
       type: object
       description: The answer to a delivery that started a run (`202`).
       properties:
@@ -29497,7 +29498,7 @@ components:
           type: string
           description: The run's status when the answer was written (`queued`).
       required: [accepted, run_id, status]
-    AgentRoutineHookAnswer:
+    AgentTriggerHookAnswer:
       description: A `200` answer to a delivery that started no run.
       oneOf:
         - type: object
@@ -29509,7 +29510,7 @@ components:
             reason:
               type: string
               description: >-
-                `disabled` (the routine is disabled or its agent inactive), `event_not_selected`, `filtered`, `duplicate`; and for GitLab / Azure DevOps after the run step `rate_limited`, `concurrency_limit`, `spend_limit`, `quota_exceeded`, `invalid_inputs`, `template_error`, `internal_error`.
+                `disabled` (the trigger is disabled or its agent inactive), `event_not_selected`, `filtered`, `duplicate`; and for GitLab / Azure DevOps after the run step `rate_limited`, `concurrency_limit`, `spend_limit`, `quota_exceeded`, `invalid_inputs`, `template_error`, `internal_error`.
             run_id:
               type: string
               nullable: true
@@ -29528,12 +29529,12 @@ components:
               type: string
               enum: [ping, test]
           required: [ok, event]
-    WebhookRoutineEventData:
+    WebhookTriggerEventData:
       type: object
       description: >-
-        `data` of `routine.fired` (a run was started) and `routine.failed` (a fire started no run: the agent is not active, a limit or quota was reached, the metadata is over 16 keys, an internal error). A repeated delivery or replayed `Idempotency-Key` sends neither. `routine.failed` is sent at most once per routine and reason per hour (per node). A schedule slot refused for inputs that no longer match the agent's declaration is recorded on the routine (`last_error`) without an event.
+        `data` of `trigger.fired` (a run was started) and `trigger.failed` (a fire started no run: the agent is not active, a limit or quota was reached, the metadata is over 16 keys, an internal error). A repeated delivery or replayed `Idempotency-Key` sends neither. `trigger.failed` is sent at most once per trigger and reason per hour (per node). A schedule slot refused for inputs that no longer match the agent's declaration is recorded on the trigger (`last_error`) without an event.
       properties:
-        routineId:
+        triggerId:
           type: string
         agentKey:
           type: string
@@ -29543,14 +29544,14 @@ components:
           description: What started the fire (`manual` = Run now).
         runId:
           type: string
-          description: '`routine.fired` only: `run_{id}`.'
+          description: '`trigger.fired` only: `run_{id}`.'
         event:
           type: string
           description: 'Webhook fires only, when the sender named an event: the normalized event name.'
         reason:
           type: string
-          description: '`routine.failed` only: the same text as the routine''s `last_error`.'
-      required: [routineId, agentKey, trigger]
+          description: '`trigger.failed` only: the same text as the trigger''s `last_error`.'
+      required: [triggerId, agentKey, trigger]
     WebhookFeedbackEventData:
       type: object
       description: '`data` of `feedback.recorded`: a person rated (or withdrew the rating of) an assistant message. No comment text.'
@@ -29912,9 +29913,9 @@ components:
               code: agent_run_max_duration_exceeded
               side_effects_possible: true
               retryable: false
-    RoutineInvalid:
+    TriggerInvalid:
       description: >-
-        `invalid_routine`: the body is not valid; `error.errors` lists every problem as `{ field, message }` (for example `name`, `type`, `schedule.cron`, `schedule.timezone`, `once.run_at`, `webhook.preset`, `webhook.filter[0].op`, `prompt`, `inputs.<name>`, `version`, `callback`; a settings object that does not belong to the `type` is reported under its own name, such as `schedule`). Also `invalid_request` (the body is not a JSON object), `invalid_json` and `routine_not_webhook` (rotate-secret on a routine of another type).
+        `invalid_trigger`: the body is not valid; `error.errors` lists every problem as `{ field, message }` (for example `name`, `type`, `schedule.cron`, `schedule.timezone`, `once.run_at`, `webhook.preset`, `webhook.filter[0].op`, `prompt`, `inputs.<name>`, `version`, `callback`; a settings object that does not belong to the `type` is reported under its own name, such as `schedule`). Also `invalid_request` (the body is not a JSON object), `invalid_json` and `trigger_not_webhook` (rotate-secret on a trigger of another type).
       content:
         application/json:
           schema:
@@ -29922,13 +29923,13 @@ components:
           example:
             error:
               type: invalid_request_error
-              message: 'Invalid routine - schedule.cron: cron must have 5 fields (minute hour day-of-month month day-of-week)'
-              code: invalid_routine
+              message: 'Invalid trigger - schedule.cron: cron must have 5 fields (minute hour day-of-month month day-of-week)'
+              code: invalid_trigger
               errors:
                 - field: schedule.cron
                   message: cron must have 5 fields (minute hour day-of-month month day-of-week)
-    RoutineNotFound:
-      description: '`agent_not_found` (no such agent in the token''s project) or `routine_not_found` (no such routine on this agent).'
+    TriggerNotFound:
+      description: '`agent_not_found` (no such agent in the token''s project) or `trigger_not_found` (no such trigger on this agent).'
       content:
         application/json:
           schema:
@@ -29936,5 +29937,5 @@ components:
           example:
             error:
               type: not_found_error
-              message: Routine not found
-              code: routine_not_found
+              message: Trigger not found
+              code: trigger_not_found

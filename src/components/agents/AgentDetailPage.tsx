@@ -83,7 +83,7 @@ import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
-import AgentRoutinesPanel from './studio/AgentRoutinesPanel';
+import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
@@ -227,9 +227,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   deploy: { top: 'deploy' },
   versions: { top: 'deploy', sub: 'versions' },
   publish: { top: 'deploy', sub: 'publish' },
-  routines: { top: 'deploy', sub: 'routines' },
-  // The section routines replaced; old links land on it.
-  schedules: { top: 'deploy', sub: 'routines' },
+  triggers: { top: 'deploy', sub: 'triggers' },
+  // The section triggers replaced; old links land on it.
+  schedules: { top: 'deploy', sub: 'triggers' },
   export: { top: 'deploy', sub: 'export' },
   observe: { top: 'sessions' },
   traces: { top: 'sessions' },
@@ -358,8 +358,8 @@ export default function AgentDetailPage() {
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
-  /** Background runs narrowed to one routine (its "Runs" link). */
-  const [runsRoutine, setRunsRoutine] = useState<{ id: string; name: string } | null>(null);
+  /** Background runs narrowed to one trigger (its "Runs" link). */
+  const [runsTrigger, setRunsTrigger] = useState<{ id: string; name: string } | null>(null);
   const [activeRunCount, setActiveRunCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
@@ -1206,7 +1206,7 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
-            description="Every conversation with this agent — console tests, API, A2A and routine runs. Click one to inspect it; sessions started here can be continued."
+            description="Every conversation with this agent — console tests, API, A2A and trigger runs. Click one to inspect it; sessions started here can be continued."
           >
             <SegmentedControl
               mb="md"
@@ -1236,8 +1236,8 @@ export default function AgentDetailPage() {
             <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
               <AgentRunsTable
                 agentId={agentId}
-                routine={runsRoutine}
-                onClearRoutine={() => setRunsRoutine(null)}
+                trigger={runsTrigger}
+                onClearTrigger={() => setRunsTrigger(null)}
                 onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
                 onActiveCountChange={setActiveRunCount}
               />
@@ -1490,8 +1490,8 @@ export default function AgentDetailPage() {
 
         {/*
           Deploy — the lifecycle of a config that is already written:
-          freeze it (Versions), expose it (Publish), start it on a trigger
-          (Routines), or take it out of the console entirely (Export).
+          freeze it (Versions), expose it (Publish), start it on its own
+          (Triggers), or take it out of the console entirely (Export).
         */}
         <Tabs.Panel value="deploy">
           {/*
@@ -1689,17 +1689,17 @@ export default function AgentDetailPage() {
 
             {!isConnected ? (
               <ConfigSection
-                id="routines"
-                title={t('routines.sectionTitle')}
-                description={t('routines.sectionDescription')}
+                id="triggers"
+                title={t('triggers.sectionTitle')}
+                description={t('triggers.sectionDescription')}
               >
-                <AgentRoutinesPanel
+                <AgentTriggersPanel
                   agentId={agentId}
                   agentName={agent.name}
                   declaredInputs={agent.config?.inputs}
                   versions={versions.map((version) => version.version)}
-                  onShowRuns={(routine) => {
-                    setRunsRoutine(routine);
+                  onShowRuns={(trigger) => {
+                    setRunsTrigger(trigger);
                     setSessionsView('runs');
                     setActiveTab('sessions');
                   }}

@@ -41,9 +41,9 @@ const catalog = WEBHOOK_EVENT_CATALOG.map((event) => ({ ...event }));
 
 describe('editing the event list', () => {
   it('groups the catalog in order', () => {
-    expect(eventGroups(catalog)).toEqual(['session', 'action', 'budget', 'feedback', 'agent_run', 'routine', 'alert']);
+    expect(eventGroups(catalog)).toEqual(['session', 'action', 'budget', 'feedback', 'agent_run', 'trigger', 'alert']);
     expect(groupEvents(catalog, 'alert')).toEqual(['alert.fired', 'alert.resolved']);
-    expect(groupEvents(catalog, 'routine')).toEqual(['routine.fired', 'routine.failed']);
+    expect(groupEvents(catalog, 'trigger')).toEqual(['trigger.fired', 'trigger.failed']);
   });
 
   it('ticks and unticks single events', () => {
@@ -58,7 +58,7 @@ describe('editing the event list', () => {
     const events = toggleGroup(['agent_run.failed', 'session.idled'], catalog, 'agent_run');
     expect(events).toEqual(['session.idled', 'agent_run.*']);
     expect(isGroupSelected(events, catalog, 'agent_run')).toBe(true);
-    expect(isGroupSelected(events, catalog, 'routine')).toBe(false);
+    expect(isGroupSelected(events, catalog, 'trigger')).toBe(false);
   });
 
   it('unticking a group drops the pattern and every exact entry of it, leaving other groups alone', () => {

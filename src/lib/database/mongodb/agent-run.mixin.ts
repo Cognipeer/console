@@ -57,7 +57,7 @@ type IAgentRunListFn = (filter: {
   mode?: IAgentRun['mode'] | IAgentRun['mode'][];
   excludeModes?: IAgentRun['mode'][];
   runClass?: AgentRunClass;
-  routineId?: string;
+  triggerId?: string;
   channel?: NonNullable<IAgentRun['channel']>;
   trigger?: NonNullable<IAgentRun['trigger']>;
   metadata?: Record<string, string>;
@@ -125,7 +125,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         [{ tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, { name: 'idx_tenant_status_class_createdAt' }, true],
         // The scheduled-run promotion sweep. Plain index: Cosmos rejects partial ones.
         [{ status: 1, notBefore: 1 }, { name: 'idx_status_notBefore' }, true],
-        [{ tenantId: 1, routineId: 1, createdAt: -1 }, { name: 'idx_tenant_routine_createdAt' }, true],
+        [{ tenantId: 1, triggerId: 1, createdAt: -1 }, { name: 'idx_tenant_trigger_createdAt' }, true],
         // The reconciler's sweep for callbacks that never settled.
         [{ callbackStatus: 1, updatedAt: 1 }, { name: 'idx_callbackStatus_updatedAt' }, true],
       ];
@@ -494,7 +494,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       if (modes.length > 0) and.push({ mode: { $in: modes } });
       if (filter.excludeModes && filter.excludeModes.length > 0) and.push({ mode: { $nin: filter.excludeModes } });
       if (filter.runClass) and.push(runClassFilter(filter.runClass));
-      if (filter.routineId) and.push({ routineId: filter.routineId });
+      if (filter.triggerId) and.push({ triggerId: filter.triggerId });
       if (filter.channel) and.push({ channel: filter.channel });
       if (filter.trigger) and.push({ trigger: filter.trigger });
       if (filter.userId) and.push({ userId: filter.userId });

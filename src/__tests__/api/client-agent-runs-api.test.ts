@@ -408,7 +408,7 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('idempotency_key_conflict');
   });
 
-  it.each(['routine:abc:2026-10-18T06:00:00.000Z', 'hook:wh_1:delivery'])('Idempotency-Key %s is reserved for routine runs: 400, nothing started', async (key) => {
+  it.each(['trigger:abc:2026-10-18T06:00:00.000Z', 'hook:wh_1:delivery'])('Idempotency-Key %s is reserved for trigger runs: 400, nothing started', async (key) => {
     const res = await create({ input: 'hello' }, { 'idempotency-key': key });
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: { type: string; code: string } }>(res.body).error).toMatchObject({ type: 'invalid_request_error', code: 'idempotency_key_reserved' });
@@ -529,7 +529,7 @@ describe('GET /client/v1/agents/runs', () => {
     hoisted.listAgentRuns.mockResolvedValue([run({ _id: 'a' }), run({ _id: 'b' }), run({ _id: 'c' })]);
     const res = await app.inject({
       method: 'GET',
-      url: '/api/client/v1/agents/runs?agent=support&status=queued,running&class=deferred&session_id=conv-1&routine_id=rt-1&channel=routine'
+      url: '/api/client/v1/agents/runs?agent=support&status=queued,running&class=deferred&session_id=conv-1&trigger_id=trg-1&channel=trigger'
         + '&metadata[ticket]=OPS-12&created_after=1760000000&created_before=2026-10-18T00:00:00Z&limit=2&after=run_z',
       headers: HEADERS,
     });
@@ -544,8 +544,8 @@ describe('GET /client/v1/agents/runs', () => {
       conversationId: 'conv-1',
       status: ['queued', 'running'],
       runClass: 'deferred',
-      routineId: 'rt-1',
-      channel: 'routine',
+      triggerId: 'trg-1',
+      channel: 'trigger',
       metadata: { ticket: 'OPS-12' },
       createdAfter: new Date(1_760_000_000_000),
       createdBefore: new Date('2026-10-18T00:00:00Z'),

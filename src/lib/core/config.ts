@@ -408,17 +408,17 @@ export interface AppConfig {
     runCallbackConcurrency: number;
     /** On shutdown: how long to wait for runs executing on this node before marking them `interrupted`. Below the shutdown timeout. */
     runDrainTimeoutMs: number;
-    /** How often the routine scheduler looks for due slots. */
-    routineTickMs: number;
-    /** A missed routine slot older than this is skipped (at most one catch-up fire). */
-    routineMisfireGraceMs: number;
+    /** How often the trigger scheduler looks for due slots. */
+    triggerTickMs: number;
+    /** A missed trigger slot older than this is skipped (at most one catch-up fire). */
+    triggerMisfireGraceMs: number;
     /** Concurrent agent chat turns per node (the `agent` queue). */
     chatConcurrency: number;
-    /** Incoming routine webhooks (`POST /api/public/hooks/:tenantId/:hookId`). */
+    /** Incoming trigger webhooks (`POST /api/public/hooks/:tenantId/:hookId`). */
     webhooks: {
       /** Largest accepted delivery body (min 16 KiB, max 25 MiB). */
       bodyLimitBytes: number;
-      /** Runs one routine's webhook starts per minute; 0 = off. */
+      /** Runs one trigger's webhook starts per minute; 0 = off. */
       rateLimitPerMinute: number;
     };
   };
@@ -533,8 +533,8 @@ function boundedAgentRunConfig(source: ConfigSource) {
       atLeast(int(source, 'AGENT_RUN_DRAIN_TIMEOUT_MS', 10_000), 0),
       atLeast(int(source, 'SHUTDOWN_TIMEOUT_MS', 15_000) - 3_000, 0),
     ),
-    routineTickMs: atLeast(int(source, 'AGENT_ROUTINE_TICK_MS', 30_000), 5_000),
-    routineMisfireGraceMs: atLeast(int(source, 'AGENT_ROUTINE_MISFIRE_GRACE_MS', 3_600_000), 0),
+    triggerTickMs: atLeast(int(source, 'AGENT_TRIGGER_TICK_MS', 30_000), 5_000),
+    triggerMisfireGraceMs: atLeast(int(source, 'AGENT_TRIGGER_MISFIRE_GRACE_MS', 3_600_000), 0),
     chatConcurrency: atLeast(int(source, 'AGENT_CHAT_CONCURRENCY', 4), 1),
     webhooks: {
       bodyLimitBytes: Math.min(atLeast(int(source, 'AGENT_WEBHOOK_BODY_LIMIT_BYTES', 5_242_880), 16_384), 26_214_400),

@@ -1,7 +1,7 @@
 /**
  * Run engine: claim failures, promotion caps, callback events, inline turns
  * ended elsewhere, quota admission, idempotency races, retention and the
- * accountable principal of a routine run.
+ * accountable principal of a trigger run.
  *
  * Same harness as `agent-run-background-execution.test.ts`: a REAL SQLite
  * provider with the agent turn itself (`agentService`), the queue, the quota
@@ -371,22 +371,22 @@ describe('retention of scheduled, deferred and finished runs', () => {
   });
 });
 
-describe('a run owned by a synthetic actor (a routine fire)', () => {
+describe('a run owned by a synthetic actor (a trigger fire)', () => {
   it('counts its quota and spend against its accountable principal', async () => {
     const run = await queued('conv-accountable', {
-      userId: 'system:routine:rt1',
+      userId: 'system:trigger:trg1',
       actorType: 'system',
-      channel: 'routine',
-      routineId: 'rt1',
+      channel: 'trigger',
+      triggerId: 'trg1',
       accountable: { userId: 'user-2', apiTokenId: 'tok-2' },
     });
-    expect(run).toMatchObject({ userId: 'system:routine:rt1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' });
+    expect(run).toMatchObject({ userId: 'system:trigger:trg1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' });
     expect(hoisted.enforceAgentRunQuota).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-2', tokenId: 'tok-2' }));
 
     await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
 
     expect(hoisted.executeAgentChatLocal).toHaveBeenCalledWith(expect.objectContaining({
-      userId: 'system:routine:rt1', accountableUserId: 'user-2',
+      userId: 'system:trigger:trg1', accountableUserId: 'user-2',
     }));
     expect(hoisted.settleAgentRun).toHaveBeenCalledWith(expect.objectContaining({ userId: 'user-2', tokenId: 'tok-2' }), expect.anything(), expect.anything());
   });

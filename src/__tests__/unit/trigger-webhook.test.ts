@@ -19,7 +19,7 @@ import {
   standardSecretProblem,
   verifyBodyAuth,
   verifyHeaderAuth,
-} from '@/lib/services/agents/routineWebhookAuth';
+} from '@/lib/services/agents/agentTriggerWebhookAuth';
 import {
   boundedView,
   filterRuleMatches,
@@ -32,9 +32,9 @@ import {
   renderWebhookTemplate,
   templateProblem,
   WebhookTemplateError,
-} from '@/lib/services/agents/routineWebhookView';
-import { parseDeliveryJson } from '@/lib/services/agents/routineWebhookDelivery';
-import { parseWebhookWrite, rotateWebhookSecret } from '@/lib/services/agents/routineWebhookTrigger';
+} from '@/lib/services/agents/agentTriggerWebhookView';
+import { parseDeliveryJson } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { parseWebhookWrite, rotateWebhookSecret } from '@/lib/services/agents/agentTriggerWebhookIntake';
 
 const SECRET = 'whsec_generated-secret-value-1234';
 const OLD = 'whsec_previous-secret-value-9876';
@@ -179,7 +179,7 @@ describe('de-duplication material', () => {
     expect(dedupMaterial('generic', 'signature', {}, body, {})).toBeNull();
   });
 
-  it('builds the attempt chain hook:<routine>:<40 hex>, :r2 … :r5', () => {
+  it('builds the attempt chain hook:<trigger>:<40 hex>, :r2 … :r5', () => {
     const base = deliveryKeyBase('r1', 'material');
     expect(base).toMatch(/^hook:r1:[0-9a-f]{40}$/);
     expect(deliveryAttemptKeys(base)).toEqual([base, `${base}:r2`, `${base}:r3`, `${base}:r4`, `${base}:r5`]);

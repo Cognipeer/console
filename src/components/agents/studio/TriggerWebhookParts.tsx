@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * The webhook parts of the routine editor (SPEC-webhooks W8): the webhook
+ * The webhook parts of the trigger editor (SPEC-webhooks W8): the webhook
  * fields, the Connect card shown after a save (URL, the secret once, the
  * sender's setup steps, rotation), the Test tab (a sample delivery → dry run →
  * run) and the Deliveries tab (the delivery log).
@@ -49,11 +49,11 @@ import {
     WEBHOOK_SAMPLES,
     WEBHOOK_TEMPLATE_VARIABLES,
     hasWebhookAuthorRule,
-    type RoutineForm,
+    type TriggerForm,
     type WebhookAuth,
     type WebhookFilterOp,
     type WebhookPreset,
-} from './routineForm';
+} from './triggerForm';
 
 export const WEBHOOK_PRESET_LABEL_KEY: Record<WebhookPreset, string> = {
     github: 'presetGithub',
@@ -85,15 +85,15 @@ const tag = (variable: string) => `{{${variable}}}`;
 // ── Webhook fields ───────────────────────────────────────────────────────
 
 export interface WebhookFieldsProps {
-    form: RoutineForm;
-    set: <K extends keyof RoutineForm>(key: K, value: RoutineForm[K]) => void;
-    /** The stored routine already has a Standard Webhooks secret (an empty field keeps it). */
+    form: TriggerForm;
+    set: <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => void;
+    /** The stored trigger already has a Standard Webhooks secret (an empty field keeps it). */
     storedStandardSecret: boolean;
-    errorOf: (field: keyof RoutineForm) => string | undefined;
+    errorOf: (field: keyof TriggerForm) => string | undefined;
 }
 
 export function WebhookFields({ form, set, storedStandardSecret, errorOf }: WebhookFieldsProps) {
-    const t = useTranslations('agents.routines');
+    const t = useTranslations('agents.triggers');
     const preset = form.webhookPreset;
     const auths = WEBHOOK_PRESET_AUTH[preset];
     const actionPath = WEBHOOK_ACTION_PATH[preset];
@@ -105,7 +105,7 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
         // Actions are per preset (their path differs).
         if (WEBHOOK_ACTION_PATH[next] !== WEBHOOK_ACTION_PATH[preset]) set('webhookActions', []);
     };
-    const setRow = (index: number, patch: Partial<RoutineForm['webhookFilter'][number]>) =>
+    const setRow = (index: number, patch: Partial<TriggerForm['webhookFilter'][number]>) =>
         set('webhookFilter', form.webhookFilter.map((row, at) => (at === index ? { ...row, ...patch } : row)));
 
     return (
@@ -222,7 +222,7 @@ export function WebhookFields({ form, set, storedStandardSecret, errorOf }: Webh
 
 /** The variables a webhook prompt template may use, shown under the prompt. */
 export function WebhookTemplateVariables() {
-    const t = useTranslations('agents.routines');
+    const t = useTranslations('agents.triggers');
     return (
         <Stack gap={4}>
             <Text size="xs" c="dimmed">{t('webhookVariables')}</Text>
@@ -236,7 +236,7 @@ export function WebhookTemplateVariables() {
 // ── Connect card ─────────────────────────────────────────────────────────
 
 function CopyValue({ value, label }: { value: string; label: string }) {
-    const t = useTranslations('agents.routines');
+    const t = useTranslations('agents.triggers');
     return (
         <Group gap="xs" wrap="nowrap">
             <Text size="xs" c="dimmed" w={70}>{label}</Text>
@@ -256,7 +256,7 @@ function CopyValue({ value, label }: { value: string; label: string }) {
 
 /** The sender's setup steps for the preset and auth mode. */
 function ConnectSteps({ preset, auth, headerName }: { preset: WebhookPreset; auth: WebhookAuth; headerName: string }) {
-    const t = useTranslations('agents.routines');
+    const t = useTranslations('agents.triggers');
     const steps: Array<{ text: string; strong?: boolean }> = [];
     switch (preset) {
         case 'github':
@@ -296,23 +296,23 @@ type GraceSeconds = (typeof GRACE_OPTIONS)[number]['value'];
 
 export interface WebhookConnectCardProps {
     agentId: string;
-    routineId: string;
-    /** The stored routine's `webhook` object. */
+    triggerId: string;
+    /** The stored trigger's `webhook` object. */
     webhook: { url?: string; preset?: string; auth?: string; header_name?: string | null; secret_hint?: string; previous_secret_valid_until?: number | null };
     /** The secret from the answer that created / replaced it: shown this once. */
     revealedSecret: string | null;
     onSecret: (secret: string | null) => void;
 }
 
-export function WebhookConnectCard({ agentId, routineId, webhook, revealedSecret, onSecret }: WebhookConnectCardProps) {
-    const t = useTranslations('agents.routines');
+export function WebhookConnectCard({ agentId, triggerId, webhook, revealedSecret, onSecret }: WebhookConnectCardProps) {
+    const t = useTranslations('agents.triggers');
     const locale = useLocale();
     const { confirm } = useConfirm();
     const [grace, setGrace] = useState<GraceSeconds>('0');
     const [standardSecret, setStandardSecret] = useState('');
     const [rotating, setRotating] = useState(false);
-    // What the stored routine says is the source of truth; a rotation answers with newer values, which hold only
-    // until the routine itself is read again (a save that replaced the secret brings its own hint and grace).
+    // What the stored trigger says is the source of truth; a rotation answers with newer values, which hold only
+    // until the trigger itself is read again (a save that replaced the secret brings its own hint and grace).
     const storedState = `${webhook.secret_hint ?? ''}|${webhook.previous_secret_valid_until ?? ''}`;
     const [rotated, setRotated] = useState<{ base: string; hint: string; previousUntil: number | null } | null>(null);
     const latest = rotated && rotated.base === storedState ? rotated : null;
@@ -327,7 +327,7 @@ export function WebhookConnectCard({ agentId, routineId, webhook, revealedSecret
         if (!ok) return;
         setRotating(true);
         try {
-            const res = await fetch(`/api/agents/${agentId}/routines/${routineId}/webhook/rotate-secret`, {
+            const res = await fetch(`/api/agents/${agentId}/triggers/${triggerId}/webhook/rotate-secret`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ grace_seconds: Number(grace), ...(standard ? { secret: standardSecret.trim() } : {}) }),
@@ -407,8 +407,8 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
     }
 }
 
-export function WebhookTestPanel({ agentId, routineId, preset }: { agentId: string; routineId: string; preset: WebhookPreset }) {
-    const t = useTranslations('agents.routines');
+export function WebhookTestPanel({ agentId, triggerId, preset }: { agentId: string; triggerId: string; preset: WebhookPreset }) {
+    const t = useTranslations('agents.triggers');
     const sample = WEBHOOK_SAMPLES[preset];
     const [headersText, setHeadersText] = useState(() => JSON.stringify(sample.headers, null, 2));
     const [payloadText, setPayloadText] = useState(() => JSON.stringify(sample.payload, null, 2));
@@ -421,7 +421,7 @@ export function WebhookTestPanel({ agentId, routineId, preset }: { agentId: stri
         if (!headers || !payload) return;
         setBusy(dryRun ? 'preview' : 'run');
         try {
-            const res = await fetch(`/api/agents/${agentId}/routines/${routineId}/run`, {
+            const res = await fetch(`/api/agents/${agentId}/triggers/${triggerId}/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ payload, headers, ...(dryRun ? { dry_run: true } : {}) }),
@@ -498,8 +498,8 @@ function OutcomeLabel({ outcome, label }: { outcome: string; label: string }) {
     );
 }
 
-export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { agentId: string; routineId: string; onShowRuns: () => void }) {
-    const t = useTranslations('agents.routines');
+export function WebhookDeliveriesPanel({ agentId, triggerId, onShowRuns }: { agentId: string; triggerId: string; onShowRuns: () => void }) {
+    const t = useTranslations('agents.triggers');
     const locale = useLocale();
     const [rows, setRows] = useState<DeliveryRow[] | null>(null);
     const [hasMore, setHasMore] = useState(false);
@@ -510,7 +510,7 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
         setLoading(true);
         try {
             const query = new URLSearchParams({ limit: '20', ...(before ? { before } : {}) });
-            const res = await fetch(`/api/agents/${agentId}/routines/${routineId}/deliveries?${query.toString()}`, { cache: 'no-store' });
+            const res = await fetch(`/api/agents/${agentId}/triggers/${triggerId}/deliveries?${query.toString()}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(await errorMessage(res));
             const data = await res.json() as { data: DeliveryRow[]; has_more: boolean };
             setRows((prev) => (before ? [...(prev ?? []), ...data.data] : data.data));
@@ -523,7 +523,7 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
         } finally {
             setLoading(false);
         }
-    }, [agentId, routineId, t]);
+    }, [agentId, triggerId, t]);
 
     useEffect(() => { void load(); }, [load]);
 

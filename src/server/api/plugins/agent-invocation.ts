@@ -451,7 +451,7 @@ export function resolveInvocationLimits(ctx: ApiTokenContext): Promise<AgentRunL
 
 /**
  * The `Idempotency-Key` header (every mode keeps its run, so it works on waited calls too).
- * Keys starting with a reserved prefix (`hook:`, `routine:`) name the runs routines start
+ * Keys starting with a reserved prefix (`hook:`, `trigger:`) name the runs triggers start
  * themselves and are refused, so a client key can never match one of those runs.
  */
 export function readIdempotencyKey(

@@ -131,11 +131,11 @@ const MAX_CALLBACK_URL_LENGTH = 2_048;
 const MIN_CALLBACK_SECRET_LENGTH = 16;
 const MAX_CALLBACK_SECRET_LENGTH = 256;
 export const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
-/** Idempotency-Key prefixes of the runs routines start (`routine:<id>:<slot>`, `hook:<id>:…`); refused from clients. */
+/** Idempotency-Key prefixes of the runs triggers start (`trigger:<id>:<slot>`, `hook:<id>:…`); refused from clients. */
 /** What can start a run (the runs list's `trigger` filter). */
 export const AGENT_RUN_TRIGGERS: ReadonlyArray<NonNullable<IAgentRun['trigger']>> = ['request', 'schedule', 'once', 'manual', 'webhook'];
 
-export const RESERVED_IDEMPOTENCY_PREFIXES = ['hook:', 'routine:'] as const;
+export const RESERVED_IDEMPOTENCY_PREFIXES = ['hook:', 'trigger:'] as const;
 
 export function isReservedIdempotencyKey(key: string): boolean {
   return RESERVED_IDEMPOTENCY_PREFIXES.some((prefix) => key.startsWith(prefix));
@@ -197,7 +197,7 @@ export function serializeAgentRun(run: IAgentRun) {
     conversation_id: run.conversationId,
     channel: run.channel ?? null,
     trigger: run.trigger ?? null,
-    routine_id: run.routineId ?? null,
+    trigger_id: run.triggerId ?? null,
     metadata: run.metadata ?? {},
     // How the agent turn ended (`end_turn` / `limit` / `requires_action` /
     // `cancelled` / `error`). Null while the run is active and on rows from
@@ -507,7 +507,7 @@ export interface StartAgentRunInput {
   actorType?: IAgentRun['actorType'];
   /**
    * Whose spend and quota policies the run counts against when `userId` is a
-   * synthetic owner (a routine fire): kept on the row for the worker.
+   * synthetic owner (a trigger fire): kept on the row for the worker.
    */
   accountable?: { userId: string; apiTokenId?: string } | null;
   version?: number;
@@ -518,7 +518,7 @@ export interface StartAgentRunInput {
   /** Inline only. */
   requestReasoning?: AgentChatRequest['requestReasoning'];
   /**
-   * Nobody can answer an approval on this run (chat completions, a routine): gated
+   * Nobody can answer an approval on this run (chat completions, a trigger): gated
    * tools follow the agent's unattended policy. Kept on the row for every continuation.
    */
   unattended?: boolean;
@@ -537,7 +537,7 @@ export interface StartAgentRunInput {
   runClass?: AgentRunClass;
   channel?: IAgentRun['channel'];
   metadata?: Record<string, string> | null;
-  routineId?: string | null;
+  triggerId?: string | null;
   trigger?: IAgentRun['trigger'];
   /** A caller-supplied `Idempotency-Key` (every mode). */
   idempotencyKey?: string;
@@ -731,7 +731,7 @@ export async function agentRunCapacityPrecheck(input: {
 }
 
 /**
- * Starts an agent turn as a run — the one way API callers, routines and the
+ * Starts an agent turn as a run — the one way API callers, triggers and the
  * runs API start one (§4.1). The dialect has already resolved and validated
  * the agent, session, files, budget, model and inputs.
  *
@@ -835,7 +835,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       runClass,
       channel: input.channel ?? null,
       metadata: input.metadata && Object.keys(input.metadata).length > 0 ? input.metadata : null,
-      routineId: input.routineId ?? null,
+      triggerId: input.triggerId ?? null,
       trigger: input.trigger ?? 'request',
       responseFormat: input.responseFormat ?? null,
       inputs: input.inputs ?? null,
@@ -1326,7 +1326,7 @@ export async function queueAgentRunResume(input: {
     }
     if (!run) {
       // The turn this continues: the paused run, else the session's latest run (a
-      // budget continuation) — its routine, flags and inputs carry over (§2.4a).
+      // budget continuation) — its trigger, flags and inputs carry over (§2.4a).
       const [source] = paused ? [paused] : await db.listAgentRuns({
         tenantId: input.tenantId,
         projectId: input.projectId,
@@ -1359,7 +1359,7 @@ export async function queueAgentRunResume(input: {
         status: 'queued',
         runClass: 'default',
         trigger: source?.trigger ?? 'request',
-        ...(source?.routineId ? { routineId: source.routineId, channel: source.channel ?? null } : {}),
+        ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
         ...(source?.unattended ? { unattended: true } : {}),
         ...(source?.externalContent ? { externalContent: true } : {}),
         ...(source?.inputs ? { inputs: source.inputs } : {}),
@@ -1683,7 +1683,7 @@ async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promis
 
 const GENERIC_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
 
-/** Run owners that are not user rows (routines, timeouts, public A2A). */
+/** Run owners that are not user rows (triggers, timeouts, public A2A). */
 function isSyntheticRunActor(userId: string): boolean {
   return userId.startsWith('system:') || userId === 'a2a-public';
 }
@@ -1912,7 +1912,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       // The tokens the turn's model calls spend are tallied as they happen, so a run that
       // fails, times out or is cancelled is still charged for them (runUsage.ts).
       const usage = createRunUsageSink();
-      // A synthetic owner (a routine) counts against its accountable principal.
+      // A synthetic owner (a trigger) counts against its accountable principal.
       const quotaCaller = {
         tenantDbName: claimed.tenantDbName,
         tenantId: claimed.tenantId,
@@ -2139,7 +2139,7 @@ export async function fireAgentRunCallback(
       status: run.status,
       class: run.runClass ?? 'default',
       metadata: run.metadata ?? {},
-      routineId: run.routineId ?? null,
+      triggerId: run.triggerId ?? null,
     },
   });
   if (!run.callbackUrl) return;

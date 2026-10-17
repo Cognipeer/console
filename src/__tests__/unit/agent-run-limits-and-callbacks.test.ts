@@ -278,7 +278,7 @@ describe('ids and serialization', () => {
       conversation_id: 'conv-1',
       channel: null,
       trigger: null,
-      routine_id: null,
+      trigger_id: null,
       metadata: {},
       stop_reason: null,
       result: null,
@@ -304,7 +304,7 @@ describe('ids and serialization', () => {
   it('serializeAgentRun lifts output_text / output_parsed and carries the engine fields', () => {
     const run = {
       _id: 'r2', mode: 'inline', agentKey: 'a', conversationId: 'c', status: 'succeeded', runClass: 'deferred',
-      version: 3, channel: 'routine', trigger: 'schedule', routineId: 'rt1', metadata: { team: 'ops' },
+      version: 3, channel: 'trigger', trigger: 'schedule', triggerId: 'trg1', metadata: { team: 'ops' },
       notBefore: new Date('2024-01-01T00:00:00Z'), detachedAt: new Date('2024-01-01T00:00:05Z'),
       result: {
         id: 'resp_r2',
@@ -313,7 +313,7 @@ describe('ids and serialization', () => {
       },
     } as unknown as IAgentRun;
     expect(serializeAgentRun(run)).toMatchObject({
-      class: 'deferred', version: 3, channel: 'routine', trigger: 'schedule', routine_id: 'rt1', metadata: { team: 'ops' },
+      class: 'deferred', version: 3, channel: 'trigger', trigger: 'schedule', trigger_id: 'trg1', metadata: { team: 'ops' },
       output_text: 'Hello', output_parsed: { ok: true }, scheduled_for: 1704067200, detached_at: 1704067205,
     });
     expect(serializeAgentRun({ ...run, status: 'scheduled', result: null } as IAgentRun)).toMatchObject({
