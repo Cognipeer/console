@@ -576,10 +576,21 @@ export function describeTurnOutcome(
 export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTurnCompaction {
     const structured = event.structuredSummary as (AgentSdkSummarizationEvent['structuredSummary'] & {
         user_directives?: string[];
+        user_directive_sources?: Record<string, string>;
     }) | undefined;
     const notes = event.integrity?.notes ?? [];
+    // agent-sdk ≥ 0.15 reports the model and the directives it refused to keep.
+    const extra = event as AgentSdkSummarizationEvent & {
+        model?: string;
+        droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+    };
+    const directiveSources = structured?.user_directive_sources;
     return {
         at: new Date().toISOString(),
+        ...(typeof extra.model === 'string' && extra.model ? { model: extra.model } : {}),
+        ...(Array.isArray(extra.droppedDirectives) && extra.droppedDirectives.length > 0
+            ? { droppedDirectives: extra.droppedDirectives }
+            : {}),
         ...(typeof event.messagesCompressed === 'number' ? { messagesCompressed: event.messagesCompressed } : {}),
         ...(typeof event.tokenCountBefore === 'number' ? { tokensBefore: event.tokenCountBefore } : {}),
         ...(typeof event.tokenCountAfter === 'number' ? { tokensAfter: event.tokenCountAfter } : {}),
@@ -590,6 +601,7 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
             ? {
                 summary: {
                     ...(structured.user_directives?.length ? { userDirectives: structured.user_directives } : {}),
+                    ...(directiveSources && Object.keys(directiveSources).length > 0 ? { directiveSources } : {}),
                     ...(structured.stable_facts?.length
                         ? { facts: structured.stable_facts.map((fact) => ({ key: fact.key, value: fact.value })) }
                         : {}),

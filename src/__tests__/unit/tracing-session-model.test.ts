@@ -21,6 +21,7 @@ import {
   type TraceNode,
 } from '@/components/tracing/sessionModel';
 import { classifySections, createToolTurnKeys, eventResponse, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
+import { stepBadge } from '@/components/tracing/stepDisplay';
 
 const T0 = Date.parse('2026-10-15T12:03:06.301Z');
 const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -342,5 +343,51 @@ describe('tool call data, whatever field the integration used', () => {
     expect(new Set(calls).size).toBe(3);
     keys.reset();
     expect(keys.call('web_search', 6)).toBe(calls[0]);
+  });
+});
+
+// ─── Context summarization (agent-sdk ≥ 0.15 traces it) ────────────────────
+describe('context summarization steps', () => {
+  const summarization: TraceEventInput = {
+    id: 'sum', sequence: 4, type: 'summarization', label: 'Context Summarization #4', model: 'gpt-6-luna',
+    timestamp: at(4100), durationMs: 1800, spanId: 'sum', parentSpanId: 'root', inputTokens: 9000, outputTokens: 300,
+    sections: [{ kind: 'message', role: 'system' }, { kind: 'summary', label: 'Summary injected into context' }, { kind: 'metadata', label: 'Compaction' }],
+  };
+
+  it('is a model step named for what it did, between the iterations it sits between', () => {
+    const events = [...agentSdk.slice(0, 3), summarization, ...agentSdk.slice(3).map((event) => {
+      const sequence = (event.sequence ?? 0) + 1;
+      return { ...event, sequence, label: event.label?.replace(/ #\d+$/, ` #${sequence}`) };
+    })];
+    const { tree } = buildSessionModel(events);
+    expect(labels(tree)).toEqual([
+      { group: 'Iteration 1', inferred: false, children: ['gpt-6-luna', 'search_topics'] },
+      'Context Summarization',
+      { group: 'Iteration 2', inferred: false, children: ['gpt-6-luna', 'search_in_files'] },
+      { group: 'Iteration 3', inferred: false, children: ['gpt-6-luna', 'read_text_file'] },
+      { group: 'Iteration 4', inferred: false, children: ['gpt-6-luna'] },
+    ]);
+    const node = flattenTree(tree).map((entry) => entry.node).find((entry) => entry.event?.type === 'summarization')!;
+    expect(node.category).toBe('model');
+    expect(stepBadge(node)).toBe('Summary');
+  });
+
+  it('does not open an inferred step of its own in a flat run', () => {
+    const flat: TraceEventInput[] = [
+      ...langChainAgent.slice(0, 2),
+      { ...summarization, parentSpanId: 'exec', timestamp: at(1225), durationMs: 5 },
+      ...langChainAgent.slice(2),
+    ];
+    const { tree } = buildSessionModel(flat);
+    expect(labels(tree)).toEqual([
+      {
+        group: 'AgentExecutor',
+        inferred: false,
+        children: [
+          { group: 'Step 1', inferred: true, children: ['gpt-4.1-mini', 'search', 'Context Summarization'] },
+          { group: 'Step 2', inferred: true, children: ['gpt-4.1-mini'] },
+        ],
+      },
+    ]);
   });
 });
