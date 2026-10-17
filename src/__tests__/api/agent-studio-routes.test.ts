@@ -107,6 +107,9 @@ import {
     createConversation,
     deleteConversation,
     getAgentById,
+    getAgentVersion,
+    listAgentVersions,
+    publishAgent,
     updateAgentRecord,
     getConversationById,
     listConversations,
@@ -413,6 +416,47 @@ describe('config validation and model check', () => {
         const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/publish', payload: {} });
         expect(res.statusCode).toBe(400);
         expect(parseJsonBody<{ error: string }>(res.body).error).toContain('toolBindings[0]');
+    });
+});
+
+describe('publish and version responses redact the frozen config', () => {
+    const VERSION = {
+        agentKey: 'field-ops',
+        version: 3,
+        snapshot: {
+            name: 'Field Ops',
+            status: 'active',
+            config: {
+                modelKey: 'gpt-5-terra',
+                sandbox: { enabled: true, secretsSealed: 'sealed-sandbox-blob' },
+                callback: { url: 'https://hooks.example.com/a', secretSealed: 'sealed-callback-blob' },
+                connection: { protocol: 'openai', url: 'https://agent.example.com', apiKeyEnc: 'sealed-key-blob' },
+            },
+        },
+    };
+    const LEAK = /sealed-(sandbox|callback|key)-blob|secretsSealed|secretSealed|apiKeyEnc/;
+
+    it('POST /agents/:agentId/publish returns the version without sealed secrets', async () => {
+        mockFn(validateAgentConfig).mockResolvedValue({ errors: [], warnings: [] });
+        mockFn(publishAgent).mockResolvedValue(VERSION);
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/publish', payload: {} });
+        expect(res.statusCode).toBe(201);
+        expect(res.body).not.toMatch(LEAK);
+        expect(parseJsonBody<{ version: { snapshot: { config: { callback: unknown } } } }>(res.body).version.snapshot.config.callback)
+            .toEqual({ url: 'https://hooks.example.com/a', secret: '••••••' });
+    });
+
+    it('GET /agents/:agentId/versions (one version and the list) never returns sealed secrets', async () => {
+        mockFn(getAgentVersion).mockResolvedValue(VERSION);
+        mockFn(listAgentVersions).mockResolvedValue({ versions: [VERSION], total: 1 });
+        const app = await agentsApp();
+        const one = await app.inject({ method: 'GET', url: '/api/agents/agent-1/versions?version=3' });
+        const list = await app.inject({ method: 'GET', url: '/api/agents/agent-1/versions' });
+        expect(one.statusCode).toBe(200);
+        expect(list.statusCode).toBe(200);
+        expect(one.body).not.toMatch(LEAK);
+        expect(list.body).not.toMatch(LEAK);
     });
 });
 

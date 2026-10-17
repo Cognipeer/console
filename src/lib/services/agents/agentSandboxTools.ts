@@ -48,7 +48,7 @@ import {
 } from './agentSandboxOutputs';
 import { resolveAttachmentsConfig } from './sessionFilesConfig';
 import { resolveUploadMimeType, saveAgentOutputFile } from './sessionFiles';
-import { openAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
+import { readAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
 
 const logger = createLogger('agent-sandbox');
 
@@ -108,6 +108,9 @@ function tail(text: string, limit: number): string {
     if (text.length <= limit) return text;
     return `… [${(text.length - limit).toLocaleString()} earlier characters omitted]\n${text.slice(-limit)}`;
 }
+
+/** Told to the model (and so the transcript) when the stored secrets cannot be decrypted. */
+const SECRETS_UNAVAILABLE_NOTICE = 'The sandbox secrets configured for this agent are unavailable (the encryption key has changed), so commands run without them. Tell the user to re-enter them in the agent settings.';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
@@ -173,8 +176,10 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         ...(sessionConversationId ? { conversationId: sessionConversationId } : {}),
     };
     const timeoutSec = clampTimeout(config.commandTimeoutSec);
-    const secrets = openAgentSandboxSecrets(config);
+    const { secrets, unreadable: secretsUnreadable } = readAgentSandboxSecrets(config);
     const scrub = (text: string) => scrubSecretValues(text, secrets);
+    /** Said with every command result: stored secrets that cannot be opened mean commands run without them. */
+    const secretsNotice = secretsUnreadable ? SECRETS_UNAVAILABLE_NOTICE : undefined;
     const preview = config.preview?.enabled
         ? {
             public: config.preview.public === true,
@@ -285,7 +290,8 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             seedResult = await applySeedFiles({
                 files,
                 agentKey: input.agentKey,
-                runner: { exec: (cmd) => runner.exec(ref, instanceId, { ...cmd, env: secrets }) },
+                // Seed writes only move bytes: they run without the agent's secrets in their environment.
+                runner: { exec: (cmd) => runner.exec(ref, instanceId, cmd) },
                 readBytes: async (file) => {
                     const { bucketKey, objectKey } = file.fileRef;
                     if (!isOwnedObjectKey(objectKey, input.agentKey)) throw new Error('not an agent asset');
@@ -315,7 +321,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     };
 
     const shapeExec = (result: AgentSandboxExecResult) => {
-        const notice = seedNotice;
+        const notice = [seedNotice, secretsNotice].filter(Boolean).join(' ') || undefined;
         seedNotice = undefined;
         return {
             exitCode: result.exitCode,
@@ -328,7 +334,9 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const lifetime = session
         ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
         : 'The sandbox is discarded when this reply is finished.';
-    const secretNote = Object.keys(secrets).length > 0
+    const secretNote = secretsUnreadable
+        ? ` ${SECRETS_UNAVAILABLE_NOTICE}`
+        : Object.keys(secrets).length > 0
         ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
         : '';
 
@@ -497,6 +505,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 readBytes: async (entry) => runner.readFileBytes
                     ? runner.readFileBytes(ref, instanceId, entry.path)
                     : readBytesViaExec(sh, entry.path, entry.size),
+                scrub,
                 store: (file) => saveAgentOutputFile({
                     scope: { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
                     conversation,

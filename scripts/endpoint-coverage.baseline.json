@@ -58,7 +58,6 @@
     "GET ${base}/:id",
     "GET ${base}/:id/deliveries",
     "GET ${base}/events",
-    "GET /agents/:agentId/versions",
     "GET /analysis/conversations",
     "GET /analysis/conversations/:id",
     "GET /analysis/definitions",

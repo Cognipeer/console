@@ -3,12 +3,19 @@
  * masked value sent back keeps what is stored.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+const log = vi.hoisted(() => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() }));
+vi.mock('@/lib/core/logger', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/lib/core/logger')>()),
+    createLogger: () => log,
+}));
 import {
     AGENT_SANDBOX_SECRET_MASK as MASK,
     maskAgentSandboxConfig,
     maskAgentSandboxSecrets,
     openAgentSandboxSecrets,
+    readAgentSandboxSecrets,
     sealAgentConfigSecrets,
     scrubSecretValues,
     sealAgentSandboxConfig,
@@ -54,6 +61,10 @@ describe('sandbox secrets', () => {
         expect(scrubSecretValues('key=alpha-1 other=ok', { A: 'alpha-1', short: 'ok' })).toBe(`key=${MASK} other=ok`);
     });
 
+    it('masks the longer value whole when one secret contains another', () => {
+        expect(scrubSecretValues('v=abcd-efgh', { SHORT: 'abcd', LONG: 'abcd-efgh' })).toBe(`v=${MASK}`);
+    });
+
     it('an exported manifest carries the secret keys, never the sealed values', () => {
         const manifest = buildAgentManifest(
             { key: 'builder', name: 'Builder', status: 'active' } as never,
@@ -62,6 +73,38 @@ describe('sandbox secrets', () => {
         const text = JSON.stringify(manifest);
         expect(text).not.toContain(stored.secretsSealed!);
         expect(manifest.spec.sandbox?.secrets).toEqual({ A: MASK, B: MASK });
+    });
+});
+
+describe('secrets that cannot be decrypted (the encryption key changed)', () => {
+    const unreadable = { enabled: true, secretsSealed: 'not-a-valid-ciphertext' };
+
+    it('opening reports it and logs an error instead of silently returning none', () => {
+        log.error.mockClear();
+        expect(readAgentSandboxSecrets(unreadable)).toEqual({ secrets: {}, unreadable: true });
+        expect(openAgentSandboxSecrets(unreadable)).toEqual({});
+        expect(log.error).toHaveBeenCalledTimes(2);
+        log.error.mockClear();
+        expect(readAgentSandboxSecrets(sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined)).unreadable).toBe(false);
+        expect(readAgentSandboxSecrets({ enabled: true }).unreadable).toBe(false);
+        expect(log.error).not.toHaveBeenCalled();
+    });
+
+    it('a masked re-save keeps the existing ciphertext, never drops it', () => {
+        const next = sealAgentSandboxConfig({ enabled: true, secrets: { A: MASK, B: MASK } }, unreadable)!;
+        expect(next.secretsSealed).toBe('not-a-valid-ciphertext');
+    });
+
+    it('a re-save without a `secrets` field keeps it too, and reads stay masked without leaking it', () => {
+        expect(sealAgentSandboxConfig({ enabled: false }, unreadable)!.secretsSealed).toBe('not-a-valid-ciphertext');
+        const masked = maskAgentSandboxConfig(unreadable)!;
+        expect(masked.secretsSealed).toBeUndefined();
+        expect(masked.secrets).toBeUndefined();
+    });
+
+    it('entering values without any mask replaces them (a deliberate re-entry)', () => {
+        const next = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'fresh-value' } }, unreadable)!;
+        expect(openAgentSandboxSecrets(next)).toEqual({ A: 'fresh-value' });
     });
 });
 
@@ -116,6 +159,12 @@ describe('agent callback secret (config.callback)', () => {
         expect(JSON.stringify(agent)).not.toContain('sealed-legacy-value');
     });
 
+    it('a masked re-save keeps a callback ciphertext that cannot be opened', () => {
+        const broken = { url: URL_, secretSealed: 'not-a-valid-ciphertext' };
+        expect(sealAgentCallbackConfig({ url: URL_, secret: MASK }, broken)!.secretSealed).toBe('not-a-valid-ciphertext');
+        expect(openAgentCallbackSecret(broken)).toBeUndefined();
+    });
+
     it('a manifest export carries the URL and a mask, never the sealed secret', () => {
         const manifest = buildAgentManifest(
             { key: 'builder', name: 'Builder', status: 'active' } as never,
@@ -124,5 +173,16 @@ describe('agent callback secret (config.callback)', () => {
         const text = JSON.stringify(manifest);
         expect(text).not.toContain(stored.secretSealed!);
         expect(manifest.spec.callback).toEqual({ url: URL_, secret: MASK });
+    });
+});
+
+describe('manifest export of a connected agent', () => {
+    it('drops the encrypted connection key even without a sandbox block', () => {
+        const manifest = buildAgentManifest(
+            { key: 'ext', name: 'Ext', status: 'active' } as never,
+            { kind: 'external', connection: { protocol: 'openai', url: 'https://agent.example.com', apiKeyEnc: 'sealed-key-blob' } } as never,
+        );
+        expect(JSON.stringify(manifest)).not.toContain('sealed-key-blob');
+        expect(JSON.stringify(manifest)).not.toContain('apiKeyEnc');
     });
 });
