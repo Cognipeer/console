@@ -1089,7 +1089,7 @@ paths:
       tags:
         - Agent Sessions
       summary: Upload a file to a session
-      description: "Attaches a file to the session. Send the file as the raw request body with its MIME type as `Content-Type` and its name in `?name=`. A small file can also go as a JSON body `{ \"name\", \"content_type\", \"data\" }` with base64 (or a data URL) `data`; a `.json` file goes as `application/octet-stream` and its name still says what it is. The file is converted to markdown (the original is kept) and counts toward the project's file quotas. What a session accepts is the agent's `attachments` setting (Configure -> Files): bucket, folder, size, count, types, retention. The file is stored in the agent's bucket at `<folder>/<agentKey>/<sessionId>/<name>`. A file nobody has sent yet goes with the session's next message; or name it in the message with an `input_file` / `input_image` part of the Responses API (or the `attachments` list of the dashboard chat)."
+      description: "Attaches a file to the session. Send the file as the raw request body with its MIME type as `Content-Type` and its name in `?name=`. A `multipart/form-data` body works too: the first file part is the file (its filename and type; `?name=` overrides the name). A small file can also go as a JSON body `{ \"name\", \"content_type\", \"data\" }` with base64 (or a data URL) `data`; a `.json` file goes as `application/octet-stream` and its name still says what it is. The file is converted to markdown (the original is kept) and counts toward the project's file quotas. What a session accepts is the agent's `attachments` setting (Configure -> Files): bucket, folder, size, count, types, retention. The file is stored in the agent's bucket at `<folder>/<agentKey>/<sessionId>/<name>`. A file nobody has sent yet goes with the session's next message; or name it in the message with an `input_file` / `input_image` part of the Responses API (or the `attachments` list of the dashboard chat)."
       operationId: uploadAgentSessionFile
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -1114,6 +1114,13 @@ paths:
             schema:
               type: string
               format: binary
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
           application/json:
             schema:
               $ref: "#/components/schemas/AgentSessionFileJsonUpload"
@@ -14791,6 +14798,24 @@ components:
             accepts_images:
               type: boolean
               description: "The agent's model accepts image input. When false, an attached image is replaced by a note saying so. A chat model with no stored setting is taken to accept images when its id belongs to a known vision family."
+            outputs:
+              type: object
+              description: "Files the agent writes itself with the `session_files_create` / `session_files_append` tools (no sandbox needed). They are delivered with the answer as `output_files`; each `download_url` is the session file content route, relative to the server origin and including `/api`."
+              properties:
+                enabled:
+                  type: boolean
+                  description: The agent can write files now (not switched off, a bucket chosen, and that bucket can take a file).
+                max_files_per_turn:
+                  type: integer
+                  description: Most files one turn may create.
+                max_file_size_mb:
+                  type: number
+                  description: Largest file in MB.
+                types:
+                  type: array
+                  items:
+                    type: string
+                  description: File extensions the agent may write, without the dot (md, csv, txt, json, html, xml, yaml, yml).
     AgentUpdateInput:
       type: object
       additionalProperties: true

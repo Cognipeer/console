@@ -8,7 +8,7 @@
 
 import { getDatabase, type IAgentConfig } from '@/lib/database';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
-import { attachmentsAvailability } from './sessionFilesConfig';
+import { attachmentsAvailability, FILE_OUTPUT_EXTENSIONS, outputsAvailability, resolveOutputsConfig } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 
 export interface AgentAttachmentInfo {
@@ -19,6 +19,15 @@ export interface AgentAttachmentInfo {
     allowedMimeTypes: string[];
     /** The agent's model reads images (an image sent to it is seen, not replaced by a note). */
     acceptsImages: boolean;
+    /** Files the agent can write for the person (`session_files_create`), independent of uploads. */
+    outputs: {
+        /** Writes files now: not switched off, a bucket named, and that bucket can take a file. */
+        enabled: boolean;
+        maxFilesPerTurn: number;
+        maxFileSizeMb: number;
+        /** File extensions it may write, without the dot. */
+        types: string[];
+    };
 }
 
 export async function describeAgentAttachments(input: {
@@ -38,18 +47,23 @@ export async function describeAgentAttachments(input: {
     }
 
     const availability = attachmentsAvailability(config);
+    const outputsOn = outputsAvailability(config);
+    const bucketUsable = async (key: string) =>
+        (await inspectFileBucket(db, input.tenantId, input.projectId, key).catch(() => null))?.usable === true;
     // Limits are shown even when files are off, so a client can render them without a second call.
     const limits = availability.available ? availability.cfg : null;
-    let enabled = false;
-    if (availability.available) {
-        const inspection = await inspectFileBucket(db, input.tenantId, input.projectId, availability.cfg.bucketKey).catch(() => null);
-        enabled = inspection?.usable === true;
-    }
+    const outputs = resolveOutputsConfig(config.attachments);
     return {
-        enabled,
+        enabled: availability.available ? await bucketUsable(availability.cfg.bucketKey) : false,
         maxFiles: limits?.maxFiles ?? 0,
         maxFileSizeMb: limits?.maxFileSizeMb ?? 0,
         allowedMimeTypes: limits?.allowedMimeTypes ?? [],
         acceptsImages,
+        outputs: {
+            enabled: outputsOn.available ? await bucketUsable(outputsOn.cfg.bucketKey) : false,
+            maxFilesPerTurn: outputs.maxFilesPerTurn,
+            maxFileSizeMb: outputs.maxFileSizeMb,
+            types: [...FILE_OUTPUT_EXTENSIONS],
+        },
     };
 }

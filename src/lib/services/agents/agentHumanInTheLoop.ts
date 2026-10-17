@@ -16,7 +16,8 @@ import type {
 } from '@/lib/database';
 
 /**
- * Tools that only READ. They follow `toolApproval.tools[name]` when one is set
+ * Tools that only READ (and the agent's own file-writing tools, which never touch anything outside
+ * the session). They follow `toolApproval.tools[name]` when one is set
  * and are otherwise never asked about — approving every knowledge lookup would
  * make the feature unusable. Everything else Console builds (bound / MCP /
  * custom tools, memory writes, sandbox_exec / run_code / write_file) follows
@@ -37,6 +38,9 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'session_files_list',
     'session_files_read',
     'session_files_view_image',
+    // The agent's own text files for the user (agentFileOutputTools.ts): scratch output of the run, delivered after the turn.
+    'session_files_create',
+    'session_files_append',
     // The SDK's own ask-user tool: asking IS the human step.
     'ask_user_question',
 ];

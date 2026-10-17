@@ -888,6 +888,52 @@ export async function uploadFile(
     };
 }
 
+/**
+ * Writes new bytes under an existing file's key (same record, same id) and converts them to
+ * markdown again. For a file that grows after it was stored; the object providers replace an
+ * object written under the same key.
+ */
+export async function replaceFileContent(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    bucketKey: string,
+    key: string,
+    input: { data: Buffer; updatedBy: string },
+): Promise<FileRecordView> {
+    const { bucket, runtime, record } = await requireFileRecord(tenantDbName, tenantId, projectId, bucketKey, key);
+    const request: UploadFileRequest = {
+        bucketKey,
+        fileName: record.name,
+        contentType: record.contentType,
+        data: input.data,
+        createdBy: input.updatedBy,
+    };
+    assertUploadAllowed(request, input.data);
+
+    const upload = await withResilience(
+        () => runtime.uploadFile({
+            key: composeProviderObjectKey(bucket, record.key),
+            name: record.name,
+            contentType: record.contentType,
+            data: input.data,
+            metadata: record.metadata,
+        }),
+        { key: `file-upload:${bucket.providerKey}` },
+    );
+
+    const db = await withTenantDb(tenantDbName);
+    const conversion = await applyMarkdownConversion(runtime, bucket, record, request, input.data);
+    const updated = await db.updateFileRecord(record.id, {
+        size: upload.handle.size ?? input.data.length,
+        checksum: upload.handle.checksum,
+        etag: upload.handle.etag,
+        ...conversion,
+        updatedBy: input.updatedBy,
+    });
+    return serializeFileRecord(updated ?? { ...record, size: input.data.length });
+}
+
 async function requireFileRecord(
     tenantDbName: string,
     tenantId: string,

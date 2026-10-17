@@ -149,14 +149,19 @@ export function toClientErrorBody(error: AgentRunErrorBody): Record<string, unkn
 
 // ── Files the agent produced ─────────────────────────────────────────────
 
-/** A file the agent wrote to its sandbox's `/outputs/`, as a client sees it. */
+/** A file the agent produced (sandbox `/outputs/` or `session_files_create`), as a client sees it. */
 export interface ClientOutputFile {
     id: string;
     name: string;
     mime_type: string;
     size: number;
-    /** Relative to the API origin: the session file content route. */
+    /** Relative to the server origin, `/api` included: the session file content route. */
     download_url: string;
+}
+
+/** Where a session file's bytes are served (the URL every client surface and the agent's tools report). */
+export function sessionFileDownloadUrl(conversationId: string, fileId: string): string {
+    return `/api/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(fileId)}/content`;
 }
 
 /** An `output_text` annotation pointing at an output file (OpenAI `container_file_citation` / `file_path` compatible). */
@@ -183,7 +188,7 @@ export function toClientOutputFiles(conversationId: string, attachments: Readonl
             name: file.name,
             mime_type: file.mimeType,
             size: file.size,
-            download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+            download_url: sessionFileDownloadUrl(conversationId, file.fileId),
         }));
 }
 
@@ -212,7 +217,7 @@ export function toClientMessageAttachments(
         mime_type: file.mimeType,
         size: file.size,
         origin: file.origin === 'agent_output' ? 'agent_output' : 'user_upload',
-        download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+        download_url: sessionFileDownloadUrl(conversationId, file.fileId),
     }));
 }
 

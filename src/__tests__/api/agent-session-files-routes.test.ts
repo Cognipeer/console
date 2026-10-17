@@ -289,6 +289,57 @@ describe('dashboard: upload', () => {
   });
 });
 
+/** A multipart/form-data body: the parts are [fieldName, value, { filename?, type? }]. */
+function multipart(parts: Array<[string, string | Buffer, { filename?: string; type?: string }?]>) {
+  const boundary = '----testboundary7MA4YWxkTrZu0gW';
+  const chunks: Buffer[] = [];
+  for (const [field, value, opts] of parts) {
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="${field}"${opts?.filename ? `; filename="${opts.filename}"` : ''}\r\n${opts?.type ? `Content-Type: ${opts.type}\r\n` : ''}\r\n`;
+    chunks.push(Buffer.from(head), Buffer.isBuffer(value) ? value : Buffer.from(value), Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return { payload: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+describe('upload as multipart/form-data', () => {
+  const bytes = Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69, 0x00, 0xff]); // a BOM, a NUL, a byte that is not UTF-8
+
+  it('stores the first file part, not the envelope: its bytes, its name and its type (dashboard and client API)', async () => {
+    for (const [url, headers] of [[DASH_URL, dashHeaders], [CLIENT_URL, clientHeaders]] as const) {
+      mockFn(uploadSessionFile).mockClear();
+      const { payload, contentType } = multipart([['note', 'ignored text field'], ['file', bytes, { filename: 'Q1 report.csv', type: 'text/csv' }], ['other', Buffer.from('second'), { filename: 'b.txt', type: 'text/plain' }]]);
+      const res = await app.inject({ method: 'POST', url, headers: { ...headers, 'content-type': contentType }, payload });
+
+      expect(res.statusCode, url).toBe(201);
+      const call = mockFn(uploadSessionFile).mock.calls[0]![0];
+      expect(call).toMatchObject({ fileName: 'Q1 report.csv', contentType: 'text/csv' });
+      expect(Buffer.compare(call.data, bytes)).toBe(0); // the part's bytes exactly, not the multipart body
+    }
+  });
+
+  it('lets ?name= name the file; a part with no type has the multipart default, text/plain', async () => {
+    const { payload, contentType } = multipart([['file', 'hello', { filename: 'ignored.bin' }]]);
+    const res = await app.inject({ method: 'POST', url: `${CLIENT_URL}?name=${encodeURIComponent('mine.txt')}`, headers: { ...clientHeaders, 'content-type': contentType }, payload });
+    expect(res.statusCode).toBe(201);
+    const call = mockFn(uploadSessionFile).mock.calls[0]![0];
+    expect(call.fileName).toBe('mine.txt');
+    expect(call.data.toString()).toBe('hello');
+    expect(call.contentType).toBe('text/plain');
+  });
+
+  it('answers 400 for a form without a file part, a body that is not multipart, or an empty body', async () => {
+    const noFile = multipart([['note', 'only text']]);
+    const a = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': noFile.contentType }, payload: noFile.payload });
+    expect(a.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { message: string } }>(a.body).error.message).toContain('no file part');
+    const broken = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': 'multipart/form-data; boundary=zzz' }, payload: Buffer.from('this is not a multipart body') });
+    expect(broken.statusCode).toBe(400);
+    const empty = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': 'multipart/form-data; boundary=zzz' } });
+    expect(empty.statusCode).toBe(400);
+    expect(uploadSessionFile).not.toHaveBeenCalled();
+  });
+});
+
 describe('dashboard: list and delete', () => {
   it('lists the session’s files', async () => {
     const res = await app.inject({ method: 'GET', url: DASH_URL, headers: dashHeaders });
@@ -912,13 +963,18 @@ describe('what the agent lookup tells a client about files', () => {
 
   it('says whether the agent takes files now, its limits and whether its model reads images', async () => {
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, createdAt: new Date('2026-01-01T00:00:00Z'), config: { modelKey: 'm', attachments: FILES_ON } });
-    mockFn(describeAgentAttachments).mockResolvedValue({ enabled: true, maxFiles: 5, maxFileSizeMb: 8, allowedMimeTypes: ['image/*'], acceptsImages: true });
+    mockFn(describeAgentAttachments).mockResolvedValue({
+      enabled: true, maxFiles: 5, maxFileSizeMb: 8, allowedMimeTypes: ['image/*'], acceptsImages: true,
+      outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv'] },
+    });
 
     const res = await lookup();
 
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ agent: Record<string, unknown> }>(res.body).agent.attachments).toEqual({
       enabled: true, max_files: 5, max_file_size_mb: 8, allowed_mime_types: ['image/*'], accepts_images: true,
+      // The files the agent writes itself (session_files_create), apart from the uploads above.
+      outputs: { enabled: true, max_files_per_turn: 10, max_file_size_mb: 2, types: ['md', 'csv'] },
     });
     expect(describeAgentAttachments).toHaveBeenCalledWith({
       tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', config: { modelKey: 'm', attachments: FILES_ON },

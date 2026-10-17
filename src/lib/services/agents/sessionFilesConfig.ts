@@ -29,6 +29,39 @@ export const SESSION_FILES_LIST_TOOL = 'session_files_list';
 export const SESSION_FILES_READ_TOOL = 'session_files_read';
 /** Looks at an image of the session again; offered while the session holds an image and the model takes images. */
 export const SESSION_FILES_VIEW_IMAGE_TOOL = 'session_files_view_image';
+/** The agent writes a text file for the person / adds to one it wrote (`attachments.outputs`, no sandbox needed). */
+export const SESSION_FILES_CREATE_TOOL = 'session_files_create';
+export const SESSION_FILES_APPEND_TOOL = 'session_files_append';
+
+/** What an unset field of `attachments.outputs` falls back to, and the most a stored value may ask for. */
+export const SESSION_FILE_OUTPUTS_DEFAULTS = { maxFilesPerTurn: 10, maxFileSizeMb: 2 } as const;
+export const SESSION_FILE_OUTPUTS_LIMITS = { maxFilesPerTurn: 20, maxFileSizeMb: 10 } as const;
+
+/**
+ * The file types the agent may write: extension -> the MIME type it is stored as. Text only, so a
+ * file is readable by the next turn (`session_files_read`) and cannot carry anything but text.
+ */
+export const FILE_OUTPUT_TYPES: Readonly<Record<string, string>> = {
+    md: 'text/markdown',
+    csv: 'text/csv',
+    txt: 'text/plain',
+    json: 'application/json',
+    html: 'text/html',
+    xml: 'application/xml',
+    yaml: 'application/yaml',
+    yml: 'application/yaml',
+};
+
+/** The extensions the agent may write, in the order the prompt and the capability list name them. */
+export const FILE_OUTPUT_EXTENSIONS: readonly string[] = Object.keys(FILE_OUTPUT_TYPES);
+
+/** Other spellings of a type the agent may declare for an extension; anything else is a mismatch. */
+export const FILE_OUTPUT_MIME_ALIASES: Readonly<Record<string, readonly string[]>> = {
+    md: ['text/x-markdown'],
+    xml: ['text/xml'],
+    yaml: ['text/yaml', 'application/x-yaml', 'text/x-yaml'],
+    yml: ['text/yaml', 'application/x-yaml', 'text/x-yaml'],
+};
 
 export interface ResolvedAttachmentsConfig {
     /** The switch as the agent's owner set it; whether files are really usable also needs a bucket (`attachmentsAvailability`). */
@@ -103,6 +136,42 @@ export function resolveAttachmentsConfig(raw?: IAgentAttachmentsConfig | null): 
         carryRecentImages: nonNegativeInt(raw?.carryRecentImages, SESSION_FILES_DEFAULTS.carryRecentImages),
         ...(typeof raw?.bucketKey === 'string' && raw.bucketKey.trim() ? { bucketKey: raw.bucketKey.trim() } : {}),
     };
+}
+
+export interface ResolvedOutputsConfig {
+    enabled: boolean;
+    maxFilesPerTurn: number;
+    maxFileSizeMb: number;
+}
+
+function boundedNumber(value: unknown, fallback: number, max: number, whole: boolean): number {
+    const n = positive(value, fallback);
+    return Math.min(whole ? Math.floor(n) : n, max);
+}
+
+/** `attachments.outputs` with the defaults filled in and the limits clamped to what the server allows. */
+export function resolveOutputsConfig(raw?: IAgentAttachmentsConfig | null): ResolvedOutputsConfig {
+    const outputs = raw?.outputs;
+    return {
+        enabled: outputs?.enabled !== false,
+        maxFilesPerTurn: boundedNumber(outputs?.maxFilesPerTurn, SESSION_FILE_OUTPUTS_DEFAULTS.maxFilesPerTurn, SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, true),
+        maxFileSizeMb: boundedNumber(outputs?.maxFileSizeMb, SESSION_FILE_OUTPUTS_DEFAULTS.maxFileSizeMb, SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, false),
+    };
+}
+
+/**
+ * Whether an agent can write files: not a connected agent, a bucket named, and the author has not
+ * switched it off. Independent of `attachments.enabled` (people attaching files): an agent that takes
+ * no uploads can still hand a file back. Whether the bucket works is checked when the run is built.
+ */
+export function outputsAvailability(config: IAgentConfig | undefined):
+    | { available: true; cfg: ResolvedAttachmentsConfig & { bucketKey: string }; outputs: ResolvedOutputsConfig }
+    | { available: false } {
+    if (!config || (config.kind === 'external' && config.connection)) return { available: false };
+    const cfg = resolveAttachmentsConfig(config.attachments);
+    const outputs = resolveOutputsConfig(config.attachments);
+    if (!outputs.enabled || !cfg.bucketKey) return { available: false };
+    return { available: true, cfg: { ...cfg, bucketKey: cfg.bucketKey }, outputs };
 }
 
 /**

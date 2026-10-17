@@ -476,6 +476,13 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
               max_file_size_mb: attachments.maxFileSizeMb,
               allowed_mime_types: attachments.allowedMimeTypes,
               accepts_images: attachments.acceptsImages,
+              // Files the agent writes for the person (session_files_create): off, or on with its limits and types.
+              outputs: {
+                enabled: attachments.outputs.enabled,
+                max_files_per_turn: attachments.outputs.maxFilesPerTurn,
+                max_file_size_mb: attachments.outputs.maxFileSizeMb,
+                types: attachments.outputs.types,
+              },
             },
           } : {}),
         },

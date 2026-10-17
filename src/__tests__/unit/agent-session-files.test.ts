@@ -21,6 +21,7 @@ const hoisted = vi.hoisted(() => ({
     findFileRecordById: vi.fn(),
   },
   uploadFile: vi.fn(),
+  replaceFileContent: vi.fn(),
   deleteFile: vi.fn(),
   warn: vi.fn(),
   perRequest: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock('@/lib/core/logger', () => ({
 }));
 vi.mock('@/lib/services/files', () => ({
   uploadFile: hoisted.uploadFile,
+  replaceFileContent: hoisted.replaceFileContent,
   deleteFile: hoisted.deleteFile,
   generateFileRelativeKey: (name: string) => `${name.replace(/\.[^.]+$/, '')}-1700000000000-abcd1234${name.includes('.') ? `.${name.split('.').pop()}` : ''}`,
   downloadFile: vi.fn(async (_db: string, _t: string, _p: string, _bucket: string, key: string, options?: { variant?: string }) => {
@@ -53,6 +55,7 @@ import {
   ATTACHMENT_BLOCK_MARKER,
   assembleTurnAttachments,
   attachmentsAvailability,
+  appendAgentOutputFile,
   cleanupExpiredSessionFiles,
   buildUserTurnContent,
   conversationFileFacts,
@@ -69,6 +72,7 @@ import {
   resolveAttachmentsConfig,
   resolveSessionFilesBucket,
   resolveUploadMimeType,
+  saveAgentOutputFile,
   sessionFileDisposition,
   stripAttachmentBlock,
   toSessionFileView,
@@ -742,5 +746,144 @@ describe('pictures in a format the model cannot be shown (F2-05)', () => {
     // Over the per-file limit it is the file limit that speaks, whatever the type.
     const huge = classifyAgentRunError(await upload('huge.pdf', 'application/pdf', 21 * 1024 * 1024).catch((e) => e));
     expect(huge).toMatchObject({ status: 413, error: { message: 'File exceeds the 20 MB limit of this agent.' } });
+  });
+});
+
+
+describe('files the agent writes itself', () => {
+  const conversation = { _id: 'c1', agentKey: 'agent' };
+  const allowed = { allowed: true, effectiveLimits: { quotas: {} } };
+  const agentConfig = { modelKey: 'm', attachments: { bucketKey: 'docs', maxFileSizeMb: 20 } };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hoisted.downloads.clear();
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([]);
+    hoisted.db.countFileRecords.mockResolvedValue(3);
+    hoisted.db.sumFileRecordBytes.mockResolvedValue(1000);
+    hoisted.db.findFileBucketByKey.mockResolvedValue({ key: 'docs', providerKey: 'local', status: 'active' });
+    hoisted.db.findProviderByKey.mockResolvedValue({ key: 'local', type: 'file', driver: 'local-filesystem', status: 'active', label: 'Local' });
+    hoisted.perRequest.mockResolvedValue(allowed);
+    hoisted.rate.mockResolvedValue({ allowed: true });
+    hoisted.resource.mockResolvedValue({ allowed: true });
+    hoisted.uploadFile.mockResolvedValue({ record: { id: 'f1', name: 'r.md', contentType: 'text/markdown', size: 5, markdownStatus: 'succeeded', bucketKey: 'docs', key: 'k' } });
+  });
+
+  const save = (extra: Record<string, unknown> = {}, data = Buffer.from('hello')) => saveAgentOutputFile({
+    scope, conversation, agentConfig, fileName: 'r.md', contentType: 'text/markdown', data, actorId: 'u1', ...extra,
+  });
+
+  it('is stored as an agent_output file of the session, with no need for attachments.enabled', async () => {
+    const saved = await save();
+    expect(saved).toMatchObject({ fileId: 'f1', origin: 'agent_output' });
+    expect(hoisted.uploadFile).toHaveBeenCalledWith('tenant_x', 't1', 'p1', expect.objectContaining({
+      bucketKey: 'docs',
+      recordExtras: expect.objectContaining({ purpose: 'conversation', conversationId: 'c1', agentKey: 'agent', origin: 'agent_output' }),
+    }));
+  });
+
+  it('goes through the same quota checks an upload does, before anything is stored', async () => {
+    await save({ tokenId: 'tok-1' });
+    expect(hoisted.perRequest).toHaveBeenCalledWith(expect.objectContaining({ domain: 'file', resourceKey: 'docs', userId: 'u1', tokenId: 'tok-1' }), { fileSize: 5, filesPerRequest: 1 });
+    expect(hoisted.rate).toHaveBeenCalledWith(expect.anything(), { files: 1, requests: 1, storageBytes: 5 });
+    expect(hoisted.resource).toHaveBeenCalledWith(expect.anything(), 'filesTotal', 3);
+
+    hoisted.uploadFile.mockClear();
+    hoisted.resource.mockResolvedValue({ allowed: false, reason: 'filesTotal limit reached' });
+    expect(await save().catch((e) => e)).toMatchObject({ status: 429, code: 'quota_exceeded', message: 'filesTotal limit reached' });
+    hoisted.resource.mockResolvedValue({ allowed: true });
+    hoisted.perRequest.mockResolvedValue({ allowed: true, effectiveLimits: { quotas: { maxStorageBytes: 1002 } } });
+    expect(await save().catch((e) => e)).toMatchObject({ status: 429, message: expect.stringContaining('storageBytes limit exceeded (1005/1002)') });
+    expect(hoisted.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('holds a file to the size it was given, else to the agent’s file size', async () => {
+    expect(await save({ maxFileBytes: 4 }).catch((e) => e)).toMatchObject({ status: 413, code: 'file_too_large', message: expect.stringContaining('limit for files an agent writes') });
+    await expect(save({ maxFileBytes: 5 })).resolves.toBeTruthy();
+    expect(await saveAgentOutputFile({
+      scope, conversation, agentConfig: { modelKey: 'm', attachments: { bucketKey: 'docs', maxFileSizeMb: 0.00001 } },
+      fileName: 'r.md', contentType: 'text/markdown', data: Buffer.alloc(20, 1), actorId: 'u1',
+    }).catch((e) => e)).toMatchObject({ status: 413 });
+  });
+
+  it('counts the files of a turn against its cap, and a refused file is not counted', async () => {
+    const turn = { saved: 0, maxFiles: 2 };
+    await save({ turn });
+    hoisted.perRequest.mockResolvedValueOnce({ allowed: false, reason: 'nope' });
+    await save({ turn }).catch(() => undefined);
+    expect(turn.saved).toBe(1);
+    await save({ turn });
+    expect(turn.saved).toBe(2);
+    hoisted.perRequest.mockClear();
+    expect(await save({ turn }).catch((e) => e)).toMatchObject({ status: 409, code: 'too_many_files', message: 'At most 2 files can be created in one turn.' });
+    expect(hoisted.perRequest).not.toHaveBeenCalled();
+  });
+
+  it('does not use up the person’s file count', async () => {
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([
+      fileRecord('out-1', { origin: 'agent_output' }), fileRecord('out-2', { origin: 'agent_output' }), fileRecord('mine'),
+    ]);
+    const upload = () => uploadSessionFile({
+      scope, conversation, agentConfig: { modelKey: 'm', attachments: { enabled: true, bucketKey: 'docs', maxFiles: 2 } },
+      fileName: 'a.txt', contentType: 'text/plain', data: Buffer.from('a'), actor: { userId: 'u1', licenseType: 'FREE' },
+    });
+    hoisted.uploadFile.mockResolvedValue({ record: { id: 'f2', name: 'a.txt', contentType: 'text/plain', size: 1, markdownStatus: 'succeeded', bucketKey: 'docs', key: 'k2' } });
+    await expect(upload()).resolves.toMatchObject({ id: 'f2' });
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([fileRecord('mine'), fileRecord('mine-2')]);
+    expect(await upload().catch((e) => e)).toMatchObject({ status: 409, code: 'too_many_files' });
+  });
+
+  it('is never put on the person’s next message', async () => {
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([fileRecord('made', { origin: 'agent_output' }), fileRecord('uploaded')]);
+    expect((await findUnsentSessionFiles(scope, { _id: 'c1', messages: [] })).map((record) => String(record._id))).toEqual(['uploaded']);
+  });
+
+  describe('appending', () => {
+    const own = (overrides: Partial<IFileRecord> = {}) => fileRecord('made', { origin: 'agent_output', agentKey: 'agent', name: 'notes.md', size: 5, key: 'obj/made.md', ...overrides });
+    const append = (extra: Record<string, unknown> = {}) => appendAgentOutputFile({
+      scope, conversation, fileId: 'made', data: Buffer.from(' more'), actorId: 'u1', maxFileBytes: 1000, ...extra,
+    });
+
+    beforeEach(() => {
+      hoisted.db.findFileRecordById.mockResolvedValue(own());
+      hoisted.downloads.set('obj/made.md', 'hello');
+      hoisted.replaceFileContent.mockImplementation(async (_d: string, _t: string, _p: string, _b: string, _k: string, input: { data: Buffer }) => ({
+        id: 'made', _id: 'made', name: 'notes.md', contentType: 'text/markdown', size: input.data.length,
+      }));
+    });
+
+    it('adds the text after the current end, in place, and reports the new size', async () => {
+      const result = await append();
+      expect(hoisted.replaceFileContent).toHaveBeenCalledTimes(1);
+      const [, , , bucket, key, input] = hoisted.replaceFileContent.mock.calls[0]!;
+      expect([bucket, key, input.data.toString()]).toEqual(['docs', 'obj/made.md', 'hello more']);
+      expect(result).toMatchObject({ fileId: 'made', size: 10, origin: 'agent_output' });
+    });
+
+    it('is only for a file of this session that this agent wrote: an upload, another agent’s file or a missing one is refused', async () => {
+      for (const record of [own({ origin: undefined }), own({ agentKey: 'someone-else' }), own({ conversationId: 'other' }), null]) {
+        hoisted.db.findFileRecordById.mockResolvedValue(record);
+        expect(await append().catch((e) => e), String(record?.origin)).toMatchObject({ status: 404, code: 'file_not_found' });
+      }
+      expect(hoisted.replaceFileContent).not.toHaveBeenCalled();
+    });
+
+    it('is only for the text types: a binary file the sandbox produced is left alone', async () => {
+      hoisted.db.findFileRecordById.mockResolvedValue(own({ name: 'chart.png', contentType: 'image/png' }));
+      expect(await append().catch((e) => e)).toMatchObject({ status: 415, code: 'unsupported_file_type' });
+      expect(hoisted.replaceFileContent).not.toHaveBeenCalled();
+    });
+
+    it('keeps the grown file within the size cap and the project’s storage quota, checked on the growth only', async () => {
+      expect(await append({ maxFileBytes: 9 }).catch((e) => e)).toMatchObject({ status: 413, code: 'file_too_large' });
+      hoisted.perRequest.mockResolvedValue({ allowed: true, effectiveLimits: { quotas: { maxStorageBytes: 1004 } } });
+      expect(await append().catch((e) => e)).toMatchObject({ status: 429, message: expect.stringContaining('storageBytes limit exceeded (1005/1004)') });
+      hoisted.perRequest.mockResolvedValue(allowed);
+      await append();
+      // The file already exists: no new file for the rate or the total-files limit.
+      expect(hoisted.rate).toHaveBeenLastCalledWith(expect.anything(), { files: 0, requests: 1, storageBytes: 5 });
+      expect(hoisted.resource).not.toHaveBeenCalled();
+      expect(hoisted.replaceFileContent).toHaveBeenCalledTimes(1);
+    });
   });
 });

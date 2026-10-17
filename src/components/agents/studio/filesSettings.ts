@@ -11,6 +11,9 @@
 import type { IAgentAttachmentsConfig } from '@/lib/database/provider/types.domain';
 import {
     normalizeAttachmentsFolder,
+    resolveOutputsConfig,
+    SESSION_FILE_OUTPUTS_DEFAULTS,
+    SESSION_FILE_OUTPUTS_LIMITS,
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_FOLDER_MAX_LENGTH,
 } from '@/lib/services/agents/sessionFilesConfig';
@@ -60,6 +63,27 @@ export function patchAttachments(
     patch: Partial<AttachmentsSettings>,
 ): AttachmentsSettings | undefined {
     return compactAttachments({ ...(current ?? {}), ...patch });
+}
+
+/** The agent's own files (`session_files_create`) are on unless switched off; they also need a bucket. */
+export function outputsEnabled(value: AttachmentsSettings | undefined): boolean {
+    return resolveOutputsConfig(value).enabled;
+}
+
+/** What the outputs section shows beside each limit: the default and the most the server accepts. */
+export const OUTPUTS_LIMITS = {
+    maxFilesPerTurn: { default: SESSION_FILE_OUTPUTS_DEFAULTS.maxFilesPerTurn, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn },
+    maxFileSizeMb: { default: SESSION_FILE_OUTPUTS_DEFAULTS.maxFileSizeMb, max: SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb },
+} as const;
+
+/** Merges an edit into `outputs`; the default (on, default limits) is stored as nothing at all. */
+export function patchOutputs(
+    current: AttachmentsSettings | undefined,
+    patch: Partial<NonNullable<AttachmentsSettings['outputs']>>,
+): AttachmentsSettings | undefined {
+    const merged: Record<string, unknown> = { ...(current?.outputs ?? {}), ...patch };
+    for (const key of Object.keys(merged)) if (merged[key] === undefined || (key === 'enabled' && merged[key] === true)) delete merged[key];
+    return patchAttachments(current, { outputs: Object.keys(merged).length > 0 ? merged : undefined });
 }
 
 export type FolderIssue = 'invalid_chars' | 'dot_dot' | 'too_long';

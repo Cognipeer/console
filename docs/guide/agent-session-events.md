@@ -53,7 +53,7 @@ Each event:
 | `agent.compaction` | what a context compaction did (`at`, `messages_compressed`, `tokens_before`, `tokens_after`, …) |
 | `action.required` | `action_id`, `kind` (`tool_approval`, `user_question` or `client_tool`), `tool_name?` (`tool_approval` and `client_tool`), `args?`, `questions?`, `allow_free_text?`, `timeout_seconds?` (`client_tool`), `expires_at?` |
 | `action.resolved` | `action_id`, `kind`, `tool_name?` (`client_tool`), `decision?`, `cancelled?`, `expired?`, `ok?`, `duration_ms?`, `timed_out?` (`client_tool`), `resolved_by`, `channel` (`dashboard`, `api`, `portal`, `timeout` or `system`) |
-| `agent.output_file` | a file the agent wrote to its sandbox `/outputs/` this turn, saved as a session file: `file_id`, `name`, `mime_type`, `size`, `download_url`. One event per file, just before `agent.message` |
+| `agent.output_file` | a file the agent produced this turn (its sandbox `/outputs/`, or `session_files_create`), saved as a session file: `file_id`, `name`, `mime_type`, `size`, `download_url`. One event per file, just before `agent.message` |
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
 | `session.usage` | `turn_cost_usd`, `spent_usd`, `budget` (sessions with a [budget](/guide/agent-session-budgets)) |
 | `budget.reached` | `spent_usd`, `max_cost_usd` |
