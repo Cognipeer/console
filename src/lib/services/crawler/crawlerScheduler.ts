@@ -23,13 +23,19 @@ import {
 } from '@/lib/core/cluster';
 import { runCrawler } from './crawlerService';
 import { crawlerEntityId } from './crawlerEntityId';
-import { computeNextRun } from './schedulePlanner';
+import { computeNextRun, dueSlot } from './schedulePlanner';
 
 const logger = createLogger('crawler-scheduler');
 
 const CHECK_INTERVAL_MS = 30_000;
 const SCHEDULER_LOCK_KEY = 'scheduler:crawler';
 const SCHEDULER_LOCK_TTL_SECONDS = 5 * 60;
+// A claim only has to outlive any replica's view of the same slot; the reconciler's retention sweep removes it later.
+const SLOT_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Crawlers carry one schedule today; the id keeps the key shape stable if that changes.
+const DEFAULT_SCHEDULE_ID = 'default';
+const CLAIM_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const lastClaimCleanupAt = new Map<string, number>();
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
@@ -79,12 +85,24 @@ async function runOnce(manual = false): Promise<{
         const crawlers = await tenantDb.listCrawlers(tenantId);
         const now = new Date();
 
+        // Expired claims are inert; sweep them at most hourly (this process).
+        if (now.getTime() - (lastClaimCleanupAt.get(tenant.dbName) ?? 0) >= CLAIM_CLEANUP_INTERVAL_MS) {
+          lastClaimCleanupAt.set(tenant.dbName, now.getTime());
+          await tenantDb.cleanupSchedulerClaims(now).catch((err) => {
+            logger.warn('Scheduler claim cleanup failed', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+
+        const slots = new Map<string, string>();
         const due = crawlers.filter((c) => {
           if (c.status !== 'active') return false;
           if (!c.schedule?.enabled) return false;
-          const next = computeNextRun(c.schedule, now);
-          if (!next) return false;
-          return next.getTime() <= now.getTime();
+          const slot = dueSlot(c.schedule, now, c.createdAt);
+          if (!slot) return false;
+          slots.set(String(c._id), slot);
+          return true;
         });
 
         const eligible: ICrawler[] = [];
@@ -107,6 +125,13 @@ async function runOnce(manual = false): Promise<{
         await Promise.allSettled(
           eligible.map(async (crawler) => {
             try {
+              // The cache lock above only reduces duplicate scanning; the
+              // database claim decides the single dispatcher for this slot.
+              const claimed = await tenantDb.claimSchedulerSlot(
+                `crawler:${String(crawler._id)}:${DEFAULT_SCHEDULE_ID}:${slots.get(String(crawler._id))}`,
+                new Date(now.getTime() + SLOT_CLAIM_TTL_MS),
+              );
+              if (!claimed) return;
               const next = computeNextRun(
                 { ...crawler.schedule!, lastRunAt: now },
                 now,

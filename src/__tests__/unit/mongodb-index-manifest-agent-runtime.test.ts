@@ -28,3 +28,11 @@ describe('index manifest: agent runtime collections', () => {
     expect(ttl?.options.expireAfterSeconds).toBe(0);
   });
 });
+
+describe('index manifest: scheduler claims', () => {
+  it('indexes expiresAt without partial or unique options (_id is the claim key)', () => {
+    const entry = (TENANT_DB_INDEXES.scheduler_claims ?? [])[0];
+    expect(entry?.key).toEqual({ expiresAt: 1 });
+    expect(JSON.stringify(entry?.options)).not.toMatch(/partialFilterExpression|unique/);
+  });
+});

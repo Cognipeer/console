@@ -68,6 +68,7 @@ export const TABLES = {
   alertEvents: 'alert_events',
   alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
+  schedulerClaims: 'scheduler_claims',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',

@@ -50,6 +50,7 @@ import { BatchJobMixin } from './mongodb/batch.mixin';
 import { UsageRollupMixin } from './mongodb/usage.mixin';
 import { EntityMetricsMixin } from './mongodb/entity-metrics.mixin';
 import { AlertStateMixin } from './mongodb/alert-state.mixin';
+import { SchedulerClaimMixin } from './mongodb/scheduler-claim.mixin';
 import { AlertChannelLibraryMixin } from './mongodb/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './mongodb/external-model-pricing.mixin';
 import { AuditMixin } from './mongodb/audit.mixin';
@@ -90,7 +91,7 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
+const PricingBase = SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkBase)));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.

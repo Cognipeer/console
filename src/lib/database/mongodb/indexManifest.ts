@@ -95,6 +95,10 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { ruleId: 1 }, options: { name: 'idx_alert_states_rule' } },
     { key: { projectId: 1, phase: 1 }, options: { name: 'idx_alert_states_project_phase_notenant' } },
   ],
+  // Exactly-once scheduler claims; `_id` is the claim key. expiresAt serves the explicit cleanup sweep.
+  scheduler_claims: [
+    { key: { expiresAt: 1 }, options: { name: 'idx_scheduler_claims_expiresAt' } },
+  ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },
   ],

@@ -742,6 +742,14 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_alert_states_rule ON alert_states(ruleId);
   CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase_notenant ON alert_states(projectId, phase);
 
+  -- Exactly-once scheduler claims: the PRIMARY KEY is the claim key.
+  CREATE TABLE IF NOT EXISTS scheduler_claims (
+    key TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_scheduler_claims_expires ON scheduler_claims(expires_at);
+
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
   CREATE TABLE IF NOT EXISTS external_model_pricing (
