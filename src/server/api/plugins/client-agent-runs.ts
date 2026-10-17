@@ -18,8 +18,6 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { cancelAgentRun, getAgentByKey, getAgentRunStatus, getConversationById } from '@/lib/services/agents';
 import {
   MAX_RUN_SCHEDULE_AHEAD_MS,
-  agentRunConcurrencyLimitErrorBody,
-  agentRunConflictErrorBody,
   agentRunNotFoundErrorBody,
   apiErrorBody,
   idempotencyKeyConflictErrorBody,
@@ -34,7 +32,6 @@ import {
   startAgentRun,
   waitForAgentRun,
   type StartAgentRunExecution,
-  type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
@@ -65,10 +62,11 @@ import {
   resolveInvocationInputs,
   resolveInvocationLimits,
   resolveInvocationModel,
+  runOutcomeRefusal,
   sendRunAccepted,
 } from './agent-invocation';
 import { toAgentResponseObject } from './agent-response-object';
-import { createResponsesStreamWriter } from './agent-responses-stream';
+import { streamAgentRunAsResponses } from './agent-responses-stream';
 import { listSessionEvents, streamSessionEvents } from './agent-session-events';
 import {
   refuseSessionLinked,
@@ -363,16 +361,18 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       };
 
       if (stream) {
-        return await streamRun(reply, base, {
+        return await streamAgentRunAsResponses(reply, base, {
           cancelOnDisconnect: body.on_disconnect === 'cancel',
           modelKey: chosenModel.modelChoice?.modelKey,
           requestReasoning: reasoning.value,
+          streamReasoning: true,
+          object: { model: agent.key, ...(chosenModel.modelChoice ? { agentModel: chosenModel.modelChoice.modelKey } : {}) },
         });
       }
 
       const execution: StartAgentRunExecution = { kind: 'queued', ...(schedule.notBefore ? { notBefore: schedule.notBefore } : {}) };
       const outcome = await startAgentRun({ ...base, execution });
-      const refusal = outcomeRefusal(outcome);
+      const refusal = runOutcomeRefusal(outcome);
       if (refusal) return reply.code(refusal.status).send(refusal.body);
       if (outcome.kind !== 'accepted' && outcome.kind !== 'replay') return reply.code(500).send(INTERNAL_ERROR_BODY);
       const run = outcome.run;
@@ -384,69 +384,6 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       return sendClassifiedError(reply, 'Client agent run create error', error);
     }
   }));
-
-  /** A streamed run: an inline turn whose text and reasoning go out as Responses events. */
-  const streamRun = async (
-    reply: FastifyReply,
-    base: Omit<Parameters<typeof startAgentRun>[0], 'execution'>,
-    options: { cancelOnDisconnect: boolean; modelKey?: string; requestReasoning?: Parameters<typeof startAgentRun>[0]['requestReasoning'] },
-  ): Promise<FastifyReply> => {
-    const writer = createResponsesStreamWriter(reply);
-    let runId: string | null = null;
-    const skeleton = (status: string) => ({
-      id: runId ? `resp_${runId}` : null,
-      object: 'response',
-      status,
-      model: base.agentKey,
-      output: [],
-      cognipeer: { run_id: runId ? `run_${runId}` : null, session_id: base.conversationId },
-    });
-    try {
-      const outcome = await startAgentRun({
-        ...base,
-        ...(options.modelKey ? { modelKey: options.modelKey } : {}),
-        ...(options.requestReasoning ? { requestReasoning: options.requestReasoning } : {}),
-        execution: {
-          kind: 'inline',
-          waitMs: 0,
-          stream: { onTextChunk: (text) => writer.text(text), onReasoningChunk: (text) => writer.reasoning(text) },
-          signal: writer.signal,
-          cancelOnDisconnect: options.cancelOnDisconnect,
-          onStarted: (run) => {
-            runId = String(run._id);
-            writer.started(skeleton('in_progress'));
-          },
-        },
-      });
-      const refusal = outcomeRefusal(outcome);
-      if (refusal) {
-        const error = (refusal.body as { error: { message: string; code?: string; type?: string } }).error;
-        writer.error(error);
-      } else if (outcome.kind === 'completed') {
-        const { _conversation_messages, ...response } = outcome.response;
-        void _conversation_messages;
-        writer.finish({
-          ...response,
-          id: `resp_${String(outcome.run._id)}`,
-          cognipeer: { run_id: publicAgentRunId(outcome.run), session_id: base.conversationId },
-        });
-      } else if (outcome.kind === 'replay') {
-        // The same Idempotency-Key, already run: the stored answer, else the run as it stands.
-        runId = String(outcome.run._id);
-        writer.started(skeleton('in_progress'));
-        writer.finish((outcome.run.result as Record<string, unknown> | null) ?? { ...skeleton(outcome.run.status === 'failed' ? 'failed' : 'incomplete') });
-      }
-    } catch (error) {
-      const classified = logAgentRouteError(logger, 'Client agent run stream error', error);
-      writer.error(
-        { message: classified.error.message, code: classified.error.code ?? null, type: classified.error.type },
-        runId ? { ...skeleton('failed'), error: { code: classified.error.code ?? classified.error.type, message: classified.error.message } } : undefined,
-      );
-    } finally {
-      writer.end();
-    }
-    return reply;
-  };
 
   // ── List ──
   app.get('/client/v1/agents/runs', withClientApiRequestContext(async (request, reply, ctx) => {
@@ -807,20 +744,6 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/responses/:responseId/cancel', { config: authz.serviceAnyOf(['models', 'agents']) }, cancelResponse);
   app.post('/client/v1/agents/responses/:responseId/cancel', cancelResponse);
 };
-
-/** The 409 / 429 a start outcome is refused with, or null for a run (accepted, completed, detached, replay). */
-function outcomeRefusal(outcome: StartAgentRunOutcome): { status: number; body: unknown } | null {
-  switch (outcome.kind) {
-    case 'conflict':
-      return { status: 409, body: agentRunConflictErrorBody() };
-    case 'idempotency_conflict':
-      return { status: 409, body: idempotencyKeyConflictErrorBody() };
-    case 'concurrency_limit':
-      return { status: 429, body: agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass) };
-    default:
-      return null;
-  }
-}
 
 /**
  * May this caller cancel `run`? Cancelling a run is acting on its session (the

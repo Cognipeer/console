@@ -12,16 +12,13 @@ import {
   updateAgentRecord,
   getAgentRunStatus,
   isBackgroundModeRequested,
-  agentRunConflictErrorBody,
   idempotencyKeyConflictErrorBody,
-  agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
 import {
   isAgentRunActive,
   lookupIdempotentAgentRun,
   startAgentRun,
   waitForAgentRun,
-  type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
@@ -74,9 +71,12 @@ import {
   resolveInvocationModel,
   resolveInvocationTarget,
   resolvePublishedAgentConfig,
+  runOutcomeRefusal,
   sendInvocationFailure,
 } from './agent-invocation';
 import { sendAgentResponseObject } from './agent-response-object';
+import { streamAgentRunAsResponses, streamRunSnapshot } from './agent-responses-stream';
+import { sendModelResponse } from './model-responses';
 import { inputsToJsonSchema } from '@/lib/services/agents/agentInputs';
 
 const logger = createLogger('api:client-agents');
@@ -130,28 +130,16 @@ const openAiFail = (
   status, type: options.type ?? 'invalid_request_error', message, code, ...(options.param ? { param: options.param } : {}), ...(options.extra ? { extra: options.extra } : {}),
 });
 
-/** The 409 / 429 a start outcome is refused with (OpenAI envelope), or null for a run. */
-function openAiOutcomeRefusal(outcome: StartAgentRunOutcome): { status: number; body: unknown } | null {
-  switch (outcome.kind) {
-    case 'conflict':
-      return { status: 409, body: openAiEnvelopeOf(agentRunConflictErrorBody()) };
-    case 'idempotency_conflict':
-      return { status: 409, body: openAiEnvelopeOf(idempotencyKeyConflictErrorBody()) };
-    case 'concurrency_limit':
-      return { status: 429, body: openAiEnvelopeOf(agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass)) };
-    default:
-      return null;
-  }
-}
-
 /**
  * `POST /client/v1/responses` (models and agents) and `POST
- * /client/v1/agents/responses` (agents only). An agent turn is a run (§4.1):
- * a plain call waits up to the window and answers 200 with the response, or
- * 202 with it `in_progress` while the run carries on; `background: true`
- * queues it (202 `queued`); `service_tier: "flex"` makes it a deferred run the
- * call waits on like a plain one. Both routes run the published version unless
- * the request pins `version: N` or asks for `"draft"`.
+ * /client/v1/agents/responses` (agents only). A model target is a gateway call
+ * (model-responses.ts). An agent turn is a run (§4.1): a plain call waits up to
+ * the window and answers 200 with the response, or 202 with it `in_progress`
+ * while the run carries on; `background: true` queues it (202 `queued`);
+ * `service_tier: "flex"` makes it a deferred run the call waits on like a plain
+ * one; `stream: true` runs it inline as Responses events (a disconnect cancels
+ * it, unless `background: true`: then it carries on detached). Both routes run
+ * the published version unless the request pins `version: N` or asks for `"draft"`.
  */
 function createResponsesHandler(agentsOnly: boolean) {
   return withOpenAiApiRequestContext(async (request, reply) => {
@@ -171,9 +159,7 @@ function createResponsesHandler(agentsOnly: boolean) {
       }
       // §5.8: agents for an agent target, models for a model target.
       await authorizeInvocationTarget(request, resolvedTarget.kind);
-      if (resolvedTarget.kind === 'model') {
-        return openAiFail(reply, 400, 'model targets are not supported on this route yet', 'model_target_unsupported', { param: 'model' });
-      }
+      if (resolvedTarget.kind === 'model') return await sendModelResponse(request, reply, ctx, body, resolvedTarget.modelKey);
 
       const target = await resolveInvocationAgent(reply, 'openai', ctx, resolvedTarget.agentKey, body.version);
       if (!target) return reply;
@@ -194,11 +180,20 @@ function createResponsesHandler(agentsOnly: boolean) {
         : undefined;
       const responseFormat = parseInvocationResponseFormat(reply, 'openai', textFormat, 'text.format');
       if (!responseFormat) return reply;
-      const inputs = resolveInvocationInputs(reply, 'openai', await resolveInvocationConfig(ctx, target), body.inputs);
+      const runConfig = await resolveInvocationConfig(ctx, target);
+      const inputs = resolveInvocationInputs(reply, 'openai', runConfig, body.inputs);
       if (!inputs) return reply;
       // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class. Anything else runs as default.
       const runClass: AgentRunClass = body.service_tier === 'flex' ? 'deferred' : 'default';
       const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
+      if (body.stream !== undefined && body.stream !== null && typeof body.stream !== 'boolean') {
+        return openAiFail(reply, 400, 'stream must be a boolean', 'invalid_request', { param: 'stream' });
+      }
+      const stream = body.stream === true;
+      // A deferred run waits for a slot in its own queue: there is no turn to stream yet.
+      if (stream && runClass === 'deferred') {
+        return openAiFail(reply, 400, 'stream cannot be combined with service_tier "flex"', 'unsupported_parameter', { param: 'service_tier' });
+      }
 
       // The session this request continues: `previous_response_id`, or `session_id` / `conversation`.
       const sessionRef = readSessionReference(body);
@@ -277,9 +272,11 @@ function createResponsesHandler(agentsOnly: boolean) {
         previousResponseId,
         ...(modelChoice ? { agentModel: modelChoice.modelKey } : {}),
         includeReasoning: shouldReturnReasoning(undefined, body),
+        background,
       };
       const ref = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
-      const queued = background || runClass === 'deferred';
+      // A stream is always an inline turn: the caller is receiving it.
+      const queued = !stream && (background || runClass === 'deferred');
       // A plain (or flex) call waits up to the window on a run that is still going; `background` never waits.
       const settle = async (run: IAgentRun) => (!background && isAgentRunActive(run) && run.status !== 'scheduled'
         ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, limits.syncWaitMs)) ?? run
@@ -298,7 +295,10 @@ function createResponsesHandler(agentsOnly: boolean) {
           idempotencyConversationScope,
         });
         if (prior.kind === 'conflict') return reply.code(409).send(openAiEnvelopeOf(idempotencyKeyConflictErrorBody()));
-        if (prior.kind === 'replay') return sendAgentResponseObject(reply, await settle(prior.run), objectOptions);
+        if (prior.kind === 'replay') {
+          const settled = await settle(prior.run);
+          return stream ? streamRunSnapshot(reply, settled, objectOptions) : sendAgentResponseObject(reply, settled, objectOptions);
+        }
       }
 
       // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
@@ -339,6 +339,16 @@ function createResponsesHandler(agentsOnly: boolean) {
         limits,
       };
 
+      if (stream) {
+        return await streamAgentRunAsResponses(reply, base, {
+          cancelOnDisconnect: !background,
+          modelKey: modelChoice?.modelKey,
+          requestReasoning: reasoningRequest.value,
+          streamReasoning: objectOptions.includeReasoning && agentShowsReasoning(runConfig),
+          object: objectOptions,
+        });
+      }
+
       const outcome = await startAgentRun(queued
         ? { ...base, execution: { kind: 'queued' } }
         : {
@@ -347,8 +357,8 @@ function createResponsesHandler(agentsOnly: boolean) {
           ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
           execution: { kind: 'inline', waitMs: limits.syncWaitMs, cancelOnDisconnect: false },
         });
-      const refusal = openAiOutcomeRefusal(outcome);
-      if (refusal) return reply.code(refusal.status).send(refusal.body);
+      const refusal = runOutcomeRefusal(outcome);
+      if (refusal) return reply.code(refusal.status).send(openAiEnvelopeOf(refusal.body));
       if (outcome.kind === 'completed') {
         const { _conversation_messages, ...responseBody } = outcome.response;
         void _conversation_messages;

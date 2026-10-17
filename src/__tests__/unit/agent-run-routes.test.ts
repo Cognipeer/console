@@ -27,6 +27,7 @@ const hoisted = vi.hoisted(() => ({
   lookupIdempotentAgentRun: vi.fn(),
   resolveAgentRunLimits: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  handleChatCompletion: vi.fn(),
 }));
 
 // The permission gate reads the caller inside a tenant scope: serve it from the same stubbed database.
@@ -91,6 +92,12 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
 vi.mock('@/lib/services/models/modelService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/models/modelService')>()),
   getModelByKey: hoisted.getModelByKey,
+}));
+
+// A model target is a gateway call; the gateway itself is stood in for.
+vi.mock('@/lib/services/models/inferenceService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/models/inferenceService')>()),
+  handleChatCompletion: hoisted.handleChatCompletion,
 }));
 
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -355,19 +362,23 @@ describe('POST /responses — target and version (§1.2)', () => {
     expect(parseJsonBody<{ error: { code: string } }>(bad.body).error.code).toBe('invalid_version');
   });
 
-  it('a model key wins a bare-name collision on /responses (not served here yet), agent:<key> always means the agent', async () => {
+  it('a model key wins a bare-name collision on /responses (a model call, not a run), agent:<key> always means the agent', async () => {
     hoisted.getModelByKey.mockResolvedValue({ key: 'support-agent' });
+    hoisted.handleChatCompletion.mockResolvedValue({
+      requestId: 'req-1',
+      response: { id: 'chatcmpl-1', object: 'chat.completion', model: 'support-agent', choices: [{ index: 0, message: { role: 'assistant', content: 'from the model' }, finish_reason: 'stop' }] },
+    });
 
     const model = await post({ model: 'support-agent', input: 'hello' });
-    expect(model.statusCode).toBe(400);
-    expect(parseJsonBody<{ error: { code: string; message: string } }>(model.body).error).toMatchObject({
-      code: 'model_target_unsupported', message: 'model targets are not supported on this route yet',
-    });
+    expect(model.statusCode).toBe(200);
+    expect(parseJsonBody<{ object: string; output_text: string }>(model.body)).toMatchObject({ object: 'response', output_text: 'from the model' });
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
 
     const agent = await post({ model: 'agent:support-agent', input: 'hello' });
     expect(agent.statusCode).toBe(200);
     expect(startInput().agentKey).toBe('support-agent');
     expect(parseJsonBody<{ model: string }>(agent.body).model).toBe('agent:support-agent');
+    expect(hoisted.handleChatCompletion).toHaveBeenCalledTimes(1);
   });
 
   it('/agents/responses is agents only: no model lookup', async () => {

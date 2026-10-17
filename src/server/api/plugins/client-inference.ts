@@ -43,7 +43,6 @@ import {
   checkBudget,
   checkPerRequestLimits,
   checkRateLimit,
-  settleUsageBudget,
 } from '@/lib/quota/quotaGuard';
 import {
   anthropicErrorBody,
@@ -63,72 +62,24 @@ import {
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
 import { authz } from '@/lib/iam/routeAuthz';
+import {
+  estimateTokens,
+  extractMessageText,
+  modelChatFailure,
+  quotaExceededPayload,
+  runModelChatCompletion,
+  sanitize,
+  type ChatCompletionRequest,
+} from './model-chat-gateway';
 
 const logger = createLogger('api:client-inference');
 
-type MessageContentPart = string | { text?: string };
-type ChatMessage = {
-  content?: string | MessageContentPart[];
-};
-type ChatCompletionRequest = {
-  [key: string]: unknown;
-  max_completion_tokens?: number;
-  max_tokens?: number;
-  messages?: unknown;
-  model?: string;
-  request_id?: string;
-  stream?: boolean;
-};
 type EmbeddingRequest = {
   [key: string]: unknown;
   input?: string | string[];
   model?: string;
   request_id?: string;
 };
-
-function quotaExceededPayload(message = 'Quota exceeded') {
-  return { error: { message, type: 'rate_limit_error' } };
-}
-
-
-function estimateTokens(text: string): number {
-  if (!text) {
-    return 0;
-  }
-  return Math.ceil(text.length / 4);
-}
-
-function extractMessageText(messages: unknown): string {
-  if (!Array.isArray(messages)) {
-    return '';
-  }
-
-  const parts: string[] = [];
-  for (const message of messages as ChatMessage[]) {
-    const content = message?.content;
-    if (typeof content === 'string') {
-      parts.push(content);
-      continue;
-    }
-
-    if (!Array.isArray(content)) {
-      continue;
-    }
-
-    for (const part of content) {
-      if (typeof part === 'string') {
-        parts.push(part);
-        continue;
-      }
-
-      if (typeof part?.text === 'string') {
-        parts.push(part.text);
-      }
-    }
-  }
-
-  return parts.join('\n');
-}
 
 function extractEmbeddingInputText(input: unknown): string {
   if (typeof input === 'string') {
@@ -146,26 +97,6 @@ function extractEmbeddingInputText(input: unknown): string {
   }
 
   return JSON.stringify(input);
-}
-
-function sanitize(value: unknown, max = 20_000) {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  try {
-    const serialized = JSON.stringify(value);
-    if (serialized.length <= max) {
-      return value;
-    }
-
-    return {
-      preview: serialized.slice(0, max),
-      truncated: true,
-    };
-  } catch {
-    return '[unserializable]';
-  }
 }
 
 function invalidJson(reply: FastifyReply) {
@@ -549,96 +480,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const requestedOutputTokens =
-        typeof body.max_completion_tokens === 'number'
-          ? body.max_completion_tokens
-          : typeof body.max_tokens === 'number'
-            ? body.max_tokens
-            : undefined;
-      const estimatedInputTokens = estimateTokens(extractMessageText(body.messages));
-      const estimatedTotalTokens = requestedOutputTokens === undefined
-        ? estimatedInputTokens
-        : estimatedInputTokens + requestedOutputTokens;
-      const tokenId = auth.tokenRecord._id?.toString() ?? auth.token;
-      const quotaContext = {
-        domain: 'llm' as const,
-        licenseType: auth.tenant.licenseType as LicenseType,
-        projectId: auth.projectId,
-        resourceKey: modelKey,
-        tenantDbName: auth.tenantDbName,
-        tenantId: auth.tenantId,
-        tokenId,
-        userId: auth.tokenRecord.userId,
-      };
-
-      try {
-        const quotaResult = await checkPerRequestLimits(quotaContext, {
-          inputTokens: estimatedInputTokens,
-          outputTokens: requestedOutputTokens,
-          totalTokens: estimatedTotalTokens,
-        });
-        if (!quotaResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(quotaResult.reason || 'Quota exceeded'),
-          );
-        }
-
-        const rateLimitResult = await checkRateLimit(quotaContext, {
-          requests: 1,
-          tokens: estimatedInputTokens,
-        });
-        if (!rateLimitResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(rateLimitResult.reason || 'Rate limit exceeded'),
-          );
-        }
-
-        const budgetResult = await checkBudget(quotaContext);
-        if (!budgetResult.allowed) {
-          return reply.code(429).send(
-            quotaExceededPayload(budgetResult.reason || 'Budget exceeded'),
-          );
-        }
-      } catch (error) {
-        logger.error('Client chat quota check error', { error });
-        return reply.code(500).send({
-          error: {
-            message: 'Quota check failed',
-            type: 'server_error',
-          },
-        });
-      }
-
-      const result = await handleChatCompletion({
-        body,
-        modelKey,
-        projectId: auth.projectId,
-        stream: Boolean(body.stream),
-        tenantDbName: auth.tenantDbName,
-        tenantId: auth.tenantId,
-        callerContext: {
-          channel: 'api',
-          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
-          projectId: auth.projectId,
-        },
-        // Settling here (rather than after the call returns, as before) is
-        // what makes this work for BOTH stream and non-stream: a streamed
-        // response's real usage isn't known until long after this function
-        // has already returned the still-open stream below, so a post-hoc
-        // `if (result.usage)` check here silently never fired for it — the
-        // budget counter never debited a single streamed request. See the
-        // 2026-09-05 assessment, F-05.
-        onUsageSettled: (cost) => {
-          void settleUsageBudget(quotaContext, cost);
-        },
-      });
-
-      const actualOutputTokens = result.usage?.outputTokens || 0;
-      if (actualOutputTokens > 0) {
-        void checkRateLimit(quotaContext, { tokens: actualOutputTokens }).catch((error) =>
-          logger.error('Failed to update chat rate limit usage', { error }),
-        );
-      }
+      const outcome = await runModelChatCompletion(auth, body, { modelKey });
+      if (outcome.kind === 'refused') return reply.code(outcome.status).send(outcome.body);
+      const { result } = outcome;
 
       if (result.stream) {
         applyStreamHeaders(reply, result.requestId);
@@ -656,51 +500,8 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope), not a model error.
       if (authorizationRefusalOf(error)) throw error;
       logger.error('Client chat completion error', { error });
-
-      if (error instanceof GuardrailBlockError) {
-        return reply.code(400).send({
-          error: {
-            action: error.action,
-            findings: error.findings,
-            guardrail_key: error.guardrailKey,
-            message: error.message,
-            type: 'guardrail_block',
-          },
-        });
-      }
-
-      const normalizedError = normalizeInferenceError(error);
-
-      try {
-        const model = modelKey
-          ? await getModelByKey(auth.tenantDbName, modelKey, auth.projectId)
-          : null;
-        if (model) {
-          const errorMessage = normalizedError.error.message;
-          await logModelUsage(auth.tenantDbName, model, {
-            errorMessage,
-            latencyMs: Date.now() - startedAt,
-            providerRequest: sanitize({ body, model: body?.model }),
-            providerResponse: sanitize({ error: errorMessage }),
-            requestId: typeof body?.request_id === 'string'
-              ? body.request_id
-              : crypto.randomUUID(),
-            route: 'chat.completions',
-            status: 'error',
-            usage: {},
-          });
-        }
-      } catch (logError) {
-        logger.error('Failed to log client chat completion error', { error: logError });
-      }
-
-      if (normalizedError.status >= 400 && normalizedError.status < 500) {
-        // Keeps a provider's 401/403 out of the security audit trail's `denied`
-        // bucket — our own auth already passed to get here.
-        request.upstreamStatusForwarded = true;
-      }
-
-      return reply.code(normalizedError.status).send({ error: normalizedError.error });
+      const failure = await modelChatFailure(request, auth, { modelKey, body, startedAt }, error);
+      return reply.code(failure.status).send(failure.body);
     }
   }));
 

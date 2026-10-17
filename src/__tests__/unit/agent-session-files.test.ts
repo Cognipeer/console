@@ -78,7 +78,7 @@ import {
 } from '@/lib/services/agents/sessionFiles';
 import { normalizeAttachmentsFolder } from '@/lib/services/agents/sessionFilesConfig';
 import { sessionFileObjectKey } from '@/lib/services/agents/sessionFilesBucket';
-import { extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
+import { InputContentPartError, extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { isReadOnlyTool, HITL_READ_ONLY_TOOLS } from '@/lib/services/agents/agentHumanInTheLoop';
 import { serializeForStorage, MAX_STATE_BYTES } from '@/lib/services/agents/agentTurnState';
 import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValidation';
@@ -554,8 +554,36 @@ describe('the Responses input', () => {
     expect(extractResponseUserInput(undefined)).toEqual({ text: null, files: [] });
   });
 
-  it('keeps the old behaviour for text: the first input_text of the last user message', () => {
-    expect(extractResponseUserInput([{ role: 'user', content: [{ type: 'input_text', text: 'a' }, { type: 'input_text', text: 'b' }] }]).text).toBe('a');
+  it('joins every text part of the last user message with a blank line', () => {
+    expect(extractResponseUserInput([{ role: 'user', content: [{ type: 'input_text', text: 'a' }, { type: 'input_file', file_id: 'f1' }, { type: 'input_text', text: 'b' }] }]))
+      .toEqual({ text: 'a\n\nb', files: [{ kind: 'file', fileId: 'f1' }] });
+  });
+
+  it('takes a file by URL (http(s) only) and the chat spelling of the parts', () => {
+    expect(extractResponseUserInput([{ role: 'user', content: [{ type: 'input_file', file_url: 'https://example.com/r.pdf', filename: 'r.pdf' }] }]).files)
+      .toEqual([{ kind: 'file', url: 'https://example.com/r.pdf', filename: 'r.pdf' }]);
+    expect(extractResponseUserInput([{ role: 'user', content: [
+      { type: 'text', text: 'see' },
+      { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+      { type: 'file', file: { file_data: 'data:text/plain;base64,QUJD', filename: 'a.txt' } },
+    ] }])).toEqual({
+      text: 'see',
+      files: [{ kind: 'image', url: 'https://example.com/cat.png' }, { kind: 'file', data: 'data:text/plain;base64,QUJD', filename: 'a.txt' }],
+    });
+    for (const url of ['file:///etc/hosts', 'ftp://example.com/a.pdf', 'not a url']) {
+      expect(() => extractResponseUserInput([{ role: 'user', content: [{ type: 'input_file', file_url: url }] }])).toThrow(InputContentPartError);
+    }
+  });
+
+  it('refuses a part type it does not take instead of dropping it', () => {
+    let caught: unknown;
+    try {
+      extractResponseUserInput([{ role: 'user', content: [{ type: 'input_text', text: 'hi' }, { type: 'input_audio', input_audio: { data: 'QUJD', format: 'wav' } }] }]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(InputContentPartError);
+    expect(caught).toMatchObject({ status: 400, code: 'unsupported_content_part', param: 'input' });
   });
 });
 
