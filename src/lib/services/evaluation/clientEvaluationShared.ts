@@ -7,8 +7,8 @@
  * stays on the dashboard surface (an admin concern).
  *
  * These helpers shape the internal camelCase records into the snake_case
- * envelope the other client modules use, so both the served Fastify plugin and
- * the route handlers below share one source of truth.
+ * envelope the other client modules use, so both the Fastify plugin and
+ * its tests share one source of truth.
  */
 
 import { NextResponse, type NextRequest } from '@/server/api/http';

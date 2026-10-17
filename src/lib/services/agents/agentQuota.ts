@@ -7,7 +7,7 @@
  * "this person ran an agent". This module is the single enforcement point the
  * run entry points share:
  *
- *   executeAgentChat          sync API, Responses/OpenAI/A2A/Assistants bridges,
+ *   executeAgentChat          sync API, Responses/OpenAI/A2A bridges,
  *                             schedules, evaluations, red team
  *   executePlaygroundChat     dashboard playground, portals, realtime voice
  *   dashboard /chat/stream    calls the playground runtime directly (agents.ts)

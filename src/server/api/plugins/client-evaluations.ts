@@ -13,8 +13,8 @@
  * Authoring of targets / datasets / suites stays on the dashboard surface
  * (`/api/evaluation/*`, session-authenticated) — an admin concern.
  *
- * Serializers are shared with the route-handler layer
- * (`routes/client/v1/evaluation/shared.ts`) so both speak one envelope.
+ * Serializers live in a shared module
+ * (`lib/services/evaluation/clientEvaluationShared.ts`) (one envelope).
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -24,7 +24,7 @@ import {
   toRunSummary,
   toRunView,
   toSuiteView,
-} from '../routes/client/v1/evaluation/shared';
+} from '@/lib/services/evaluation/clientEvaluationShared';
 import {
   getApiTokenContextForRequest,
   sendApiTokenError,

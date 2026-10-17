@@ -1489,57 +1489,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-
-      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
-      // database, before the page, so a busy teammate cannot push theirs off it.
-      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      const conversations = await listConversations(session.tenantDbName, agent.key, {
-        limit: 50,
-        projectId,
-        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
-      });
-
-      return reply.code(200).send({ conversations });
-    } catch (error) {
-      return sendRouteError(reply, error, 'List agent conversations error', 'Failed to list conversations');
-    }
-  }));
-
-  app.post('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const conversation = await createConversation(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        session.userId,
-        agent.key,
-        typeof body.title === 'string' ? body.title : undefined,
-        { source: 'console' },
-      );
-
-      return reply.code(201).send({ conversation });
-    } catch (error) {
-      return sendRouteError(reply, error, 'Create agent conversation error', 'Failed to create conversation');
-    }
-  }));
-
   // ── Sessions ─────────────────────────────────────────────────────────
   //
   // A Session is the conversation record, presented under the name the
-  // Sessions page uses. Kept as its own route group rather than renaming
-  // `/conversations` above — nothing else in the codebase depends on that
-  // name yet, but adding rather than renaming means neither guess can be
-  // wrong about who else might.
+  // Sessions page uses.
 
   app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
     try {

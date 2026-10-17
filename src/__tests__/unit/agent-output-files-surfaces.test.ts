@@ -1,6 +1,6 @@
 /**
  * Files an agent wrote to its sandbox `/outputs/` on every response surface
- * (chat completions, Assistants, A2A, session events, transcript). All additive.
+ * (chat completions, A2A, session events, transcript). All additive.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -10,10 +10,8 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import { toChatChunk, toChatCompletion } from '@/server/api/plugins/agent-openai-bridge';
-import { fileAnnotations, mergedMessages, toMessageObject } from '@/server/api/plugins/client-assistants';
 import { a2aFileArtifacts } from '@/server/api/plugins/client-a2a';
 import { outputFileEventData, toClientOutputFiles, toClientTranscriptMessage } from '@/lib/services/agents/clientWire';
-import type { IAgentConversation } from '@/lib/database';
 
 const attachments = [
   { fileId: 'f1', name: 'report.pdf', mimeType: 'application/pdf', size: 1234, origin: 'agent_output' as const },
@@ -36,29 +34,6 @@ describe('chat completions', () => {
     expect(toChatChunk({ id: 'x', model: 'a', finish: true, files })).toMatchObject({ files: [{ id: 'f1' }] });
     expect(toChatChunk({ id: 'x', model: 'a', delta: 'hi', files })).not.toHaveProperty('files');
     expect(toChatChunk({ id: 'x', model: 'a', finish: true })).not.toHaveProperty('files');
-  });
-});
-
-describe('Assistants wire', () => {
-  it('annotates where the text names the file and lists it in attachments/file_ids', () => {
-    const conv = { _id: 'c1', messages: [
-      { role: 'user', content: 'go', timestamp: new Date(), attachments: [attachments[1]] },
-      { role: 'assistant', content: 'Wrote report.pdf for you', timestamp: new Date(), attachments },
-    ] } as unknown as IAgentConversation;
-    const merged = mergedMessages(conv);
-    const user = toMessageObject('c1', 'asst_a', 0, merged[0]);
-    expect(user).not.toHaveProperty('attachments');
-    const msg = toMessageObject('c1', 'asst_a', 1, merged[1]);
-    expect(msg.content[0].text.annotations).toEqual([
-      { type: 'file_path', text: 'report.pdf', start_index: 6, end_index: 16, file_path: { file_id: 'f1' } },
-    ]);
-    expect((msg as { attachments: unknown }).attachments).toEqual([{ file_id: 'f1', tools: [] }]);
-    expect((msg as { file_ids: unknown }).file_ids).toEqual(['f1']);
-  });
-
-  it('keeps annotations empty without files, and lists a file the text does not name', () => {
-    expect(fileAnnotations('nothing', [])).toEqual([]);
-    expect(fileAnnotations('nothing', files)).toEqual([]);
   });
 });
 

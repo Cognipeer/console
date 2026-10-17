@@ -2,7 +2,7 @@
  * Session ownership as a permission, at the REAL routes, the REAL gate and the REAL policy engine, over a
  * real SQLite provider: every path to a session's content asks "did THIS caller start it, and if not may
  * they view / act on it" - the list, the record, the events, the files, the runs, the Files API objects, the
- * tracing thread, the threads of the Assistants API, the Responses continuation.
+ * tracing thread, the Responses continuation.
  *
  * The default is today's behaviour (everybody the route admits); a deny rule about
  * `agent.session_view_others` / `agent.session_manage_others` is what narrows it, written the way the
@@ -71,7 +71,6 @@ import { agentSessionFilesApiPlugin } from '@/server/api/plugins/agent-session-f
 import { clientAgentRunsApiPlugin } from '@/server/api/plugins/client-agent-runs';
 import { clientAgentSessionsApiPlugin } from '@/server/api/plugins/client-agent-sessions';
 import { clientAgentsApiPlugin } from '@/server/api/plugins/client-agents';
-import { clientAssistantsApiPlugin } from '@/server/api/plugins/client-assistants';
 import { clientFilesApiPlugin } from '@/server/api/plugins/client-files';
 import { clientTracingApiPlugin } from '@/server/api/plugins/client-tracing';
 import { filesApiPlugin } from '@/server/api/plugins/files';
@@ -187,7 +186,6 @@ beforeEach(async () => {
     await instance.register(clientAgentSessionsApiPlugin);
     await instance.register(clientAgentRunsApiPlugin);
     await instance.register(clientAgentsApiPlugin);
-    await instance.register(clientAssistantsApiPlugin);
     await instance.register(clientFilesApiPlugin);
     await instance.register(clientTracingApiPlugin);
     await instance.register(filesApiPlugin);
@@ -230,8 +228,6 @@ describe('the Sessions list of an agent', () => {
     const theirs = await dash('padmin', 'GET', `/agents/${agentId}/sessions`);
     expect(json(theirs).scope).toEqual({ viewOthers: true });
     expect(json(theirs).sessions).toHaveLength(100);
-    // the conversations list (the older route) follows the same rule
-    expect(json(await dash('other', 'GET', `/agents/${agentId}/conversations`)).conversations.map((c: { _id: string }) => c._id)).toEqual([idOf('others')]);
   });
 
   it('says for each waiting session whether THIS viewer could answer it - the engine\'s rule, not a guess from a role', async () => {
@@ -551,14 +547,6 @@ describe('a new turn in somebody else\'s session needs viewing it as well as cha
     expect((await dash('padmin', 'POST', `/agents/${agentId}/sessions/${idOf('starters')}/continue`, { message: 'x' })).statusCode).not.toBe(403);
   });
 
-  it('a run on an Assistants thread; adding a message to it hands nothing back and stays a matter of changing the session', async () => {
-    await deny('agent.session_view_others', 'other');
-    await tokenOf('other');
-    const run = await viaToken('POST', `/client/v1/threads/thread_${idOf('starters')}/runs`, {});
-    expect(run.statusCode).toBe(403);
-    expect(json(run).error).toContain('not allowed to view');
-  });
-
   it('the other changes keep asking only for the permission to change (budget, files, delete)', async () => {
     await deny('agent.session_view_others', 'other');
     await tokenOf('other');
@@ -581,30 +569,6 @@ describe('a new turn in somebody else\'s session needs viewing it as well as cha
     const res = await respond({ session_id: idOf('starters') });
     expect(res.statusCode).toBe(503);
     expect(json(res).error).toMatchObject({ code: 'authorization_unavailable' });
-  });
-});
-
-describe('the threads of the Assistants API (a thread is a session)', () => {
-  const thread = (id: keyof typeof sessions) => `thread_${idOf(id)}`;
-
-  it('read, change and delete follow the same needs', async () => {
-    await deny('agent.session_view_others', 'other');
-    await tokenOf('other');
-    const refused = await viaToken('GET', `/client/v1/threads/${thread('starters')}`);
-    expect(refused.statusCode).toBe(403);
-    expect(json(refused)).toMatchObject({ decision_id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
-    expect((await viaToken('GET', `/client/v1/threads/${thread('starters')}/messages`)).statusCode).toBe(403);
-    // managing is a separate action
-    expect((await viaToken('DELETE', `/client/v1/threads/${thread('starters')}`)).statusCode).toBe(200);
-    await tokenOf('starter');
-    expect((await viaToken('GET', `/client/v1/threads/${thread('others')}`)).statusCode).toBe(200);
-  });
-
-  it('an engine outage is a 503', async () => {
-    hoisted.engine.down = true;
-    hoisted.engine.only = 'agent.';
-    await tokenOf('other');
-    expect((await viaToken('GET', `/client/v1/threads/${thread('starters')}`)).statusCode).toBe(503);
   });
 });
 

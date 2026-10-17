@@ -1,7 +1,7 @@
 /**
  * One agent, reached through every channel that can reach it.
  *
- * The agent surface grew one channel at a time — Responses, Assistants, A2A,
+ * The agent surface grew one channel at a time — Responses, A2A,
  * the dashboard's own routes, and now OpenAI chat/completions — and each was
  * tested where it was written. That leaves the question nobody was asking:
  * does the SAME agent, with the same config, behave the same whichever door

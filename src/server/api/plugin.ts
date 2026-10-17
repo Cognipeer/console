@@ -28,7 +28,6 @@ import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
 import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
 import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
 import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
-import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
 import { clientMonitoringApiPlugin } from './plugins/client-monitoring';
@@ -143,7 +142,7 @@ const PUBLIC_API_PREFIXES = [
   ...enterprisePublicApiPrefixes,
 ];
 
-const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', '/api/internal/gpu-pool/'];
+const CLIENT_API_PREFIXES = ['/api/client/', '/api/metrics', '/api/internal/gpu-pool/'];
 
 /**
  * Endpoints under these prefixes manage their own auth (Bearer agent tokens)
@@ -527,7 +526,6 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientWebhooksApiPlugin);
   await app.register(clientAgentSessionsApiPlugin);
   await app.register(agentSessionFilesApiPlugin);
-  await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
   await app.register(clientMonitoringApiPlugin);

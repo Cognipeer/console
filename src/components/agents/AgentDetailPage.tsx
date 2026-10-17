@@ -1964,20 +1964,6 @@ for chunk in stream:
               </Text>
               <Code block>{`GET ${a2aCardUrl}`}</Code>
 
-              <Divider />
-              <Text size="sm" fw={600}>Assistants API</Text>
-              <Text size="xs" c="dimmed">
-                For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
-                {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
-                a new, separate agent. Start a thread and run it in one call:
-              </Text>
-              <Code block>
-{`POST ${origin}/api/client/v1/threads/runs
-{
-  "assistant_id": "asst_${agent.key}",
-  "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
-}`}
-              </Code>
             </Stack>
           </SectionCard>
         </Tabs.Panel>

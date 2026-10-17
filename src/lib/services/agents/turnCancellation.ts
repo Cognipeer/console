@@ -1,7 +1,7 @@
 /**
  * Stopping an agent turn that is running RIGHT NOW, whichever door it came in
  * by: the Studio/playground (JSON or SSE), the client API (`/responses`,
- * chat completions, A2A, Assistants) or a background run.
+ * chat completions, A2A) or a background run.
  *
  * Every inline turn holds the conversation's single run slot (a `mode: 'sync'`
  * `AgentRun` row). That row is the one place every node can see, so a stop is

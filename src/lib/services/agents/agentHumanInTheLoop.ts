@@ -171,7 +171,7 @@ export type HitlRunMode = 'ask' | 'deny' | 'allow';
 
 /**
  * Picks the mode of a run. `unattended` = no interactive user on it (a
- * schedule, an evaluation, an OpenAI-shaped or Assistants client…); the agent's
+ * schedule, an evaluation, an OpenAI-shaped client…); the agent's
  * own `unattended` setting then decides. `canPause: false` = there is nowhere
  * to park a paused turn (a stateless playground call has no conversation), so
  * `pause` cannot be honoured there and degrades to `deny` — never to `allow`.

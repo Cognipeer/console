@@ -1,7 +1,7 @@
 /**
  * HTTP-level tests for the LIVE Knowledge Engine dashboard plugin.
  *
- * Every other `rag-*` test in this directory drives `src/server/api/routes/**`,
+ * Every other `rag-*` test in this directory drove the removed `src/server/api/routes/**`,
  * which is an unmounted duplicate — none of them can fail on a change to the
  * Fastify plugin that actually serves traffic. This one injects into the plugin
  * itself, over real SQLite.

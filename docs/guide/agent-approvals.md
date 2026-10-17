@@ -156,7 +156,7 @@ Where the tools are offered is explicit. *Configure → Client tools → Where t
 | **Dashboard playground** (`playground`) | The person testing | The call waits on its card | Type the result on the card, give up, or let an external system answer through the API |
 | **Portal embedded in a page** (`portal`) | The page that embeds the portal | The frame posts `cp:tool_call` | The host answers with `cp:tool_result` |
 
-**Never offered anywhere else**: A2A, MCP, realtime, schedules, evaluations and red-team cases, the Assistants API, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
+**Never offered anywhere else**: A2A, MCP, realtime, schedules, evaluations and red-team cases, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
 
 An embedded portal can also declare tools of its own for its page. Where both name the same tool, the agent's declaration wins.
 
@@ -216,7 +216,7 @@ The caller runs the tool and answers with `output` or `error` (table above). The
 
 ## Unattended runs
 
-Some runs have nobody to answer: schedules, evaluations and red-team cases, and the OpenAI-shaped and Assistants endpoints, which have no way to send an answer. The *When nobody can answer* setting decides what a gated tool does there:
+Some runs have nobody to answer: schedules, evaluations and red-team cases, and the OpenAI-shaped endpoints, which have no way to send an answer. The *When nobody can answer* setting decides what a gated tool does there:
 
 - **Deny the tool call** (default): the tool does not run, the model is told no approver is available and the run goes on. Questions are not asked.
 - **Pause and wait for approval in Studio:** behaves like an attended run; the request waits in the session until someone answers it.
