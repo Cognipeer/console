@@ -1,7 +1,12 @@
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import { rememberSessionModel } from './agent-model-authz';
-import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import {
+    agentRunConcurrencyLimitErrorBody,
+    resolveAgentRunLimits,
+    startAgentRun,
+    type AgentRunLimits,
+} from '@/lib/services/agents/agentRunService';
 /**
  * An agent, answered as an OpenAI chat completion.
  *
@@ -13,8 +18,8 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  * team already has.
  *
  * This is deliberately a BRIDGE, not a second agent runtime: it translates
- * a chat-completions request into the same `executeAgentChat` the Responses
- * API calls, and translates the answer back. Nothing about how an agent runs
+ * a chat-completions request into the same run (`startAgentRun`, channel
+ * `chat_completions`) the Responses API starts, and translates the answer back. Nothing about how an agent runs
  * is decided here.
  *
  * Resolution order matters and is not negotiable: a model key wins. An agent
@@ -32,7 +37,7 @@ import {
     type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
 import { toClientPendingAction, toFileAnnotations, type ClientOutputFile, type ClientPendingAction } from '@/lib/services/agents/clientWire';
-import type { IAgent } from '@/lib/database';
+import type { IAgent, IAgentRun } from '@/lib/database';
 import { createConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
 import {
     executeAgentChat,
@@ -361,6 +366,13 @@ export interface RunAgentCompletionInput {
     modelChoice?: AgentModelChoice;
     /** `reasoning_effort` / `reasoning: { effort }` of the request, validated by the route. Lowest rung. */
     requestReasoning?: NormalizedReasoning;
+    /** The caller's run limits (its wait window included); the env ceilings otherwise. */
+    limits?: AgentRunLimits;
+    apiTokenId?: string;
+    /** Aborts when the client disconnects: a stream then stops the run (OpenAI semantics), a plain call leaves it running. */
+    signal?: AbortSignal;
+    /** The session the call runs on, once known (the route answers it in `X-Cognipeer-Session-Id`). */
+    onSession?: (conversationId: string) => void;
 }
 
 /** Why a request to answer a tool call was refused, as the chat-completions error. */
@@ -379,7 +391,9 @@ function answerRefusal(outcome: ResolveOutcome): { error: string; status: number
 }
 
 export type AgentCompletionResult =
-    | { error: string; status: number }
+    | { error: string; status: number; code?: string; type?: string; extra?: Record<string, unknown> }
+    /** The wait window ended with the run still going: it continues (202, follow it on the runs API). */
+    | { accepted: IAgentRun; conversationId: string }
     | {
         content: string;
         conversationId: string;
@@ -392,6 +406,8 @@ export type AgentCompletionResult =
         reasoning?: string;
         /** Files the agent produced this turn (sandbox /outputs), as `output_files`. */
         outputFiles?: ClientOutputFile[];
+        /** The run this turn was (a tool answer continues the paused run's session and has none of its own). */
+        runId?: string;
     };
 
 function toCompletionUsage(usage: AgentChatResponse['usage'] | undefined): { usage?: AgentCompletionUsage } {
@@ -418,32 +434,68 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     // A queued or later turn of this session reads the choice from it.
     if (input.modelChoice) await rememberSessionModel(input.ctx.tenantDbName, conversation.conversationId, input.modelChoice);
 
-    const result = await executeAgentChatExclusive({
-        ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
-        ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
-        agentKey: input.agent.key,
-        conversationId: conversation.conversationId,
-        projectId: input.ctx.projectId,
+    input.onSession?.(conversation.conversationId);
+
+    const streaming = Boolean(input.onTextChunk);
+    const limits = input.limits ?? await resolveAgentRunLimits();
+    const outcome = await startAgentRun({
         tenantDbName: input.ctx.tenantDbName,
         tenantId: input.ctx.tenantId,
+        projectId: input.ctx.projectId,
+        agentKey: input.agent.key,
+        conversationId: conversation.conversationId,
+        userMessage,
+        userId: input.ctx.userId,
+        ...(input.apiTokenId ? { apiTokenId: input.apiTokenId, actorType: 'api_token' as const } : {}),
         // API traffic runs the published version, exactly as /responses does:
         // a draft saved mid-afternoon must not become what callers get.
         usePublished: true,
-        userId: input.ctx.userId,
-        userMessage,
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
+        ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
+        ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
         // The chat-completions wire has no way to answer an approval: a gated
         // tool follows the agent's `humanInTheLoop.unattended` setting (deny by
         // default; `pause` leaves the session waiting in the dashboard).
         unattended: true,
         // It does have a way to run a tool: the agent's client tools come back as `tool_calls`.
         answersClientTools: true,
-        ...(input.version !== undefined ? { version: input.version } : {}),
-        ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
-        ...(input.onTextChunk ? { onTextChunk: input.onTextChunk } : {}),
-        ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}),
+        channel: 'chat_completions',
+        trigger: 'request',
+        execution: {
+            kind: 'inline',
+            waitMs: limits.syncWaitMs,
+            ...(streaming
+                ? { stream: { onTextChunk: input.onTextChunk, ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}) } }
+                : {}),
+            ...(input.signal ? { signal: input.signal } : {}),
+            // A stream that loses its reader stops (OpenAI semantics); a plain call's run carries on.
+            cancelOnDisconnect: streaming,
+        },
+        limits,
     });
 
-    return completionFrom(result, conversation.conversationId);
+    switch (outcome.kind) {
+        case 'completed':
+            return { ...completionFrom(outcome.response, conversation.conversationId), runId: String(outcome.run._id) };
+        case 'detached':
+        case 'accepted':
+            return { accepted: outcome.run, conversationId: conversation.conversationId };
+        case 'replay':
+            return outcome.run.result
+                ? completionFrom(outcome.run.result as unknown as AgentChatResponse, conversation.conversationId)
+                : { accepted: outcome.run, conversationId: conversation.conversationId };
+        case 'conflict':
+            return { error: 'An active run (queued or running) already exists for this conversation.', status: 409, type: 'agent_run_conflict', code: 'agent_run_conflict' };
+        case 'idempotency_conflict':
+            return { error: 'This Idempotency-Key was already used with a different request.', status: 409, type: 'idempotency_key_conflict', code: 'idempotency_key_conflict' };
+        case 'concurrency_limit': {
+            const body = agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass).error;
+            return { error: body.message, status: 429, code: body.code, type: 'rate_limit_error', extra: { class: outcome.runClass, scope: outcome.scope, limit: outcome.limit } };
+        }
+        default:
+            return { error: 'the agent run could not be started', status: 500 };
+    }
 }
 
 /** A Responses-shaped agent result as a chat completion: the answer, or the client tools it is waiting on. */
@@ -476,6 +528,7 @@ async function answerToolCalls(input: RunAgentCompletionInput, answers: ToolAnsw
     if (!input.answer) return { error: 'tool messages are not accepted here', status: 400 };
     const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx, 'api');
     if ('error' in conversation) return { error: conversation.error, status: 404 };
+    input.onSession?.(conversation.conversationId);
 
     let last: ResolveOutcome | undefined;
     for (const answer of answers) {

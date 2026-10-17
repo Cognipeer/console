@@ -13,8 +13,7 @@ const hoisted = vi.hoisted(() => ({
   getAgentByKey: vi.fn(),
   getConversationById: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
+  startAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
@@ -78,8 +77,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
   return {
     ...actual,
-    runSyncAgentTurn: hoisted.runSyncAgentTurn,
-    createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
+    startAgentRun: hoisted.startAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
     resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
   };
@@ -119,6 +117,8 @@ const responses = (payload: Record<string, unknown>, extraHeaders: Record<string
   payload,
 });
 
+const RUN = { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'support-agent' };
+
 let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 
 beforeEach(async () => {
@@ -131,7 +131,7 @@ beforeEach(async () => {
   hoisted.getAgentRunStatus.mockResolvedValue(null);
   hoisted.resolveAgentRunLimits.mockResolvedValue(LIMITS);
   hoisted.blocking.mockResolvedValue(null);
-  hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-1', status: 'completed' } });
+  hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: { id: 'resp_run-1', status: 'completed' } });
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientAgentSessionsApiPlugin);
     await instance.register(clientAgentsApiPlugin);
@@ -143,7 +143,7 @@ afterEach(async () => {
 });
 
 
-const lastSyncRequest = () => (hoisted.runSyncAgentTurn.mock.calls.at(-1)![0] as { request: Record<string, unknown> }).request;
+const lastSyncRequest = () => hoisted.startAgentRun.mock.calls.at(-1)![0] as Record<string, unknown>;
 
 describe('reasoning_effort on /client/v1/agents/responses', () => {
   it('hands a valid effort to the run as the request value', async () => {
@@ -174,7 +174,7 @@ describe('reasoning_effort on /client/v1/agents/responses', () => {
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi', ...extra }));
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: { code: string; message: string } }>(res.body).error).toMatchObject({ code: 'invalid_reasoning' });
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 });
 
@@ -188,14 +188,14 @@ describe('include_reasoning: false', () => {
   };
 
   it('leaves the reasoning item out of this response', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: withReasoning });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: withReasoning });
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi', include_reasoning: false }));
     const output = parseJsonBody<{ output: Array<{ type: string }> }>(res.body).output;
     expect(output.map((item) => item.type)).toEqual(['message']);
   });
 
   it('keeps it otherwise', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: withReasoning });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: withReasoning });
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi' }));
     expect(parseJsonBody<{ output: Array<{ type: string }> }>(res.body).output.map((item) => item.type)).toEqual(['reasoning', 'message']);
   });

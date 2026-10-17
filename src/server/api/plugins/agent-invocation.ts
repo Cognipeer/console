@@ -5,8 +5,8 @@
  * session's budget, reasoning, the model choice, the run limits, the
  * Idempotency-Key, the callback, the files and the runtime context.
  *
- * Shared by the runs API (`client-agent-runs.ts`) and the Responses route
- * (`client-agents.ts`); each helper answers a refusal itself in the caller's
+ * Shared by the runs API (`client-agent-runs.ts`), the Responses route
+ * (`client-agents.ts`), chat completions and A2A; each helper answers a refusal itself in the caller's
  * dialect and returns null, so a route reads `if (!x) return reply;`.
  */
 
@@ -43,6 +43,8 @@ import {
 import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
 import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { getModelByKey } from '@/lib/services/models/modelService';
+import { createLogger } from '@/lib/core/logger';
 import { getHeaderValue } from '../fastify-utils';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import {
@@ -78,6 +80,21 @@ export function sendInvocationFailure(reply: FastifyReply, dialect: InvocationDi
     });
   }
   return reply.code(failure.status).send(apiErrorBody(failure.type, failure.message, failure.code, failure.extra));
+}
+
+const logger = createLogger('api:agent-invocation');
+
+/**
+ * A client-envelope error body (`{ error: { type, message, code, ...extra } }`)
+ * in OpenAI's (`{ error: { message, type, param, code, ...extra } }`).
+ */
+export function openAiEnvelopeOf(body: unknown): { error: Record<string, unknown> } {
+  const error = ((body as { error?: unknown })?.error ?? {}) as Record<string, unknown>;
+  if (typeof error !== 'object' || error === null) {
+    return { error: { message: String(error), type: 'invalid_request_error', param: null, code: null } };
+  }
+  const { type, message, code, param, ...extra } = error;
+  return { error: { message: message ?? null, type: type ?? 'api_error', param: param ?? null, code: code ?? null, ...extra } };
 }
 
 const invalid = (message: string, code: string, param?: string): InvocationFailure => ({
@@ -138,6 +155,45 @@ export async function resolveInvocationAgent(
     }
   }
   return { agent, ...(requested.version !== undefined ? { version: requested.version } : {}), usePublished: !requested.draft };
+}
+
+// ── Target: an agent or a model (§1.2) ───────────────────────────────────
+
+/** `agent:<key>` always names an agent; a bare name is a model first. */
+export const AGENT_TARGET_PREFIX = 'agent:';
+
+export type InvocationTarget =
+  | { kind: 'agent'; agentKey: string }
+  | { kind: 'model'; modelKey: string }
+  | { kind: 'not_found' };
+
+/**
+ * What `model` names on a route that serves models and agents:
+ * `agent:<key>` → that agent; else a model with that key in the project; else
+ * an agent with that key; else nothing (404 `model_not_found`). A model wins a
+ * bare-name collision so nobody's model traffic moves because an agent was
+ * later given the same key. `agentsOnly` (the `/agents/...` alias) skips the
+ * model lookup: the name is an agent key.
+ */
+export async function resolveInvocationTarget(
+  ctx: { tenantDbName: string; projectId: string },
+  model: string,
+  options: { agentsOnly?: boolean } = {},
+): Promise<InvocationTarget> {
+  const explicit = model.startsWith(AGENT_TARGET_PREFIX);
+  const key = explicit ? model.slice(AGENT_TARGET_PREFIX.length) : model;
+  if (!key) return { kind: 'not_found' };
+  if (explicit || options.agentsOnly) return { kind: 'agent', agentKey: key };
+  try {
+    if (await getModelByKey(ctx.tenantDbName, key, ctx.projectId)) return { kind: 'model', modelKey: key };
+  } catch (error) {
+    // A model store that cannot answer must not take agent traffic down with it.
+    logger.warn('Model lookup failed while resolving a target; trying agents', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  const agent = await getAgentByKey(ctx.tenantDbName, key, ctx.projectId);
+  return agent ? { kind: 'agent', agentKey: key } : { kind: 'not_found' };
 }
 
 // ── Input ────────────────────────────────────────────────────────────────

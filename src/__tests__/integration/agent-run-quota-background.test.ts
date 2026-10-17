@@ -37,7 +37,8 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { AgentQuotaExceededError } from '@/lib/services/agents/agentQuota';
-import { createBackgroundAgentRun, runAgentJobLocal } from '@/lib/services/agents/agentRunService';
+import { runAgentJobLocal } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 
 let db: SQLiteProvider;
 let tmpDir: string;
@@ -77,7 +78,7 @@ const conversation = async (n: number) =>
   } as never))._id);
 
 async function submit(conversationId: string, extra: Record<string, unknown> = {}) {
-  return createBackgroundAgentRun({
+  return queueAgentRun({
     tenantId, tenantDbName: dbName, projectId: PROJECT_ID, agentKey: AGENT_KEY,
     conversationId, userMessage: 'hi', userId: 'alice', usePublished: false, ...extra,
   });
@@ -96,14 +97,14 @@ describe('background agent runs and the agent-run quota', () => {
       label: 'project quota', limits: { rateLimit: { requests: { perMinute: 1 } } },
     } as never);
     for (let i = 0; i < 3; i += 1) {
-      expect((await submit(await conversation(i))).kind).toBe('created');
+      expect((await submit(await conversation(i))).kind).toBe('accepted');
     }
   });
 
   it('refuses a submit over the limit with the quota error, creating no run', async () => {
     await agentLimit({ rateLimit: { requests: { perDay: 1 } } });
 
-    expect((await submit(await conversation(1))).kind).toBe('created');
+    expect((await submit(await conversation(1))).kind).toBe('accepted');
     const second = await conversation(2);
     const error = await submit(second).then(() => null, (e: unknown) => e);
 
@@ -118,16 +119,16 @@ describe('background agent runs and the agent-run quota', () => {
     const conversationId = await conversation(1);
 
     const first = await submit(conversationId, { idempotencyKey: 'k-1', idempotencyConversationScope: conversationId });
-    expect(first.kind).toBe('created');
+    expect(first.kind).toBe('accepted');
 
     const replay = await submit(conversationId, { idempotencyKey: 'k-1', idempotencyConversationScope: conversationId });
-    expect(replay.kind).toBe('idempotent_replay');
+    expect(replay.kind).toBe('replay');
   });
 
   it('adds the finished run\'s tokens (once) so the next submit sees them', async () => {
     await agentLimit({ rateLimit: { tokens: { perDay: 400 } } });
     const created = await submit(await conversation(1));
-    if (created.kind !== 'created') throw new Error('expected a created run');
+    if (created.kind !== 'accepted') throw new Error('expected a created run');
 
     hoisted.executeAgentChatLocal.mockResolvedValue({
       id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed',

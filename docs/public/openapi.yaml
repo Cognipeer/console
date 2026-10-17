@@ -313,7 +313,7 @@ paths:
         - name: Idempotency-Key
           in: header
           required: false
-          description: "Background mode only (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run with `200` instead of queuing a new one; the same key with a different request is rejected with `409` (`idempotency_key_conflict`). Sending it on a synchronous request is rejected with `400` (`idempotency_key_sync_not_supported`)."
+          description: "Any mode (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run's response instead of starting a new one: `200` once it finished, `202` while it is still going (a synchronous retry waits like a new call first); the same key with a different request is rejected with `409` (`idempotency_key_conflict`)."
           schema:
             type: string
             maxLength: 255
@@ -8524,7 +8524,7 @@ paths:
         - name: Idempotency-Key
           in: header
           required: false
-          description: "Background mode only (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run with `200` instead of queuing a new one; the same key with a different request is rejected with `409` (`idempotency_key_conflict`). Sending it on a synchronous request is rejected with `400` (`idempotency_key_sync_not_supported`)."
+          description: "Any mode (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run's response instead of starting a new one: `200` once it finished, `202` while it is still going (a synchronous retry waits like a new call first); the same key with a different request is rejected with `409` (`idempotency_key_conflict`)."
           schema:
             type: string
             maxLength: 255

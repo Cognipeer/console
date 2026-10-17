@@ -32,7 +32,7 @@ const hoisted = vi.hoisted(() => ({
   getConversationById: vi.fn(),
   getAgentByKey: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
+  startAgentRun: vi.fn(),
   limits: vi.fn(),
   updateBudget: vi.fn(),
   queueContinue: vi.fn(),
@@ -48,14 +48,10 @@ vi.mock('@/lib/services/agents', () => ({
   deleteAgentRecord: vi.fn(),
   listAgents: vi.fn(),
   updateAgentRecord: vi.fn(),
-  runSyncAgentTurn: hoisted.runSyncAgentTurn,
-  createBackgroundAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
   agentRunConflictErrorBody: () => ({ error: 'conflict' }),
-  agentSyncTimeoutErrorBody: () => ({ error: 'timeout' }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({ error: 'idem' }),
   idempotencyKeyConflictErrorBody: () => ({ error: 'idem' }),
   agentRunConcurrencyLimitErrorBody: () => ({ error: 'cap' }),
 }));
@@ -74,6 +70,11 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   agentDefaultCallback: () => ({}),
   lookupIdempotentAgentRun: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  startAgentRun: hoisted.startAgentRun,
+  waitForAgentRun: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  isAgentRunActive: (run: { status: string }) => ['scheduled', 'queued', 'running'].includes(run.status),
+  publicAgentRunId: (run: { _id: string }) => `run_${run._id}`,
 }));
 
 vi.mock('@/lib/services/agents/sessionBudgetService', () => ({ updateSessionBudget: hoisted.updateBudget }));
@@ -213,7 +214,7 @@ describe('client: session budget', () => {
 
   it('a Responses call that starts a session passes its budget on; a bad one is a 400', async () => {
     hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-new', status: 'completed' } });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-new', agentKey: 'support-agent' }, response: { id: 'resp_run-1', status: 'completed' } });
 
     let res = await app.inject({
       method: 'POST', url: '/api/client/v1/agents/responses', headers,
@@ -234,7 +235,7 @@ describe('client: session budget', () => {
 
   it('a Responses call without a budget leaves the agent default to apply (budget argument undefined)', async () => {
     hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-new', status: 'completed' } });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-new', agentKey: 'support-agent' }, response: { id: 'resp_run-1', status: 'completed' } });
     await app.inject({ method: 'POST', url: '/api/client/v1/agents/responses', headers, payload: { model: 'support-agent', input: 'hi' } });
     expect(hoisted.createConversation.mock.calls[0][7]).toBeUndefined();
   });
@@ -251,7 +252,7 @@ describe('client: session budget', () => {
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
       type: 'budget_reached', spent_usd: 1.02, max_cost_usd: 1,
     });
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
   describe('an agent whose admin set a session budget binds its API clients', () => {
     const bound = (extra: Record<string, unknown> = {}) => ({

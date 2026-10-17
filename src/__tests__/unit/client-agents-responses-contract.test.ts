@@ -14,8 +14,7 @@ const hoisted = vi.hoisted(() => ({
   getAgentByKey: vi.fn(),
   getConversationById: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
+  startAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
@@ -79,8 +78,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
   return {
     ...actual,
-    runSyncAgentTurn: hoisted.runSyncAgentTurn,
-    createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
+    startAgentRun: hoisted.startAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
     resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
   };
@@ -112,6 +110,7 @@ const BOUND_AGENT = {
 };
 const EXISTING_SESSION = { _id: 'conv-1', tenantId: 'tenant-1', projectId: 'proj-1', agentKey: 'support-agent', messages: [], createdBy: 'user-1' };
 
+const RUN = { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'support-agent' };
 const LIMITS = { syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 };
 const responses = (payload: Record<string, unknown>, extraHeaders: Record<string, string> = {}) => ({
   method: 'POST' as const,
@@ -132,7 +131,7 @@ beforeEach(async () => {
   hoisted.getAgentRunStatus.mockResolvedValue(null);
   hoisted.resolveAgentRunLimits.mockResolvedValue(LIMITS);
   hoisted.blocking.mockResolvedValue(null);
-  hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-1', status: 'completed' } });
+  hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: { id: 'resp_run-1', status: 'completed' } });
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientAgentSessionsApiPlugin);
     await instance.register(clientAgentsApiPlugin);
@@ -149,7 +148,7 @@ describe('budget on a Responses request', () => {
       const res = await app.inject(responses({ model: 'support-agent', input: 'more', previous_response_id: 'resp_conv-1', budget }));
       expect(res.statusCode, JSON.stringify(budget)).toBe(200);
     }
-    expect(hoisted.runSyncAgentTurn).toHaveBeenCalledTimes(4);
+    expect(hoisted.startAgentRun).toHaveBeenCalledTimes(4);
     expect(hoisted.createConversation).not.toHaveBeenCalled();
   });
 
@@ -176,7 +175,7 @@ describe('budget on a Responses request', () => {
 
 describe('a refused turn is logged as a refusal', () => {
   it('a spent session budget (402) is info, with no stack and no error entry', async () => {
-    hoisted.runSyncAgentTurn.mockRejectedValue(new AgentBudgetReachedError(1.02, 1));
+    hoisted.startAgentRun.mockRejectedValue(new AgentBudgetReachedError(1.02, 1));
     const res = await app.inject(responses({ model: 'support-agent', input: 'more', previous_response_id: 'resp_conv-1' }));
     expect(res.statusCode).toBe(402);
     expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('budget_reached');
@@ -189,7 +188,7 @@ describe('a refused turn is logged as a refusal', () => {
   });
 
   it('a session waiting on a person (409 pending_action) is info too', async () => {
-    hoisted.runSyncAgentTurn.mockRejectedValue(new AgentPendingActionError(['act_1']));
+    hoisted.startAgentRun.mockRejectedValue(new AgentPendingActionError(['act_1']));
     const res = await app.inject(responses({ model: 'support-agent', input: 'more', previous_response_id: 'resp_conv-1' }));
     expect(res.statusCode).toBe(409);
     expect(parseJsonBody<{ error: { pending_action_ids: string[] } }>(res.body).error.pending_action_ids).toEqual(['act_1']);
@@ -198,7 +197,7 @@ describe('a refused turn is logged as a refusal', () => {
   });
 
   it('another 4xx the caller can act on is a warning without a stack', async () => {
-    hoisted.runSyncAgentTurn.mockRejectedValue(new Error('Model "gpt-x" not found'));
+    hoisted.startAgentRun.mockRejectedValue(new Error('Model "gpt-x" not found'));
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi' }));
     expect(res.statusCode).toBe(409);
     expect(hoisted.log.error).not.toHaveBeenCalled();
@@ -208,7 +207,7 @@ describe('a refused turn is logged as a refusal', () => {
 
   it('a server fault is still an error with its stack', async () => {
     const failure = new Error('kaboom');
-    hoisted.runSyncAgentTurn.mockRejectedValue(failure);
+    hoisted.startAgentRun.mockRejectedValue(failure);
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi' }));
     expect(res.statusCode).toBe(500);
     expect(hoisted.log.error).toHaveBeenCalledWith('Client agent responses error', { error: failure });
@@ -218,7 +217,7 @@ describe('a refused turn is logged as a refusal', () => {
 
 describe('409 for a conversation that is busy', () => {
   it('has the same type and code on the Responses route and on answering a request', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'conflict' });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
     const fromResponses = await app.inject(responses({ model: 'support-agent', input: 'hi' }));
 
     hoisted.resolveAction.mockResolvedValue({ kind: 'busy' });
@@ -233,7 +232,8 @@ describe('409 for a conversation that is busy', () => {
     expect(fromResolve.statusCode).toBe(409);
     const a = parseJsonBody<{ error: { type: string; code: string } }>(fromResponses.body).error;
     const b = parseJsonBody<{ error: { type: string; code: string } }>(fromResolve.body).error;
+    // OpenAI's envelope on /responses, the client one on the actions route: the same type and code.
     expect(a).toMatchObject({ type: 'agent_run_conflict', code: 'agent_run_conflict' });
-    expect(b).toEqual(a);
+    expect({ type: b.type, code: b.code }).toEqual({ type: a.type, code: a.code });
   });
 });

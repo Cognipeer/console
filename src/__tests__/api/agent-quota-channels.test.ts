@@ -77,25 +77,10 @@ vi.mock('@/lib/services/agents', () => {
         prepareConnectionForStorage: vi.fn(),
         publishAgent: vi.fn(),
         updateAgentRecord: vi.fn(),
-        // Background execution (docs/guide/agent-background-execution.md):
-        // `runSyncAgentTurn` delegates to the SAME `executeAgentChat` mock
-        // above so `runCalls()` (which reads `executeAgentChat.mock.calls`)
-        // keeps observing exactly what each channel asked the runtime to do
-        // — these tests are about the CHANNEL wiring, not the sync-ceiling
-        // orchestration itself (covered by agent-run-sync-ceiling.test.ts).
-        runSyncAgentTurn: vi.fn(async ({ request }: { request: unknown }) => ({
-            kind: 'ok',
-            response: await executeAgentChat(request),
-        })),
-        createBackgroundAgentRun: vi.fn(),
         getAgentRunStatus: vi.fn(),
         requestAgentRunCancellation: vi.fn(),
         isBackgroundModeRequested: vi.fn().mockReturnValue(false),
         agentRunConflictErrorBody: vi.fn(() => ({ error: { type: 'agent_run_conflict', message: 'conflict' } })),
-        agentSyncTimeoutErrorBody: vi.fn(() => ({ error: { type: 'timeout', message: 'timed out' } })),
-        idempotencyKeyRequiresBackgroundErrorBody: vi.fn(() => ({
-            error: { type: 'invalid_request_error', message: 'Idempotency-Key requires background: true' },
-        })),
     };
 });
 
@@ -240,7 +225,8 @@ describe('an agent run over its quota', () => {
         expect(res.statusCode).toBe(429);
         const { error } = parseJsonBody<{ error: Record<string, unknown> }>(res.body);
         expect(error).toMatchObject(MODEL_ENDPOINT_QUOTA_ERROR);
-        expect(error).toEqual({ message: REFUSAL, type: 'rate_limit_error', code: 'agent_quota_exceeded' });
+        // The OpenAI envelope: `param` is part of it.
+        expect(error).toEqual({ message: REFUSAL, type: 'rate_limit_error', param: null, code: 'agent_quota_exceeded' });
     }, IMPORT_TIMEOUT_MS);
 
     it('OpenAI chat/completions: the same 429 and error object', async () => {

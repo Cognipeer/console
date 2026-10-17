@@ -66,7 +66,7 @@ import {
   type ResolveActor,
 } from '@/lib/services/agents/agentActionResolution';
 import { runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
-import { createBackgroundAgentRun } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
 const PROJECT_ID = 'proj-1';
@@ -1174,12 +1174,12 @@ describe('background runs', () => {
     scriptModel(oneToolScript('ls'));
     const conversation = await newConversation();
     const id = String(conversation._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'list files', userId: OWNER,
       callbackUrl: 'https://example.com/hook',
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
 
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
@@ -1217,11 +1217,11 @@ describe('background runs', () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'list files', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
@@ -1236,11 +1236,11 @@ describe('background runs', () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'list files', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
@@ -1257,11 +1257,11 @@ describe('background runs', () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'list files', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
@@ -1298,11 +1298,11 @@ describe('background runs', () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'list files', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     // A newer turn is running on the conversation now.

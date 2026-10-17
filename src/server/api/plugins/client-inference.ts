@@ -22,6 +22,8 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
+import { agentRunLocation, resolveInvocationLimits } from './agent-invocation';
+import { publicAgentRunId } from '@/lib/services/agents/agentRunService';
 import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
   resolveAgentModel,
@@ -233,8 +235,11 @@ async function handleAgentChatCompletion(input: {
     }
   }
   const cognipeer = modelChoice ? { cognipeer: { agent_model: modelChoice.modelKey } } : {};
+  const limits = await resolveInvocationLimits(auth);
 
   const common = {
+    limits,
+    ...(auth.tokenRecord._id ? { apiTokenId: String(auth.tokenRecord._id) } : {}),
     ...(modelChoice ? { modelChoice } : {}),
     ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     agent,
@@ -269,7 +274,10 @@ async function handleAgentChatCompletion(input: {
   if (!streaming) {
     let result: Awaited<ReturnType<typeof runAgentCompletion>>;
     try {
-      result = await runAgentCompletion(common);
+      result = await runAgentCompletion({
+        ...common,
+        onSession: (conversationId) => { void reply.header('X-Cognipeer-Session-Id', conversationId); },
+      });
     } catch (error) {
       if (error instanceof AgentGuardrailBlockedError) {
         return reply.code(error.status).send({
@@ -288,8 +296,33 @@ async function handleAgentChatCompletion(input: {
     }
     if ('error' in result) {
       return reply.code(result.status).send({
-        error: { message: result.error, type: 'invalid_request_error' },
+        error: {
+          message: result.error,
+          type: result.type ?? 'invalid_request_error',
+          ...(result.code ? { code: result.code } : {}),
+          ...result.extra,
+        },
       });
+    }
+    if ('accepted' in result) {
+      // The wait window ended with the run still going: it carries on; follow it on the runs API.
+      return reply
+        .code(202)
+        .header('Location', agentRunLocation(result.accepted))
+        .header('Retry-After', '2')
+        .send({
+          id,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [],
+          cognipeer: {
+            status: 'in_progress',
+            run_id: publicAgentRunId(result.accepted),
+            session_id: result.conversationId,
+            ...(modelChoice ? { agent_model: modelChoice.modelKey } : {}),
+          },
+        });
     }
     return reply.code(200).send({
       ...toChatCompletion({ id, model, ...result, ...(includeReasoning ? {} : { reasoning: undefined }) }),
@@ -297,11 +330,16 @@ async function handleAgentChatCompletion(input: {
     });
   }
 
+  // The headers go out once the session is known (`X-Cognipeer-Session-Id`), or with the first chunk.
   applyStreamHeaders(reply);
-  reply.raw.flushHeaders?.();
 
   let closed = false;
-  reply.raw.on('close', () => { closed = true; });
+  // A reader that goes away stops the run, as OpenAI's stream does.
+  const disconnect = new AbortController();
+  reply.raw.on('close', () => {
+    closed = true;
+    if (!reply.raw.writableFinished) disconnect.abort();
+  });
   const send = (payload: unknown) => {
     if (closed) return;
     try {
@@ -319,6 +357,12 @@ async function handleAgentChatCompletion(input: {
   try {
     const result = await runAgentCompletion({
       ...common,
+      signal: disconnect.signal,
+      onSession: (conversationId) => {
+        if (reply.raw.headersSent) return;
+        reply.raw.setHeader('X-Cognipeer-Session-Id', conversationId);
+        reply.raw.flushHeaders?.();
+      },
       onTextChunk: (text) => {
         streamed += text;
         send(toChatChunk({ id, model, delta: text }));
@@ -334,7 +378,10 @@ async function handleAgentChatCompletion(input: {
     });
 
     if ('error' in result) {
-      send({ error: { message: result.error, type: 'invalid_request_error' } });
+      send({ error: { message: result.error, type: result.type ?? 'invalid_request_error', ...(result.code ? { code: result.code } : {}) } });
+    } else if ('accepted' in result) {
+      // Not reached for a stream (it has no window); kept so every outcome ends the stream with something.
+      send({ error: { message: 'The run is still in progress', type: 'server_error', code: 'agent_run_in_progress', run_id: publicAgentRunId(result.accepted) } });
     } else {
       // Thinking that did not stream (a routed run without relay, a model call that was not streamed)
       // still comes out, ahead of the answer's missing tail.

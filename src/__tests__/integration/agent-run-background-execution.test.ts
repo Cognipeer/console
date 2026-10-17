@@ -55,7 +55,6 @@ import { getRequestContext } from '@/lib/core/requestContext';
 import {
   AGENT_RUN_QUEUE,
   AGENT_RUN_CALLBACK_QUEUE,
-  createBackgroundAgentRun,
   runAgentJobLocal,
   getAgentRunStatus,
   requestAgentRunCancellation,
@@ -67,6 +66,7 @@ import {
   startAgentRun,
   type StartAgentRunInput,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 
 function delay(ms: number): Promise<void> {
@@ -142,9 +142,9 @@ afterEach(async () => {
 
 async function createRun(
   conversationId: string,
-  overrides: Partial<Parameters<typeof createBackgroundAgentRun>[0]> = {},
+  overrides: Partial<Parameters<typeof queueAgentRun>[0]> = {},
 ) {
-  const outcome = await createBackgroundAgentRun({
+  const outcome = await queueAgentRun({
     tenantId,
     tenantDbName: dbName,
     projectId: PROJECT_ID,
@@ -154,7 +154,7 @@ async function createRun(
     userId: 'user-1',
     ...overrides,
   });
-  if (outcome.kind !== 'created') throw new Error(`expected created, got ${outcome.kind}`);
+  if (outcome.kind !== 'accepted') throw new Error(`expected accepted, got ${outcome.kind}`);
   return outcome.run;
 }
 
@@ -215,7 +215,7 @@ describe('background execution core (§7)', () => {
     hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
 
     await createRun('conv-conflict');
-    const second = await createBackgroundAgentRun({
+    const second = await queueAgentRun({
       tenantId,
       tenantDbName: dbName,
       projectId: PROJECT_ID,

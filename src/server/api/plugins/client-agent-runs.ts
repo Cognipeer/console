@@ -15,7 +15,7 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type { AgentRunClass, IAgentConversation, IAgentRun } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
-import { getAgentByKey, getAgentRunStatus, getConversationById, requestAgentRunCancellation } from '@/lib/services/agents';
+import { cancelAgentRun, getAgentByKey, getAgentRunStatus, getConversationById } from '@/lib/services/agents';
 import {
   MAX_RUN_SCHEDULE_AHEAD_MS,
   agentRunConcurrencyLimitErrorBody,
@@ -49,6 +49,7 @@ import {
   checkSessionContinuable,
   invocationApiTokenId,
   invocationRuntimeContext,
+  openAiEnvelopeOf,
   parseInvocationInput,
   parseInvocationReasoning,
   parseNewSessionBudget,
@@ -63,6 +64,7 @@ import {
   resolveInvocationModel,
   sendRunAccepted,
 } from './agent-invocation';
+import { toAgentResponseObject } from './agent-response-object';
 import { createResponsesStreamWriter } from './agent-responses-stream';
 import { listSessionEvents, streamSessionEvents } from './agent-session-events';
 import {
@@ -70,6 +72,7 @@ import {
   sendAuthorizationUnavailable,
   sendClientListUnavailable,
   sendClientSessionRefusal,
+  sendOpenAiSessionRefusal,
   sessionListScope,
   sessionStreamStillAllowed,
   type SessionNeed,
@@ -584,35 +587,11 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/agents/runs/:runId/cancel', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { runId } = request.params as { runId: string };
-      // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
       const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
       if (run && run.mode !== 'sync') {
-        // Cancelling a run is acting on its session: the owner always may, anybody else needs
-        // `agent.session_manage_others`.
-        const refusal = await refuseSessionLinked(request, run.conversationId, 'manage', {
-          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
-          alsoOwnedBy: [run.userId],
-        });
-        if (refusal) return sendClientSessionRefusal(reply, request, refusal);
+        if (await refuseRunCancel(request, reply, ctx, run, 'client')) return reply;
       }
-      if (run && run.mode !== 'sync' && run.status === 'requires_action') {
-        const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
-        if (conversation && conversation.projectId === ctx.projectId) {
-          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
-          if (!verdict.allowed && verdict.unavailable) {
-            return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
-          }
-          if (!verdict.allowed) {
-            return reply.code(403).send(apiErrorBody(
-              'permission_error',
-              'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
-              'action_forbidden',
-              verdict.decisionId ? { decision_id: verdict.decisionId } : undefined,
-            ));
-          }
-        }
-      }
-      const outcome = await requestAgentRunCancellation(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
+      const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId });
       if (outcome.kind === 'not_found') {
         return reply.code(404).send(agentRunNotFoundErrorBody());
       }
@@ -761,24 +740,59 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // `resp_<conversationId>` (what /responses returns) or `run_<runId>` (a background run).
+  // ── OpenAI Responses: read and cancel a response (§5.3) ──
+  //
+  // A response is a run (`resp_<runId>`; the runs API's `run_<runId>` names the
+  // same one), answered as the Response object in OpenAI's error envelope.
+  const responseNotFound = (reply: FastifyReply, responseId: string) => reply.code(404).send({
+    error: { message: `No response found with id '${responseId}'.`, type: 'invalid_request_error', param: null, code: 'response_not_found' },
+  });
+  const loadResponseRun = async (ctx: ApiTokenContext, responseId: string): Promise<IAgentRun | null> => {
+    if (!responseId.startsWith('resp_') && !responseId.startsWith('run_')) return null;
+    const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, normalizeAgentRunId(responseId));
+    return run && run.mode !== 'sync' ? run : null;
+  };
+
+  const getResponse = withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const { responseId } = request.params as { responseId: string };
+      const run = await loadResponseRun(ctx, responseId);
+      if (!run) return responseNotFound(reply, responseId);
+      const refusal = await refuseSessionLinked(request, run.conversationId, 'view', {
+        actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+        alsoOwnedBy: [run.userId],
+      });
+      if (refusal) return sendOpenAiSessionRefusal(reply, request, refusal);
+      return reply.code(200).send(toAgentResponseObject(run));
+    } catch (error) {
+      logger.error('Client response get error', { error });
+      return reply.code(500).send(openAiEnvelopeOf(INTERNAL_ERROR_BODY));
+    }
+  });
+  app.get('/client/v1/responses/:responseId', getResponse);
+  app.get('/client/v1/agents/responses/:responseId', getResponse);
+
+  // Cancel (§4.7) → the Response object (`cancelled`, or `in_progress` while a cooperative
+  // cancel lands); an already finished one answers 200 with its final object, as OpenAI does.
+  // A `resp_<conversationId>` from before responses were run-scoped still stops its session's turn.
   const cancelResponse = withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { responseId } = request.params as { responseId: string };
-      let conversationId: string | undefined;
-      if (responseId.startsWith('run_')) {
-        const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, responseId.slice(4));
-        conversationId = run?.conversationId;
-      } else if (responseId.startsWith('resp_')) {
-        conversationId = responseId.slice(5);
+      const run = await loadResponseRun(ctx, responseId);
+      if (run) {
+        if (await refuseRunCancel(request, reply, ctx, run, 'openai')) return reply;
+        const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: String(run._id) });
+        if (outcome.kind === 'not_found') return responseNotFound(reply, responseId);
+        return reply.code(200).send(toAgentResponseObject(outcome.run));
       }
+      const conversationId = responseId.startsWith('resp_') ? responseId.slice(5) : undefined;
       const outcome = conversationId ? await cancelByConversation(request, reply, ctx, conversationId) : null;
-      if (!outcome) return reply.code(404).send(agentRunNotFoundErrorBody());
+      if (!outcome) return responseNotFound(reply, responseId);
       if (reply.sent || !('cancelled' in outcome)) return reply;
       return reply.code(200).send({ id: responseId, conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
     } catch (error) {
       logger.error('Client response cancel error', { error });
-      return reply.code(500).send(INTERNAL_ERROR_BODY);
+      return reply.code(500).send(openAiEnvelopeOf(INTERNAL_ERROR_BODY));
     }
   });
   app.post('/client/v1/responses/:responseId/cancel', cancelResponse);
@@ -797,4 +811,46 @@ function outcomeRefusal(outcome: StartAgentRunOutcome): { status: number; body: 
     default:
       return null;
   }
+}
+
+/**
+ * May this caller cancel `run`? Cancelling a run is acting on its session (the
+ * owner always may, anybody else needs `agent.session_manage_others`), and a
+ * run paused on an approval is ended by answering it "no", which takes the
+ * right to answer it. True when refused (the reply is sent). A boolean, not the
+ * reply: a reply is thenable, and awaiting one waits for it to be sent.
+ */
+async function refuseRunCancel(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: ApiTokenContext,
+  run: IAgentRun,
+  dialect: 'client' | 'openai',
+): Promise<boolean> {
+  const refusal = await refuseSessionLinked(request, run.conversationId, 'manage', {
+    actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+    alsoOwnedBy: [run.userId],
+  });
+  if (refusal) {
+    if (dialect === 'openai') sendOpenAiSessionRefusal(reply, request, refusal);
+    else sendClientSessionRefusal(reply, request, refusal);
+    return true;
+  }
+  if (run.status !== 'requires_action') return false;
+  const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
+  if (!conversation || conversation.projectId !== ctx.projectId) return false;
+  const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
+  if (!verdict.allowed && verdict.unavailable) {
+    sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+    return true;
+  }
+  if (verdict.allowed) return false;
+  const body = apiErrorBody(
+    'permission_error',
+    'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
+    'action_forbidden',
+    verdict.decisionId ? { decision_id: verdict.decisionId } : undefined,
+  );
+  void reply.code(403).send(dialect === 'openai' ? openAiEnvelopeOf(body) : body);
+  return true;
 }

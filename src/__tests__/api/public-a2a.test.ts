@@ -35,6 +35,7 @@ import {
   resolveA2aExposure,
 } from '@/lib/services/agents/a2aExposure';
 import { publicA2aApiPlugin } from '@/server/api/plugins/public-a2a';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const SLUG = 'abcdef1234567890';
@@ -57,7 +58,7 @@ const listAgents = vi.fn();
 const findTenantById = vi.fn();
 
 // Turns on an existing conversation hold its single active-run slot (a
-// `mode: 'sync'` AgentRun reservation) for their whole duration.
+// the conversation's active-run slot, a recorded inline run) for their whole duration.
 const agentRunReservation = {
   create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
   remove: vi.fn(async () => true),
@@ -73,7 +74,7 @@ async function buildApp() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant, listAgents, findTenantById , createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove });
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, listAgents, findTenantById, createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove } as never));
   findTenantById.mockResolvedValue({ _id: 'tenant-1', dbName: 'tenant_acme' });
   listAgents.mockResolvedValue([PUBLIC_AGENT]);
 });
@@ -173,6 +174,8 @@ describe('public message/send', () => {
     expect(chatRequest.tenantDbName).toBe('tenant_acme');
     expect(chatRequest.userId).toBe('a2a-public');
     expect(chatRequest.runtimeContext).toMatchObject({ source: 'a2a', userId: 'a2a-public' });
+    expect(agentRunReservation.create).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'a2a', userId: 'a2a-public' }));
+    expect(body.result.id).toBe('run_reservation-1');
     expect(chatRequest.runtimeContext.tokenId).toBeUndefined();
   });
 

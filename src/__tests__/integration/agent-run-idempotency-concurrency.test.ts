@@ -36,9 +36,9 @@ import { getDatabase } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import {
-  createBackgroundAgentRun,
   lookupIdempotentAgentRun,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 
 let db: SQLiteProvider;
 let tmpDir: string;
@@ -47,7 +47,7 @@ const dbName = 'tenant_idempotency';
 const PROJECT_ID = 'proj-1';
 const AGENT_KEY = 'support-bot';
 
-function baseInput(conversationId: string, overrides: Partial<Parameters<typeof createBackgroundAgentRun>[0]> = {}) {
+function baseInput(conversationId: string, overrides: Partial<Parameters<typeof queueAgentRun>[0]> = {}) {
   return {
     tenantId,
     tenantDbName: dbName,
@@ -90,12 +90,12 @@ afterEach(async () => {
 
 describe('Idempotency-Key (§12.15)', () => {
   it('a repeated key with the same request body returns the existing run instead of creating a new one', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-a' }));
-    expect(first.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-a' }));
+    expect(first.kind).toBe('accepted');
 
-    const second = await createBackgroundAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-a' }));
-    expect(second.kind).toBe('idempotent_replay');
-    if (first.kind === 'created' && second.kind === 'idempotent_replay') {
+    const second = await queueAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-a' }));
+    expect(second.kind).toBe('replay');
+    if (first.kind === 'accepted' && second.kind === 'replay') {
       expect(String(second.run._id)).toBe(String(first.run._id));
     }
 
@@ -104,20 +104,20 @@ describe('Idempotency-Key (§12.15)', () => {
   });
 
   it('a repeated key with a DIFFERENT request body is a conflict, neither silently executed nor merged', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-b' }));
-    expect(first.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-1', { idempotencyKey: 'idem-b' }));
+    expect(first.kind).toBe('accepted');
 
-    const second = await createBackgroundAgentRun(
+    const second = await queueAgentRun(
       baseInput('conv-1', { idempotencyKey: 'idem-b', userMessage: 'a completely different message' }),
     );
     expect(second.kind).toBe('idempotency_conflict');
   });
 
   it('two different keys for the same conversation are independent (the active-run index still governs conflicts)', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-2', { idempotencyKey: 'idem-c' }));
-    expect(first.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-2', { idempotencyKey: 'idem-c' }));
+    expect(first.kind).toBe('accepted');
 
-    const second = await createBackgroundAgentRun(baseInput('conv-2', { idempotencyKey: 'idem-d' }));
+    const second = await queueAgentRun(baseInput('conv-2', { idempotencyKey: 'idem-d' }));
     // Same conversation, still active from the first request — §12.14's
     // single-active-run rule is a separate guard idempotency doesn't bypass.
     expect(second.kind).toBe('conflict');
@@ -130,12 +130,12 @@ describe('Idempotency-Key (§12.15)', () => {
     // real retries would) while `idempotencyConversationScope` is left
     // unset (null) both times, exactly as client-agents.ts does when it
     // never resolved an existing conversation.
-    const first = await createBackgroundAgentRun(baseInput('conv-fresh-1', { idempotencyKey: 'idem-retry' }));
-    expect(first.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-fresh-1', { idempotencyKey: 'idem-retry' }));
+    expect(first.kind).toBe('accepted');
 
-    const second = await createBackgroundAgentRun(baseInput('conv-fresh-2', { idempotencyKey: 'idem-retry' }));
-    expect(second.kind).toBe('idempotent_replay');
-    if (first.kind === 'created' && second.kind === 'idempotent_replay') {
+    const second = await queueAgentRun(baseInput('conv-fresh-2', { idempotencyKey: 'idem-retry' }));
+    expect(second.kind).toBe('replay');
+    if (first.kind === 'accepted' && second.kind === 'replay') {
       expect(String(second.run._id)).toBe(String(first.run._id));
       // The replay returns the FIRST attempt's real conversation, not the
       // second (fresh, now-orphaned) one.
@@ -144,12 +144,12 @@ describe('Idempotency-Key (§12.15)', () => {
   });
 
   it('when the caller DOES continue an existing conversation (idempotencyConversationScope set), a different conversation under the same key is a genuine conflict', async () => {
-    const first = await createBackgroundAgentRun(
+    const first = await queueAgentRun(
       baseInput('conv-x', { idempotencyKey: 'idem-scoped', idempotencyConversationScope: 'conv-x' }),
     );
-    expect(first.kind).toBe('created');
+    expect(first.kind).toBe('accepted');
 
-    const second = await createBackgroundAgentRun(
+    const second = await queueAgentRun(
       baseInput('conv-y', { idempotencyKey: 'idem-scoped', idempotencyConversationScope: 'conv-y' }),
     );
     expect(second.kind).toBe('idempotency_conflict');
@@ -159,14 +159,14 @@ describe('Idempotency-Key (§12.15)', () => {
 describe('Idempotency-Key — races and the pre-conversation lookup', () => {
   it('REGRESSION: concurrent same-key requests — exactly one run is created, the other replays it', async () => {
     const results = await Promise.all([
-      createBackgroundAgentRun(baseInput('conv-race-1', { idempotencyKey: 'idem-race' })),
-      createBackgroundAgentRun(baseInput('conv-race-2', { idempotencyKey: 'idem-race' })),
+      queueAgentRun(baseInput('conv-race-1', { idempotencyKey: 'idem-race' })),
+      queueAgentRun(baseInput('conv-race-2', { idempotencyKey: 'idem-race' })),
     ]);
     const kinds = results.map((r) => r.kind).sort();
-    expect(kinds).toEqual(['created', 'idempotent_replay']);
-    const created = results.find((r) => r.kind === 'created');
-    const replay = results.find((r) => r.kind === 'idempotent_replay');
-    if (created?.kind === 'created' && replay?.kind === 'idempotent_replay') {
+    expect(kinds).toEqual(['accepted', 'replay']);
+    const created = results.find((r) => r.kind === 'accepted');
+    const replay = results.find((r) => r.kind === 'replay');
+    if (created?.kind === 'accepted' && replay?.kind === 'replay') {
       expect(String(replay.run._id)).toBe(String(created.run._id));
     }
     expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
@@ -174,17 +174,17 @@ describe('Idempotency-Key — races and the pre-conversation lookup', () => {
   });
 
   it('REGRESSION: an insert that loses the race on the unique key (AgentRunIdempotencyKeyTakenError) resolves to a replay, not a 500', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-taken-1', { idempotencyKey: 'idem-taken' }));
-    expect(first.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-taken-1', { idempotencyKey: 'idem-taken' }));
+    expect(first.kind).toBe('accepted');
 
     // Make the pre-check miss, as it does when two requests read before
     // either writes — the insert itself must then catch the duplicate.
     const lookup = vi.spyOn(db, 'getAgentRunByIdempotencyKey');
     lookup.mockResolvedValueOnce(null);
-    const second = await createBackgroundAgentRun(baseInput('conv-taken-2', { idempotencyKey: 'idem-taken' }));
+    const second = await queueAgentRun(baseInput('conv-taken-2', { idempotencyKey: 'idem-taken' }));
 
-    expect(second.kind).toBe('idempotent_replay');
-    if (first.kind === 'created' && second.kind === 'idempotent_replay') {
+    expect(second.kind).toBe('replay');
+    if (first.kind === 'accepted' && second.kind === 'replay') {
       expect(String(second.run._id)).toBe(String(first.run._id));
     }
     // The losing insert left nothing behind.
@@ -192,17 +192,17 @@ describe('Idempotency-Key — races and the pre-conversation lookup', () => {
   });
 
   it('the same race with a DIFFERENT body resolves to idempotency_conflict', async () => {
-    await createBackgroundAgentRun(baseInput('conv-taken-3', { idempotencyKey: 'idem-taken-2' }));
+    await queueAgentRun(baseInput('conv-taken-3', { idempotencyKey: 'idem-taken-2' }));
     vi.spyOn(db, 'getAgentRunByIdempotencyKey').mockResolvedValueOnce(null);
-    const second = await createBackgroundAgentRun(
+    const second = await queueAgentRun(
       baseInput('conv-taken-4', { idempotencyKey: 'idem-taken-2', userMessage: 'something else' }),
     );
     expect(second.kind).toBe('idempotency_conflict');
   });
 
   it('lookupIdempotentAgentRun (run before a conversation is created) answers replay / conflict / none', async () => {
-    const created = await createBackgroundAgentRun(baseInput('conv-lookup', { idempotencyKey: 'idem-lookup' }));
-    if (created.kind !== 'created') throw new Error('expected created');
+    const created = await queueAgentRun(baseInput('conv-lookup', { idempotencyKey: 'idem-lookup' }));
+    if (created.kind !== 'accepted') throw new Error('expected accepted');
     const common = {
       tenantDbName: dbName,
       tenantId,
@@ -225,14 +225,14 @@ describe('Idempotency-Key — races and the pre-conversation lookup', () => {
 
 describe('Concurrency cap (§12.8)', () => {
   it('rejects a new background run once the tenant is at its configured concurrent-run cap', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-a'));
-    const second = await createBackgroundAgentRun(baseInput('conv-b'));
-    expect(first.kind).toBe('created');
-    expect(second.kind).toBe('created');
+    const first = await queueAgentRun(baseInput('conv-a'));
+    const second = await queueAgentRun(baseInput('conv-b'));
+    expect(first.kind).toBe('accepted');
+    expect(second.kind).toBe('accepted');
 
     // Cap is 2 (set in beforeEach) — a third request must be rejected, not
     // silently queued behind the other two.
-    const third = await createBackgroundAgentRun(baseInput('conv-c'));
+    const third = await queueAgentRun(baseInput('conv-c'));
     expect(third.kind).toBe('concurrency_limit');
     if (third.kind === 'concurrency_limit') {
       expect(third.limit).toBe(2);
@@ -243,8 +243,8 @@ describe('Concurrency cap (§12.8)', () => {
     expect(await db.countActiveAgentRuns(tenantId)).toBe(2);
     expect((await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId: 'conv-c' }))).toHaveLength(0);
     expect(hoisted.publish.mock.calls.filter(([, name]) => name === 'run')).toHaveLength(2);
-    const retry = await createBackgroundAgentRun(baseInput('conv-c', { limits: { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 3, maxActivePerProject: 0 } }));
-    expect(retry.kind).toBe('created');
+    const retry = await queueAgentRun(baseInput('conv-c', { limits: { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 3, maxActivePerProject: 0 } }));
+    expect(retry.kind).toBe('accepted');
   });
 
   it('dashboard sync reservations count against the run cap like every other active run (§4.1)', async () => {
@@ -262,7 +262,7 @@ describe('Concurrency cap (§12.8)', () => {
         callbackAttempts: 0,
       });
     }
-    const first = await createBackgroundAgentRun(baseInput('conv-a'));
+    const first = await queueAgentRun(baseInput('conv-a'));
     expect(first.kind).toBe('concurrency_limit');
     // The rejected insert was rolled back, not left queued.
     expect(await db.countActiveAgentRuns(tenantId, undefined, { mode: 'background' })).toBe(0);
@@ -271,57 +271,57 @@ describe('Concurrency cap (§12.8)', () => {
 
   it('concurrent submissions cannot all slip past the cap (count is taken after each insert)', async () => {
     const results = await Promise.all(
-      ['p-1', 'p-2', 'p-3', 'p-4', 'p-5'].map((c) => createBackgroundAgentRun(baseInput(c))),
+      ['p-1', 'p-2', 'p-3', 'p-4', 'p-5'].map((c) => queueAgentRun(baseInput(c))),
     );
-    expect(results.filter((r) => r.kind === 'created').length).toBeLessThanOrEqual(2);
+    expect(results.filter((r) => r.kind === 'accepted').length).toBeLessThanOrEqual(2);
     expect(await db.countActiveAgentRuns(tenantId, undefined, { mode: 'background' })).toBeLessThanOrEqual(2);
   });
 
   it('a per-project cap rejects with scope "project" while the tenant still has room', async () => {
     const limits = { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 10, maxActivePerProject: 1 };
-    expect((await createBackgroundAgentRun(baseInput('conv-p1', { limits }))).kind).toBe('created');
+    expect((await queueAgentRun(baseInput('conv-p1', { limits }))).kind).toBe('accepted');
 
-    const overProject = await createBackgroundAgentRun(baseInput('conv-p2', { limits }));
-    expect(overProject).toEqual({ kind: 'concurrency_limit', limit: 1, scope: 'project' });
+    const overProject = await queueAgentRun(baseInput('conv-p2', { limits }));
+    expect(overProject).toEqual({ kind: 'concurrency_limit', limit: 1, scope: 'project', runClass: 'default' });
 
     // Another project in the same tenant is unaffected.
-    const otherProject = await createBackgroundAgentRun(baseInput('conv-p3', { limits, projectId: 'proj-2' }));
-    expect(otherProject.kind).toBe('created');
+    const otherProject = await queueAgentRun(baseInput('conv-p3', { limits, projectId: 'proj-2' }));
+    expect(otherProject.kind).toBe('accepted');
   });
 
   it('a cap of 0 means no cap', async () => {
     const limits = { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 0, maxActivePerProject: 0 };
     for (const c of ['z-1', 'z-2', 'z-3', 'z-4']) {
-      expect((await createBackgroundAgentRun(baseInput(c, { limits }))).kind).toBe('created');
+      expect((await queueAgentRun(baseInput(c, { limits }))).kind).toBe('accepted');
     }
   });
 
   it('a publish failure deletes the row (the conversation is not left locked) and rethrows', async () => {
     hoisted.publish.mockRejectedValueOnce(new Error('queue down'));
-    await expect(createBackgroundAgentRun(baseInput('conv-publish-fail'))).rejects.toThrow('queue down');
+    await expect(queueAgentRun(baseInput('conv-publish-fail'))).rejects.toThrow('queue down');
     expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
-    expect((await createBackgroundAgentRun(baseInput('conv-publish-fail'))).kind).toBe('created');
+    expect((await queueAgentRun(baseInput('conv-publish-fail'))).kind).toBe('accepted');
   });
 
   it('does not count terminal (finalized) runs against the cap', async () => {
-    const first = await createBackgroundAgentRun(baseInput('conv-a'));
-    if (first.kind !== 'created') throw new Error('expected created');
+    const first = await queueAgentRun(baseInput('conv-a'));
+    if (first.kind !== 'accepted') throw new Error('expected accepted');
     await db.claimAgentRun(String(first.run._id), tenantId, 'worker-1', new Date());
     await db.finalizeAgentRun(String(first.run._id), tenantId, { status: 'succeeded', completedAt: new Date() });
 
-    const second = await createBackgroundAgentRun(baseInput('conv-b'));
-    const third = await createBackgroundAgentRun(baseInput('conv-c'));
-    expect(second.kind).toBe('created');
-    expect(third.kind).toBe('created');
+    const second = await queueAgentRun(baseInput('conv-b'));
+    const third = await queueAgentRun(baseInput('conv-c'));
+    expect(second.kind).toBe('accepted');
+    expect(third.kind).toBe('accepted');
   });
 });
 
 describe('Retention (§12.10)', () => {
-  it('createBackgroundAgentRun sets expiresAt from AGENT_RUN_RETENTION_DAYS', async () => {
+  it('queueAgentRun sets expiresAt from AGENT_RUN_RETENTION_DAYS', async () => {
     process.env.AGENT_RUN_RETENTION_DAYS = '30';
     reloadConfig();
-    const outcome = await createBackgroundAgentRun(baseInput('conv-retention'));
-    if (outcome.kind !== 'created') throw new Error('expected created');
+    const outcome = await queueAgentRun(baseInput('conv-retention'));
+    if (outcome.kind !== 'accepted') throw new Error('expected accepted');
     expect(outcome.run.expiresAt).toBeTruthy();
     const daysUntilExpiry = (new Date(outcome.run.expiresAt!).getTime() - Date.now()) / 86_400_000;
     expect(daysUntilExpiry).toBeGreaterThan(29);
@@ -345,7 +345,7 @@ describe('Retention (§12.10)', () => {
       callbackAttempts: 0,
     });
 
-    await createBackgroundAgentRun(baseInput('conv-new'));
+    await queueAgentRun(baseInput('conv-new'));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(await db.getAgentRunById(String(stale._id), tenantId, PROJECT_ID)).not.toBeNull();
 

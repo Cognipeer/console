@@ -30,8 +30,6 @@ export {
   cancelAgentRun,
   waitForAgentRun,
   resolveAgentRunLimits,
-  runSyncAgentTurn,
-  createBackgroundAgentRun,
   getAgentRunStatus,
   requestAgentRunCancellation,
   isBackgroundModeRequested,

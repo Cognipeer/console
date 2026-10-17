@@ -1,4 +1,11 @@
-import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import {
+  cancelAgentRun,
+  getAgentRunStatus,
+  publicAgentRunId,
+  resolveAgentRunLimits,
+  startAgentRun,
+  type AgentRunLimits,
+} from '@/lib/services/agents/agentRunService';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
@@ -14,19 +21,22 @@ import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
  * unauthenticated by the public-a2a plugin, which reuses the shared
  * `handleA2aRpc` / `buildAgentCard` helpers exported here.
  *
- * State model: A2A `contextId` maps 1:1 onto the existing agent conversation
- * id (the same store the Responses API uses via `resp_<conversationId>`).
- * A turn runs inside the `message/send` call, which returns a `completed` task
- * (or an `input-required` one when the turn paused for an approval or an
- * answer) whose id encodes the conversation and assistant-message index, so
- * `tasks/get` can rebuild it without a separate task collection.
+ * State model: A2A `contextId` maps 1:1 onto the agent conversation (session).
+ * A `message/send` is a run (`startAgentRun`, channel `a2a`) executed inside
+ * the call: it returns a `completed` task (or an `input-required` one when the
+ * turn paused for an approval or an answer), or a `working` one when the wait
+ * window ended first and the run carries on. The task id is the run's id
+ * (`run_<runId>`), so `tasks/get` reads the run and `tasks/cancel` cancels it.
+ * Ids from before (`task_<conversationId>_<messageIndex>`) still resolve
+ * against the conversation's messages.
  */
 
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody, toClientOutputFiles, toClientPendingAction, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IAgent } from '@/lib/database';
+import type { IAgent, IAgentRun } from '@/lib/database';
+import type { AgentChatResponse } from '@/lib/services/agents/agentService';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
 import { isA2aEnabled } from '@/lib/services/agents/a2aExposure';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -37,6 +47,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
+import { resolveInvocationLimits } from './agent-invocation';
 import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
@@ -73,6 +84,8 @@ export interface A2aCallContext {
   /** Attribution identity: the token's user, or a sentinel for public calls. */
   userId: string;
   tokenId?: string;
+  /** The caller's run limits (its wait window included); the env ceilings otherwise. */
+  limits?: AgentRunLimits;
 }
 
 /**
@@ -113,8 +126,68 @@ function extractText(parts: A2aPart[] | undefined): string {
     .join('\n');
 }
 
-function taskId(conversationId: string, messageIndex: number): string {
-  return `task_${conversationId}_${messageIndex}`;
+/** A task id of the run scheme (`run_<runId>`). */
+function isRunTaskId(id: string): boolean {
+  return /^run_[A-Za-z0-9-]+$/.test(id);
+}
+
+function answerTextOf(result: Pick<AgentChatResponse, 'output'> | null | undefined): string {
+  return (result?.output ?? [])
+    .filter((item): item is Extract<typeof item, { type: 'message' }> => item.type === 'message')
+    .flatMap((item) => item.content.map((c) => c.text))
+    .join('');
+}
+
+/** A finished (or paused) turn's answer as its task. */
+function taskFromResponse(id: string, contextId: string, result: AgentChatResponse, baseUrl: string): Record<string, unknown> {
+  const assistantText = answerTextOf(result);
+  if (result.status === 'requires_action') {
+    return inputRequiredTask(id, contextId, assistantText, result.required_action?.actions ?? []);
+  }
+  return completedTask(
+    id,
+    contextId,
+    assistantText,
+    result.stop_reason && result.stop_reason !== 'completed'
+      ? { reason: result.stop_reason, ...(result.stop_detail ? { detail: result.stop_detail } : {}) }
+      : undefined,
+    a2aFileArtifacts(id, result.output_files ?? [], baseUrl),
+  );
+}
+
+/** A task with no answer yet (or none at all): just its state. */
+function stateTask(id: string, contextId: string, state: string, text?: string): Record<string, unknown> {
+  return {
+    kind: 'task',
+    id,
+    contextId,
+    status: {
+      state,
+      timestamp: new Date().toISOString(),
+      ...(text ? { message: { kind: 'message', role: 'agent', messageId: `${id}_status`, parts: [{ kind: 'text', text }] } } : {}),
+    },
+  };
+}
+
+/** The task a run is, in A2A states: submitted (waiting), working, input-required, completed, failed, canceled. */
+function taskFromRun(run: IAgentRun, baseUrl: string): Record<string, unknown> {
+  const id = publicAgentRunId(run);
+  const result = run.result as unknown as AgentChatResponse | null | undefined;
+  switch (run.status) {
+    case 'scheduled':
+    case 'queued':
+      return stateTask(id, run.conversationId, 'submitted');
+    case 'running':
+      return stateTask(id, run.conversationId, 'working');
+    case 'requires_action':
+      return inputRequiredTask(id, run.conversationId, answerTextOf(result), result?.required_action?.actions ?? []);
+    case 'succeeded':
+      return result ? taskFromResponse(id, run.conversationId, result, baseUrl) : completedTask(id, run.conversationId, '');
+    case 'canceled':
+      return stateTask(id, run.conversationId, 'canceled');
+    default:
+      return stateTask(id, run.conversationId, 'failed', run.errorMessage ?? 'The run failed.');
+  }
 }
 
 function parseTaskId(id: string): { conversationId: string; messageIndex: number } | null {
@@ -345,47 +418,54 @@ export async function handleA2aRpc(
         },
       );
 
-      const result = await executeAgentChatExclusive({
-        agentKey: agent.key,
-        conversationId,
-        projectId: ctx.projectId,
+      const limits = ctx.limits ?? await resolveAgentRunLimits();
+      const outcome = await startAgentRun({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
-        usePublished: true,
-        userId: ctx.userId,
+        projectId: ctx.projectId,
+        agentKey: agent.key,
+        conversationId,
         userMessage,
+        userId: ctx.userId,
+        ...(ctx.tokenId ? { apiTokenId: ctx.tokenId, actorType: 'api_token' as const } : {}),
+        usePublished: true,
         runtimeContext,
+        channel: 'a2a',
+        trigger: 'request',
+        // Past the window the run carries on and the caller gets a `working` task to poll with tasks/get.
+        execution: { kind: 'inline', waitMs: limits.syncWaitMs, cancelOnDisconnect: false },
+        limits,
       });
-
-      const assistantText = result.output
-        .filter((item): item is Extract<typeof item, { type: 'message' }> => item.type === 'message')
-        .flatMap((item) => item.content.map((c) => c.text))
-        .join('');
-      const messageIndex = (result._conversation_messages?.length ?? 1) - 1;
-
-      if (result.status === 'requires_action') {
+      if (outcome.kind === 'conflict') {
+        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'An active run (queued or running) already exists for this conversation.', {
+          type: 'agent_run_conflict', code: 'agent_run_conflict',
+        }));
+      }
+      if (outcome.kind === 'concurrency_limit') {
+        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'Too many agent runs are queued or running; retry later.', {
+          type: 'rate_limit_error', code: 'agent_run_concurrency_limit', class: outcome.runClass, scope: outcome.scope, limit: outcome.limit,
+        }));
+      }
+      if (outcome.kind === 'idempotency_conflict') {
+        return reply.code(200).send(jsonRpcError(rpcId, -32603, 'Idempotency conflict', { type: 'idempotency_key_conflict' }));
+      }
+      if (outcome.kind === 'completed') {
         return reply.code(200).send(jsonRpcOk(
           rpcId,
-          inputRequiredTask(taskId(conversationId, messageIndex), conversationId, assistantText, result.required_action?.actions ?? []),
+          taskFromResponse(publicAgentRunId(outcome.run), conversationId, outcome.response, externalBaseUrl(request)),
         ));
       }
-
-      return reply.code(200).send(jsonRpcOk(
-        rpcId,
-        completedTask(
-          taskId(conversationId, messageIndex),
-          conversationId,
-          assistantText,
-          result.stop_reason && result.stop_reason !== 'completed'
-            ? { reason: result.stop_reason, ...(result.stop_detail ? { detail: result.stop_detail } : {}) }
-            : undefined,
-          a2aFileArtifacts(taskId(conversationId, messageIndex), result.output_files ?? [], externalBaseUrl(request)),
-        ),
-      ));
+      // `detached` (the window ended first) and the rest: the run as it stands — `working` while it goes on.
+      return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, externalBaseUrl(request))));
     }
 
     if (method === 'tasks/get') {
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
+      if (isRunTaskId(requestedId)) {
+        const run = await loadTaskRun(ctx, agent, requestedId);
+        if (!run) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+        return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(run, externalBaseUrl(request))));
+      }
       const parsed = requestedId ? parseTaskId(requestedId) : null;
       if (!parsed) {
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
@@ -420,6 +500,34 @@ export async function handleA2aRpc(
       // holds the conversation's run slot, which every node reads. A task that waits on a person
       // (`input-required`) is cancelled with it — its open approvals and questions end as cancelled.
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
+      if (isRunTaskId(requestedId)) {
+        const run = await loadTaskRun(ctx, agent, requestedId);
+        if (!run) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+        if (run.status === 'requires_action' && request.apiTokenContext) {
+          // Ending a task that waits on a request is answering it with "no": the engine says whether this caller may.
+          const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
+          if (conversation) {
+            const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+            if (!verdict.allowed && verdict.unavailable) {
+              return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+                ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+              }));
+            }
+            if (!verdict.allowed) {
+              return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, 'You are not allowed to answer the request this task waits on.', {
+                ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+              }));
+            }
+          }
+        }
+        const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: requestedId });
+        if (outcome.kind === 'not_found') return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+        if (outcome.kind === 'already_terminal') {
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'));
+        }
+        // A running turn stops at its next checkpoint; the task is canceled from here on.
+        return reply.code(200).send(jsonRpcOk(rpcId, stateTask(requestedId, run.conversationId, 'canceled')));
+      }
       const parsed = requestedId ? parseTaskId(requestedId) : null;
       if (!parsed) {
         // Not an id this server hands out: nothing to look up, and nothing that could be canceled.
@@ -494,6 +602,14 @@ export async function handleA2aRpc(
   }
 }
 
+/** The run a `run_<id>` task names, when this caller may see it (this agent, this project, a conversation it started). */
+async function loadTaskRun(ctx: A2aCallContext, agent: IAgent, taskIdValue: string): Promise<IAgentRun | null> {
+  const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, taskIdValue);
+  if (!run || run.mode === 'sync' || run.agentKey !== agent.key) return null;
+  const conversation = await getConversationById(ctx.tenantDbName, run.conversationId).catch(() => null);
+  return conversationVisibleTo(conversation, agent, ctx) ? run : null;
+}
+
 async function loadExposedAgent(
   ctx: ApiTokenContext,
   agentKey: string,
@@ -546,6 +662,7 @@ export const clientA2aApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: ctx.projectId,
           userId: ctx.tokenRecord.userId,
           tokenId: ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined,
+          limits: await resolveInvocationLimits(ctx),
         },
         agent,
         request,

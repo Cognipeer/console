@@ -5,8 +5,11 @@
  *     identical to a missing agent)
  *   - the agent card advertises the JSON-RPC endpoint + bearer security
  *   - message/send maps contextId ↔ conversationId, stamps the caller's
- *     runtime context with source 'a2a', and returns a terminal task
- *   - tasks/get rebuilds a completed task from the conversation store
+ *     runtime context with source 'a2a', runs the turn as a recorded inline
+ *     run (channel a2a) and returns a terminal task named by the run
+ *     (`run_<runId>`), or a `working` one when the wait window ends first
+ *   - tasks/get / tasks/cancel read and cancel the run; the older
+ *     `task_<conv>_<idx>` ids still rebuild from the conversation store
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -51,6 +54,17 @@ vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
   approvalAuthorizerFor: vi.fn(),
 }));
 
+// The caller's wait window: the real limits unless a test shortens it.
+const limits = vi.hoisted(() => ({ override: null as null | Record<string, number> }));
+vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
+  return {
+    ...actual,
+    resolveAgentRunLimits: async (...args: Parameters<typeof actual.resolveAgentRunLimits>) =>
+      (limits.override ? { ...(await actual.resolveAgentRunLimits()), ...limits.override } : actual.resolveAgentRunLimits(...args)),
+  };
+});
+
 vi.mock('@/lib/services/agents/agentService', () => ({
   getAgentByKey: vi.fn(),
   executeAgentChat: vi.fn(),
@@ -93,9 +107,13 @@ const EXPOSED_AGENT = {
 };
 
 const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
-// message/send holds the conversation's single active-run slot for the turn.
+// message/send is a recorded inline run: inserted before the turn, finalized after it.
 const createAgentRun = vi.fn();
 const deleteAgentRun = vi.fn();
+const finalizeAgentRun = vi.fn();
+const markAgentRunDetached = vi.fn();
+const getAgentRunById = vi.fn();
+const requestAgentRunCancel = vi.fn();
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
   return fn as ReturnType<typeof vi.fn>;
@@ -108,9 +126,20 @@ async function buildApp() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-  createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record }));
+  limits.override = null;
+  createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'run-1', ...record }));
   deleteAgentRun.mockResolvedValue(true);
-  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, createAgentRun, deleteAgentRun } as never));
+  finalizeAgentRun.mockImplementation(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({
+    _id: 'run-1', mode: 'inline', agentKey: 'support-bot', conversationId: 'conv-1', ...patch,
+  }));
+  markAgentRunDetached.mockImplementation(async () => ({
+    _id: 'run-1', mode: 'inline', status: 'running', agentKey: 'support-bot', conversationId: 'conv-9', detachedAt: new Date(),
+  }));
+  getAgentRunById.mockResolvedValue(null);
+  requestAgentRunCancel.mockResolvedValue(null);
+  mockFn(getDatabase).mockResolvedValue(createMockDb({
+    runWithTenant, createAgentRun, deleteAgentRun, finalizeAgentRun, markAgentRunDetached, getAgentRunById, requestAgentRunCancel,
+  } as never));
   mockFn(getAgentByKey).mockResolvedValue(EXPOSED_AGENT);
   approval.ending.mockResolvedValue({ allowed: true });
   approval.cancelPending.mockResolvedValue(null);
@@ -182,7 +211,7 @@ describe('message/send', () => {
     expect(body.id).toBe(7);
     expect(body.result.kind).toBe('task');
     expect(body.result.contextId).toBe('conv-1');
-    expect(body.result.id).toBe('task_conv-1_1');
+    expect(body.result.id).toBe('run_run-1');
     expect((body.result.status as { state: string }).state).toBe('completed');
     const artifacts = body.result.artifacts as Array<{ parts: Array<{ text: string }> }>;
     expect(artifacts[0].parts[0].text).toBe('Hi there');
@@ -196,6 +225,7 @@ describe('message/send', () => {
       userId: 'user-1',
       tokenId: 'tok-1',
     });
+    expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'a2a', usePublished: true, apiTokenId: 'tok-1' }));
   });
 
   it('reports a turn that paused for an approval as input-required, with the pending actions', async () => {
@@ -218,7 +248,7 @@ describe('message/send', () => {
     const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
     expect((body.result.status as { state: string }).state).toBe('input-required');
     expect(body.result.metadata).toEqual({ stopReason: 'requires_action', pendingActions: actions });
-    expect(body.result.id).toBe('task_conv-1_1');
+    expect(body.result.id).toBe('run_run-1');
   });
 
   it('a message sent while the task waits on a person names the ids to answer', async () => {
@@ -273,17 +303,13 @@ describe('message/send', () => {
   });
 });
 
-describe('message/send — one active turn per conversation', () => {
-  it('holds a sync reservation for the conversation during the turn and releases it afterwards', async () => {
+describe('message/send — a recorded run, one active turn per conversation', () => {
+  it('inserts the inline run before the turn and finalizes it after (the row is kept, never deleted)', async () => {
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockImplementation(async () => {
-      // While the turn runs, the slot is held and not yet released.
-      expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({
-        mode: 'sync',
-        conversationId: 'conv-9',
-        status: 'running',
-      }));
-      expect(deleteAgentRun).not.toHaveBeenCalled();
+      // While the turn runs, the run holds the conversation and is not finalized yet.
+      expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', conversationId: 'conv-9', status: 'running' }));
+      expect(finalizeAgentRun).not.toHaveBeenCalled();
       return {
         output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
         _conversation_messages: [{}, {}],
@@ -299,7 +325,8 @@ describe('message/send — one active turn per conversation', () => {
     });
 
     expect(parseJsonBody<{ result: { contextId: string } }>(res.body).result.contextId).toBe('conv-9');
-    expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'succeeded' }));
+    expect(deleteAgentRun).not.toHaveBeenCalled();
   });
 
   it('REGRESSION: a conversation busy with another run (e.g. a background run) is refused with agent_run_conflict, never run concurrently', async () => {
@@ -321,19 +348,106 @@ describe('message/send — one active turn per conversation', () => {
     expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
   });
 
-  it('releases the reservation even when the turn throws', async () => {
+  it('a turn that throws is finalized failed and answered as a JSON-RPC error', async () => {
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockRejectedValue(new Error('provider exploded'));
 
     const app = await buildApp();
-    await app.inject({
+    const res = await app.inject({
       method: 'POST',
       url: '/api/client/v1/a2a/support-bot',
       headers: { authorization: 'Bearer tok' },
       payload: { jsonrpc: '2.0', id: 6, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
     });
 
-    expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+    expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32603);
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed', errorReason: 'agent_error' }));
+  });
+
+  it('past the wait window the task comes back working, named by its run, and the run carries on', async () => {
+    limits.override = { syncWaitMs: 30 };
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    let finish!: () => void;
+    mockFn(executeAgentChat).mockImplementation(() => new Promise((resolve) => {
+      finish = () => resolve({ output: [], _conversation_messages: [] });
+    }));
+
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 11, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Slow' }], contextId: 'conv-9' } } },
+    });
+
+    const body = parseJsonBody<{ result: { id: string; contextId: string; status: { state: string } } }>(res.body);
+    expect(body.result).toMatchObject({ id: 'run_run-1', contextId: 'conv-9', status: { state: 'working' } });
+    expect(markAgentRunDetached).toHaveBeenCalled();
+    expect(finalizeAgentRun).not.toHaveBeenCalled();
+    finish();
+    await vi.waitFor(() => expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'succeeded' })));
+  });
+});
+
+describe('tasks/get and tasks/cancel on run ids (run_<runId>)', () => {
+  const rpc = async (method: string, id: string) => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method, params: { id } },
+    });
+    return parseJsonBody<{ result?: Record<string, any>; error?: { code: number } }>(res.body);
+  };
+  const row = (overrides: Record<string, unknown>) => ({
+    _id: 'run-1', mode: 'inline', agentKey: 'support-bot', conversationId: 'conv-9', tenantId: 'tenant-1', projectId: 'proj-1', ...overrides,
+  });
+
+  beforeEach(() => {
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+  });
+
+  it.each([
+    ['queued', 'submitted'], ['running', 'working'], ['failed', 'failed'], ['canceled', 'canceled'],
+  ])('a %s run reads as %s', async (status, state) => {
+    getAgentRunById.mockResolvedValue(row({ status, errorMessage: 'boom' }));
+    const body = await rpc('tasks/get', 'run_run-1');
+    expect(body.result).toMatchObject({ kind: 'task', id: 'run_run-1', contextId: 'conv-9', status: { state } });
+    expect(getAgentRunById).toHaveBeenCalledWith('run-1', 'tenant-1', 'proj-1');
+  });
+
+  it('a finished run reads as its completed task, with the answer as the artifact', async () => {
+    getAgentRunById.mockResolvedValue(row({
+      status: 'succeeded',
+      result: { status: 'completed', output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done' }] }] },
+    }));
+    const body = await rpc('tasks/get', 'run_run-1');
+    expect(body.result!.status.state).toBe('completed');
+    expect(body.result!.artifacts[0].parts[0].text).toBe('Done');
+  });
+
+  it('a run of another agent, or on a conversation the caller did not start, is TaskNotFound', async () => {
+    getAgentRunById.mockResolvedValue(row({ status: 'running', agentKey: 'other-agent' }));
+    expect((await rpc('tasks/get', 'run_run-1')).error?.code).toBe(-32001);
+
+    getAgentRunById.mockResolvedValue(row({ status: 'running' }));
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'someone-else', messages: [] });
+    expect((await rpc('tasks/get', 'run_run-1')).error?.code).toBe(-32001);
+    expect((await rpc('tasks/cancel', 'run_run-1')).error?.code).toBe(-32001);
+  });
+
+  it('tasks/cancel cancels the run (cancelAgentRun): a queued one at once', async () => {
+    getAgentRunById.mockResolvedValue(row({ mode: 'background', status: 'queued' }));
+    requestAgentRunCancel.mockResolvedValue(row({ mode: 'background', status: 'canceled' }));
+    const body = await rpc('tasks/cancel', 'run_run-1');
+    expect(body.result).toMatchObject({ id: 'run_run-1', status: { state: 'canceled' } });
+    expect(requestAgentRunCancel).toHaveBeenCalledWith('run-1', 'tenant-1', 'proj-1');
+  });
+
+  it('tasks/cancel of a finished run cannot cancel it (-32004)', async () => {
+    getAgentRunById.mockResolvedValue(row({ status: 'succeeded' }));
+    expect((await rpc('tasks/cancel', 'run_run-1')).error?.code).toBe(-32004);
   });
 });
 

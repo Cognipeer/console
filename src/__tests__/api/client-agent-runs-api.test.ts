@@ -19,7 +19,7 @@ const hoisted = vi.hoisted(() => ({
   startAgentRun: vi.fn(),
   waitForAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
-  requestAgentRunCancellation: vi.fn(),
+  cancelAgentRun: vi.fn(),
   listAgentRuns: vi.fn(),
   lookupIdempotentAgentRun: vi.fn(),
   resolveAgentRunLimits: vi.fn(),
@@ -64,7 +64,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     startAgentRun: hoisted.startAgentRun,
     waitForAgentRun: hoisted.waitForAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
-    requestAgentRunCancellation: hoisted.requestAgentRunCancellation,
+    cancelAgentRun: hoisted.cancelAgentRun,
     listAgentRuns: hoisted.listAgentRuns,
     lookupIdempotentAgentRun: hoisted.lookupIdempotentAgentRun,
     resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
@@ -471,7 +471,7 @@ describe('GET /client/v1/agents/runs/:runId', () => {
   it('a run of another project (or a sync reservation) is 404 on every run route', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue(null);
     // The cancel asks the engine, which scopes by project the same way.
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'not_found' });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'not_found' });
     for (const [method, url] of [
       ['GET', '/api/client/v1/agents/runs/run_r1'],
       ['POST', '/api/client/v1/agents/runs/run_r1/cancel'],
@@ -485,7 +485,7 @@ describe('GET /client/v1/agents/runs/:runId', () => {
     }
     // Looked up in the caller's project only.
     for (const call of hoisted.getAgentRunStatus.mock.calls) expect(call.slice(0, 3)).toEqual(['tenant_acme', 'tenant-1', 'proj-1']);
-    expect(hoisted.requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run_r1');
+    expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run_r1' });
     hoisted.getAgentRunStatus.mockResolvedValue(run({ mode: 'sync', status: 'running' }));
     expect((await app.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run_r1', headers: HEADERS })).statusCode).toBe(404);
   });
@@ -496,7 +496,7 @@ describe('POST /client/v1/agents/runs/:runId/cancel', () => {
 
   it('a queued run is canceled at once', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue(run());
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'accepted', run: run({ status: 'canceled', errorReason: 'canceled_by_caller' }) });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ status: 'canceled', errorReason: 'canceled_by_caller' }) });
     const res = await cancel();
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody(res.body)).toMatchObject({ status: 'canceled', error: { type: 'canceled_by_caller' } });
@@ -504,14 +504,14 @@ describe('POST /client/v1/agents/runs/:runId/cancel', () => {
 
   it('a running run comes back still running, with cancel_requested_at', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue(run({ status: 'running' }));
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'accepted', run: run({ status: 'running', cancelRequestedAt: CREATED }) });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ status: 'running', cancelRequestedAt: CREATED }) });
     const res = await cancel();
     expect(parseJsonBody(res.body)).toMatchObject({ status: 'running', cancel_requested_at: Math.floor(CREATED.getTime() / 1000) });
   });
 
   it('a paused run is settled canceled for a caller that may answer its open request', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue(run({ status: 'requires_action' }));
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'accepted', run: run({ status: 'canceled' }) });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ status: 'canceled' }) });
     const res = await cancel();
     expect(res.statusCode).toBe(200);
     expect(hoisted.authorizeEndingOpenRequests).toHaveBeenCalled();
@@ -520,7 +520,7 @@ describe('POST /client/v1/agents/runs/:runId/cancel', () => {
 
   it('a finished run is a 409 agent_run_already_terminal', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue(run({ status: 'succeeded' }));
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'already_terminal', run: run({ status: 'succeeded' }) });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'already_terminal', run: run({ status: 'succeeded' }) });
     const res = await cancel();
     expect(res.statusCode).toBe(409);
     expect(parseJsonBody(res.body)).toMatchObject({ error: { type: 'agent_run_already_terminal', code: 'agent_run_already_terminal', status: 'succeeded' } });

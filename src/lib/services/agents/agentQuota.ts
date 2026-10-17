@@ -11,7 +11,7 @@
  *                             schedules, evaluations, red team
  *   executePlaygroundChat     dashboard playground, portals, realtime voice
  *   dashboard /chat/stream    calls the playground runtime directly (agents.ts)
- *   createBackgroundAgentRun  background runs, checked at submit so the caller
+ *   startAgentRun (queued)    queued runs, checked at submit so the caller
  *                             gets the 429 instead of a run that fails later
  *
  * It deliberately does NOT sit in `executeAgentChatLocal` / `executePlaygroundChatLocal`:

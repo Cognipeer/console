@@ -57,14 +57,10 @@ vi.mock('@/lib/services/agents', () => ({
   prepareConnectionForStorage: vi.fn(),
   publishAgent: vi.fn(),
   updateAgentRecord: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
   agentRunConflictErrorBody: () => ({ error: 'conflict' }),
-  agentSyncTimeoutErrorBody: () => ({ error: 'timeout' }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({ error: 'idem' }),
   idempotencyKeyConflictErrorBody: () => ({ error: 'idem' }),
   agentRunConcurrencyLimitErrorBody: () => ({ error: 'cap' }),
 }));
@@ -126,6 +122,11 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   agentDefaultCallback: () => ({}),
   lookupIdempotentAgentRun: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  startAgentRun: vi.fn(),
+  waitForAgentRun: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  isAgentRunActive: (run: { status: string }) => ['scheduled', 'queued', 'running'].includes(run.status),
+  publicAgentRunId: (run: { _id: string }) => `run_${run._id}`,
 }));
 
 import { getDatabase } from '@/lib/database';
@@ -133,11 +134,9 @@ import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import {
   createConversation,
-  createBackgroundAgentRun,
   getAgentById,
   getAgentByKey,
   getConversationById,
-  runSyncAgentTurn,
 } from '@/lib/services/agents';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
@@ -145,7 +144,7 @@ import { deleteSessionFile, listSessionFiles, readSessionFileContent, uploadSess
 import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
-import { resolveAgentRunLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
+import { resolveAgentRunLimits, startAgentRun, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { agentSessionFilesApiPlugin } from '@/server/api/plugins/agent-session-files';
@@ -635,13 +634,17 @@ describe('dashboard chat bodies', () => {
 
 describe('client Responses: input_file / input_image', () => {
   const responses = async () => createFastifyApiTestApp(clientAgentsApiPlugin);
-  const syncOk = { kind: 'ok', response: { id: 'resp_conv-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] } };
+  const syncOk = {
+    kind: 'completed',
+    run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'field-ops' },
+    response: { id: 'resp_run-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] },
+  };
 
   beforeEach(() => {
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: FILES_ON } });
     mockFn(createConversation).mockResolvedValue(conversation());
     mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
-    mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
+    mockFn(startAgentRun).mockResolvedValue(syncOk);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['up1', 'up2'], named: [] });
   });
 
@@ -667,7 +670,7 @@ describe('client Responses: input_file / input_image', () => {
       ],
       actor: { userId: 'user-1', licenseType: 'STARTER', tokenId: 'tok-1' },
     }));
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ userMessage: 'compare', attachments: ['up1', 'up2'], conversationId: 'conv-1' });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ userMessage: 'compare', attachments: ['up1', 'up2'], conversationId: 'conv-1' });
     await r.close();
   });
 
@@ -675,7 +678,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     const res = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,QUJD' }] }] });
     expect(res.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request.userMessage).toBe('');
+    expect(mockFn(startAgentRun).mock.calls[0]![0].userMessage).toBe('');
     await r.close();
   });
 
@@ -683,7 +686,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     await post(r, { model: 'field-ops', input: 'hello' });
     expect(storeResponseInputFiles).not.toHaveBeenCalled();
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).not.toHaveProperty('attachments');
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).not.toHaveProperty('attachments');
     await r.close();
   });
 
@@ -730,12 +733,12 @@ describe('client Responses: input_file / input_image', () => {
     }
     expect(createConversation).not.toHaveBeenCalled();
     expect(storeResponseInputFiles).not.toHaveBeenCalled();
-    expect(runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(startAgentRun).not.toHaveBeenCalled();
 
     // A request without file parts is untouched by the change.
     const text = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_text', text: 'just text' }] }] });
     expect(text.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ userMessage: 'just text' });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ userMessage: 'just text' });
     await r.close();
 
     // The change is written down where clients look for it.
@@ -759,7 +762,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     const ok = await post(r, { model: 'field-ops', previous_response_id: 'resp_conv-1', input: [{ role: 'user', content: [{ type: 'input_text', text: 'again' }, { type: 'input_file', file_id: 'f1' }] }] });
     expect(ok.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ conversationId: 'conv-1', attachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ conversationId: 'conv-1', attachments: ['f1'] });
 
     mockFn(storeResponseInputFiles).mockRejectedValue(new AgentAttachmentError(413, 'file_too_large', 'too big'));
     const refused = await post(r, { model: 'field-ops', previous_response_id: 'resp_conv-1', input: [{ role: 'user', content: [{ type: 'input_file', file_data: 'QUJD', filename: 'a.txt' }] }] });
@@ -771,7 +774,7 @@ describe('client Responses: input_file / input_image', () => {
   it('a background run carries the attachments; only the ids the caller named identify it for idempotency', async () => {
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['f1', 'up1'], named: ['f1'] });
     mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'field-ops' }));
-    mockFn(createBackgroundAgentRun).mockResolvedValue({ kind: 'created', run: { _id: 'run-1', status: 'queued' } });
+    mockFn(startAgentRun).mockResolvedValue({ kind: 'accepted', run: { _id: 'run-1', status: 'queued', mode: 'background', conversationId: 'conv-1', agentKey: 'field-ops' } });
     mockFn(validateCallbackRequest).mockResolvedValue({ ok: true });
     const r = await responses();
     const res = await post(r, {
@@ -779,14 +782,18 @@ describe('client Responses: input_file / input_image', () => {
       input: [{ role: 'user', content: [{ type: 'input_file', file_id: 'f1' }, { type: 'input_file', file_data: 'QUJD', filename: 'b.txt' }] }],
     });
     expect(res.statusCode).toBe(202);
-    expect(mockFn(createBackgroundAgentRun).mock.calls[0]![0]).toMatchObject({ attachments: ['f1', 'up1'], idempotencyAttachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ attachments: ['f1', 'up1'], idempotencyAttachments: ['f1'] });
     await r.close();
   });
 });
 
 describe('client Responses: continuing a session with session_id / conversation', () => {
   const responses = async () => createFastifyApiTestApp(clientAgentsApiPlugin);
-  const syncOk = { kind: 'ok', response: { id: 'resp_conv-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] } };
+  const syncOk = {
+    kind: 'completed',
+    run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'field-ops' },
+    response: { id: 'resp_run-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] },
+  };
   const post = (app2: Awaited<ReturnType<typeof responses>>, payload: Record<string, unknown>) =>
     app2.inject({ method: 'POST', url: '/api/client/v1/agents/responses', headers: clientHeaders, payload });
   const fileInput = [{ role: 'user', content: [{ type: 'input_text', text: 'read it' }, { type: 'input_file', file_id: 'f1' }] }];
@@ -796,7 +803,7 @@ describe('client Responses: continuing a session with session_id / conversation'
     mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'field-ops', metadata: { source: 'api' } }));
     mockFn(createConversation).mockResolvedValue(conversation());
     mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
-    mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
+    mockFn(startAgentRun).mockResolvedValue(syncOk);
     mockFn(pendingActionsBlockingMessage).mockResolvedValue(null);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['f1'], named: ['f1'] });
   });
@@ -807,17 +814,17 @@ describe('client Responses: continuing a session with session_id / conversation'
     expect(res.statusCode).toBe(200);
     expect(getConversationById).toHaveBeenCalledWith('tenant_acme', 'conv-1');
     expect(createConversation).not.toHaveBeenCalled();
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ conversationId: 'conv-1', userMessage: 'read it', attachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ conversationId: 'conv-1', userMessage: 'read it', attachments: ['f1'] });
     await r.close();
   });
 
   it('conversation is the OpenAI-style alias: a string, or { id }', async () => {
     const r = await responses();
     for (const conversationRef of ['conv-1', { id: 'conv-1' }]) {
-      mockFn(runSyncAgentTurn).mockClear();
+      mockFn(startAgentRun).mockClear();
       const res = await post(r, { model: 'field-ops', conversation: conversationRef, input: 'hi' });
       expect(res.statusCode).toBe(200);
-      expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request.conversationId).toBe('conv-1');
+      expect(mockFn(startAgentRun).mock.calls[0]![0].conversationId).toBe('conv-1');
     }
     await r.close();
   });
@@ -849,7 +856,7 @@ describe('client Responses: continuing a session with session_id / conversation'
       mockFn(getConversationById).mockResolvedValue(conversation(other));
       expect((await post(r, { model: 'field-ops', session_id: 'conv-1', input: 'hi' })).statusCode).toBe(404);
     }
-    expect(runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(startAgentRun).not.toHaveBeenCalled();
     await r.close();
   });
 

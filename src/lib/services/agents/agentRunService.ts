@@ -431,9 +431,9 @@ export async function reserveConversationForSyncTurn(
  * `executeAgentChat` holding the conversation's slot for the whole turn;
  * throws `AgentRunConflictError` (→ 409 via `classifyAgentRunError`) when
  * another run holds it. For entry points that run a turn on an EXISTING
- * conversation outside the /responses ceiling (OpenAI bridge, A2A,
- * Assistants): without the slot those turns could overlap a background run on
- * the same conversation and one would overwrite the other's history.
+ * conversation outside the run engine (the Assistants adapter): without the
+ * slot those turns could overlap a background run on the same conversation
+ * and one would overwrite the other's history.
  */
 export async function executeAgentChatExclusive(request: AgentChatRequest): Promise<AgentChatResponse> {
   const reservation = await reserveConversationForSyncTurn(await getDatabase(), request);
@@ -529,6 +529,10 @@ export interface StartAgentRunInput {
   modelKey?: string;
   /** Inline only. */
   requestReasoning?: AgentChatRequest['requestReasoning'];
+  /** Inline only: a caller that cannot answer an approval (chat completions) — gated tools follow the agent's unattended policy. */
+  unattended?: boolean;
+  /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
+  answersClientTools?: boolean;
   responseFormat?: AgentResponseFormat | null;
   inputs?: Record<string, unknown> | null;
   /** Default `default`. A `deferred` run is always queued. */
@@ -992,6 +996,8 @@ function executeInlineRun(
     ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
     ...(input.modelKey ? { modelKey: input.modelKey } : {}),
     ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
+    ...(input.unattended ? { unattended: true } : {}),
+    ...(input.answersClientTools ? { answersClientTools: true } : {}),
     ...(input.responseFormat ? { responseFormat: input.responseFormat } : {}),
     ...(input.inputs ? { inputs: input.inputs } : {}),
     ...(execution.stream?.onTextChunk ? { onTextChunk: execution.stream.onTextChunk } : {}),
@@ -1093,132 +1099,6 @@ function executeInlineRun(
     settled,
   });
   return { settled, detach };
-}
-
-// ── Thin wrappers kept for the dialects not yet on `startAgentRun` ───────
-
-export type SyncRunOutcome =
-  | { kind: 'ok'; response: AgentChatResponse; run: IAgentRun }
-  | { kind: 'detached'; run: IAgentRun }
-  | { kind: 'replay'; run: IAgentRun }
-  | { kind: 'idempotency_conflict' }
-  | { kind: 'conflict' }
-  | { kind: 'concurrency_limit'; limit: number; scope: 'tenant' | 'project' };
-
-export interface RunSyncAgentTurnInput {
-  request: AgentChatRequest;
-  /** The caller's wait window (`resolveAgentRunLimits().syncWaitMs`); defaults to the env value. */
-  syncTimeoutMs?: number;
-  limits?: AgentRunLimits;
-  apiTokenId?: string;
-  channel?: IAgentRun['channel'];
-  callback?: { url: string; secret?: string } | null;
-  idempotencyKey?: string;
-  idempotencyConversationScope?: string | null;
-  idempotencyAttachments?: string[];
-}
-
-/**
- * A synchronous API turn: an inline run (§4.2) that waits up to the window and
- * then detaches (`detached` → 202) instead of failing; the run keeps going.
- */
-export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<SyncRunOutcome> {
-  const { request } = input;
-  const limits = input.limits ?? envRunLimits();
-  const outcome = await startAgentRun({
-    tenantId: request.tenantId,
-    tenantDbName: request.tenantDbName,
-    projectId: request.projectId,
-    agentKey: request.agentKey,
-    conversationId: request.conversationId,
-    userMessage: request.userMessage,
-    ...(request.attachments?.length ? { attachments: request.attachments } : {}),
-    ...(input.idempotencyAttachments ? { idempotencyAttachments: input.idempotencyAttachments } : {}),
-    userId: request.userId,
-    ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
-    version: request.version,
-    usePublished: request.usePublished,
-    runtimeContext: request.runtimeContext,
-    modelKey: request.modelKey,
-    requestReasoning: request.requestReasoning,
-    channel: input.channel ?? 'responses',
-    callback: input.callback ?? null,
-    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-    idempotencyConversationScope: input.idempotencyConversationScope,
-    execution: {
-      kind: 'inline',
-      waitMs: input.syncTimeoutMs ?? limits.syncWaitMs,
-      ...(request.signal ? { signal: request.signal } : {}),
-      cancelOnDisconnect: false,
-    },
-    limits,
-  });
-  if (outcome.kind === 'completed') return { kind: 'ok', response: outcome.response, run: outcome.run };
-  if (outcome.kind === 'accepted') return { kind: 'detached', run: outcome.run };
-  if (outcome.kind === 'concurrency_limit') return { kind: 'concurrency_limit', limit: outcome.limit, scope: outcome.scope };
-  return outcome;
-}
-
-export interface CreateBackgroundAgentRunInput {
-  tenantId: string;
-  tenantDbName: string;
-  projectId: string;
-  agentKey: string;
-  conversationId: string;
-  userMessage: string;
-  attachments?: string[];
-  idempotencyAttachments?: string[];
-  userId: string;
-  version?: number;
-  usePublished?: boolean;
-  runtimeContext?: AgentRuntimeContext;
-  apiTokenId?: string;
-  callbackUrl?: string;
-  /** Plaintext; sealed before it is stored. */
-  callbackSecret?: string;
-  idempotencyKey?: string;
-  idempotencyConversationScope?: string | null;
-  limits?: AgentRunLimits;
-}
-
-export type CreateBackgroundAgentRunOutcome =
-  | { kind: 'created'; run: IAgentRun }
-  | { kind: 'idempotent_replay'; run: IAgentRun }
-  | { kind: 'idempotency_conflict' }
-  | { kind: 'conflict' }
-  | { kind: 'concurrency_limit'; limit: number; scope: 'tenant' | 'project' };
-
-/** A queued (`background: true`) API turn — `startAgentRun` with queued execution. */
-export async function createBackgroundAgentRun(
-  input: CreateBackgroundAgentRunInput,
-): Promise<CreateBackgroundAgentRunOutcome> {
-  const outcome = await startAgentRun({
-    tenantId: input.tenantId,
-    tenantDbName: input.tenantDbName,
-    projectId: input.projectId,
-    agentKey: input.agentKey,
-    conversationId: input.conversationId,
-    userMessage: input.userMessage,
-    ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-    ...(input.idempotencyAttachments ? { idempotencyAttachments: input.idempotencyAttachments } : {}),
-    userId: input.userId,
-    version: input.version,
-    usePublished: input.usePublished,
-    runtimeContext: input.runtimeContext,
-    ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
-    actorType: 'api_token',
-    channel: 'responses',
-    callback: input.callbackUrl ? { url: input.callbackUrl, ...(input.callbackSecret ? { secret: input.callbackSecret } : {}) } : null,
-    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-    idempotencyConversationScope: input.idempotencyConversationScope,
-    execution: { kind: 'queued' },
-    ...(input.limits ? { limits: input.limits } : {}),
-  });
-  if (outcome.kind === 'accepted') return { kind: 'created', run: outcome.run };
-  if (outcome.kind === 'replay') return { kind: 'idempotent_replay', run: outcome.run };
-  if (outcome.kind === 'concurrency_limit') return { kind: 'concurrency_limit', limit: outcome.limit, scope: outcome.scope };
-  if (outcome.kind === 'idempotency_conflict' || outcome.kind === 'conflict') return outcome;
-  throw new Error(`Unexpected outcome for a queued run: ${outcome.kind}`);
 }
 
 // ── §4.3: deferred dispatch ──────────────────────────────────────────────

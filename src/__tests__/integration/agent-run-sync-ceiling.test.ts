@@ -3,11 +3,11 @@
  * waits up to its window and then DETACHES (the call answers 202, the run
  * keeps going and notifies when it ends) instead of failing at the window.
  *
- * `runSyncAgentTurn` (agentRunService.ts) is exercised against a REAL
+ * `startAgentRun` with inline execution (agentRunService.ts) is exercised against a REAL
  * SQLite provider (so the single-active-run partial-unique-index guard,
  * §12.14, is genuinely exercised, not mocked) with only `executeAgentChat`
  * itself faked — this test is about the RACE/reservation orchestration in
- * `runSyncAgentTurn`, not the SDK invocation pipeline (already covered by
+ * the inline run, not the SDK invocation pipeline (already covered by
  * `agent-chat-cancellation-cell.test.ts` and the promoted spike).
  *
  * A deliberately slow `executeAgentChat` proves the call returns `detached`
@@ -52,11 +52,11 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import {
   AGENT_RUN_CALLBACK_QUEUE,
-  createBackgroundAgentRun,
-  runSyncAgentTurn,
   startAgentRun,
+  type AgentRunLimits,
   type StartAgentRunInput,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,7 +125,17 @@ function inlineInput(conversationId: string, execution: Partial<Extract<StartAge
   };
 }
 
-describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
+/** A plain synchronous API turn: an inline run waiting `waitMs` (the env window by default). */
+function syncTurn(conversationId: string, waitMs = 5_000, limits?: AgentRunLimits) {
+  return startAgentRun({
+    ...baseRequest(conversationId),
+    channel: 'responses',
+    execution: { kind: 'inline', waitMs, cancelOnDisconnect: false },
+    ...(limits ? { limits } : {}),
+  });
+}
+
+describe('inline run — wait window and detach (§4.2)', () => {
   it('detaches at the window, not when the slow call eventually finishes', async () => {
     hoisted.executeAgentChat.mockImplementation(async () => {
       await delay(400);
@@ -133,7 +143,7 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
     });
 
     const startedAt = Date.now();
-    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-timeout'), syncTimeoutMs: 60 });
+    const outcome = await syncTurn('conv-timeout', 60);
     const elapsedMs = Date.now() - startedAt;
 
     expect(outcome.kind).toBe('detached');
@@ -162,11 +172,7 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
     });
 
     const startedAt = Date.now();
-    const outcome = await runSyncAgentTurn({
-      request: baseRequest('conv-held'),
-      syncTimeoutMs: 60,
-      limits: { syncWaitMs: 60, maxDurationMs: 60_000, maxActivePerTenant: 0, maxActivePerProject: 0 },
-    });
+    const outcome = await syncTurn('conv-held', 60, { syncWaitMs: 60, maxDurationMs: 60_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
     expect(outcome.kind).toBe('detached');
 
     // The turn is not cancelled by the window; its deadline is the run's ceiling.
@@ -176,7 +182,7 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
     // Still running: another turn on this conversation is refused.
     expect(await db.countActiveAgentRuns(tenantId, PROJECT_ID, { mode: 'inline' })).toBe(1);
     const callsBefore = hoisted.executeAgentChat.mock.calls.length;
-    const meanwhile = await runSyncAgentTurn({ request: baseRequest('conv-held'), syncTimeoutMs: 60 });
+    const meanwhile = await syncTurn('conv-held', 60);
     expect(meanwhile.kind).toBe('conflict');
     expect(hoisted.executeAgentChat.mock.calls.length).toBe(callsBefore);
 
@@ -190,7 +196,7 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
     let failTurn!: (error: Error) => void;
     hoisted.executeAgentChat.mockImplementation(() => new Promise((_, reject) => { failTurn = reject; }));
 
-    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-held-reject'), syncTimeoutMs: 60 });
+    const outcome = await syncTurn('conv-held-reject', 60);
     expect(outcome.kind).toBe('detached');
     expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
 
@@ -206,10 +212,10 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
   it('a turn that completes in time is recorded as a succeeded inline run before returning', async () => {
     hoisted.executeAgentChat.mockResolvedValue(okResponse('resp_ok'));
 
-    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-quick'), syncTimeoutMs: 1_000 });
-    expect(outcome.kind).toBe('ok');
+    const outcome = await syncTurn('conv-quick', 1_000);
+    expect(outcome.kind).toBe('completed');
     expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
-    if (outcome.kind !== 'ok') return;
+    if (outcome.kind !== 'completed') return;
     expect(outcome.run).toMatchObject({ mode: 'inline', status: 'succeeded' });
     expect(outcome.run.detachedAt ?? null).toBeNull();
   });
@@ -217,7 +223,7 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
   it('a turn that throws before the window releases the conversation and rethrows', async () => {
     hoisted.executeAgentChat.mockRejectedValue(new Error('provider exploded'));
 
-    await expect(runSyncAgentTurn({ request: baseRequest('conv-throw'), syncTimeoutMs: 1_000 })).rejects.toThrow('provider exploded');
+    await expect(syncTurn('conv-throw', 1_000)).rejects.toThrow('provider exploded');
     expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
   });
 
@@ -227,14 +233,14 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
       return { id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null };
     });
     const conversationId = 'conv-conflict';
-    const firstPromise = runSyncAgentTurn({ request: baseRequest(conversationId) });
+    const firstPromise = syncTurn(conversationId);
     await delay(20); // let the first call's reservation land before racing the second
 
-    const secondOutcome = await runSyncAgentTurn({ request: baseRequest(conversationId) });
+    const secondOutcome = await syncTurn(conversationId);
     expect(secondOutcome.kind).toBe('conflict');
 
     const firstOutcome = await firstPromise;
-    expect(firstOutcome.kind).toBe('ok');
+    expect(firstOutcome.kind).toBe('completed');
   });
 
   it('a background request against a conversation with an in-flight sync run also gets a conflict (§12.14)', async () => {
@@ -243,10 +249,10 @@ describe('runSyncAgentTurn — wait window and detach (§4.2)', () => {
       return { id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null };
     });
     const conversationId = 'conv-cross-mode-conflict';
-    const firstPromise = runSyncAgentTurn({ request: baseRequest(conversationId) });
+    const firstPromise = syncTurn(conversationId);
     await delay(20);
 
-    const backgroundOutcome = await createBackgroundAgentRun({
+    const backgroundOutcome = await queueAgentRun({
       tenantId,
       tenantDbName: dbName,
       projectId: PROJECT_ID,
