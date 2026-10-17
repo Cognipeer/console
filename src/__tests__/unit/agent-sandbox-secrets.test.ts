@@ -19,6 +19,7 @@ import {
     sealAgentConfigSecrets,
     scrubSecretValues,
     sealAgentSandboxConfig,
+    sandboxSecretsConflict,
 } from '@/lib/services/agents/agentSandboxSecrets';
 import { openAgentCallbackSecret, sealAgentCallbackConfig } from '@/lib/services/agents/agentCallbackConfig';
 import type { IAgentConfig } from '@/lib/database';
@@ -100,6 +101,29 @@ describe('secrets that cannot be decrypted (the encryption key changed)', () => 
         const masked = maskAgentSandboxConfig(unreadable)!;
         expect(masked.secretsSealed).toBeUndefined();
         expect(masked.secrets).toBeUndefined();
+    });
+
+    it('a read says so: secretsUnreadable on the agent, never on a sandbox that can be opened, never in a manifest', () => {
+        const agent = { config: { modelKey: 'm', sandbox: unreadable } } as { config: IAgentConfig };
+        expect(maskAgentSandboxSecrets(agent).config.sandbox).toEqual({ enabled: true, secretsUnreadable: true });
+        const readable = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined);
+        expect(maskAgentSandboxSecrets({ config: { modelKey: 'm', sandbox: readable } } as { config: IAgentConfig }).config.sandbox)
+            .toEqual({ enabled: true, secrets: { A: MASK } });
+        expect(maskAgentSandboxConfig(unreadable)).not.toHaveProperty('secretsUnreadable');
+    });
+
+    it('a save conflicts only when masks are mixed with other values over ciphertext that cannot be opened', () => {
+        const mixed = { enabled: true, secrets: { A: MASK, B: 'fresh-value' } };
+        expect(sandboxSecretsConflict(mixed, unreadable)).toBe(true);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: MASK, B: '' } }, unreadable)).toBe(true);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: MASK, B: MASK } }, unreadable)).toBe(false);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: 'fresh-value' } }, unreadable)).toBe(false);
+        expect(sandboxSecretsConflict({ enabled: true }, unreadable)).toBe(false);
+        // Readable or absent ciphertext merges as before.
+        const readable = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined);
+        expect(sandboxSecretsConflict(mixed, readable)).toBe(false);
+        expect(sandboxSecretsConflict(mixed, { enabled: true })).toBe(false);
+        expect(sandboxSecretsConflict(mixed, undefined)).toBe(false);
     });
 
     it('entering values without any mask replaces them (a deliberate re-entry)', () => {

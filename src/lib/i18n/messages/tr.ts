@@ -3010,6 +3010,10 @@ export const tr: typeof en = {
       unchanged: 'Değişmedi',
       noDifferences: 'Fark bulunamadı',
     },
+    sandboxSecrets: {
+      unreadableTitle: 'Kayıtlı gizli değerler çözülemiyor',
+      unreadableBody: 'Bu sandbox için kaydedilen gizli değerler çözülemiyor; büyük olasılıkla şifreleme anahtarı değişti. Değiştirilene kadar komutlar bunlar olmadan çalışır. Değiştirmek için tüm değerleri yeniden girin.',
+    },
     sandboxSeed: {
       title: 'Önceden yüklenen dosyalar',
       description: 'Sandbox başlarken, ajan çalışmadan önce içine yazılan dosyalar (örneğin bir sunum şablonu). Her dosyanın konulacağı yolu belirleyin; ajana bu dosyalar bildirilir.',
@@ -3375,8 +3379,7 @@ export const tr: typeof en = {
       publishNote: 'Portal kullanıcıları taslağın değil, yayımlanmış sürümün ayarlarını alır.',
       outputsTitle: 'Ajanın yazdığı dosyalar',
       cfgOutputs: 'Ajan dosya oluşturabilsin',
-      cfgOutputsDescription: 'session_files_create ve session_files_append araçlarını ekler: ajan bir metin dosyası ({types}) yazar ve yanıtıyla birlikte teslim edilir. Sandbox gerekmez; bir bucket seçilince varsayılan olarak açıktır.',
-      cfgOutputsNeedsBucket: 'Dosyaları saklamak için bir bucket gerekir: “Kişiler dosya ekleyebilsin” seçeneğini açıp bir bucket seçin.',
+      cfgOutputsDescription: 'session_files_create ve session_files_append araçlarını ekler: ajan bir metin dosyası ({types}) yazar ve yanıtıyla birlikte teslim edilir; ajan oturumdaki dosyaları listeleyip okuyabilir. Sandbox ve yükleme gerekmez, ancak dosyaları saklamak için bir bucket gerekir. Kişiler dosya ekleyebiliyorsa ve bir bucket seçiliyse varsayılan olarak açıktır; aksi halde buradan açın.',
       cfgOutputsMaxFiles: 'Tur başına dosya',
       cfgOutputsMaxFileSize: 'En büyük dosya (MB)',
       storageTitle: 'Dosyalar nerede saklanır',

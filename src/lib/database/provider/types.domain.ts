@@ -2955,6 +2955,8 @@ export interface IAgentSandboxConfig {
   secrets?: Record<string, string>;
   /** Sealed form of `secrets`; never leaves the server. */
   secretsSealed?: string;
+  /** Set on agent reads only (never stored): secrets are stored but cannot be decrypted, see `agentSandboxSecrets.ts`. */
+  secretsUnreadable?: boolean;
   /** Which tool groups to give the agent. All on by default. */
   tools?: { exec?: boolean; code?: boolean; files?: boolean };
   /**

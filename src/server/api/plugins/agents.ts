@@ -823,6 +823,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
+          if ('conflict' in checked) return reply.code(409).send(checked.conflict);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
           warnings = checked.warnings;
         }

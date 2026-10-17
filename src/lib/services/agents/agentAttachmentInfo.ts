@@ -19,9 +19,9 @@ export interface AgentAttachmentInfo {
     allowedMimeTypes: string[];
     /** The agent's model reads images (an image sent to it is seen, not replaced by a note). */
     acceptsImages: boolean;
-    /** Files the agent can write for the person (`session_files_create`), independent of uploads. */
+    /** Files the agent can write for the person (`session_files_create`), independent of uploads (on by default only together with them). */
     outputs: {
-        /** Writes files now: not switched off, a bucket named, and that bucket can take a file. */
+        /** Writes files now: switched on (by default with uploads), a bucket named, and that bucket can take a file. */
         enabled: boolean;
         maxFilesPerTurn: number;
         maxFileSizeMb: number;

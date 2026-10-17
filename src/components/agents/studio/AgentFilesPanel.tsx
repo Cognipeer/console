@@ -46,6 +46,7 @@ import {
     DEFAULT_FILES_FOLDER,
     effectiveRetentionDays,
     filesEnabled,
+    filesNeedBucket,
     folderIssue,
     folderPreview,
     MAX_FOLDER_LENGTH,
@@ -81,7 +82,7 @@ export interface AgentFilesPanelViewProps {
     showErrors?: boolean;
 }
 
-/** The project's buckets for the picker, loaded while files are on. */
+/** The project's buckets for the picker, loaded while files are on (uploads or the agent's own). */
 export function useAttachmentBuckets(enabled: boolean): { state: BucketsState; reload: () => void } {
     const [state, setState] = useState<BucketsState>({ status: 'loading' });
     const [attempt, setAttempt] = useState(0);
@@ -116,7 +117,7 @@ export default function AgentFilesPanel({
     agentKey,
     showErrors,
 }: Omit<AgentFilesPanelViewProps, 'buckets' | 'onRetryBuckets'>) {
-    const { state, reload } = useAttachmentBuckets(filesEnabled(value));
+    const { state, reload } = useAttachmentBuckets(filesNeedBucket(value));
     return (
         <AgentFilesPanelView
             value={value}
@@ -135,7 +136,8 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
     const current = value ?? {};
     const set = (patch: Partial<AttachmentsSettings>) => onChange(patchAttachments(value, patch));
     const on = filesEnabled(value);
-    const hasBucket = Boolean(current.bucketKey?.trim());
+    const writesFiles = outputsEnabled(value);
+    const needsBucket = filesNeedBucket(value);
 
     const list = buckets.status === 'ready' ? buckets.buckets : null;
     const labels: BucketReasonLabels & { notFound: (key: string) => string } = {
@@ -207,12 +209,11 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                 <Stack gap="sm">
                     <Switch
                         label={t('cfgOutputs')}
-                        description={hasBucket ? t('cfgOutputsDescription', { types: FILE_OUTPUT_EXTENSIONS.map((ext) => `.${ext}`).join(' ') }) : t('cfgOutputsNeedsBucket')}
-                        checked={hasBucket && outputsEnabled(value)}
-                        disabled={!hasBucket}
+                        description={t('cfgOutputsDescription', { types: FILE_OUTPUT_EXTENSIONS.map((ext) => `.${ext}`).join(' ') })}
+                        checked={writesFiles}
                         onChange={(event) => onChange(patchOutputs(value, { enabled: event.currentTarget.checked }))}
                     />
-                    {hasBucket && outputsEnabled(value) ? (
+                    {writesFiles ? (
                         <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
                             <NumberInput
                                 label={t('cfgOutputsMaxFiles')}
@@ -237,7 +238,7 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                 </Stack>
             </ConfigBlock>
 
-            {on ? (
+            {needsBucket ? (
                 <>
                     <ConfigBlock title={t('storageTitle')} icon={<IconFolder size={14} />}>
                         <Stack gap="sm">
@@ -323,116 +324,120 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                         </Stack>
                     </ConfigBlock>
 
-                    <ConfigBlock title={t('limitsTitle')}>
-                        <Stack gap="sm">
-                            <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
-                                <NumberInput
-                                    label={t('cfgMaxFiles')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
-                                    min={1}
-                                    max={100}
-                                    allowDecimal={false}
-                                    value={current.maxFiles ?? ''}
-                                    onChange={(v) => set({ maxFiles: typeof v === 'number' ? v : undefined })}
-                                />
-                                <NumberInput
-                                    label={t('cfgMaxFileSize')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.maxFileSizeMb)}
-                                    min={1}
-                                    value={current.maxFileSizeMb ?? ''}
-                                    onChange={(v) => set({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
-                                />
-                                <NumberInput
-                                    label={t('cfgRetention')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
-                                    min={1}
-                                    allowDecimal={false}
-                                    value={current.retentionDays ?? ''}
-                                    onChange={(v) => set({ retentionDays: typeof v === 'number' ? v : undefined })}
-                                />
-                            </SimpleGrid>
-                            <Text size="xs" c="dimmed">{t('cfgRetentionDescription')}</Text>
-                            <TagsInput
-                                label={t('cfgMimeTypes')}
-                                description={t('cfgMimeTypesDescription')}
-                                placeholder={(current.allowedMimeTypes?.length ?? 0) === 0 ? t('cfgMimeTypesPlaceholder') : undefined}
-                                data={[...MIME_TYPE_SUGGESTIONS]}
-                                splitChars={[',', ' ']}
-                                acceptValueOnBlur
-                                clearable
-                                value={current.allowedMimeTypes ?? []}
-                                onChange={(allowedMimeTypes) => set({ allowedMimeTypes })}
-                            />
-                        </Stack>
-                    </ConfigBlock>
+                    {on ? (
+                        <>
+                            <ConfigBlock title={t('limitsTitle')}>
+                                <Stack gap="sm">
+                                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                                        <NumberInput
+                                            label={t('cfgMaxFiles')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
+                                            min={1}
+                                            max={100}
+                                            allowDecimal={false}
+                                            value={current.maxFiles ?? ''}
+                                            onChange={(v) => set({ maxFiles: typeof v === 'number' ? v : undefined })}
+                                        />
+                                        <NumberInput
+                                            label={t('cfgMaxFileSize')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.maxFileSizeMb)}
+                                            min={1}
+                                            value={current.maxFileSizeMb ?? ''}
+                                            onChange={(v) => set({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
+                                        />
+                                        <NumberInput
+                                            label={t('cfgRetention')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
+                                            min={1}
+                                            allowDecimal={false}
+                                            value={current.retentionDays ?? ''}
+                                            onChange={(v) => set({ retentionDays: typeof v === 'number' ? v : undefined })}
+                                        />
+                                    </SimpleGrid>
+                                    <Text size="xs" c="dimmed">{t('cfgRetentionDescription')}</Text>
+                                    <TagsInput
+                                        label={t('cfgMimeTypes')}
+                                        description={t('cfgMimeTypesDescription')}
+                                        placeholder={(current.allowedMimeTypes?.length ?? 0) === 0 ? t('cfgMimeTypesPlaceholder') : undefined}
+                                        data={[...MIME_TYPE_SUGGESTIONS]}
+                                        splitChars={[',', ' ']}
+                                        acceptValueOnBlur
+                                        clearable
+                                        value={current.allowedMimeTypes ?? []}
+                                        onChange={(allowedMimeTypes) => set({ allowedMimeTypes })}
+                                    />
+                                </Stack>
+                            </ConfigBlock>
 
-                    <ConfigBlock title={t('readingTitle')}>
-                        <Stack gap="sm">
-                            <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
-                                <NumberInput
-                                    label={t('cfgInlineTokens')}
-                                    description={t('cfgInlineTokensDescription')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.inlineMaxTokens)}
-                                    min={100}
-                                    allowDecimal={false}
-                                    value={current.inlineMaxTokens ?? ''}
-                                    onChange={(v) => set({ inlineMaxTokens: typeof v === 'number' ? v : undefined })}
-                                />
-                                <NumberInput
-                                    label={t('cfgReadPage')}
-                                    description={t('cfgReadPageDescription')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.readPageChars)}
-                                    min={500}
-                                    allowDecimal={false}
-                                    value={current.readPageChars ?? ''}
-                                    onChange={(v) => set({ readPageChars: typeof v === 'number' ? v : undefined })}
-                                />
-                            </SimpleGrid>
-                            <Switch
-                                label={t('cfgAttachNew')}
-                                description={t('cfgAttachNewDescription')}
-                                checked={attachesNewUploads(value)}
-                                onChange={(event) => set({ attachNewUploads: event.currentTarget.checked ? undefined : false })}
-                            />
-                        </Stack>
-                    </ConfigBlock>
+                            <ConfigBlock title={t('readingTitle')}>
+                                <Stack gap="sm">
+                                    <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+                                        <NumberInput
+                                            label={t('cfgInlineTokens')}
+                                            description={t('cfgInlineTokensDescription')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.inlineMaxTokens)}
+                                            min={100}
+                                            allowDecimal={false}
+                                            value={current.inlineMaxTokens ?? ''}
+                                            onChange={(v) => set({ inlineMaxTokens: typeof v === 'number' ? v : undefined })}
+                                        />
+                                        <NumberInput
+                                            label={t('cfgReadPage')}
+                                            description={t('cfgReadPageDescription')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.readPageChars)}
+                                            min={500}
+                                            allowDecimal={false}
+                                            value={current.readPageChars ?? ''}
+                                            onChange={(v) => set({ readPageChars: typeof v === 'number' ? v : undefined })}
+                                        />
+                                    </SimpleGrid>
+                                    <Switch
+                                        label={t('cfgAttachNew')}
+                                        description={t('cfgAttachNewDescription')}
+                                        checked={attachesNewUploads(value)}
+                                        onChange={(event) => set({ attachNewUploads: event.currentTarget.checked ? undefined : false })}
+                                    />
+                                </Stack>
+                            </ConfigBlock>
 
-                    <ConfigBlock title={t('imagesTitle')}>
-                        <Stack gap="sm">
-                            <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
-                                <NumberInput
-                                    label={t('cfgMaxImages')}
-                                    description={t('cfgMaxImagesDescription')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.maxImages)}
-                                    min={1}
-                                    max={50}
-                                    allowDecimal={false}
-                                    value={current.maxImages ?? ''}
-                                    onChange={(v) => set({ maxImages: typeof v === 'number' ? v : undefined })}
-                                />
-                                <NumberInput
-                                    label={t('cfgMaxImageMb')}
-                                    description={t('cfgMaxImageMbDescription')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.maxBytes / 1_000_000)}
-                                    min={0.1}
-                                    max={200}
-                                    decimalScale={1}
-                                    value={bytesToMb(current.maxBytes) ?? ''}
-                                    onChange={(v) => set({ maxBytes: mbToBytes(v) })}
-                                />
-                                <NumberInput
-                                    label={t('cfgCarryImages')}
-                                    description={t('cfgCarryImagesDescription')}
-                                    placeholder={String(SESSION_FILES_DEFAULTS.carryRecentImages)}
-                                    min={0}
-                                    max={20}
-                                    allowDecimal={false}
-                                    value={current.carryRecentImages ?? ''}
-                                    onChange={(v) => set({ carryRecentImages: typeof v === 'number' ? v : undefined })}
-                                />
-                            </SimpleGrid>
-                        </Stack>
-                    </ConfigBlock>
+                            <ConfigBlock title={t('imagesTitle')}>
+                                <Stack gap="sm">
+                                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                                        <NumberInput
+                                            label={t('cfgMaxImages')}
+                                            description={t('cfgMaxImagesDescription')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.maxImages)}
+                                            min={1}
+                                            max={50}
+                                            allowDecimal={false}
+                                            value={current.maxImages ?? ''}
+                                            onChange={(v) => set({ maxImages: typeof v === 'number' ? v : undefined })}
+                                        />
+                                        <NumberInput
+                                            label={t('cfgMaxImageMb')}
+                                            description={t('cfgMaxImageMbDescription')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.maxBytes / 1_000_000)}
+                                            min={0.1}
+                                            max={200}
+                                            decimalScale={1}
+                                            value={bytesToMb(current.maxBytes) ?? ''}
+                                            onChange={(v) => set({ maxBytes: mbToBytes(v) })}
+                                        />
+                                        <NumberInput
+                                            label={t('cfgCarryImages')}
+                                            description={t('cfgCarryImagesDescription')}
+                                            placeholder={String(SESSION_FILES_DEFAULTS.carryRecentImages)}
+                                            min={0}
+                                            max={20}
+                                            allowDecimal={false}
+                                            value={current.carryRecentImages ?? ''}
+                                            onChange={(v) => set({ carryRecentImages: typeof v === 'number' ? v : undefined })}
+                                        />
+                                    </SimpleGrid>
+                                </Stack>
+                            </ConfigBlock>
+                        </>
+                    ) : null}
 
                     <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />} p="sm">
                         <Stack gap={2}>

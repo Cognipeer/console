@@ -149,20 +149,23 @@ function boundedNumber(value: unknown, fallback: number, max: number, whole: boo
     return Math.min(whole ? Math.floor(n) : n, max);
 }
 
-/** `attachments.outputs` with the defaults filled in and the limits clamped to what the server allows. */
+/**
+ * `attachments.outputs` with the defaults filled in and the limits clamped to what the server allows.
+ * `enabled` left unset follows uploads: on when the agent takes uploads and has a bucket, off otherwise.
+ */
 export function resolveOutputsConfig(raw?: IAgentAttachmentsConfig | null): ResolvedOutputsConfig {
     const outputs = raw?.outputs;
     return {
-        enabled: outputs?.enabled !== false,
+        enabled: typeof outputs?.enabled === 'boolean' ? outputs.enabled : raw?.enabled === true && Boolean(raw.bucketKey?.trim()),
         maxFilesPerTurn: boundedNumber(outputs?.maxFilesPerTurn, SESSION_FILE_OUTPUTS_DEFAULTS.maxFilesPerTurn, SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, true),
         maxFileSizeMb: boundedNumber(outputs?.maxFileSizeMb, SESSION_FILE_OUTPUTS_DEFAULTS.maxFileSizeMb, SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, false),
     };
 }
 
 /**
- * Whether an agent can write files: not a connected agent, a bucket named, and the author has not
- * switched it off. Independent of `attachments.enabled` (people attaching files): an agent that takes
- * no uploads can still hand a file back. Whether the bucket works is checked when the run is built.
+ * Whether an agent can write files: not a connected agent, a bucket named, and the outputs switched on
+ * (by default they follow `attachments.enabled`, see `resolveOutputsConfig`). Not tied to uploads:
+ * an agent that takes none can still hand a file back. Whether the bucket works is checked when the run is built.
  */
 export function outputsAvailability(config: IAgentConfig | undefined):
     | { available: true; cfg: ResolvedAttachmentsConfig & { bucketKey: string }; outputs: ResolvedOutputsConfig }
