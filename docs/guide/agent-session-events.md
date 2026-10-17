@@ -40,14 +40,14 @@ Each event:
 { "seq": 38, "type": "agent.tool_result", "data": { "tool_call_id": "call_1", "name": "sandbox_exec", "ok": true, "duration_ms": 812 }, "run_id": "run_3f9c…", "created_at": "2026-10-01T12:00:03.120Z" }
 ```
 
-`run_id` is the run id as `GET /agents/runs/{runId}` and the 202 of a background call return it (`run_` plus the id), so an event joins to its run directly. Events written outside a run carry none. `seq` is unique and ascending within the session. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
+`run_id` is the run id as `GET /agents/runs/{runId}` and the 202 of a background call return it (`run_` plus the id), so an event joins to its run directly. A run that paused and was answered inline keeps its events across the resume: the continuation writes its events with the same `run_id`, so `GET /agents/runs/{runId}/events` does not stop at the pause. Events written outside a run carry none. `seq` is unique and ascending within the session. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
 
 ### Event types
 
 | Type | `data` |
 | --- | --- |
 | `user.message` | `content` |
-| `session.status_running` | `trigger`: `message`, `resume` or `timeout` |
+| `session.status_running` | `trigger`: `message`, `resume` (a person answered the request the turn paused on) or `timeout` (the request timed out and the agent's timeout policy, *deny* or *allow*, let the turn go on: recorded with the actor `system` and the channel `timeout`) |
 | `agent.tool_use` | `tool_call_id`, `name`, `args`, `subagent?` |
 | `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?`, `subagent?`, `source?` (`client`: the page embedding the chat ran it) |
 | `agent.compaction` | what a context compaction did (`at`, `messages_compressed`, `tokens_before`, `tokens_after`, …) |
@@ -83,7 +83,7 @@ data: {"seq":42,"type":"agent.tool_use","data":{"tool_call_id":"call_2","name":"
 
 `agent.message.delta` frames exist only for a turn whose starter streams. A turn started without `stream` (a synchronous call, a background run, a routine) does not stream the model, so a follower sees the finished `agent.message` arrive at once, without deltas. Deltas appear when the caller that starts the turn asks for a streamed answer, for example the dashboard's chat stream in Studio. Do not wait for deltas: build a follower around the stored events, and treat deltas as a bonus when they come.
 
-A `: ping` comment is sent every 15 seconds. The stream ends after an hour or when you close it; reconnect with the last `id` to pick up where you left off.
+A `: ping` comment is sent every 15 seconds. The stream ends after an hour, when you close it, or when the server shuts down (open streams are ended during a graceful shutdown); reconnect with the last `id` to pick up where you left off.
 
 With Redis configured, the stream follows a turn that runs on another node.
 

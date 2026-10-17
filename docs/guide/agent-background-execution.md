@@ -14,6 +14,8 @@ There is no per-agent switch and no setting to choose a mode: the caller decides
 
 The dashboard's own Studio and portal chats reserve the conversation while a turn runs and leave no run behind.
 
+A call that is refused before its run exists (a cap, a conflict, the quota, a spend limit) leaves nothing behind: the session that the same request created is removed again, so a client retrying a refusal does not pile up empty sessions. A session the request continued is kept.
+
 A conversation holds **one active run at a time**. A second message to a session that is still running is refused with `409 agent_run_conflict`; a session that waits on an [approval or a question](/guide/agent-approvals) answers `409 pending_action`.
 
 ## The wait window
@@ -23,6 +25,8 @@ A plain call waits for the run for at most `AGENT_SYNC_TIMEOUT_MS` (default 10 m
 - **The run finishes first:** `200` with the answer, in the dialect's own shape.
 - **The window ends first (detach):** `202` with the run in the dialect's shape (`status: "in_progress"` on `/responses`, an empty `chat.completion` whose `cognipeer` object names the run on chat completions, a `working` task on A2A), plus `Location: /api/client/v1/agents/runs/run_<id>` and `Retry-After: 2`. The run is **not** stopped. It carries on in the background, bounded by `AGENT_BACKGROUND_MAX_DURATION_MS`, and from then on it notifies like a queued run: the `agent_run.*` [webhook](/guide/webhooks) events and a callback, if it has one.
 - **The caller leaves first:** a plain call that drops its connection leaves the run going (it becomes detached). A `/responses` **stream** that loses its reader stops the run, unless the request said `background: true`. A runs-API stream keeps the run going unless it said `"on_disconnect": "cancel"`. An A2A `message/stream` client that disconnects does not stop the task either: it reattaches with `tasks/resubscribe` (one resubscribe stream follows a task for up to 60 minutes; resubscribe again after that).
+
+A waited call whose run is **ended elsewhere** before it finishes (the server shut down and handed its runs over, or the run's worker was lost) does not get the partial answer its turn may have produced. It gets `503` `agent_run_interrupted` (`retryable: true`, `side_effects_possible: true`; a stream gets an `error` event and `response.failed`). Read the run to see how it ended, or send the request again. A long-poll (`?wait=`, `Prefer: wait=N`, a routine's Run now) also stops waiting when its client disconnects; the run is not affected.
 
 Keep `AGENT_SYNC_TIMEOUT_MS` below the shortest timeout of anything between the caller and the server (load balancer, API gateway, serverless function): a connection that an intermediary cuts first never sees the `202`.
 
@@ -53,7 +57,7 @@ curl -X POST "$BASE/api/client/v1/agents/support-bot/runs" \
   }'
 ```
 
-The create call is **async-first**: it answers `202` with the run at once (`wait` defaults to 0). Send `"wait": 30` (or `Prefer: wait=30`) to hold the call for up to 30 seconds and get `200` with the finished run when it ends sooner. `Prefer: respond-async` is the same as `wait: 0`. The body takes:
+A body that is not a JSON object (malformed, empty, an array or a string) is `400 invalid_json`. The create call is **async-first**: it answers `202` with the run at once (`wait` defaults to 0). Send `"wait": 30` (or `Prefer: wait=30`) to hold the call for up to 30 seconds and get `200` with the finished run when it ends sooner. `Prefer: respond-async` is the same as `wait: 0`. The body takes:
 
 | Field | |
 | --- | --- |
@@ -68,7 +72,7 @@ The create call is **async-first**: it answers `202` with the run at once (`wait
 | `metadata` | Up to 16 string pairs (keys `[A-Za-z0-9_.-]`, at most 64 characters; values at most 512). Kept on the run, returned by every read, filterable on the list. |
 | `callback` | `{ "url", "secret"? }`, see [Callbacks](#callbacks-and-webhooks). |
 | `response_format` | Structured output for this run (`json_schema` or `json_object`). |
-| `runtime_context`, `reasoning`, `agent_model`, `budget` | As on [`/responses`](/api/agents#parameters). |
+| `runtime_context`, `reasoning`, `agent_model`, `budget` | As on [`/responses`](/api/agents#parameters). `reasoning` applies to a streamed run only: a queued run (the default, `deferred`, scheduled) runs with the agent's own effort. |
 
 A run, as every read returns it:
 
@@ -131,7 +135,7 @@ The first two blocks count the whole tenant; `project` counts the token's projec
 
 ## Scheduled runs
 
-`run_at` (ISO-8601 or unix seconds) or `delay_seconds` on a run makes it `scheduled` when the time is more than a second ahead, at most **30 days** out; a time already past just starts the run. The run is promoted to `queued` by the reconciler when it is due (it ticks every 30 seconds), and it holds the conversation only from then on. If the session is busy at that moment the run stays `scheduled` and is tried again on the next tick. A scheduled or deferred run that has not started `AGENT_DEFERRED_MAX_WAIT_MS` after it was due fails as `expired`. A scheduled run can be [canceled](#cancel) like any other.
+`run_at` (ISO-8601 or unix seconds) or `delay_seconds` on a run makes it `scheduled` when the time is more than a second ahead, at most **30 days** out; a time already past just starts the run. The run is promoted to `queued` by the reconciler when it is due (it ticks every 30 seconds), and it holds the conversation only from then on. If the session is busy at that moment, or the tenant (or project) is already at its default-class active-run cap, the run stays `scheduled` and is tried again on the next tick: a scheduled run can therefore start later than its `run_at` while the cap is full, and one more is promoted as soon as a slot frees up. A scheduled or deferred run that has not started `AGENT_DEFERRED_MAX_WAIT_MS` after it was due fails as `expired`. A scheduled run can be [canceled](#cancel) like any other.
 
 For repeating or recurring work use a [routine](/guide/agent-routines).
 
@@ -139,7 +143,7 @@ For repeating or recurring work use a [routine](/guide/agent-routines).
 
 `Idempotency-Key` (at most 255 characters) works on **every** call that starts a run: runs API, `/responses`, chat completions and A2A alike.
 
-- The same key with the same request answers with the stored run: `200` once it has finished; while it is still going the retry waits like a new call would (up to the window), then `200` or `202`. No second run starts.
+- The same key with the same request answers with the stored run: `200` once it has finished; while it is still going the retry waits like a new call would (up to the window), then `200` or `202`. No second run starts. A retry of a `stream: true` request is answered as a stream too (the Responses events of the run as it stands: the stored terminal event of a finished run, a further `response.in_progress` for one that is still going), not as JSON. Two identical requests that arrive together do not fail with a conflict: the second waits briefly for the first one's run and replays it.
 - The same key with a different request (another agent, session, message, version or named file) answers `409 idempotency_key_conflict`.
 - A key that starts with `routine:` or `hook:` is refused (`400 idempotency_key_reserved`): those name the runs routines start themselves.
 - A key does not undo the side effects of a first attempt. It stops a *retried* attempt from repeating them.
@@ -159,8 +163,8 @@ What it does, by status:
 
 - `scheduled` or `queued`: canceled now.
 - `running`: the run is asked to stop (`cancel_requested_at` is set) and stops before its next step; the run turns `canceled` once the turn has actually ended, a moment later. The turn keeps the text it had already streamed as its answer.
-- `requires_action`: ended now, its open approvals and questions are cancelled and the session goes idle. This is answering them "no", so it needs the right to answer them (`403 action_forbidden` otherwise); see [who may answer](/guide/agent-approvals#who-may-answer-the-approve-permission).
-- Already finished: the runs API answers `409 agent_run_already_terminal` (with the final `status`); the Responses route answers `200` with the finished Response, as OpenAI does; A2A answers the error `-32004` (not cancelable).
+- `requires_action`: ended now, its open approvals and questions are cancelled and the session goes idle. This is answering them "no", so it needs the right to answer them (`403 action_forbidden` otherwise); see [who may answer](/guide/agent-approvals#who-may-answer-the-approve-permission). A paused run ends the same way, `canceled` with the reason `canceled_by_caller`, its callback and the `agent_run.canceled` webhook event, whenever its pause is dropped by something else: a new message to an agent that is set to cancel pending requests, a session truncate, or a timeout of the agent's `onTimeout: cancel`.
+- Already finished: the runs API answers `409 agent_run_already_terminal` (with the final `status`); the Responses route answers `200` with the finished Response, as OpenAI does; A2A answers the error `-32002` (`TaskNotCancelable`).
 
 The session route stops whatever the session is doing and answers `{ "object": "agent.session.cancel", "cancelled": true|false, "run_ids": […] }`; nothing running is `cancelled: false`, not an error. Cancelling needs the right to act on the session ([Authorization](/guide/authorization#sessions-and-approvals)).
 
@@ -173,19 +177,19 @@ A run that nobody is waiting on reports itself in two ways:
 
 Both fire only for **async runs**: a queued run, and a plain call that detached. A call answered inline sends nothing.
 
-A callback is a `POST` with `x-cognipeer-event: agent_run.succeeded | agent_run.failed | agent_run.canceled | agent_run.requires_action`, a stable `x-cognipeer-event-id` (deduplicate retries on it), and, with a secret, `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`:
+A callback is a `POST` with `x-cognipeer-event: agent_run.succeeded | agent_run.failed | agent_run.canceled | agent_run.requires_action`, a stable `x-cognipeer-event-id` (deduplicate retries on it; `evt_<runId>_<event>`, and `evt_<runId>_<event>_<generation>` for the second and later outcomes of a run that paused and was resumed, so each one has its own id), and, with a secret, `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`:
 
 ```json
 { "id": "evt_…", "event": "agent_run.succeeded", "createdAt": "…", "runId": "run_…", "sessionId": "…", "conversationId": "…", "data": { "result": { … } } }
 ```
 
-`data` is `{ result }` on success, `{ errorReason, message }` on failure and empty on cancel. Delivery goes through its own queue (`AGENT_RUN_CALLBACK_CONCURRENCY` workers a node), up to five attempts with exponential backoff from 2 seconds, and the state is on the run (`callback.status`: `pending`, `delivered` or `failed`; `attempts`). A callback that never settled, because a node died or the queue lost the job, is queued again by the reconciler. The run's own status is the source of truth: poll it if a callback does not arrive.
+`data` is `{ result }` on success, `{ errorReason, message }` on failure and empty on cancel. Delivery goes through its own queue (`AGENT_RUN_CALLBACK_CONCURRENCY` workers a node), up to five attempts with exponential backoff from 2 seconds, and the state is on the run (`callback.status`: `pending`, `delivered` or `failed`; `attempts`). A late delivery of an older event never overwrites the state of a newer one. A callback that never settled, because a node died or the queue lost the job, is queued again by the reconciler. To remove an agent's default callback, clear its URL in **Configure → Callback & budget**: the stored secret is removed with it. The run's own status is the source of truth: poll it if a callback does not arrive.
 
 ## Shutdown and crashes
 
-- **Draining.** On `SIGTERM` a node stops taking new queue work, waits up to `AGENT_RUN_DRAIN_TIMEOUT_MS` (10 seconds, kept 3 seconds below `SHUTDOWN_TIMEOUT_MS`) for the runs executing on it, and marks what is left `failed` with the error type `interrupted`: *"The server restarted while this run was in progress. It was not completed; retry it."* Their callbacks and webhooks fire. They are **not** retried automatically, because a half-done turn may have had side effects. Queued and scheduled runs are untouched; another node, or this one after the restart, picks them up.
-- **A node that dies.** A running run whose heartbeat is older than `AGENT_RUN_HEARTBEAT_STALE_MS` (45 seconds) is failed as `worker_lost`, also not retried. A queued run no worker took within `AGENT_RUN_REQUEUE_AFTER_MS` is published again; a job is never run twice (each execution has its own dedup key).
-- **Retention.** Run records are kept `AGENT_RUN_RETENTION_DAYS` (30). A run that is queued, running, scheduled or paused is never deleted.
+- **Draining.** On `SIGTERM` a node stops taking new queue work, waits up to `AGENT_RUN_DRAIN_TIMEOUT_MS` (10 seconds, kept 3 seconds below `SHUTDOWN_TIMEOUT_MS`) for the runs executing on it, and marks what is left `failed` with the error type `interrupted`: *"The server restarted while this run was in progress. It was not completed; retry it."* Their callbacks and webhooks fire. This happens **before** the HTTP server starts waiting for its open connections: a caller that is waiting on such a run gets its `503 agent_run_interrupted` (a stream, its `error` event) and ends, so no open stream holds the shutdown up. Open session event streams are ended too; their clients reconnect (with `Last-Event-ID`) to the next node. They are **not** retried automatically, because a half-done turn may have had side effects. Queued and scheduled runs are untouched; another node, or this one after the restart, picks them up.
+- **A node that dies.** A running run whose heartbeat is older than `AGENT_RUN_HEARTBEAT_STALE_MS` (45 seconds) is failed as `worker_lost`, also not retried. A queued run no worker took within `AGENT_RUN_REQUEUE_AFTER_MS` is published again, with a job id of its own for each requeue window, so a job that failed before it claimed its run is tried again instead of being lost; a job is never run twice (a run is claimed once). On MongoDB an idempotency lock that was never bound to a run (the node died between the lock and the insert) is reclaimed after 60 seconds.
+- **Retention.** Run records are kept `AGENT_RUN_RETENTION_DAYS` (30), counted from when the run **finished**, whichever way it ended (a run scheduled 20 days ahead is kept 30 days after it ran, not 10). Until it has run, a scheduled run's record is kept for the retention days after its due time (a deferred run's also after `AGENT_DEFERRED_MAX_WAIT_MS`). A run that is queued, running, scheduled or paused is never deleted, and an idempotency key lives as long as its run.
 
 ## Routines
 
@@ -220,14 +224,18 @@ Tenant quotas can lower the wait window, the maximum duration and the active-run
 
 | Status | Code | When |
 | --- | --- | --- |
-| `400` | `invalid_callback`, `invalid_schedule`, `invalid_wait`, `invalid_metadata`, `invalid_inputs`, `invalid_response_format`, `idempotency_key_reserved` | The request is malformed; the message says which field. |
+| `400` | `invalid_json`, `invalid_callback`, `invalid_schedule`, `invalid_wait`, `invalid_metadata`, `invalid_inputs`, `invalid_response_format`, `invalid_version`, `idempotency_key_reserved` | The request is malformed (`invalid_json`: the body is not a JSON object); the message says which field. |
+| `400` | `attachment_unreachable` | A remote `file_url` / `image_url` (or A2A `file.uri`) could not be fetched, or did not arrive within the outbound timeout (30 seconds by default; headers and body together). |
 | `404` | `agent_run_not_found` | No such run in this project. |
 | `409` | `agent_run_conflict` | The session already has an active run. |
 | `409` | `idempotency_key_conflict` | The key was used for another request. |
 | `409` | `agent_run_already_terminal` | Cancel of a finished run. |
-| `429` | `agent_run_concurrency_limit` | A cap is full. |
-| `429` | `spend_limit_exceeded`, `agent_quota_exceeded` | The tenant's spend limit or quota is used up. |
+| `429` | `agent_run_concurrency_limit` | A cap is full. `Retry-After: 30`. |
+| `429` | `spend_limit_exceeded`, `agent_quota_exceeded` | The tenant's spend limit or quota is used up (`Retry-After: 60` for the quota). The agent-run quota counts a run only once it is admitted: a call refused for a conflict or a cap uses no unit. |
+| `503` | `agent_run_interrupted` | The run a call was waiting on was ended elsewhere (shutdown, lost worker) before it finished. Retryable; tool side effects may have happened (`side_effects_possible`). |
 | `504` | `agent_run_max_duration_exceeded` | A call that was still waiting when the run reached its maximum duration. `side_effects_possible` is `true` and `retryable` `false`: do not retry blindly. |
+
+A **stream** (`stream: true`, `/responses`, chat completions) is checked against the active-run caps and the agent quota **before it opens**: over a limit the answer is the plain JSON `429` above with its `Retry-After`, and no session is created. Only a limit that is reached in the instant between that check and the run's start still ends the open stream with an `error` event.
 
 Errors on the runs API and the sessions API are `{ "error": { "type", "message", "code" } }`; the OpenAI-shaped routes use OpenAI's envelope (`message`, `type`, `param`, `code`) and A2A uses JSON-RPC errors.
 

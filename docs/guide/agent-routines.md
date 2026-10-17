@@ -26,6 +26,7 @@ The scheduler ticks every `AGENT_ROUTINE_TICK_MS` (30 seconds, minimum 5) **on e
 - It starts a **queued** run (`channel: "routine"`, `trigger: "schedule" | "once" | "manual" | "webhook"`, `routine_id`) in the routine's `class`, `version` (a published version number; empty = the published one), `metadata`, `response_format` and `callback`. Nothing waits on it: its answer is the run.
 - Its idempotency key is `routine:<routineId>:<slot>`, which is why one slot never starts two runs.
 - Every fire is a **new session**, owned by a synthetic actor (`system:routine:<id>`, shown as *Routine*), not by a person or a token.
+- **Whose limits it counts against.** The session belongs to the routine, but a fire is accountable to a person: its spend limits, quota, run limits and usage are counted against the routine's **last updater** (whoever last changed it), or its **creator** until somebody changes it, for the `schedule`, `once` and `webhook` triggers. **Run now** counts against the person who pressed it, and the API token they used. Change who a routine's spend shows up under by saving the routine as that person. The session owner stays `system:routine:<id>`.
 - It is an **unattended** run: nobody is there to answer. A tool that would ask for approval follows the agent's *When nobody can answer* setting ([approvals](/guide/agent-approvals#unattended-runs)): denied by default, or paused in the session until someone answers it in Studio, or allowed. Client tools and questions are not offered.
 - The result of the fire is on the routine: `last_status` (`started` or `failed`), `last_run_id`, `last_error`, `last_fire_at`. A skipped, refused or duplicate fire does not change them.
 - Webhook subscriptions get [`routine.fired`](/guide/webhooks) when a run started, and `routine.failed` when it could not (once per routine and reason an hour).
@@ -38,7 +39,7 @@ The client API (`/api/client/v1`, the **Agents** service) and the dashboard (`/a
 | --- | --- |
 | `GET`, `POST /agents/{agentKey}/routines` | List, create. |
 | `GET`, `PATCH`, `DELETE /agents/{agentKey}/routines/{routineId}` | Read, change, delete. A PATCH that sends the stored trigger back unchanged keeps its timing. |
-| `POST …/routines/{routineId}/run` | **Run now**: one fire with trigger `manual`. The body may override `inputs` and `metadata`; `wait` (or `Prefer: wait=N`) holds the call like the [runs API](/guide/agent-background-execution#the-runs-api) does; the client API takes `Idempotency-Key`. Answers `200` with a finished run, `202` with a running one, `429` with `Retry-After` when a cap or limit refuses it. |
+| `POST …/routines/{routineId}/run` | **Run now**: one fire with trigger `manual`. The body may override `inputs` and `metadata`; `wait` (or `Prefer: wait=N`) holds the call like the [runs API](/guide/agent-background-execution#the-runs-api) does; the client API takes `Idempotency-Key`. Answers `200` with a finished run, `202` with a running one, `429` with `Retry-After` when a cap or limit refuses it. The wait stops if the client disconnects (the run carries on). |
 | `GET /agents/runs?routine_id=…` | History: the runs the routine started. |
 
 ```bash
@@ -105,7 +106,7 @@ The body must be JSON (`application/json`; GitHub's *Content type* has to be set
 | Run rate, run cap, spend limit, quota | `429` with `Retry-After` for `github` and `generic`; `200 { "accepted": false, … }` for `gitlab` and `azure_devops`, whose senders switch a hook off after repeated failures |
 | Inputs or template do not resolve | `400` for `github` and `generic`; `200 accepted: false` for the other two |
 
-**Duplicates.** A redelivery of a delivery that already started a run (or is still running) answers `200 duplicate` and starts nothing; a redelivery of one whose run **failed or was canceled** starts a new run, up to a small bound. Duplicates are recognised by the delivery id or the body (a generic sender without a delivery id is never de-duplicated). The window is the life of the run record (`AGENT_RUN_RETENTION_DAYS`, 30 days).
+**Duplicates.** A redelivery of a delivery that already started a run (or is still running) answers `200 duplicate` and starts nothing; a redelivery of one whose run **failed or was canceled** starts a new run, up to a small bound. Duplicates are recognised by the delivery id or the body (a generic sender without a delivery id is never de-duplicated). The window is the life of the run record (`AGENT_RUN_RETENTION_DAYS`, 30 days, counted from when the run finished).
 
 **Limits.** `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` (60, `0` = off) caps the runs one routine's trigger starts a minute, counted per node unless `RATE_LIMIT_PROVIDER=redis`. A flood from many addresses is for your ingress or WAF to stop: the senders above share addresses. Use the **Deferred** class for busy hooks.
 

@@ -60,7 +60,8 @@ GET /api/client/v1/agents/:agentKey
       "modelKey": "gpt-4o",
       "temperature": 0.7,
       "topP": 1,
-      "maxTokens": 4096
+      "maxTokens": 4096,
+      "showReasoning": true
     },
     "status": "active",
     "createdAt": "2026-01-15T10:00:00.000Z",
@@ -78,7 +79,7 @@ GET /api/client/v1/agents/:agentKey
 }
 ```
 
-`input_schema` and `output_schema` describe the agent as a typed function: the JSON Schema of the `inputs` it takes (`null` when it declares none) and of its structured answer (`null` for a plain-text agent). `attachments` is present when the agent can take files, and its `outputs` says whether the agent can [write files](/guide/session-files#files-the-agent-produces) for the person.
+`input_schema` and `output_schema` describe the agent as a typed function: the JSON Schema of the `inputs` it takes (`null` when it declares none) and of its structured answer (`null` for a plain-text agent). `attachments` is present when the agent can take files, and its `outputs` says whether the agent can [write files](/guide/session-files#files-the-agent-produces) for the person. `attachments.accepts_images` is `true` only while uploads are on and the bucket can take a file **and** the agent's model reads images, so it is `false` whenever uploads are off. The example shows exactly what the route returns; `models` is added when the agent offers more than one model, and nothing else (the older `experience` block is not part of this response).
 
 ## Invoke an agent (Responses API)
 
@@ -114,14 +115,14 @@ A token needs the Models **or** the Agents service for `/responses`, and then th
 | `input` | string \| array | Yes | The user message: a string or Responses input items. The last user message is the turn |
 | `previous_response_id` | string | No | The `id` of an earlier response of this agent: continues its session |
 | `session_id`, `conversation` | string | No | Continue that session directly (the same as `previous_response_id`) |
-| `version` | number \| `"draft"` | No | A published version, or the draft |
+| `version` | number \| `"draft"` | No | A published version, or the draft. Anything else is `400 invalid_version`; a version that does not exist is `404 version_not_found` |
 | `stream` | boolean | No | Server-Sent Events, see [Streaming](#streaming) |
 | `background` | boolean | No | Queue the run and answer `202` at once (also the `X-Cognipeer-Background: true` header). Streamed with `background: true`, a disconnect does not stop the run |
 | `service_tier` | string | No | `flex` queues the run in the low-priority [class](/guide/agent-background-execution#run-classes) and waits for it like a plain call. Anything else is the default class |
 | `text.format` | object | No | Structured output for this call, see [below](#typed-inputs-and-structured-output) |
 | `inputs` | object | No | Values for the agent's declared inputs (an extension) |
 | `metadata` | object | No | Up to 16 string pairs kept on the run |
-| `reasoning.effort`, `agent_model` | string | No | Reasoning effort, and one of the agent's additional models |
+| `reasoning.effort`, `agent_model` | string | No | Reasoning effort, and one of the agent's additional models. The effort applies to a run that executes in the request (a waited call, a stream); a queued run (`background: true`, `service_tier: "flex"`) uses the agent's own effort |
 | `callback_url`, `callback_secret` | string | No | A [callback](/guide/agent-background-execution#callbacks-and-webhooks) for a run that nobody is waiting on |
 | `budget` | object \| null | No | Spend budget for the session this request starts: `{ "max_cost_usd": 2, "on_reach": "pause" }`. See [Session budgets](/guide/agent-session-budgets) |
 | `runtime_context`, `include_reasoning` | | No | Runtime context for the agent's tools; `false` hides reasoning from the output |
@@ -190,7 +191,7 @@ A token needs the Models **or** the Agents service for `/responses`, and then th
 }
 ```
 
-All the `input_text` parts of the last user message are joined with a blank line. An `http(s)` `file_url` is fetched by the server (private addresses are refused) within the agent's size limit.
+All the `input_text` parts of the last user message are joined with a blank line. An `http(s)` `file_url` or `image_url` is fetched by the server (private addresses are refused) within the agent's size limit, and it has to arrive within the outbound timeout (30 seconds by default, one deadline for the headers and the body together): a file that does not is `400 attachment_unreachable`.
 
 ### Response
 
@@ -215,7 +216,9 @@ All the `input_text` parts of the last user message are joined with a blank line
   "status": "completed",
   "usage": {
     "input_tokens": 12,
+    "input_tokens_details": { "cached_tokens": 0 },
     "output_tokens": 45,
+    "output_tokens_details": { "reasoning_tokens": 0 },
     "total_tokens": 57
   },
   "created_at": 1709500000,
@@ -229,7 +232,7 @@ All the `input_text` parts of the last user message are joined with a blank line
 }
 ```
 
-The `id` is the run's (`resp_<runId>`; the [runs API](/guide/agent-background-execution#the-runs-api) names the same run `run_<runId>`), so every call has its own id. `cognipeer.session_id` is the session to continue.
+`usage` always carries the two detail objects, `0` when a detail was not reported (`reasoning_tokens` is `0` for an agent run). The `id` is the run's (`resp_<runId>`; the [runs API](/guide/agent-background-execution#the-runs-api) names the same run `run_<runId>`), so every call has its own id. `cognipeer.session_id` is the session to continue.
 
 | `status` | When |
 |----------|------|
@@ -248,11 +251,11 @@ GET  /api/client/v1/responses/{id}          # the Response object, current
 POST /api/client/v1/responses/{id}/cancel   # cancel it, answers the Response object
 ```
 
-(also under `/agents/responses/{id}`). An unknown id is `404 response_not_found` in OpenAI's error envelope; `background` reads back `true` for a run that was started with `background: true`, streamed or not. A finished response is answered `200` by `cancel` with its final object.
+(also under `/agents/responses/{id}`). An unknown id is `404 response_not_found` in OpenAI's error envelope; `background` reads back what the request asked for: `true` for a run that was started with `background: true`, streamed or not; a `service_tier: "flex"` call is queued but reads `false`. A body that is not a JSON object is `400 invalid_json`. A waited call whose run was ended elsewhere (the server shut down, the worker was lost) answers `503 agent_run_interrupted`, never a partial answer as if it were final. A finished response is answered `200` by `cancel` with its final object.
 
 ### Streaming
 
-`"stream": true` answers with the OpenAI Responses events, `event: <type>` and `data: {…}` each with a `sequence_number`: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta` (the answer as it is written), `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, the `response.reasoning_summary_*` events when the agent shows its reasoning, and one of `response.completed`, `response.incomplete` (also how a cancelled run ends) or `response.failed`; a failure before the stream opens is a normal error. A `: ping` comment keeps the connection alive. If the reader goes away the run stops, unless the request said `background: true`.
+`"stream": true` answers with the OpenAI Responses events, `event: <type>` and `data: {…}` each with a `sequence_number`: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta` (the answer as it is written), `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, the `response.reasoning_summary_*` events when the agent shows its reasoning, and one of `response.completed`, `response.incomplete` (also how a cancelled run ends) or `response.failed`; a failure before the stream opens is a normal error: the active-run caps and the agent quota are checked first, so over a limit the answer is a plain JSON `429` with `Retry-After` (30 seconds for the cap, 60 for the quota) and no session is created. A limit reached in the instant between that check and the run's start, and a run that is ended elsewhere (shutdown, lost worker: `agent_run_interrupted`), end the open stream with an `error` event. A `: ping` comment keeps the connection alive. If the reader goes away the run stops, unless the request said `background: true`.
 
 A model target streams the model's own chunks as the same events.
 
@@ -332,8 +335,8 @@ The id resolves to the run, and the run to its session, so the history is rebuil
 |---|---|
 | **Runs API** | `POST /agents/{agentKey}/runs` starts a run (async-first, `wait`, `class`, `run_at` / `delay_seconds`, `callback`, `metadata`, `response_format`, `stream`); `GET /agents/runs` lists them, `GET /agents/runs/{runId}` reads one (`?wait=`), `GET /agents/runs/queue` shows the queue, `…/events` and `…/events/stream` follow it, `…/actions/{actionId}` answers it. See [Agent runs](/guide/agent-background-execution). |
 | **Routines** | `…/agents/{agentKey}/routines` (list, create, get, update, delete, `…/run`, and for webhook triggers `…/webhook/rotate-secret` and `…/deliveries`). See [Agent routines](/guide/agent-routines). |
-| **Models** | `GET /models` lists the project's models and its active agents (`agent:<key>`); see [Inference](/guide/inference#model-discovery). |
-| **A2A** | `POST /a2a/{agentKey}`: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`. See [Approvals](/guide/agent-approvals#background-runs-and-a2a) and [Session files](/guide/session-files#files-the-agent-produces). |
+| **Models** | `GET /models` lists the project's models and its active agents (`agent:<key>`); a token with only the Agents service lists the agents alone. See [Inference](/guide/inference#model-discovery). |
+| **A2A** | `POST /a2a/{agentKey}`: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`. A run that was canceled answers a Task `canceled`, one that failed after it started (the quota refusal, a request that is still pending) a Task `failed` with `metadata.errorType` / `errorCode`; `tasks/cancel` of a task that cannot be canceled is `-32002`. The public route (`/api/public/a2a/{tenantId}/{slug}`) binds a task to its caller: the ids are `run_<runId>.<nonce>` and `<sessionId>.<nonce>`, to be handed back whole (see the OpenAPI description). See [Approvals](/guide/agent-approvals#background-runs-and-a2a) and [Session files](/guide/session-files#files-the-agent-produces). |
 
 ### Cancelling
 
@@ -357,13 +360,14 @@ Agents configured in the dashboard can include:
 
 | Status | Description |
 |--------|-------------|
-| 400 | A malformed field (the `code` says which), a missing `model` or `input`, or the agent is not active |
+| 400 | A malformed field (the `code` says which: `invalid_json` for a body that is not a JSON object, `invalid_version`, `attachment_unreachable`), a missing `model` or `input`, or the agent is not active |
 | 401 | Invalid API token |
 | 402 | The session has reached its spend budget (`budget_reached`) |
 | 403 | The token's owner lacks the service the target needs, or may not touch the session (`session_forbidden`) |
 | 404 | Agent, run, response or version not found, or `previous_response_id` references another agent's session |
 | 409 | Another run is active for the conversation (`agent_run_conflict`), the session waits for an approval or an answer (`pending_action`), or the `Idempotency-Key` belongs to another request (`idempotency_key_conflict`) |
-| 429 | The run cap (`agent_run_concurrency_limit`), the tenant's spend limit (`spend_limit_exceeded`) or its quota is used up |
+| 429 | The run cap (`agent_run_concurrency_limit`, `Retry-After: 30`), the tenant's spend limit (`spend_limit_exceeded`) or its quota (`agent_quota_exceeded`, `Retry-After: 60`) is used up |
 | 500 | Internal error during agent execution |
+| 503 | The permission engine could not decide (`authorization_unavailable`), or the run a call waited on was ended elsewhere before it finished (`agent_run_interrupted`, retryable) |
 
 The runs, sessions and routines APIs answer `{ "error": { "type", "message", "code" } }`; the OpenAI routes use OpenAI's envelope with `param`. The full list for runs is in [Agent runs](/guide/agent-background-execution#errors).

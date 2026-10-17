@@ -46,7 +46,39 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - A server that shuts down hands its runs over (`interrupted`), a run whose worker disappears is closed as `worker_lost`,
   and retention (`AGENT_RUN_RETENTION_DAYS`) never deletes a queued, running, scheduled or waiting run.
 - `GET /responses/{id}` reports `background: true` for a run that was started with `background: true`, also when the
-  call streamed.
+  call streamed; a `service_tier: "flex"` call reads `false` (it is queued, but not a background request).
+- A waited call whose run is ended elsewhere before it finishes (the server shut down and handed its runs over, or the
+  worker was lost) answers `503 agent_run_interrupted` (retryable; tool side effects may have happened) instead of the
+  partial answer its turn had produced, and a stream ends with an `error` event and `response.failed`. Graceful shutdown
+  drains the runs **before** the HTTP server waits for its open connections (`AGENT_RUN_DRAIN_TIMEOUT_MS` applies there),
+  and open session event streams are ended (clients reconnect).
+- A run's retention (`AGENT_RUN_RETENTION_DAYS`) is counted from when it finished, whatever way it ended, and for a
+  scheduled or deferred run from its due time, so a run scheduled far ahead is not deleted soon after it ran; on MongoDB
+  the idempotency key now lives as long as its run.
+- A due scheduled run is promoted only while the tenant (or project) is under its default-class active-run cap; at the
+  cap it stays `scheduled`, so it can start later than `run_at`.
+- A paused run whose pause is dropped (a new message to an agent set to cancel pending requests, a session truncate,
+  `onTimeout: cancel`) now ends `canceled` (`canceled_by_caller`) with its callback and `agent_run.canceled` event,
+  instead of staying `requires_action`.
+- After a pause, run callbacks carry an event id of their own for each outcome (`evt_<runId>_<event>_<generation>` from
+  the second one on) and a late delivery of an older event no longer overwrites the state of a newer one.
+- Answering an approval inline continues the paused run: the response id is `resp_<runId>` of that run, its events cover
+  the continuation (they no longer stop at the pause), and a timeout continuation (`onTimeout` deny or allow) is labelled
+  `timeout` in the session events.
+- The agent-run quota counts a run only once it is admitted (a conflict or a concurrency refusal uses no unit), and a
+  start refused before its run exists removes the session that the same request created. A queued run whose job fails
+  before it claims its run is no longer lost: the reconciler republishes it.
+- Streams (runs API, `/responses`, chat completions) check the active-run caps and the agent quota before they open: over
+  a limit the answer is a plain JSON `429` (`Retry-After` 30 s for the cap, 60 s for the quota), not an `error` event;
+  non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a routine's Run now) stop when the
+  client disconnects.
+- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses` and `/agents/responses`; an
+  `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
+  has to arrive within the outbound timeout (`400 attachment_unreachable`), and a malformed percent-escape in its name no
+  longer fails the call.
+- Responses `usage` always carries `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`
+  (`0` when not reported; `reasoning_tokens` is `0` for an agent run). `reasoning` is applied to runs that execute in the
+  request only: a queued (`background`, `flex`, `POST …/runs` without `stream`) run uses the agent's own effort.
 
 ### Responses, chat completions and models
 
@@ -58,6 +90,13 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `deferred` run), `GET` and `cancel`, and answer `202` past the wait window. Agent chat completions stream with a
   keep-alive comment and `stream_options.include_usage`.
 - `GET /models` lists `agent:<key>` entries, so an OpenAI-compatible client can pick an agent from its model list.
+  `GET /models` and `GET /models/{id}` admit a token that holds Models **or** Agents (read): an Agents-only token lists
+  only agents (no models, no providers) and fetches `agent:<key>`, while fetching a model id needs Models (`403`).
+- Chat completions with an agent model check `version` like `/responses` (a positive integer, a numeric string or
+  `"draft"`; otherwise `400 invalid_version`, an unknown version `404 version_not_found`). The transcript match that
+  continues a session now covers file and image references and the OpenAI `user` field, and continues a session only when
+  exactly one of the owner's sessions matches (an ambiguous transcript starts a new session).
+- `attachments.accepts_images` on `GET /agents/{key}` is `false` while uploads are off or the bucket is unusable.
 - **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact), and agents
   that declare `config.inputs` take typed `inputs`. `GET /agents/{key}` returns `input_schema` and `output_schema`.
   Studio: Configure → Inputs and Output.
@@ -69,7 +108,16 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - A `message/stream` client that disconnects no longer cancels the task. `tasks/resubscribe` (`{ "id": … }`) reattaches:
   the current Task, then status and artifact updates until the task is final (a finished task, or one waiting on input,
   answers the Task and its final status at once; one resubscribe stream follows a task for up to 60 minutes).
-  `tasks/cancel` is unchanged and works in any non-final state.
+  `tasks/cancel` works in any non-final state; a task that cannot be canceled answers `-32002` (`TaskNotCancelable`,
+  earlier `-32004`).
+- `message/send` answers a Task in state `canceled` for a run that was stopped while the call waited, and a Task in state
+  `failed` (with `metadata.errorType` / `errorCode`) for a run that failed after it started, the agent quota refusal and
+  a still-pending request included; a refusal before the run exists stays a JSON-RPC error.
+- **Public A2A** (`/api/public/a2a/...`): a task and its session are bound to the caller that created them. Ids are
+  `run_<runId>.<nonce>` and `<sessionId>.<nonce>` and must be handed back whole; without the right nonce `tasks/get`,
+  `tasks/cancel` and `tasks/resubscribe` answer `-32001` and a `contextId` answers `-32602` (`unknown contextId`).
+  Public conversations created before this change can no longer be reached from the public route. The inputs of a
+  public caller's `data` part are external content and never reach the system prompt.
 
 ### Routines and webhook triggers
 
@@ -78,6 +126,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   owned by `system:routine:<id>`, with the idempotency key `routine:<id>:<slot>`; **Run now** and a run history per
   routine. The scheduler runs on every node and the database picks one winner per slot
   (`AGENT_ROUTINE_TICK_MS`, `AGENT_ROUTINE_MISFIRE_GRACE_MS`). `routine.fired` and `routine.failed` are webhook events.
+  The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the routine's last
+  updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
 - **Webhook triggers**: a routine with a `webhook` trigger starts when something posts to
   `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the routine's secret). Presets for
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
@@ -94,7 +144,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   with uploads off they stay off until turned on, and the read tools are offered when uploads **or** outputs are on.
   `attachments.outputs` on `GET /agents/{key}` shows the effective setting.
 - Files an agent produced come back on Responses, chat completions (`output_files`, `file_path` annotations) and A2A
-  artifacts.
+  artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
+  breaks).
 
 ### Sandbox
 
@@ -104,6 +155,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `409 sandbox_secrets_unreadable` (enter every value again to replace them; only masks keeps them), its tools run without secrets and say so,
   and Studio shows a warning.
 - Environment fields of sandbox templates and instances are write-only: stored sealed and shown masked (Enterprise).
+  An environment that cannot be decrypted is reported (`envUnreadable`) instead of dropped: a change that needs the
+  stored values answers `409 sandbox_env_unreadable` and keeps the ciphertext, and the template editor asks for every
+  value or none. A row opened with Replace and saved without a value keeps the stored one.
+- Clearing an agent's callback URL removes the whole callback, and the stored secret with it (the masked secret read back
+  next to no URL is accepted and dropped).
 
 ### Configuration
 
