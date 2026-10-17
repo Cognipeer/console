@@ -17,7 +17,7 @@ export interface AgentAttachmentInfo {
     maxFiles: number;
     maxFileSizeMb: number;
     allowedMimeTypes: string[];
-    /** The agent's model reads images (an image sent to it is seen, not replaced by a note). */
+    /** Uploads are on (`enabled`) and the agent's model reads images (an image sent to it is seen, not replaced by a note). */
     acceptsImages: boolean;
     /** Files the agent can write for the person (`session_files_create`), independent of uploads (on by default only together with them). */
     outputs: {
@@ -40,21 +40,24 @@ export async function describeAgentAttachments(input: {
     const db = await getDatabase();
     await db.switchToTenant(input.tenantDbName);
 
-    let acceptsImages = false;
-    if (config.modelKey && !(config.kind === 'external' && config.connection)) {
-        const model = await db.findModelByKey(config.modelKey, input.projectId).catch(() => null);
-        acceptsImages = model ? resolveModelCapabilities(model).inputModalities.includes('image') : false;
-    }
-
     const availability = attachmentsAvailability(config);
     const outputsOn = outputsAvailability(config);
     const bucketUsable = async (key: string) =>
         (await inspectFileBucket(db, input.tenantId, input.projectId, key).catch(() => null))?.usable === true;
+    const enabled = availability.available ? await bucketUsable(availability.cfg.bucketKey) : false;
+
+    // An image reaches the model only through an upload, so with uploads off it accepts none.
+    let acceptsImages = false;
+    if (enabled && config.modelKey && !(config.kind === 'external' && config.connection)) {
+        const model = await db.findModelByKey(config.modelKey, input.projectId).catch(() => null);
+        acceptsImages = model ? resolveModelCapabilities(model).inputModalities.includes('image') : false;
+    }
+
     // Limits are shown even when files are off, so a client can render them without a second call.
     const limits = availability.available ? availability.cfg : null;
     const outputs = resolveOutputsConfig(config.attachments);
     return {
-        enabled: availability.available ? await bucketUsable(availability.cfg.bucketKey) : false,
+        enabled,
         maxFiles: limits?.maxFiles ?? 0,
         maxFileSizeMb: limits?.maxFileSizeMb ?? 0,
         allowedMimeTypes: limits?.allowedMimeTypes ?? [],
