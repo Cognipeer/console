@@ -314,12 +314,12 @@ describeForEachProvider('AgentRun — data model foundation (Group A)', (getDb) 
 
   it('countActiveAgentRuns can count background runs only (sync reservations do not use the background cap)', async () => {
     const db = getDb();
-    const before = await db.countActiveAgentRuns(tenantId, projectId, 'background');
-    const beforeSync = await db.countActiveAgentRuns(tenantId, projectId, 'sync');
+    const before = await db.countActiveAgentRuns(tenantId, projectId, { mode: 'background' });
+    const beforeSync = await db.countActiveAgentRuns(tenantId, projectId, { mode: 'sync' });
     await db.createAgentRun(baseRecord(conv()));
     await db.createAgentRun(baseRecord(conv(), { mode: 'sync', status: 'running' }));
-    expect(await db.countActiveAgentRuns(tenantId, projectId, 'background')).toBe(before + 1);
-    expect(await db.countActiveAgentRuns(tenantId, projectId, 'sync')).toBe(beforeSync + 1);
+    expect(await db.countActiveAgentRuns(tenantId, projectId, { mode: 'background' })).toBe(before + 1);
+    expect(await db.countActiveAgentRuns(tenantId, projectId, { mode: 'sync' })).toBe(beforeSync + 1);
   });
 
   it('listQueuedAgentRuns returns only queued rows created before the cutoff, oldest first', async () => {

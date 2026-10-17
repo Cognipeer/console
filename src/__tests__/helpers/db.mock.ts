@@ -257,6 +257,11 @@ function buildPrimers(): Record<string, Mock> {
     // already get `[]` / `0` / `true` from `defaultReturnFor`.
     getAgentRunById: vi.fn().mockResolvedValue(null),
     getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
+    // Shapes the name-based default would get wrong (a record, not a number / undefined).
+    countAgentRunsByStatus: vi.fn().mockResolvedValue({}),
+    promoteScheduledAgentRun: vi.fn().mockResolvedValue(null),
+    markAgentRunDetached: vi.fn().mockResolvedValue(null),
+    markAgentRunPublished: vi.fn().mockResolvedValue(null),
   };
 }
 

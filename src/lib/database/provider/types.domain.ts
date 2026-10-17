@@ -2575,6 +2575,44 @@ export interface IAgentSubagentPolicy {
   allowAdhocTools?: boolean;
 }
 
+/** Where a run's result is POSTed (`IAgentConfig.callback`). */
+export interface IAgentCallbackConfig {
+  url?: string;
+  /** Write-only HMAC secret: plaintext in, masked out. */
+  secret?: string;
+  /** Sealed `secret`; never returned by the API. */
+  secretSealed?: string;
+}
+
+/**
+ * Class of an agent run. `default` is interactive and counts against the
+ * tenant's active cap; `deferred` is low priority, queued on its own and
+ * managed by its own caps.
+ */
+export type AgentRunClass = 'default' | 'deferred';
+
+/** Per-request structured output of a run (Responses `text.format`, chat `response_format`, runs API). */
+export interface AgentResponseFormat {
+  type: 'json_schema' | 'json_object';
+  /** json_schema only; default 'response'. */
+  name?: string;
+  /** json_schema only; draft-07 subset (the converter `config.structuredOutput` uses). */
+  schema?: Record<string, unknown>;
+  strict?: boolean;
+}
+
+/** One declared input of an agent (`IAgentConfig.inputs`). */
+export interface IAgentInputField {
+  /** `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, unique within the agent. */
+  name: string;
+  label?: string;
+  description?: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'json';
+  enum?: Array<string | number>;
+  required?: boolean;
+  default?: unknown;
+}
+
 export interface IAgentExecutionConfig {
   /** Synchronous ceiling for this agent, seconds. */
   syncTimeoutSeconds?: number;
@@ -2618,6 +2656,17 @@ export interface IAgentExecutionConfig {
 export interface IAgentAttachmentsConfig {
   /** true = the agent takes attachments (needs `bucketKey`). Default false. */
   enabled?: boolean;
+  /**
+   * Files the agent writes itself (`session_files_create` / `session_files_append`),
+   * stored in the same bucket. Default ON when the agent has a `bucketKey`.
+   */
+  outputs?: {
+    enabled?: boolean;
+    /** Most files one turn may create. */
+    maxFilesPerTurn?: number;
+    /** Largest generated file, MB. */
+    maxFileSizeMb?: number;
+  };
   /** Most files one session may hold. Default 10. */
   maxFiles?: number;
   /** Largest single file, MB. Default 20. */
@@ -2769,6 +2818,30 @@ export interface IAgentConfig {
    * value is min(env ceiling, tenant quota, this).
    */
   execution?: IAgentExecutionConfig;
+  /**
+   * Callback for runs started without their own `callback_url` (every dialect,
+   * routines included). The secret is write-only: plaintext in, masked out;
+   * only the sealed form is stored.
+   */
+  callback?: IAgentCallbackConfig;
+  /**
+   * Default spend budget of a session of this agent (copied to each session when
+   * it starts). Absent = sessions have no budget; the per-turn
+   * `runtime.limits.maxCostUsd` is separate and unchanged.
+   */
+  budget?: IAgentSessionBudget & {
+    /**
+     * May an API client remove this budget or raise it past `maxCostUsd`
+     * (session create / `PATCH`)? Default false: the budget the admin set binds
+     * the integration it is meant to constrain. Dashboard users are not affected.
+     */
+    allowClientOverride?: boolean;
+  };
+  /**
+   * Declared inputs of the agent (a form for a human, a validated object for an
+   * API / routine caller). Absent = the agent takes free text only. At most 32.
+   */
+  inputs?: IAgentInputField[];
   /**
    * Human in the loop: tool approvals and questions to the user. Absent (every
    * agent created before this existed) = nothing ever pauses.
@@ -4416,19 +4489,25 @@ export interface IPrescriptionReport {
 // agent turns can carry irreversible tool side effects that crawl jobs do not.
 
 /**
- * Which path created this row. A `'sync'` row exists only to hold the
- * single-active-run reservation (see `createAgentRun` in contract.ts for
- * `conversationId`, §6/§12.14) for the duration of an inline call — it is
- * always deleted when the call ends (success, timeout, or error), never left
- * in a terminal state and never intended to be polled.
+ * Which path created this row.
+ *  - `'sync'`: a dashboard/portal reservation that only holds the
+ *    single-active-run slot (see `createAgentRun` in contract.ts for
+ *    `conversationId`, §6/§12.14) for the duration of a call — deleted when the
+ *    turn ends (success, timeout, or error), never polled.
+ *  - `'inline'`: an API turn executed in the request process. Recorded like a
+ *    background run (finalized, kept until retention), heartbeats, and may
+ *    detach (the caller stops waiting and gets 202).
+ *  - `'background'`: a queue worker run.
  */
-export type AgentRunMode = 'sync' | 'background';
+export type AgentRunMode = 'sync' | 'inline' | 'background';
 
 /**
- * No `timeout` state: a timeout only happens in synchronous mode, whose
- * reservation row is deleted when the call ends, never finalized (§6).
+ * `scheduled` is not active: it holds no conversation slot and is promoted to
+ * `queued` when `notBefore` is due. A dashboard `sync` row never reaches a
+ * terminal state (its row is deleted when the turn ends, §6).
  */
 export type AgentRunStatus =
+  | 'scheduled'
   | 'queued'
   | 'running'
   /**
@@ -4444,7 +4523,7 @@ export type AgentRunStatus =
 /**
  * Distinguishes an agent-side failure, a worker that died mid-run (§12.1),
  * the server-side background ceiling firing (§12.13), and an explicit caller
- * cancel — three different causes should not collapse into one generic value.
+ * cancel — different causes should not collapse into one generic value.
  */
 export type AgentRunErrorReason =
   | 'agent_error'
@@ -4457,6 +4536,10 @@ export type AgentRunErrorReason =
   | 'owner_disabled'
   /** The owner's account state could not be read, so the run was refused (fail closed). */
   | 'owner_unverifiable'
+  /** A deferred / scheduled run that did not start within `AGENT_DEFERRED_MAX_WAIT_MS` of becoming due. */
+  | 'expired'
+  /** The server shut down while the run was executing; not retried automatically. */
+  | 'interrupted'
   | null;
 
 /** Durable delivery state for the optional callback webhook (§12.6). */
@@ -4581,8 +4664,32 @@ export interface IAgentRun extends IUsageAttributionFields {
    * with. Never returned by the API.
    */
   callbackSecret?: string | null;
-  /** Effective background ceiling resolved at submit time (env ∧ tenant quota ∧ agent). */
+  /** Effective run ceiling resolved at submit time (env ∧ tenant quota). */
   maxDurationMs?: number | null;
+  /** Absent = `default`. */
+  runClass?: AgentRunClass;
+  /** Scheduled start: a `scheduled` row is promoted to `queued` once this is due. */
+  notBefore?: Date | null;
+  /** Set when an `inline` run's caller stopped waiting (the call answered 202). */
+  detachedAt?: Date | null;
+  /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
+  metadata?: Record<string, string> | null;
+  /** The surface that created the run. */
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'routine' | null;
+  routineId?: string | null;
+  trigger?: 'request' | 'schedule' | 'once' | 'manual' | null;
+  /** Per-request structured output; the worker and a resume re-apply it. */
+  responseFormat?: AgentResponseFormat | null;
+  /** Validated agent inputs (`IAgentConfig.inputs`). */
+  inputs?: Record<string, unknown> | null;
+  /**
+   * Bumped on every (re)queue for a NEW execution (create = 1, resume/continue
+   * +1). The job dedup key is `ar_${runId}_${queueGeneration}`, so a reconciler
+   * republish of the same generation is a no-op.
+   */
+  queueGeneration?: number;
+  /** When the queue job was last published (reconciler republish bookkeeping). */
+  lastPublishedAt?: Date | null;
   callbackStatus?: AgentRunCallbackStatus | null;
   /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
   callbackAttempts?: number;

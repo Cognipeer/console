@@ -396,6 +396,28 @@ export interface AppConfig {
     runConcurrency: number;
     /** A `queued` run older than this with no worker is republished by the reconciler. */
     runRequeueAfterMs: number;
+    /** Default class: queued+running runs per tenant, every mode (sync, inline, background); 0 = no cap. The tenant quota `maxConcurrentAgentRuns` lowers it. */
+    runMaxActivePerTenant: number;
+    /** Default class: queued+running runs per project; 0 = off. */
+    runMaxActivePerProject: number;
+    /** Deferred class: runs executing at once per tenant. */
+    deferredMaxRunningPerTenant: number;
+    /** Deferred class: queued+scheduled runs per tenant; over it a new run is refused (429). */
+    deferredMaxQueuedPerTenant: number;
+    /** Deferred queue workers per node (the deferred share of a node; default half of `runConcurrency`, at least 1). */
+    deferredConcurrency: number;
+    /** A deferred / scheduled run that has not started this long after it became due is failed as `expired`. */
+    deferredMaxWaitMs: number;
+    /** Callback delivery workers per node (own queue). */
+    runCallbackConcurrency: number;
+    /** On shutdown: how long to wait for runs executing on this node before marking them `interrupted`. Below the shutdown timeout. */
+    runDrainTimeoutMs: number;
+    /** How often the routine scheduler looks for due slots. */
+    routineTickMs: number;
+    /** A missed routine slot older than this is skipped (at most one catch-up fire). */
+    routineMisfireGraceMs: number;
+    /** Concurrent agent chat turns per node (the `agent` queue). */
+    chatConcurrency: number;
   };
 
   /**
@@ -490,12 +512,28 @@ export interface AppConfig {
 function boundedAgentRunConfig(source: ConfigSource) {
   const atLeast = (value: number, min: number) => (Number.isFinite(value) ? Math.max(value, min) : min);
   const runHeartbeatIntervalMs = atLeast(int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000), 1_000);
+  const runConcurrency = atLeast(int(source, 'AGENT_RUN_CONCURRENCY', 4), 1);
   return {
     runHeartbeatIntervalMs,
     runHeartbeatStaleMs: atLeast(int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000), runHeartbeatIntervalMs * 3),
     backgroundMaxConcurrentRunsPerProject: atLeast(int(source, 'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT', 0), 0),
-    runConcurrency: atLeast(int(source, 'AGENT_RUN_CONCURRENCY', 4), 1),
+    runConcurrency,
     runRequeueAfterMs: atLeast(int(source, 'AGENT_RUN_REQUEUE_AFTER_MS', 120_000), 10_000),
+    runMaxActivePerTenant: atLeast(int(source, 'AGENT_RUN_MAX_ACTIVE_PER_TENANT', 250), 0),
+    runMaxActivePerProject: atLeast(int(source, 'AGENT_RUN_MAX_ACTIVE_PER_PROJECT', 0), 0),
+    deferredMaxRunningPerTenant: atLeast(int(source, 'AGENT_DEFERRED_MAX_RUNNING_PER_TENANT', 2), 1),
+    deferredMaxQueuedPerTenant: atLeast(int(source, 'AGENT_DEFERRED_MAX_QUEUED_PER_TENANT', 10_000), 1),
+    deferredConcurrency: atLeast(int(source, 'AGENT_DEFERRED_CONCURRENCY', Math.max(1, Math.floor(runConcurrency / 2))), 1),
+    deferredMaxWaitMs: atLeast(int(source, 'AGENT_DEFERRED_MAX_WAIT_MS', 86_400_000), 60_000),
+    runCallbackConcurrency: atLeast(int(source, 'AGENT_RUN_CALLBACK_CONCURRENCY', 4), 1),
+    // Shutdown also has to stop servers and flush; the drain gets what is left after 3 s of that.
+    runDrainTimeoutMs: Math.min(
+      atLeast(int(source, 'AGENT_RUN_DRAIN_TIMEOUT_MS', 10_000), 0),
+      atLeast(int(source, 'SHUTDOWN_TIMEOUT_MS', 15_000) - 3_000, 0),
+    ),
+    routineTickMs: atLeast(int(source, 'AGENT_ROUTINE_TICK_MS', 30_000), 5_000),
+    routineMisfireGraceMs: atLeast(int(source, 'AGENT_ROUTINE_MISFIRE_GRACE_MS', 3_600_000), 0),
+    chatConcurrency: atLeast(int(source, 'AGENT_CHAT_CONCURRENCY', 4), 1),
   };
 }
 

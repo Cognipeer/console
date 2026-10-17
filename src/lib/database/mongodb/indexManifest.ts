@@ -129,6 +129,11 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
     // A caller who may not see other people's sessions lists only the runs they queued, newest first.
     { key: { tenantId: 1, projectId: 1, agentKey: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_user_createdAt' } },
+    // Per-class queue visibility, the deferred dispatcher and the expiry sweep.
+    { key: { tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, options: { name: 'idx_tenant_status_class_createdAt' } },
+    // The scheduled-run promotion sweep.
+    { key: { status: 1, notBefore: 1 }, options: { name: 'idx_status_notBefore' } },
+    { key: { tenantId: 1, routineId: 1, createdAt: -1 }, options: { name: 'idx_tenant_routine_createdAt' } },
   ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },

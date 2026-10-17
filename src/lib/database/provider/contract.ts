@@ -48,6 +48,7 @@ import type {
   CrawlJobStatus,
   CrawlerStatus,
   IAgentRun,
+  AgentRunClass,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1996,7 +1997,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * queued/running run per conversation" race-free (§6/§12.14): SQLite with a
    * partial unique index, Mongo with agent_run_locks documents, since Cosmos
    * rejects partial indexes — for both `mode: 'sync'` and
-   * `mode: 'background'` rows alike. A violation MUST be caught by the
+   * `mode: 'inline'` and `mode: 'background'` rows alike. A `scheduled` row is
+   * not active and takes no slot (it takes it when promoted, see
+   * `promoteScheduledAgentRun`). A violation MUST be caught by the
    * implementation and re-thrown as `AgentRunConflictError` (see
    * `./errors.ts`), never left as a raw driver error, so callers can map it
    * directly to `409 Conflict` without a TOCTOU check-then-insert.
@@ -2030,8 +2033,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Record a cancellation request, scoped by tenantId + projectId (§12.11).
-   * Mirrors `requestCrawlJobCancel`: a `queued` run transitions straight to
-   * `canceled` (nothing is executing it yet); a `running` run only has
+   * Mirrors `requestCrawlJobCancel`: a `queued` or `scheduled` run transitions
+   * straight to `canceled` (nothing is executing it yet); a `running` run only has
    * `cancelRequestedAt` stamped so the owning worker's own poll loop
    * observes it and performs its own guarded transition (§7 step 6).
    */
@@ -2058,7 +2061,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Puts a paused (`requires_action`) run back in the queue to continue its
    * turn: CAS from `requires_action` to `queued`, taking the conversation's
    * active-run slot again. Null when the run is not paused any more; throws
-   * `AgentRunConflictError` when another run holds the slot.
+   * `AgentRunConflictError` when another run holds the slot. Increments
+   * `queueGeneration` (a resume is a new execution: its job dedup key differs).
    */
   requeueAgentRunForResume(
     id: string,
@@ -2092,7 +2096,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Heartbeat-sweep input for the crash-recovery reconciler (§7.1): `running`
-   * rows in this tenant whose `heartbeatAt` is older than `heartbeatBefore`.
+   * rows in this tenant (every mode, `inline` included) whose `heartbeatAt` is
+   * older than `heartbeatBefore`.
    */
   listStaleAgentRuns(
     tenantId: string,
@@ -2101,7 +2106,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /**
    * Boot-time recovery input (§7.1): `queued` rows in this tenant — a
    * message the in-memory queue provider lost on process restart is safe to
-   * republish as-is, since a `queued` run never started executing.
+   * republish as-is, since a `queued` run never started executing. `deferred`
+   * rows are left out (their dispatcher publishes them), and so are
+   * `scheduled` rows (not queued yet).
    */
   listQueuedAgentRuns(
     tenantId: string,
@@ -2118,8 +2125,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options: { updatedBefore: Date; maxAttempts: number; limit?: number },
   ): Promise<IAgentRun[]>;
   /**
-   * Dashboard listing, newest first. Always tenant+project scoped;
-   * `agentKey`/`conversationId`/`status`/`mode` narrow it further.
+   * Run listing, newest first (stable order: `createdAt` then id). Always
+   * tenant+project scoped; everything else narrows it. `cursor` is the id of
+   * the last row of the previous page (rows after it are returned). A caller
+   * that wants `has_more` asks for `limit + 1` rows.
    */
   listAgentRuns(filter: {
     tenantId: string;
@@ -2127,7 +2136,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     agentKey?: string;
     conversationId?: string;
     status?: IAgentRun['status'][];
-    mode?: IAgentRun['mode'];
+    /** One mode or any of several. */
+    mode?: IAgentRun['mode'] | IAgentRun['mode'][];
+    excludeModes?: IAgentRun['mode'][];
+    /** `default` also matches rows with no class. */
+    runClass?: AgentRunClass;
+    routineId?: string;
+    channel?: NonNullable<IAgentRun['channel']>;
+    /** Exact `key = value` pairs the run's metadata must carry. */
+    metadata?: Record<string, string>;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    cursor?: string;
     /** Only the runs this user queued (the list of a caller who may not see other people's). */
     userId?: string;
     limit?: number;
@@ -2136,12 +2156,57 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Sync-mode cleanup (§6): unconditional delete, not a finalize — a
    * `mode: 'sync'` row is a reservation slot, never a terminal record, and
    * an orphaned one (process crash mid-call) is freed the same way by the
-   * reconciler.
+   * reconciler. Also the undo of a refused (cap overflow) insert.
    */
   deleteAgentRun(id: string): Promise<boolean>;
-  /** §12.8 concurrency-cap input: count of `queued`+`running` rows. */
-  countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number>;
-  /** §12.10 retention, following the `cleanupAgentTracingRetention` precedent. */
+  /**
+   * §12.8 concurrency-cap input: count of `queued`+`running` rows. `runClass`
+   * `default` also counts rows with no class.
+   */
+  countActiveAgentRuns(
+    tenantId: string,
+    projectId?: string,
+    opts?: { mode?: IAgentRun['mode']; runClass?: AgentRunClass },
+  ): Promise<number>;
+  /**
+   * Row counts per status (queue visibility, deferred caps). Every requested
+   * status is present in the result, 0 when there is none.
+   */
+  countAgentRunsByStatus(
+    tenantId: string,
+    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+  ): Promise<Record<string, number>>;
+  /** `scheduled` rows of this tenant whose `notBefore` is due, oldest first. */
+  listDueScheduledAgentRuns(tenantId: string, now: Date, limit: number): Promise<IAgentRun[]>;
+  /**
+   * CAS `scheduled` -> `queued`, taking the conversation's active-run slot.
+   * Null when the row is no longer `scheduled` (another node promoted or
+   * canceled it); throws `AgentRunConflictError` when another run holds the
+   * slot (the row stays `scheduled`, retried on the next tick).
+   */
+  promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null>;
+  /** `deferred` `queued` rows (notBefore absent or <= `dueBefore`), oldest first: the dispatcher's input. */
+  listQueuedDeferredAgentRuns(
+    tenantId: string,
+    options: { limit: number; dueBefore: Date },
+  ): Promise<IAgentRun[]>;
+  /**
+   * Deferred `queued` rows and overdue `scheduled` rows that have waited since
+   * before `dueBefore` (their due time — `notBefore`, else `createdAt`) without
+   * starting. The reconciler fails them as `expired`.
+   */
+  listExpiredWaitingAgentRuns(
+    tenantId: string,
+    options: { dueBefore: Date; limit: number },
+  ): Promise<IAgentRun[]>;
+  /** CAS on `running`: stamps `detachedAt` (the caller of an inline run stopped waiting). */
+  markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
+  /** Stamps `lastPublishedAt` after a queue publish (no status guard). */
+  markAgentRunPublished(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
+  /**
+   * §12.10 retention, following the `cleanupAgentTracingRetention` precedent.
+   * Never deletes `queued`, `running`, `scheduled` or `requires_action` rows.
+   */
   cleanupAgentRunRetention(options: {
     olderThan: Date;
     batchSize?: number;

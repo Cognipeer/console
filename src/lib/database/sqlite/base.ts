@@ -1117,6 +1117,20 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentRuns, 'resumeActionIds', 'resumeActionIds TEXT');
     // Conversation files that ride the message of a (background) run.
     this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
+    // Run engine: class (absent = default), scheduled start, detached inline runs,
+    // caller labels, origin surface, routine link, per-request structured output,
+    // validated inputs, queue generation (job dedup) and last publish time. All
+    // nullable; old rows read back as absent. (`runTrigger` because TRIGGER is an SQL keyword.)
+    for (const [column, type] of [
+      ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
+      ['channel', 'TEXT'], ['routineId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
+      ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status_class_created ON ${TABLES.agentRuns}(tenantId, status, runClass, createdAt)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_status_notBefore ON ${TABLES.agentRuns}(status, notBefore)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_routine_created ON ${TABLES.agentRuns}(tenantId, routineId, createdAt)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.

@@ -130,7 +130,7 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
     expect(seenCell?.cancelled).toBe(true);
 
     // Still reserved: another turn on this conversation is refused.
-    expect(await db.countActiveAgentRuns(tenantId, PROJECT_ID, 'sync')).toBe(1);
+    expect(await db.countActiveAgentRuns(tenantId, PROJECT_ID, { mode: 'sync' })).toBe(1);
     const callsBefore = hoisted.executeAgentChat.mock.calls.length;
     const meanwhile = await runSyncAgentTurn({ request: baseRequest('conv-held'), syncTimeoutMs: 60 });
     expect(meanwhile.kind).toBe('conflict');

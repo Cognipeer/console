@@ -28,9 +28,9 @@ services:
       - BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD:-}
       - BOOTSTRAP_ADMIN_NAME=${BOOTSTRAP_ADMIN_NAME:-Administrator}
       # Agent Background Execution (docs/guide/agent-background-execution.md)
-      # Hard ceiling for a synchronous agent turn; MUST be below the shortest infra timeout in the deployment
-      - AGENT_SYNC_TIMEOUT_MS=${AGENT_SYNC_TIMEOUT_MS:-180000}
-      # Server-operated upper bound on a background run, independent of the agent's own maxWallClockMs
+      # How long a synchronous call waits for its run before answering 202 (the run keeps going); keep it below the shortest infra timeout in the deployment
+      - AGENT_SYNC_TIMEOUT_MS=${AGENT_SYNC_TIMEOUT_MS:-600000}
+      # Longest wall-clock a run may take, independent of the agent's own maxWallClockMs
       - AGENT_BACKGROUND_MAX_DURATION_MS=${AGENT_BACKGROUND_MAX_DURATION_MS:-1800000}
       # Simple per-tenant cap on simultaneous queued+running background runs
       - AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT=${AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT:-10}
@@ -46,6 +46,18 @@ services:
       - AGENT_RUN_HEARTBEAT_INTERVAL_MS=${AGENT_RUN_HEARTBEAT_INTERVAL_MS:-15000}
       # A running run whose heartbeat is older than this is orphaned by the reconciler
       - AGENT_RUN_HEARTBEAT_STALE_MS=${AGENT_RUN_HEARTBEAT_STALE_MS:-45000}
+      # Run engine knobs (code defaults shown; uncomment to override)
+      # - AGENT_RUN_MAX_ACTIVE_PER_TENANT=${AGENT_RUN_MAX_ACTIVE_PER_TENANT:-250}
+      # - AGENT_RUN_MAX_ACTIVE_PER_PROJECT=${AGENT_RUN_MAX_ACTIVE_PER_PROJECT:-0}
+      # - AGENT_DEFERRED_MAX_RUNNING_PER_TENANT=${AGENT_DEFERRED_MAX_RUNNING_PER_TENANT:-2}
+      # - AGENT_DEFERRED_MAX_QUEUED_PER_TENANT=${AGENT_DEFERRED_MAX_QUEUED_PER_TENANT:-10000}
+      # - AGENT_DEFERRED_CONCURRENCY=${AGENT_DEFERRED_CONCURRENCY:-2}
+      # - AGENT_DEFERRED_MAX_WAIT_MS=${AGENT_DEFERRED_MAX_WAIT_MS:-86400000}
+      # - AGENT_RUN_CALLBACK_CONCURRENCY=${AGENT_RUN_CALLBACK_CONCURRENCY:-4}
+      # - AGENT_RUN_DRAIN_TIMEOUT_MS=${AGENT_RUN_DRAIN_TIMEOUT_MS:-10000}
+      # - AGENT_ROUTINE_TICK_MS=${AGENT_ROUTINE_TICK_MS:-30000}
+      # - AGENT_ROUTINE_MISFIRE_GRACE_MS=${AGENT_ROUTINE_MISFIRE_GRACE_MS:-3600000}
+      # - AGENT_CHAT_CONCURRENCY=${AGENT_CHAT_CONCURRENCY:-4}
     volumes:
       - app-data:/app/data
     restart: unless-stopped

@@ -29,18 +29,14 @@ import { AGENT_RUN_QUEUE, runAgentJobLocal, deliverAgentRunCallbackJob } from '.
 const log = createLogger('agent.consumer');
 let started = false;
 
-/**
- * Concurrent agent turns per node.
- *
- * These jobs are LLM round-trips — almost entirely I/O wait — so serialising
- * them head-of-line blocked every cross-node turn behind the slowest one, and
- * the queue's 60s invoke timeout then failed the ones still waiting.
- */
-const CONCURRENCY = Math.max(1, Number(process.env.AGENT_CHAT_CONCURRENCY ?? 4) || 4);
-
 export async function startAgentQueueConsumer(): Promise<void> {
   if (started) return;
   const queue = await getQueue();
+  // Concurrent agent turns per node (`AGENT_CHAT_CONCURRENCY`). These jobs are
+  // LLM round-trips — almost entirely I/O wait — so serialising them head-of-line
+  // blocked every cross-node turn behind the slowest one, and the queue's 60s
+  // invoke timeout then failed the ones still waiting.
+  const chatConcurrency = getConfig().agent.chatConcurrency;
   queue.consume(queueNameFor('agent'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'chat') {
       return withWorkerRelay(ctx.data, (relay, data) => {
@@ -62,7 +58,7 @@ export async function startAgentQueueConsumer(): Promise<void> {
       }));
     }
     throw new Error(`Unknown agent job: ${ctx.name}`);
-  }, { concurrency: CONCURRENCY });
+  }, { concurrency: chatConcurrency });
 
   // Background runs + their callbacks, with their own concurrency: a run can
   // take 30 minutes, and sharing the chat queue's slots blocked chat.
@@ -77,5 +73,5 @@ export async function startAgentQueueConsumer(): Promise<void> {
     throw new Error(`Unknown agent-run job: ${ctx.name}`);
   }, { concurrency: getConfig().agent.runConcurrency });
   started = true;
-  log.info('Agent queue consumer registered', { concurrency: CONCURRENCY });
+  log.info('Agent queue consumer registered', { concurrency: chatConcurrency });
 }

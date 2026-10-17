@@ -882,11 +882,11 @@ export async function createBackgroundAgentRun(
 
   const overCap = async (): Promise<{ limit: number; scope: 'tenant' | 'project' } | null> => {
     if (limits.maxConcurrentRunsPerTenant > 0) {
-      const active = await db.countActiveAgentRuns(input.tenantId, undefined, 'background');
+      const active = await db.countActiveAgentRuns(input.tenantId, undefined, { mode: 'background' });
       if (active > limits.maxConcurrentRunsPerTenant) return { limit: limits.maxConcurrentRunsPerTenant, scope: 'tenant' };
     }
     if (limits.maxConcurrentRunsPerProject > 0) {
-      const active = await db.countActiveAgentRuns(input.tenantId, input.projectId, 'background');
+      const active = await db.countActiveAgentRuns(input.tenantId, input.projectId, { mode: 'background' });
       if (active > limits.maxConcurrentRunsPerProject) return { limit: limits.maxConcurrentRunsPerProject, scope: 'project' };
     }
     return null;

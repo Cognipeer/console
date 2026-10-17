@@ -213,6 +213,33 @@ shared by all replicas.
 
 See [Cluster](/guide/cluster) for the full topology / assignment model.
 
+### Agent Runs
+
+Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS` and then answers `202` while the run keeps going; runs can also be queued (`background`), deferred (low priority) or scheduled. See [Agent background execution](/guide/agent-background-execution).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_SYNC_TIMEOUT_MS` | How long a synchronous call waits for its run (minimum `5000`). After that the call answers `202` with the run and it continues in the background. Keep it below the shortest infrastructure timeout (load balancer, gateway) in the deployment | `600000` |
+| `AGENT_BACKGROUND_MAX_DURATION_MS` | Longest wall-clock any run may take (an inline run after it detached, background and deferred runs), independent of the agent's own `maxWallClockMs` | `1800000` |
+| `AGENT_RUN_MAX_ACTIVE_PER_TENANT` | Default-class runs queued or running per tenant, synchronous calls included. `0` = no cap. The tenant quota `maxConcurrentAgentRuns` lowers it | `250` |
+| `AGENT_RUN_MAX_ACTIVE_PER_PROJECT` | The same per project. `0` = off | `0` |
+| `AGENT_RUN_CONCURRENCY` | Default-class queue workers per node | `4` |
+| `AGENT_DEFERRED_MAX_RUNNING_PER_TENANT` | Deferred (low priority) runs executing at once per tenant | `2` |
+| `AGENT_DEFERRED_MAX_QUEUED_PER_TENANT` | Deferred runs queued or scheduled per tenant. A new run over it is refused with `429` | `10000` |
+| `AGENT_DEFERRED_CONCURRENCY` | Deferred queue workers per node | half of `AGENT_RUN_CONCURRENCY`, at least `1` |
+| `AGENT_DEFERRED_MAX_WAIT_MS` | A deferred or scheduled run that has not started this long after it became due fails with reason `expired` (minimum `60000`) | `86400000` |
+| `AGENT_RUN_CALLBACK_CONCURRENCY` | Callback delivery workers per node | `4` |
+| `AGENT_RUN_DRAIN_TIMEOUT_MS` | On shutdown: how long to wait for runs executing on this node before marking the rest `interrupted`. Kept below `SHUTDOWN_TIMEOUT_MS` minus 3 seconds | `10000` |
+| `AGENT_ROUTINE_TICK_MS` | How often the routine scheduler looks for due slots (minimum `5000`) | `30000` |
+| `AGENT_ROUTINE_MISFIRE_GRACE_MS` | A missed routine slot older than this is skipped; at most one catch-up run fires | `3600000` |
+| `AGENT_CHAT_CONCURRENCY` | Concurrent agent chat turns per node | `4` |
+| `AGENT_RUN_RETENTION_DAYS` | How long run records (`userMessage`, result) are kept | `30` |
+| `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | How often a worker stamps the heartbeat of a running run (minimum `1000`) | `15000` |
+| `AGENT_RUN_HEARTBEAT_STALE_MS` | A running run whose heartbeat is older than this is failed as `worker_lost` (at least three heartbeat intervals) | `45000` |
+| `AGENT_RUN_REQUEUE_AFTER_MS` | A queued run that no worker picked up after this long is republished (minimum `10000`) | `120000` |
+
+`AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT` and `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT` are replaced by `AGENT_RUN_MAX_ACTIVE_PER_TENANT` and `AGENT_RUN_MAX_ACTIVE_PER_PROJECT`; the new caps also count synchronous calls.
+
 ### Entity Health & Alerting
 
 Health views, alert rules and reports for agents, models, knowledge bases, MCP servers and tools read 5-minute rollups that every node buffers in memory and flushes to the database. See [Monitoring](/guide/monitoring#alerts-incidents) for how alert rules use them and [Agent Tracing](/guide/tracing#session-status) for how a session's status is decided.

@@ -9,7 +9,7 @@
  */
 
 import { ObjectId, MongoServerError, type Filter } from 'mongodb';
-import type { IAgentRun } from '../provider.interface';
+import type { AgentRunClass, IAgentRun } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
@@ -47,6 +47,38 @@ interface AgentRunLockDoc {
 function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === DUPLICATE_KEY_ERROR_CODE;
 }
+
+type IAgentRunListFn = (filter: {
+  tenantId: string;
+  projectId: string;
+  agentKey?: string;
+  conversationId?: string;
+  status?: IAgentRun['status'][];
+  mode?: IAgentRun['mode'] | IAgentRun['mode'][];
+  excludeModes?: IAgentRun['mode'][];
+  runClass?: AgentRunClass;
+  routineId?: string;
+  channel?: NonNullable<IAgentRun['channel']>;
+  metadata?: Record<string, string>;
+  createdAfter?: Date;
+  createdBefore?: Date;
+  cursor?: string;
+  userId?: string;
+  limit?: number;
+}) => Promise<IAgentRun[]>;
+
+/** `default` also matches rows with no class (every row from before run classes). */
+const runClassFilter = (runClass: AgentRunClass): Record<string, unknown> =>
+  runClass === 'default' ? { runClass: { $in: ['default', null] } } : { runClass };
+
+/**
+ * `metadata.<key> = value`. A key with a dot would be read as a nested path, so
+ * those go through `$getField` (MongoDB 5.0+).
+ */
+const metadataFilter = (key: string, value: string): Record<string, unknown> =>
+  key.includes('.')
+    ? { $expr: { $eq: [{ $getField: { field: { $literal: key }, input: '$metadata' } }, value] } }
+    : { [`metadata.${key}`]: value };
 
 const conversationLockId = (conversationId: string) => `conv:${conversationId}`;
 const idempotencyLockId = (tenantId: string, projectId: string, key: string) => `idem:${tenantId}:${projectId}:${key}`;
@@ -88,6 +120,11 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         [{ expiresAt: 1 }, { name: 'idx_expiresAt' }, true],
         [{ tenantId: 1, projectId: 1, idempotencyKey: 1 }, { name: 'idx_tenant_project_idempotencyKey' }, true],
         [{ tenantId: 1, projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_tenant_project_agent_createdAt' }, true],
+        // Per-class queue visibility, the deferred dispatcher and the expiry sweep.
+        [{ tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, { name: 'idx_tenant_status_class_createdAt' }, true],
+        // The scheduled-run promotion sweep. Plain index: Cosmos rejects partial ones.
+        [{ status: 1, notBefore: 1 }, { name: 'idx_status_notBefore' }, true],
+        [{ tenantId: 1, routineId: 1, createdAt: -1 }, { name: 'idx_tenant_routine_createdAt' }, true],
         // The reconciler's sweep for callbacks that never settled.
         [{ callbackStatus: 1, updatedAt: 1 }, { name: 'idx_callbackStatus_updatedAt' }, true],
       ];
@@ -187,7 +224,13 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
 
       const now = new Date();
       // An empty list is stored as none, like the SQLite provider does.
-      const doc: Omit<IAgentRun, '_id'> = { ...record, attachments: record.attachments?.length ? record.attachments : null, createdAt: now, updatedAt: now };
+      const doc: Omit<IAgentRun, '_id'> = {
+        ...record,
+        attachments: record.attachments?.length ? record.attachments : null,
+        queueGeneration: record.queueGeneration ?? 1,
+        createdAt: now,
+        updatedAt: now,
+      };
       try {
         const result = await db
           .collection<IAgentRun>(COLLECTIONS.agentRuns)
@@ -247,9 +290,11 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     ): Promise<IAgentRun | null> {
       const now = new Date();
       const scope = { _id: objectId(id), tenantId, projectId };
-      // Fast path: run hasn't started yet, cancel it outright.
+      // Fast path: run hasn't started yet (queued, or scheduled for later),
+      // cancel it outright. A scheduled row holds no slot; the release below is
+      // a no-op for it (it only deletes a lock this run holds).
       const canceled = await this.setAgentRun(
-        { ...scope, status: 'queued' },
+        { ...scope, status: { $in: ['queued', 'scheduled'] } },
         { status: 'canceled', errorReason: 'canceled_by_caller', completedAt: now, updatedAt: now },
       );
       if (canceled) {
@@ -291,6 +336,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         { _id: objectId(id), tenantId, status: 'requires_action' },
         {
           status: 'queued',
+          // A resume is a new execution (its job dedup key differs) and the
+          // moment the run became due again (a deferred run's wait restarts).
+          queueGeneration: (paused.queueGeneration ?? 1) + 1,
+          notBefore: new Date(),
           resumeActionIds,
           stopReason: null,
           result: null,
@@ -376,7 +425,8 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       options?: { createdBefore?: Date; limit?: number },
     ): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = { tenantId, status: 'queued' };
+      // Deferred rows are published by their dispatcher, never by the requeue sweep.
+      const query: Record<string, unknown> = { tenantId, status: 'queued', runClass: { $ne: 'deferred' } };
       if (options?.createdBefore) query.createdAt = { $lt: options.createdBefore };
       const cursor = db
         .collection<IAgentRun>(COLLECTIONS.agentRuns)
@@ -408,30 +458,126 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
-    async listAgentRuns(filter: {
-      tenantId: string;
-      projectId: string;
-      agentKey?: string;
-      conversationId?: string;
-      status?: IAgentRun['status'][];
-      mode?: IAgentRun['mode'];
-      userId?: string;
-      limit?: number;
-    }): Promise<IAgentRun[]> {
+    async listAgentRuns(filter: Parameters<IAgentRunListFn>[0]): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = { tenantId: filter.tenantId, projectId: filter.projectId };
-      if (filter.agentKey) query.agentKey = filter.agentKey;
-      if (filter.conversationId) query.conversationId = filter.conversationId;
-      if (filter.status && filter.status.length > 0) query.status = { $in: filter.status };
-      if (filter.mode) query.mode = filter.mode;
-      if (filter.userId) query.userId = filter.userId;
-      const docs = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .find(query)
-        .sort({ createdAt: -1 })
-        .limit(Math.min(Math.max(filter.limit ?? 50, 1), 500))
+      const col = db.collection<IAgentRun>(COLLECTIONS.agentRuns);
+      const and: Record<string, unknown>[] = [{ tenantId: filter.tenantId, projectId: filter.projectId }];
+      if (filter.agentKey) and.push({ agentKey: filter.agentKey });
+      if (filter.conversationId) and.push({ conversationId: filter.conversationId });
+      if (filter.status && filter.status.length > 0) and.push({ status: { $in: filter.status } });
+      const modes = filter.mode === undefined ? [] : Array.isArray(filter.mode) ? filter.mode : [filter.mode];
+      if (modes.length > 0) and.push({ mode: { $in: modes } });
+      if (filter.excludeModes && filter.excludeModes.length > 0) and.push({ mode: { $nin: filter.excludeModes } });
+      if (filter.runClass) and.push(runClassFilter(filter.runClass));
+      if (filter.routineId) and.push({ routineId: filter.routineId });
+      if (filter.channel) and.push({ channel: filter.channel });
+      if (filter.userId) and.push({ userId: filter.userId });
+      for (const [key, value] of Object.entries(filter.metadata ?? {})) and.push(metadataFilter(key, value));
+      if (filter.createdAfter) and.push({ createdAt: { $gt: filter.createdAfter } });
+      if (filter.createdBefore) and.push({ createdAt: { $lt: filter.createdBefore } });
+      if (filter.cursor) {
+        let cursorDoc: IAgentRun | null = null;
+        try {
+          cursorDoc = await col.findOne({ _id: objectId(filter.cursor), tenantId: filter.tenantId, projectId: filter.projectId });
+        } catch {
+          cursorDoc = null;
+        }
+        // An unknown cursor ends the listing instead of restarting it.
+        if (!cursorDoc) return [];
+        and.push({ $or: [
+          { createdAt: { $lt: cursorDoc.createdAt } },
+          { createdAt: cursorDoc.createdAt, _id: { $lt: cursorDoc._id } },
+        ] });
+      }
+      const docs = await col
+        .find({ $and: and })
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(Math.min(Math.max(filter.limit ?? 50, 1), 1000))
         .toArray();
       return docs.map(toRun);
+    }
+
+    async listDueScheduledAgentRuns(tenantId: string, now: Date, limit: number): Promise<IAgentRun[]> {
+      const docs = await this.agentRunsCollection()
+        .find({ tenantId, status: 'scheduled', notBefore: { $lte: now } })
+        .sort({ notBefore: 1, _id: 1 })
+        .limit(Math.max(limit, 1))
+        .toArray();
+      return docs.map(toRun);
+    }
+
+    async promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null> {
+      const scheduled = await this.agentRunsCollection().findOne({ _id: objectId(runId), tenantId, status: 'scheduled' });
+      if (!scheduled) return null;
+      await this.ensureAgentRunsIndexes();
+      // The slot is taken before the row becomes active, like a resume.
+      const lockId = conversationLockId(scheduled.conversationId);
+      if (!(await this.acquireAgentRunLock(lockId, 'conversation'))) throw new AgentRunConflictError(scheduled.conversationId);
+      const locks = this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks);
+      let run: IAgentRun | null;
+      try {
+        run = await this.setAgentRun({ _id: objectId(runId), tenantId, status: 'scheduled' }, { status: 'queued', updatedAt: new Date() });
+      } catch (error) {
+        await locks.deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
+        if (isDuplicateKey(error)) throw new AgentRunConflictError(scheduled.conversationId);
+        throw error;
+      }
+      if (!run) {
+        await locks.deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
+        return null;
+      }
+      await this.bindAgentRunLock(lockId, runId);
+      return run;
+    }
+
+    async listQueuedDeferredAgentRuns(
+      tenantId: string,
+      options: { limit: number; dueBefore: Date },
+    ): Promise<IAgentRun[]> {
+      const docs = await this.agentRunsCollection()
+        .find({
+          tenantId,
+          status: 'queued',
+          runClass: 'deferred',
+          $or: [{ notBefore: null }, { notBefore: { $lte: options.dueBefore } }],
+        })
+        .sort({ createdAt: 1, _id: 1 })
+        .limit(Math.max(options.limit, 1))
+        .toArray();
+      return docs.map(toRun);
+    }
+
+    async listExpiredWaitingAgentRuns(
+      tenantId: string,
+      options: { dueBefore: Date; limit: number },
+    ): Promise<IAgentRun[]> {
+      // The due moment is `notBefore`, else `createdAt` (a run that was never scheduled).
+      const docs = await this.agentRunsCollection()
+        .find({
+          tenantId,
+          $and: [
+            { $or: [{ status: 'scheduled' }, { status: 'queued', runClass: 'deferred' }] },
+            { $or: [
+              { notBefore: { $lt: options.dueBefore } },
+              { notBefore: null, createdAt: { $lt: options.dueBefore } },
+            ] },
+          ],
+        })
+        .sort({ createdAt: 1, _id: 1 })
+        .limit(Math.max(options.limit, 1))
+        .toArray();
+      return docs.map(toRun);
+    }
+
+    async markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null> {
+      return this.setAgentRun(
+        { _id: objectId(runId), tenantId, status: 'running' },
+        { detachedAt: at, updatedAt: new Date() },
+      );
+    }
+
+    async markAgentRunPublished(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null> {
+      return this.setAgentRun({ _id: objectId(runId), tenantId }, { lastPublishedAt: at, updatedAt: new Date() });
     }
 
     async deleteAgentRun(id: string): Promise<boolean> {
@@ -453,15 +599,29 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return true;
     }
 
-    async countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number> {
-      const db = this.getTenantDb();
-      const query: Record<string, unknown> = {
-        tenantId,
-        status: { $in: ['queued', 'running'] },
-      };
-      if (projectId) query.projectId = projectId;
-      if (mode) query.mode = mode;
-      return db.collection<IAgentRun>(COLLECTIONS.agentRuns).countDocuments(query);
+    async countActiveAgentRuns(
+      tenantId: string,
+      projectId?: string,
+      opts?: { mode?: IAgentRun['mode']; runClass?: AgentRunClass },
+    ): Promise<number> {
+      const and: Record<string, unknown>[] = [{ tenantId, status: { $in: ['queued', 'running'] } }];
+      if (projectId) and.push({ projectId });
+      if (opts?.mode) and.push({ mode: opts.mode });
+      if (opts?.runClass) and.push(runClassFilter(opts.runClass));
+      return this.agentRunsCollection().countDocuments({ $and: and });
+    }
+
+    async countAgentRunsByStatus(
+      tenantId: string,
+      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+    ): Promise<Record<string, number>> {
+      const entries = await Promise.all(opts.statuses.map(async (status) => {
+        const and: Record<string, unknown>[] = [{ tenantId, status }];
+        if (opts.projectId) and.push({ projectId: opts.projectId });
+        if (opts.runClass) and.push(runClassFilter(opts.runClass));
+        return [status, await this.agentRunsCollection().countDocuments({ $and: and })] as const;
+      }));
+      return Object.fromEntries(entries);
     }
 
     async cleanupAgentRunRetention(options: {
@@ -471,10 +631,11 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const db = this.getTenantDb();
       const query: Record<string, unknown> = {
         expiresAt: { $lt: options.olderThan },
-        // A queued/running row is never retention's to delete, whatever its
-        // expiresAt says (AGENT_RUN_RETENTION_DAYS=0 would otherwise delete a
-        // run right after it is created).
-        status: { $nin: ['queued', 'running'] },
+        // A queued/running/scheduled/paused row is never retention's to delete,
+        // whatever its expiresAt says (AGENT_RUN_RETENTION_DAYS=0 would otherwise
+        // delete a run right after it is created, and a paused run is waiting
+        // for a person).
+        status: { $nin: ['queued', 'running', 'scheduled', 'requires_action'] },
       };
       await db.collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
         .deleteMany({ kind: 'idempotency', expiresAt: { $lt: options.olderThan } })

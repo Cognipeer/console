@@ -156,7 +156,7 @@ Precedent: this repeats the same shape already used by `ICrawlJob` (`src/lib/dat
 | Field | Type | Notes |
 |---|---|---|
 | `_id` | id | Run identifier. **Not** reused as the OpenAI-facing response id directly — see [§8](#8-response-id-scheme). |
-| `mode` | `'sync' \| 'background'` | Which path created this row. A `'sync'` row exists **only** to hold the single-active-run reservation (below) for the duration of an inline call — it is always deleted when the call ends (success, timeout, or error), never left in a terminal `succeeded`/`failed` state and never intended to be polled. This is how §5's "a synchronous call persists no queryable artifact" and §7 step 1's "creation is atomic for both modes" coexist without contradicting each other. |
+| `mode` | `'sync' \| 'inline' \| 'background'` | Which path created this row. A `'sync'` row (dashboard / portal turn) exists **only** to hold the single-active-run reservation (below) for the duration of the call — it is deleted when the call ends (success, timeout, or error), never left in a terminal `succeeded`/`failed` state and never intended to be polled. An `'inline'` row is an API turn executed in the request process: it is recorded and finalized like a background run (kept until retention), and may detach — the caller stops waiting and gets `202` while the run continues. A `'background'` row is executed by a queue worker. |
 | `tenantId` / `tenantDbName` | string | Tenant isolation — stamped at creation, never re-derived mid-run. |
 | `projectId` | string | Project scoping. **Required**, checked on every read/write path (§12.11) — not optional the way `IBatchJob.projectId` currently is. |
 | `agentKey` | string | Which agent this run invokes. |

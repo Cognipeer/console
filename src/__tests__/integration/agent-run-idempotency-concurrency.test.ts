@@ -273,7 +273,7 @@ describe('Concurrency cap (§12.8)', () => {
       ['p-1', 'p-2', 'p-3', 'p-4', 'p-5'].map((c) => createBackgroundAgentRun(baseInput(c))),
     );
     expect(results.filter((r) => r.kind === 'created').length).toBeLessThanOrEqual(2);
-    expect(await db.countActiveAgentRuns(tenantId, undefined, 'background')).toBeLessThanOrEqual(2);
+    expect(await db.countActiveAgentRuns(tenantId, undefined, { mode: 'background' })).toBeLessThanOrEqual(2);
   });
 
   it('a per-project cap rejects with scope "project" while the tenant still has room', async () => {
