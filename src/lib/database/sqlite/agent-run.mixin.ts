@@ -495,6 +495,17 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
+    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null> {
+      // Leaving `queued` frees the partial unique index slot with the row update.
+      const now = this.now();
+      return this.updateAgentRunIf(runId, `
+        UPDATE ${TABLES.agentRuns}
+        SET status = 'failed', errorReason = 'expired', errorMessage = @errorMessage, stopReason = 'error',
+            completedAt = @now, updatedAt = @now
+        WHERE id = @id AND tenantId = @tenantId AND status IN ('queued', 'scheduled')
+      `, { id: runId, tenantId, errorMessage, now });
+    }
+
     async markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null> {
       return this.updateAgentRunIf(runId, `
         UPDATE ${TABLES.agentRuns} SET detachedAt = @at, updatedAt = @updatedAt

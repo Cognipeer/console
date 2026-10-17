@@ -261,6 +261,7 @@ function buildPrimers(): Record<string, Mock> {
     countAgentRunsByStatus: vi.fn().mockResolvedValue({}),
     promoteScheduledAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunDetached: vi.fn().mockResolvedValue(null),
+    expireWaitingAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunPublished: vi.fn().mockResolvedValue(null),
   };
 }

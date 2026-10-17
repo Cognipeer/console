@@ -617,7 +617,7 @@ describe('the budget is a setting of the session', () => {
   });
 
   it('starts from the agent default and can be overridden or switched off at creation', async () => {
-    await createAgent({ execution: { sessionBudget: { maxCostUsd: 2, onReach: 'stop' } } });
+    await createAgent({ budget: { maxCostUsd: 2, onReach: 'stop' } });
     const inherited = await createConversation(DB_NAME, tenantId, PROJECT_ID, OWNER, AGENT_KEY);
     expect(inherited.budget).toEqual({ maxCostUsd: 2, onReach: 'stop' });
     const own = await createConversation(DB_NAME, tenantId, PROJECT_ID, OWNER, AGENT_KEY, undefined, undefined, { maxCostUsd: 5, onReach: 'pause' });

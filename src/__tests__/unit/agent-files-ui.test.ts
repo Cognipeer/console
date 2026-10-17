@@ -201,9 +201,9 @@ describe('Configure → Files', () => {
     render(h(AgentFilesPanelView, { value, onChange: noop, agentKey: 'support', buckets, ...extra }), locale);
   const ready = (...list: AttachmentBucketOption[]): BucketsState => ({ status: 'ready', buckets: list });
 
-  it('is a section of its own, right after Execution, owning config.attachments', () => {
+  it('is a section of its own, right after Callback & budget, owning config.attachments', () => {
     const keys = Object.keys(CONFIG_SECTION_KEYS);
-    expect(keys[keys.indexOf('execution') + 1]).toBe('files');
+    expect(keys[keys.indexOf('callback') + 1]).toBe('files');
     expect(CONFIG_SECTION_KEYS.files).toEqual(['attachments']);
     expect(CONFIG_SECTION_TITLES.files).toBe('Files');
     const translate = (language: typeof en) => (key: string) =>
@@ -215,7 +215,8 @@ describe('Configure → Files', () => {
   it('marks Files changed when the stored attachments differ from the published ones', () => {
     const published = { modelKey: 'm', attachments: { enabled: true, bucketKey: 'docs' } };
     expect([...changedConfigSections({ modelKey: 'm', attachments: { enabled: true, bucketKey: 'other' } }, published)]).toEqual(['files']);
-    expect([...changedConfigSections({ modelKey: 'm', execution: { backgroundEnabled: false }, attachments: published.attachments }, published)]).toEqual(['execution']);
+    expect([...changedConfigSections({ modelKey: 'm', budget: { maxCostUsd: 1, onReach: 'pause' }, attachments: published.attachments }, published)]).toEqual(['callback']);
+    expect([...changedConfigSections({ modelKey: 'm', callback: { url: 'https://h.example.com' }, attachments: published.attachments }, published)]).toEqual(['callback']);
   });
 
   it('shows only the switch while files are off — off by default', () => {

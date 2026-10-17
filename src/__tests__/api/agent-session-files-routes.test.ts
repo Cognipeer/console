@@ -115,7 +115,7 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   backgroundDisabledErrorBody: () => ({ error: { type: 'invalid_request_error', code: 'background_disabled' } }),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
-  resolveAgentExecutionLimits: vi.fn(),
+  resolveAgentRunLimits: vi.fn(),
   queueAgentRunContinue: vi.fn(),
   serializeAgentRun: (run: { _id: string; status: string }) => ({ id: `run_${run._id}`, object: 'agent.run', status: run.status }),
   reserveConversationForSyncTurn: vi.fn(),
@@ -145,7 +145,7 @@ import { deleteSessionFile, listSessionFiles, readSessionFileContent, uploadSess
 import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
-import { resolveAgentExecutionLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
+import { resolveAgentRunLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { agentSessionFilesApiPlugin } from '@/server/api/plugins/agent-session-files';
@@ -640,7 +640,7 @@ describe('client Responses: input_file / input_image', () => {
   beforeEach(() => {
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: FILES_ON } });
     mockFn(createConversation).mockResolvedValue(conversation());
-    mockFn(resolveAgentExecutionLimits).mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
+    mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
     mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['up1', 'up2'], named: [] });
   });
@@ -795,7 +795,7 @@ describe('client Responses: continuing a session with session_id / conversation'
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: FILES_ON } });
     mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'field-ops', metadata: { source: 'api' } }));
     mockFn(createConversation).mockResolvedValue(conversation());
-    mockFn(resolveAgentExecutionLimits).mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
+    mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
     mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
     mockFn(pendingActionsBlockingMessage).mockResolvedValue(null);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['f1'], named: ['f1'] });

@@ -182,51 +182,41 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
-    const execution = config.execution;
-    if (execution) {
-        const env = getConfig().agent;
-        const syncMaxSeconds = Math.floor(env.syncTimeoutMs / 1000);
-        const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
-        checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
-        checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
-        const sessionBudget = execution.sessionBudget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
-        if (sessionBudget !== undefined && sessionBudget !== null) {
-            if (typeof sessionBudget !== 'object' || Array.isArray(sessionBudget)) {
-                issues.errors.push({ field: 'execution.sessionBudget', message: 'must be an object: { maxCostUsd, onReach }' });
+    const budget = config.budget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
+    if (budget !== undefined && budget !== null) {
+        if (typeof budget !== 'object' || Array.isArray(budget)) {
+            issues.errors.push({ field: 'budget', message: 'must be an object: { maxCostUsd, onReach }' });
+        } else {
+            if (!isNumber(budget.maxCostUsd)) {
+                issues.errors.push({ field: 'budget.maxCostUsd', message: 'is required and must be a number' });
             } else {
-                if (!isNumber(sessionBudget.maxCostUsd)) {
-                    issues.errors.push({ field: 'execution.sessionBudget.maxCostUsd', message: 'is required and must be a number' });
-                } else {
-                    checkNumber(issues, 'execution.sessionBudget.maxCostUsd', sessionBudget.maxCostUsd, { min: 0, exclusiveMin: true });
-                }
-                if (sessionBudget.onReach !== 'pause' && sessionBudget.onReach !== 'stop') {
-                    issues.errors.push({ field: 'execution.sessionBudget.onReach', message: 'must be one of: pause, stop' });
-                }
-                if (sessionBudget.allowClientOverride !== undefined && typeof sessionBudget.allowClientOverride !== 'boolean') {
-                    issues.errors.push({ field: 'execution.sessionBudget.allowClientOverride', message: 'must be a boolean' });
-                }
+                checkNumber(issues, 'budget.maxCostUsd', budget.maxCostUsd, { min: 0, exclusiveMin: true });
+            }
+            if (budget.onReach !== 'pause' && budget.onReach !== 'stop') {
+                issues.errors.push({ field: 'budget.onReach', message: 'must be one of: pause, stop' });
+            }
+            if (budget.allowClientOverride !== undefined && typeof budget.allowClientOverride !== 'boolean') {
+                issues.errors.push({ field: 'budget.allowClientOverride', message: 'must be a boolean' });
             }
         }
-        if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
-            issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
-        }
-        if (execution.defaultMode === 'background' && execution.backgroundEnabled === false) {
-            issues.errors.push({ field: 'execution.defaultMode', message: 'cannot be background while background execution is disabled' });
-        }
-        if (execution.callbackUrl !== undefined && execution.callbackUrl !== '') {
-            const parsed = URL.canParse(execution.callbackUrl) ? new URL(execution.callbackUrl) : null;
-            if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || execution.callbackUrl.length > 2048) {
-                issues.errors.push({ field: 'execution.callbackUrl', message: 'must be an http(s) URL of at most 2048 characters' });
+    }
+
+    const callback = config.callback;
+    if (callback) {
+        if (callback.url !== undefined && callback.url !== '') {
+            const parsed = URL.canParse(callback.url) ? new URL(callback.url) : null;
+            if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || callback.url.length > 2048) {
+                issues.errors.push({ field: 'callback.url', message: 'must be an http(s) URL of at most 2048 characters' });
             } else if (parsed.protocol === 'http:') {
-                issues.warnings.push({ field: 'execution.callbackUrl', message: 'Callbacks over plain http can be read in transit; prefer https.' });
+                issues.warnings.push({ field: 'callback.url', message: 'Callbacks over plain http can be read in transit; prefer https.' });
             }
         }
-        if (typeof execution.callbackSecret === 'string' && execution.callbackSecret !== '' && execution.callbackSecret !== AGENT_SANDBOX_SECRET_MASK
-            && (execution.callbackSecret.length < 16 || execution.callbackSecret.length > 256)) {
-            issues.errors.push({ field: 'execution.callbackSecret', message: 'must be 16–256 characters' });
+        if (typeof callback.secret === 'string' && callback.secret !== '' && callback.secret !== AGENT_SANDBOX_SECRET_MASK
+            && (callback.secret.length < 16 || callback.secret.length > 256)) {
+            issues.errors.push({ field: 'callback.secret', message: 'must be 16–256 characters' });
         }
-        if (execution.callbackSecret && !execution.callbackUrl) {
-            issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        if (callback.secret && !callback.url) {
+            issues.errors.push({ field: 'callback.secret', message: 'needs a callback URL' });
         }
     }
 

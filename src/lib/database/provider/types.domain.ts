@@ -2613,36 +2613,6 @@ export interface IAgentInputField {
   default?: unknown;
 }
 
-export interface IAgentExecutionConfig {
-  /** Synchronous ceiling for this agent, seconds. */
-  syncTimeoutSeconds?: number;
-  /** false = API calls may not run this agent in the background. Default true. */
-  backgroundEnabled?: boolean;
-  /** Longest a background run of this agent may take, minutes. */
-  backgroundMaxDurationMinutes?: number;
-  /**
-   * Default spend budget of a session of this agent (copied to each session
-   * when it starts). Absent = sessions have no budget; the per-turn
-   * `runtime.limits.maxCostUsd` is separate and unchanged.
-   */
-  sessionBudget?: IAgentSessionBudget & {
-    /**
-     * May an API client remove this budget or raise it past `maxCostUsd`
-     * (session create / `PATCH`)? Default false: the budget the admin set binds
-     * the integration it is meant to constrain. Dashboard users are not affected.
-     */
-    allowClientOverride?: boolean;
-  };
-  /** What an API call that does not say `background` gets. Default 'sync'. */
-  defaultMode?: 'sync' | 'background';
-  /** Callback for background runs started without their own `callback_url`. */
-  callbackUrl?: string;
-  /** Write-only HMAC secret for that callback: plaintext in, masked out. */
-  callbackSecret?: string;
-  /** Sealed `callbackSecret`; never returned by the API. */
-  callbackSecretSealed?: string;
-}
-
 /**
  * Files a user attaches to a session (the composer's paperclip, the client
  * API's `input_file` / `input_image`). Every field is a stored setting; absent
@@ -2812,12 +2782,6 @@ export interface IAgentConfig {
   memory?: IAgentMemoryConfig;
   /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
   sandbox?: IAgentSandboxConfig;
-  /**
-   * How API calls to this agent execute (docs/guide/agent-background-execution.md).
-   * Every limit here is an upper bound the agent opts into; the effective
-   * value is min(env ceiling, tenant quota, this).
-   */
-  execution?: IAgentExecutionConfig;
   /**
    * Callback for runs started without their own `callback_url` (every dialect,
    * routines included). The secret is write-only: plaintext in, masked out;
@@ -3463,7 +3427,7 @@ export interface IAgentConversation {
   /** Highest `agent_session_events.seq` written for this conversation. */
   lastEventSeq?: number;
   /**
-   * This session's spend budget. Copied from the agent's `execution.sessionBudget`
+   * This session's spend budget. Copied from the agent's `budget`
    * when the session is created; can be set, raised or removed (`null`) later.
    */
   budget?: IAgentSessionBudget | null;

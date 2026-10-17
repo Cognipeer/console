@@ -265,6 +265,23 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
       // Created long ago without a notBefore counts from createdAt.
       expect(await db.listExpiredWaitingAgentRuns(tenantId, { dueBefore: new Date(Date.now() + 30_000), limit: 10 })).toHaveLength(3);
     });
+
+    it('expireWaitingAgentRun fails a queued / scheduled row as expired, frees the slot, and leaves other states alone', async () => {
+      const db = getDb();
+      const conversationId = conv();
+      const queued = await db.createAgentRun(rec({ runClass: 'deferred', conversationId }));
+      const expired = await db.expireWaitingAgentRun(id(queued), tenantId, 'too late');
+      expect(expired).toMatchObject({ status: 'failed', errorReason: 'expired', errorMessage: 'too late' });
+      expect(expired!.completedAt).toBeTruthy();
+      // The slot is free again.
+      await expect(db.createAgentRun(rec({ conversationId }))).resolves.toBeTruthy();
+
+      const scheduled = await db.createAgentRun(rec({ status: 'scheduled', notBefore: new Date(0) }));
+      expect((await db.expireWaitingAgentRun(id(scheduled), tenantId, 'x'))?.status).toBe('failed');
+      const running = await db.createAgentRun(rec({ status: 'running' }));
+      expect(await db.expireWaitingAgentRun(id(running), tenantId, 'x')).toBeNull();
+      expect(await db.expireWaitingAgentRun(id(queued), tenantId, 'x')).toBeNull();
+    });
   });
 
   it('markAgentRunDetached is a CAS on running; markAgentRunPublished stamps lastPublishedAt', async () => {

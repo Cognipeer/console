@@ -73,6 +73,9 @@ export interface AgentRunErrorBody {
     /** `budget_reached` only: what the session has spent and what its budget is (USD). */
     spentUsd?: number;
     maxCostUsd?: number;
+    /** `timeout` only: tool calls already in flight may have had effects; not retried. */
+    side_effects_possible?: boolean;
+    retryable?: boolean;
 }
 
 /**
@@ -128,6 +131,21 @@ export class AgentAttachmentError extends Error {
         this.name = 'AgentAttachmentError';
         this.status = status;
         this.code = code;
+    }
+}
+
+/**
+ * A run that hit its wall-clock ceiling (`maxDurationMs`) while the caller was
+ * still receiving it (a stream has no wait window to detach at). The run row
+ * is already failed as `max_duration_exceeded`.
+ */
+export class AgentRunTimeoutError extends Error {
+    readonly status = 504;
+    readonly code = 'agent_run_max_duration_exceeded';
+
+    constructor(message = 'The agent run exceeded its maximum duration and was stopped. Side effects from tool calls already in flight may have occurred.') {
+        super(message);
+        this.name = 'AgentRunTimeoutError';
     }
 }
 
@@ -210,6 +228,13 @@ export function classifyAgentRunError(
                 code: 'pending_action',
                 pendingActionIds: error.pendingActionIds,
             },
+        };
+    }
+
+    if (error instanceof AgentRunTimeoutError) {
+        return {
+            status: 504,
+            error: { message: error.message, type: 'timeout', code: error.code, side_effects_possible: true, retryable: false },
         };
     }
 

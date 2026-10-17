@@ -1,7 +1,7 @@
 import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
-import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentRun, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -16,8 +16,6 @@ import {
   getAgentRunStatus,
   isBackgroundModeRequested,
   agentRunConflictErrorBody,
-  agentSyncTimeoutErrorBody,
-  idempotencyKeyRequiresBackgroundErrorBody,
   idempotencyKeyConflictErrorBody,
   agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
@@ -25,10 +23,12 @@ import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   agentDefaultCallback,
   apiErrorBody,
-  backgroundDisabledErrorBody,
   invalidRequestErrorBody,
+  isAgentRunActive,
   lookupIdempotentAgentRun,
-  resolveAgentExecutionLimits,
+  publicAgentRunId,
+  waitForAgentRun,
+  resolveAgentRunLimits,
   serializeAgentRun,
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
@@ -116,6 +116,26 @@ export function readSessionReference(body: Record<string, unknown>): { id?: stri
   }
   if (named.length === 2 && named[0] !== named[1]) return { error: 'session_id and conversation name different sessions' };
   return named.length > 0 ? { id: named[0] } : {};
+}
+
+/** 202 for a run that is still going: the run object, where to follow it, and when to look again. */
+function sendRunAccepted(reply: FastifyReply, run: IAgentRun) {
+  return reply
+    .code(202)
+    .header('Location', `/api/client/v1/agents/runs/${publicAgentRunId(run)}`)
+    .header('Retry-After', '2')
+    .send(serializeAgentRun(run));
+}
+
+/**
+ * A synchronous call replayed by its Idempotency-Key: the stored answer (200)
+ * when the run has one, the run itself while it is still going (202), and
+ * the run with its error once it failed or was canceled (200).
+ */
+function sendSyncRunReplay(reply: FastifyReply, run: IAgentRun) {
+  if (isAgentRunActive(run)) return sendRunAccepted(reply, run);
+  if ((run.status === 'succeeded' || run.status === 'requires_action') && run.result) return reply.code(200).send(run.result);
+  return reply.code(200).send(serializeAgentRun(run));
 }
 
 function createResponsesHandler(usePublished: boolean) {
@@ -314,11 +334,8 @@ function createResponsesHandler(usePublished: boolean) {
         }
       }
 
-      // Effective execution limits: min(env ceiling, tenant quota, the
-      // agent's own Execution settings). Execution settings are operational
-      // and apply without publishing, so they are read from the live agent.
-      const limits = await resolveAgentExecutionLimits({
-        agentConfig: agent.config,
+      // Effective run limits: min(env ceiling, tenant quota).
+      const limits = await resolveAgentRunLimits({
         quotaContext: {
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -330,34 +347,23 @@ function createResponsesHandler(usePublished: boolean) {
       });
 
       const idempotencyKey = getHeaderValue(request, 'idempotency-key');
-      const background = isBackgroundModeRequested(
-        getHeaderValue(request, 'x-cognipeer-background'),
-        body,
-        limits.defaultMode,
-      );
-      // §9/§12.15: Idempotency-Key is background-only — sync mode persists
-      // nothing to key a retry against, so honoring it would silently do
-      // nothing. Rejected loudly instead.
-      if (idempotencyKey && !background) {
-        return reply.code(400).send(idempotencyKeyRequiresBackgroundErrorBody());
-      }
+      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
+      // Every call is a recorded run, so an Idempotency-Key works on synchronous calls too.
       if (idempotencyKey && idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
         return reply.code(400).send(invalidRequestErrorBody(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
       }
-      if (background && !limits.backgroundEnabled) {
-        return reply.code(400).send(backgroundDisabledErrorBody());
-      }
 
-      let callback: { url?: string; secret?: string } = {};
-      if (background) {
+      // A synchronous call may detach into a run too, so its callback applies when it does.
+      let callback: { url?: string; secret?: string } = agentDefaultCallback(agent.config);
+      if (body.callback_url !== undefined || body.callback_secret !== undefined) {
         const requested = await validateCallbackRequest(body.callback_url, body.callback_secret);
         if (!requested.ok) return reply.code(400).send(invalidRequestErrorBody(requested.message, 'invalid_callback'));
-        callback = requested.url ? { url: requested.url, secret: requested.secret } : agentDefaultCallback(agent.config);
+        if (requested.url) callback = { url: requested.url, secret: requested.secret };
       }
 
       // A replayed request must not mint a fresh conversation first — every
       // retry of "start a new conversation" would leave an orphan behind.
-      if (background && idempotencyKey) {
+      if (idempotencyKey) {
         const prior = await lookupIdempotentAgentRun({
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -370,7 +376,16 @@ function createResponsesHandler(usePublished: boolean) {
           idempotencyConversationScope,
         });
         if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
-        if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
+        if (prior.kind === 'replay') {
+          if (background) return reply.code(200).send(serializeAgentRun(prior.run));
+          // A synchronous retry: the stored answer when there is one, else wait like a new call.
+          const settled = isAgentRunActive(prior.run)
+            ? (await waitForAgentRun({
+              tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: String(prior.run._id),
+            }, limits.syncWaitMs)) ?? prior.run
+            : prior.run;
+          return sendSyncRunReplay(reply, settled);
+        }
       }
 
       // A queued turn learns of an exhausted tenant spend limit here (429), not
@@ -482,14 +497,27 @@ function createResponsesHandler(usePublished: boolean) {
           ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
           ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
         },
-        syncTimeoutMs: limits.syncTimeoutMs,
+        limits,
+        ...(apiTokenId ? { apiTokenId } : {}),
+        channel: 'responses',
+        callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        idempotencyConversationScope,
+        ...(namedAttachments.length > 0 ? { idempotencyAttachments: namedAttachments } : {}),
       });
       if (syncOutcome.kind === 'conflict') {
         return reply.code(409).send(agentRunConflictErrorBody());
       }
-      if (syncOutcome.kind === 'timeout') {
-        return reply.code(504).send(agentSyncTimeoutErrorBody());
+      if (syncOutcome.kind === 'idempotency_conflict') {
+        return reply.code(409).send(idempotencyKeyConflictErrorBody());
       }
+      if (syncOutcome.kind === 'concurrency_limit') {
+        return reply.code(429).send(agentRunConcurrencyLimitErrorBody(syncOutcome.limit, syncOutcome.scope));
+      }
+      if (syncOutcome.kind === 'replay') return sendSyncRunReplay(reply, syncOutcome.run);
+      // The wait window ended with the run still going: it continues in the
+      // background; follow it on the runs API.
+      if (syncOutcome.kind === 'detached') return sendRunAccepted(reply, syncOutcome.run);
 
       const { _conversation_messages, ...fullBody } = syncOutcome.response;
       void _conversation_messages;

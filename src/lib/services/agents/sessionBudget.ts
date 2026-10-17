@@ -9,7 +9,7 @@
  * or refuses further messages (`stop`).
  *
  * The budget is a setting of the session, not a constant: it starts from the
- * agent's `execution.sessionBudget`, can be given when the session is created,
+ * agent's `budget`, can be given when the session is created,
  * and can be added, raised or removed at any time afterwards.
  *
  * Enforcement rides on the agent-sdk's own cost limit: a turn starts with a
@@ -59,8 +59,8 @@ export function parseSessionBudget(value: unknown, field = 'budget'): BudgetInpu
 }
 
 /** The agent's default session budget, when it has a usable one. */
-export function agentSessionBudget(config: Pick<IAgentConfig, 'execution'> | undefined): IAgentSessionBudget | undefined {
-  const stored = config?.execution?.sessionBudget;
+export function agentSessionBudget(config: Pick<IAgentConfig, 'budget'> | undefined): IAgentSessionBudget | undefined {
+  const stored = config?.budget;
   if (!stored) return undefined;
   const parsed = parseSessionBudget(stored);
   return parsed.ok ? parsed.budget : undefined;
@@ -69,16 +69,16 @@ export function agentSessionBudget(config: Pick<IAgentConfig, 'execution'> | und
 /**
  * Why an API client may not set this budget, or null when it may. An agent that
  * has a default session budget binds its API clients to it unless the admin
- * allowed overrides (`execution.sessionBudget.allowClientOverride`): a client
+ * allowed overrides (`budget.allowClientOverride`): a client
  * can lower the budget, but not remove it or raise it past the agent's default
  * (or past what the session already has, when an admin raised that).
  */
 export function clientBudgetViolation(
-  config: Pick<IAgentConfig, 'execution'> | undefined,
+  config: Pick<IAgentConfig, 'budget'> | undefined,
   requested: IAgentSessionBudget | null,
   current?: IAgentSessionBudget | null,
 ): string | null {
-  if (config?.execution?.sessionBudget?.allowClientOverride === true) return null;
+  if (config?.budget?.allowClientOverride === true) return null;
   const ceiling = agentSessionBudget(config);
   if (!ceiling) return null;
   const limit = Math.max(ceiling.maxCostUsd, current?.maxCostUsd ?? 0);

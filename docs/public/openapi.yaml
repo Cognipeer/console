@@ -294,7 +294,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (published version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) or `session_id` (a session created with `POST /agents/sessions`, or any session id) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) or `session_id` (a session created with `POST /agents/sessions`, or any session id) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (the header takes precedence over the body); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponsePublished
       parameters:
         - name: X-Cognipeer-Agent-Model
@@ -306,7 +306,7 @@ paths:
         - name: X-Cognipeer-Background
           in: header
           required: false
-          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field, which in turn takes precedence over the agent's `execution.defaultMode` setting."
+          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field."
           schema:
             type: string
             example: "true"
@@ -8505,7 +8505,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (draft version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) or `session_id` for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) or `session_id` for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (the header takes precedence over the body); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponseDraft
       parameters:
         - name: X-Cognipeer-Agent-Model
@@ -8517,7 +8517,7 @@ paths:
         - name: X-Cognipeer-Background
           in: header
           required: false
-          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field, which in turn takes precedence over the agent's `execution.defaultMode` setting."
+          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field."
           schema:
             type: string
             example: "true"
@@ -14586,7 +14586,7 @@ components:
           description: "A spend budget for the session this request STARTS (`null` = none, overriding the agent's default). Ignored when the request continues a session with `previous_response_id` (not applied and not validated, so a client may send its default budget on every call): change that one with `PATCH /agents/sessions/{conversationId}`. When the agent has a session budget of its own, a client may lower it but not raise or remove it (`403`, `budget_override_forbidden`)."
         background:
           type: boolean
-          description: "Run the turn in background mode (mirrors the OpenAI Responses API field). Only a JSON boolean is honoured. The `X-Cognipeer-Background` header takes precedence over this field, and this field takes precedence over the agent's `execution.defaultMode`, so `false` forces a synchronous call on an agent that runs in the background by default. Background mode returns `202` with an `AgentRun`; it is rejected with `400` (`agent_background_disabled`) when the agent has background execution disabled."
+          description: "Run the turn in background mode (mirrors the OpenAI Responses API field). Only a JSON boolean is honoured. The `X-Cognipeer-Background` header takes precedence over this field. Background mode returns `202` with an `AgentRun`."
         callback_url:
           type: string
           format: uri

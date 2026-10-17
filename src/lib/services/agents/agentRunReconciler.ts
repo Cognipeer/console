@@ -31,15 +31,24 @@
  * crawler's documented failure mode) IS safe to republish as-is, since it
  * never started executing: every queued run at boot, and on each tick those
  * older than `runRequeueAfterMs`. `claimAgentRun` is a CAS, so a duplicate
- * delivery no-ops.
+ * delivery no-ops. Each republish carries the run's job dedup key
+ * (`ar_<id>_<generation>`), so a job still waiting in the queue is not
+ * duplicated. Deferred rows are never swept this way: the deferred dispatcher
+ * hands them out within their class cap on every tick.
+ *
+ * Scheduled rows (`run_at` / `delay_seconds`) are promoted to `queued` when
+ * due; a deferred or scheduled run that has not started within
+ * `AGENT_DEFERRED_MAX_WAIT_MS` of becoming due fails as `expired`.
  */
 
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
+import { AgentRunConflictError } from '@/lib/database';
 import {
   AGENT_RUN_CALLBACK_MAX_ATTEMPTS,
+  dispatchDeferredRuns,
   fireAgentRunCallback,
   isAbandonedSyncReservation,
   publishAgentRunJob,
@@ -66,12 +75,22 @@ let lastRetentionAt = 0;
 const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 /** Bound on how many queued runs one tick republishes per tenant. */
 const REQUEUE_BATCH = 100;
+/** Bound on how many due scheduled runs one tick promotes (and expired ones it fails) per tenant. */
+const SCHEDULED_BATCH = 100;
+
+const EXPIRED_RUN_MESSAGE = 'The run did not start in time (it waited longer than the deferred / scheduled wait limit) and was not executed.';
 
 interface SweepResult {
   tenantsScanned: number;
   failedRunningRuns: number;
   deletedSyncRuns: number;
   requeuedRuns: number;
+  /** Scheduled runs that came due and were queued. */
+  promotedRuns: number;
+  /** Deferred / scheduled runs that waited too long and were failed as `expired`. */
+  expiredRuns: number;
+  /** Deferred runs handed to their queue. */
+  dispatchedDeferredRuns: number;
   retentionDeleted: number;
   /** Pending approvals / questions whose time ran out (dropped, or denied and continued). */
   expiredActions: number;
@@ -82,19 +101,30 @@ interface SweepResult {
 }
 
 const EMPTY_SWEEP: SweepResult = {
-  tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0, expiredActions: 0,
-  requeuedWebhookDeliveries: 0, redeliveredCallbacks: 0,
+  tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, promotedRuns: 0, expiredRuns: 0,
+  dispatchedDeferredRuns: 0, retentionDeleted: 0, expiredActions: 0, requeuedWebhookDeliveries: 0, redeliveredCallbacks: 0,
 };
 
+/** Whether a sweep did anything worth a log line. */
+function sweepDidWork(sweep: SweepResult): boolean {
+  return Object.entries(sweep).some(([key, value]) => key !== 'tenantsScanned' && value > 0);
+}
+
 /**
- * One pass over every tenant:
- *  - `running` background runs whose heartbeat went stale → `worker_lost`;
+ * One pass over every tenant, in this order:
+ *  - `running` inline / background runs whose heartbeat went stale →
+ *    `worker_lost` (notified only when async: an inline run nobody stopped
+ *    waiting on gets no callback);
  *  - sync reservations past their own ceiling (+ grace) → deleted. A sync
  *    row never heartbeats, so "stale heartbeat" alone would delete a live
  *    long turn's reservation and let a second turn start on its conversation;
+ *  - due `scheduled` runs → `queued` (taking the conversation slot; a slot
+ *    held by another run leaves the row scheduled for the next tick);
+ *  - deferred / scheduled runs past `AGENT_DEFERRED_MAX_WAIT_MS` → `expired`;
  *  - `queued` runs older than `runRequeueAfterMs` → republished (a lost queue
  *    message, a memory queue on a pod that died). Safe: the claim is a CAS,
  *    a duplicate delivery just no-ops;
+ *  - deferred runs → dispatched within their class's running cap;
  *  - pending approvals / questions past their `expiresAt` → the agent's own
  *    `onTimeout` (drop them, or deny and let the agent continue as a job);
  *  - webhook deliveries that are pending and due → enqueued again;
@@ -117,6 +147,9 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   let failedRunningRuns = 0;
   let deletedSyncRuns = 0;
   let requeuedRuns = 0;
+  let promotedRuns = 0;
+  let expiredRuns = 0;
+  let dispatchedDeferredRuns = 0;
   let retentionDeleted = 0;
   let expiredActions = 0;
   let requeuedWebhookDeliveries = 0;
@@ -148,7 +181,9 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
             status: 'failed',
             errorReason: 'worker_lost',
             errorMessage: ORPHANED_RUNNING_MESSAGE,
+            stopReason: 'error',
             completedAt: new Date(),
+            runtimeContext: null,
           });
           if (finalized) {
             failedRunningRuns += 1;
@@ -159,6 +194,43 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
               });
             });
           }
+        }
+
+        // Scheduled runs that came due. A default-class run is published at once;
+        // a deferred one waits for the dispatcher below.
+        const due = await tenantDb.listDueScheduledAgentRuns(tenantId, new Date(now), SCHEDULED_BATCH);
+        for (const run of due) {
+          const runId = String(run._id);
+          try {
+            const promoted = await tenantDb.promoteScheduledAgentRun(runId, tenantId);
+            if (!promoted) continue;
+            promotedRuns += 1;
+            if (promoted.runClass !== 'deferred') await publishAgentRunJob(promoted);
+          } catch (error) {
+            // Another run holds the conversation: stays scheduled, tried again next tick.
+            if (error instanceof AgentRunConflictError) continue;
+            logger.warn('Failed to promote a scheduled agent run', {
+              runId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        // Waited too long to start: failed as `expired`, with its notifications.
+        const expired = await tenantDb.listExpiredWaitingAgentRuns(tenantId, {
+          dueBefore: new Date(now - cfg.agent.deferredMaxWaitMs),
+          limit: SCHEDULED_BATCH,
+        });
+        for (const run of expired) {
+          const finalized = await tenantDb.expireWaitingAgentRun(String(run._id), tenantId, EXPIRED_RUN_MESSAGE);
+          if (!finalized) continue;
+          expiredRuns += 1;
+          await fireAgentRunCallback(finalized, 'failed', { errorReason: 'expired', message: EXPIRED_RUN_MESSAGE }).catch((error) => {
+            logger.warn('Failed to deliver expired callback', {
+              runId: String(run._id),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
         }
 
         const queued = await tenantDb.listQueuedAgentRuns(tenantId, { createdBefore: requeueBefore, limit: REQUEUE_BATCH });
@@ -173,6 +245,13 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
             });
           }
         }
+
+        dispatchedDeferredRuns += await dispatchDeferredRuns(tenant.dbName!, tenantId).catch((error) => {
+          logger.warn('Failed to dispatch deferred agent runs', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return 0;
+        });
 
         // Callbacks nobody delivered: the row says `pending` / `failed`, the run
         // is past the point of sending one, and it has been quiet for longer than
@@ -227,8 +306,8 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   }
 
   return {
-    tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted, expiredActions,
-    requeuedWebhookDeliveries, redeliveredCallbacks,
+    tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, promotedRuns, expiredRuns, dispatchedDeferredRuns,
+    retentionDeleted, expiredActions, requeuedWebhookDeliveries, redeliveredCallbacks,
   };
 }
 
@@ -243,8 +322,7 @@ export async function reconcileOrphanedAgentRuns(): Promise<SweepResult> {
   // At boot every queued run is republished, not just old ones: an in-memory
   // queue lost them all with the previous process.
   const sweep = await sweepStaleRunningAgentRuns({ requeueAllQueued: true });
-  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0 || sweep.expiredActions > 0
-    || sweep.requeuedWebhookDeliveries > 0 || sweep.redeliveredCallbacks > 0) {
+  if (sweepDidWork(sweep)) {
     logger.info('Reconciled orphaned agent runs at boot', { ...sweep });
   }
   return sweep;
@@ -267,8 +345,7 @@ async function runOnce(): Promise<SweepResult> {
     }
 
     const result = await sweepStaleRunningAgentRuns();
-    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0 || result.expiredActions > 0
-      || result.requeuedWebhookDeliveries > 0 || result.redeliveredCallbacks > 0) {
+    if (sweepDidWork(result)) {
       logger.info('Reconciled orphaned agent runs', result);
     }
     return result;

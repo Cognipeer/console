@@ -77,12 +77,12 @@ beforeEach(async () => {
   tenantId = String(tenant._id);
   await db.switchToTenant(dbName);
   hoisted.publish.mockResolvedValue(undefined);
-  process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT = '2';
+  process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT = '2';
   reloadConfig();
 });
 
 afterEach(async () => {
-  delete process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT;
+  delete process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT;
   reloadConfig();
   await db.disconnect();
   rmSync(tmpDir, { recursive: true, force: true });
@@ -243,11 +243,11 @@ describe('Concurrency cap (§12.8)', () => {
     expect(await db.countActiveAgentRuns(tenantId)).toBe(2);
     expect((await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId: 'conv-c' }))).toHaveLength(0);
     expect(hoisted.publish.mock.calls.filter(([, name]) => name === 'run')).toHaveLength(2);
-    const retry = await createBackgroundAgentRun(baseInput('conv-c', { limits: { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 3, maxConcurrentRunsPerProject: 0 } }));
+    const retry = await createBackgroundAgentRun(baseInput('conv-c', { limits: { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 3, maxActivePerProject: 0 } }));
     expect(retry.kind).toBe('created');
   });
 
-  it('REGRESSION: sync reservations (interactive turns) do not count against the background cap', async () => {
+  it('dashboard sync reservations count against the run cap like every other active run (§4.1)', async () => {
     for (const conversationId of ['conv-sync-1', 'conv-sync-2', 'conv-sync-3']) {
       await db.createAgentRun({
         mode: 'sync',
@@ -263,9 +263,10 @@ describe('Concurrency cap (§12.8)', () => {
       });
     }
     const first = await createBackgroundAgentRun(baseInput('conv-a'));
-    const second = await createBackgroundAgentRun(baseInput('conv-b'));
-    expect(first.kind).toBe('created');
-    expect(second.kind).toBe('created');
+    expect(first.kind).toBe('concurrency_limit');
+    // The rejected insert was rolled back, not left queued.
+    expect(await db.countActiveAgentRuns(tenantId, undefined, { mode: 'background' })).toBe(0);
+    expect(hoisted.publish.mock.calls.filter(([, name]) => name === 'run')).toHaveLength(0);
   });
 
   it('concurrent submissions cannot all slip past the cap (count is taken after each insert)', async () => {
@@ -277,7 +278,7 @@ describe('Concurrency cap (§12.8)', () => {
   });
 
   it('a per-project cap rejects with scope "project" while the tenant still has room', async () => {
-    const limits = { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 10, maxConcurrentRunsPerProject: 1 };
+    const limits = { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 10, maxActivePerProject: 1 };
     expect((await createBackgroundAgentRun(baseInput('conv-p1', { limits }))).kind).toBe('created');
 
     const overProject = await createBackgroundAgentRun(baseInput('conv-p2', { limits }));
@@ -289,7 +290,7 @@ describe('Concurrency cap (§12.8)', () => {
   });
 
   it('a cap of 0 means no cap', async () => {
-    const limits = { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 };
+    const limits = { syncWaitMs: 60_000, maxDurationMs: 60_000, maxActivePerTenant: 0, maxActivePerProject: 0 };
     for (const c of ['z-1', 'z-2', 'z-3', 'z-4']) {
       expect((await createBackgroundAgentRun(baseInput(c, { limits }))).kind).toBe('created');
     }

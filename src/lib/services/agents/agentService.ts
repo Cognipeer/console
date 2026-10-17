@@ -47,7 +47,7 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -171,6 +171,7 @@ import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
     buildCostEstimator,
     buildTurnInputState,
@@ -2664,13 +2665,16 @@ export async function updateAgentRecord(
     await db.switchToTenant(tenantDbName);
     // Old Advanced-tab reasoning moves next to the model on every save.
     if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.execution) {
+    if (data.config?.sandbox || data.config?.callback) {
         // `config` replaces the stored one wholesale; masked secret values
         // must resolve against what is stored, not be saved as the mask —
-        // and a plaintext secret (sandbox secrets, the execution callback
-        // secret) must be sealed before it is written.
+        // and a plaintext secret (sandbox secrets, the callback secret) must
+        // be sealed before it is written.
         const current = await db.findAgentById(agentId);
         data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
+    } else if (data.config) {
+        // The removed Execution settings a stored config may still carry go on save.
+        data = { ...data, config: stripLegacyExecutionConfig(data.config) };
     }
     return db.updateAgent(agentId, { ...data, updatedBy: userId });
 }
@@ -2976,7 +2980,7 @@ export async function createConversation(
     metadata?: Record<string, unknown>,
     /**
      * The session's spend budget. Absent = the agent's own default
-     * (`execution.sessionBudget`); `null` = none, whatever the agent's default.
+     * (`config.budget`); `null` = none, whatever the agent's default.
      */
     budget?: IAgentSessionBudget | null,
 ): Promise<IAgentConversation> {
@@ -3194,6 +3198,14 @@ export interface AgentChatRequest {
      * `runtimeContext.source`, the API token from `runtimeContext.tokenId`.
      */
     callerContext?: RoutingCallerContext;
+    /**
+     * Per-request structured output and validated agent inputs. The run engine
+     * carries them on the run row (so a queued run and a resume see the same
+     * values) and passes them here; how the turn applies them is §6 of the run
+     * engine spec.
+     */
+    responseFormat?: AgentResponseFormat;
+    inputs?: Record<string, unknown>;
     /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so

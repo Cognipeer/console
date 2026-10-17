@@ -376,12 +376,10 @@ export interface AppConfig {
    * timeout in the deployment (Decision 6).
    */
   agent: {
-    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. Default 10 min. */
+    /** How long a synchronous call waits for its run; after it the call answers 202 and the run continues. Default 10 min. */
     syncTimeoutMs: number;
-    /** Server-operated upper bound on a background run, independent of the agent's own limit. */
+    /** Wall-clock ceiling of any run (inline after it detached, background, deferred). */
     backgroundMaxDurationMs: number;
-    /** Simple per-tenant cap on simultaneous queued+running background runs (§12.8). */
-    backgroundMaxConcurrentRunsPerTenant: number;
     /** Retention TTL for AgentRun records (§12.10), following the tracing-retention precedent. */
     runRetentionDays: number;
     /** Retention TTL for `agent_session_events` (the append-only session event log). */
@@ -390,8 +388,6 @@ export interface AppConfig {
     runHeartbeatIntervalMs: number;
     /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
     runHeartbeatStaleMs: number;
-    /** Per-project cap on simultaneous queued+running background runs; 0 = only the tenant cap applies. */
-    backgroundMaxConcurrentRunsPerProject: number;
     /** Background runs executed at once per node (own queue, so they never starve chat). */
     runConcurrency: number;
     /** A `queued` run older than this with no worker is republished by the reconciler. */
@@ -516,7 +512,6 @@ function boundedAgentRunConfig(source: ConfigSource) {
   return {
     runHeartbeatIntervalMs,
     runHeartbeatStaleMs: atLeast(int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000), runHeartbeatIntervalMs * 3),
-    backgroundMaxConcurrentRunsPerProject: atLeast(int(source, 'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT', 0), 0),
     runConcurrency,
     runRequeueAfterMs: atLeast(int(source, 'AGENT_RUN_REQUEUE_AFTER_MS', 120_000), 10_000),
     runMaxActivePerTenant: atLeast(int(source, 'AGENT_RUN_MAX_ACTIVE_PER_TENANT', 250), 0),
@@ -896,11 +891,6 @@ function buildConfig(source: ConfigSource): AppConfig {
     agent: {
       syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 600_000), 5_000),
       backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
-      backgroundMaxConcurrentRunsPerTenant: int(
-        source,
-        'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT',
-        10,
-      ),
       runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
       sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
       ...boundedAgentRunConfig(source),

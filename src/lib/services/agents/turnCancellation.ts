@@ -22,7 +22,7 @@
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentRun } from '@/lib/database';
 import { cancelPendingForNewMessage } from './agentPendingActions';
-import { requestAgentRunCancellation, runWithTenantDb } from './agentRunService';
+import { cancelAgentRun, runWithTenantDb } from './agentRunService';
 import { abortLocalTurns } from './turnWatch';
 
 const logger = createLogger('agent-turn-cancel');
@@ -54,38 +54,49 @@ export interface CancelConversationTurnOutcome {
 
 /**
  * Stops the conversation's running turn and cancels what a paused one waits on.
- * Nothing to stop is not an error (`cancelled: false`).
+ * A run (inline or queued, running or paused) goes through `cancelAgentRun`, so
+ * a paused run's row is settled `canceled` with its notifications, not left
+ * `requires_action`. Nothing to stop is not an error (`cancelled: false`).
  */
 export async function cancelConversationTurn(input: CancelConversationTurnInput): Promise<CancelConversationTurnOutcome> {
   const runIds: string[] = [];
+  // Ending a paused run answers its open requests "no": only for a caller allowed to.
+  const statuses: IAgentRun['status'][] = input.cancelActions === false ? ['queued', 'running'] : ['queued', 'running', 'requires_action'];
 
   const rows = await runWithTenantDb(input.tenantDbName, async (db) => {
     const active = await db.listAgentRuns({
       tenantId: input.tenantId,
       projectId: input.projectId,
       conversationId: input.conversationId,
-      status: ['queued', 'running'],
+      status: statuses,
       limit: 5,
     });
     return active.filter((row) => !input.agentKey || row.agentKey === input.agentKey);
   });
 
+  let stoppedRunning = false;
+  let settledPaused = false;
   for (const row of rows) {
     const id = String(row._id);
-    if (row.mode === 'background') {
-      // Owns the callback and the queued fast path.
-      const outcome = await requestAgentRunCancellation(input.tenantDbName, input.tenantId, input.projectId, id);
-      if (outcome.kind === 'accepted') runIds.push(id);
-    } else {
+    if (row.mode === 'sync') {
+      // A dashboard reservation: the turn's node finds the stamp on its next poll.
       const stamped = await runWithTenantDb(input.tenantDbName, (db) => db.requestAgentRunCancel(id, input.tenantId, input.projectId));
       if (stamped) runIds.push(id);
+      stoppedRunning = true;
+      continue;
     }
+    // Owns the callback, the queued fast path and the paused-run settlement.
+    const outcome = await cancelAgentRun({ tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId, runId: id });
+    if (outcome.kind === 'accepted') runIds.push(id);
+    if (row.status !== 'requires_action') stoppedRunning = true;
+    else if (outcome.kind === 'accepted') settledPaused = true;
   }
 
   // This node's own turn stops now, not on the next poll.
-  if (rows.length > 0) abortLocalTurns(input.tenantId, input.conversationId);
+  if (stoppedRunning) abortLocalTurns(input.tenantId, input.conversationId);
 
-  const cancelledActions = input.cancelActions === false ? false : await cancelOpenActions(input);
+  // A settled paused run has already cancelled its open requests (and reset the session).
+  const cancelledActions = input.cancelActions === false ? false : (await cancelOpenActions(input)) || settledPaused;
   return { cancelled: runIds.length > 0 || cancelledActions, runIds, cancelledActions };
 }
 

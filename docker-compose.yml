@@ -32,10 +32,6 @@ services:
       - AGENT_SYNC_TIMEOUT_MS=${AGENT_SYNC_TIMEOUT_MS:-600000}
       # Longest wall-clock a run may take, independent of the agent's own maxWallClockMs
       - AGENT_BACKGROUND_MAX_DURATION_MS=${AGENT_BACKGROUND_MAX_DURATION_MS:-1800000}
-      # Simple per-tenant cap on simultaneous queued+running background runs
-      - AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT=${AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT:-10}
-      # Per-project cap on queued+running background runs (0 = only the tenant cap)
-      - AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT=${AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT:-0}
       # Background runs executed at once per node (dedicated queue)
       - AGENT_RUN_CONCURRENCY=${AGENT_RUN_CONCURRENCY:-4}
       # Republish a queued run that no worker picked up after this long

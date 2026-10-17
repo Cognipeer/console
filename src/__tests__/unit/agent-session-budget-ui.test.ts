@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
 import { I18nProvider } from '@/lib/i18n';
 import { BudgetBanner, BudgetMeter } from '@/components/agents/session/SessionBudgetControls';
-import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
+import AgentRunSettingsPanel from '@/components/agents/studio/AgentRunSettingsPanel';
 import {
   budgetPatchBody,
   sessionBudgetView,
@@ -155,15 +155,16 @@ describe('BudgetMeter / BudgetBanner', () => {
   });
 });
 
-describe('Configure → Execution: default session budget', () => {
+describe('Configure → Callback & budget: default session budget', () => {
+  const panel = (budget: unknown) => h(AgentRunSettingsPanel, {
+    callback: undefined, onCallbackChange: noop, budget: budget as never, onBudgetChange: noop,
+  });
   it('shows the amount and, once set, what happens at the limit', () => {
-    const empty = render(h(AgentExecutionPanel, { value: undefined, onChange: noop }));
+    const empty = render(panel(undefined));
     expect(empty).toContain('Budget per session (USD)');
     expect(empty).not.toContain('When the budget is reached');
 
-    const withBudget = render(h(AgentExecutionPanel, {
-      value: { sessionBudget: { maxCostUsd: 5, onReach: 'stop' } }, onChange: noop,
-    }));
+    const withBudget = render(panel({ maxCostUsd: 5, onReach: 'stop' }));
     expect(withBudget).toContain('When the budget is reached');
     expect(withBudget).toContain('Pause and wait');
     expect(withBudget).toContain('refused until the budget is raised');

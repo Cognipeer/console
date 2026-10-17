@@ -20,11 +20,10 @@ import { createConversation, deleteConversation, getAgentByKey, getConversationB
 import { sessionModelChoice } from '@/lib/services/agents/agentModelSelection';
 import {
   apiErrorBody,
-  backgroundDisabledErrorBody,
   invalidRequestErrorBody,
   isBackgroundModeRequested,
   queueAgentRunContinue,
-  resolveAgentExecutionLimits,
+  resolveAgentRunLimits,
   runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -433,12 +432,10 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         if (violation) return reply.code(403).send(apiErrorBody('permission_error', violation, 'budget_override_forbidden'));
       }
 
-      // A continuation runs in the background: fail before changing anything if it cannot.
+      // A continuation runs in the background, with the run limits of this caller.
       const willResume = resume && conversation.runtimeStatus === 'budget_paused';
-      const agent = willResume ? await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId) : null;
       const limits = willResume
-        ? await resolveAgentExecutionLimits({
-          agentConfig: agent?.config,
+        ? await resolveAgentRunLimits({
           quotaContext: {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
@@ -449,7 +446,6 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           },
         })
         : null;
-      if (limits && !limits.backgroundEnabled) return reply.code(400).send(backgroundDisabledErrorBody());
 
       const outcome = await updateSessionBudget({
         tenantDbName: ctx.tenantDbName,
@@ -480,6 +476,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           }),
           ...(apiTokenId ? { apiTokenId } : {}),
           actorType: 'api_token',
+          ...(limits ? { limits } : {}),
         });
         if (queued.kind === 'conflict') {
           return reply.code(409).send(RUN_CONFLICT_BODY);
@@ -611,9 +608,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       // `approved_args` / `remember_for_session` (snake_case, like the rest of the client API).
       const body = normalizeClientResolveBody(readJsonBody<Record<string, unknown>>(request));
 
-      const agent = await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId);
-      const limits = await resolveAgentExecutionLimits({
-        agentConfig: agent?.config,
+      const limits = await resolveAgentRunLimits({
         quotaContext: {
           tenantDbName: ctx.tenantDbName,
           tenantId: ctx.tenantId,
@@ -623,10 +618,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           tokenId: ctx.tokenRecord._id?.toString(),
         },
       });
-      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body, 'sync');
-      if (background && !limits.backgroundEnabled) {
-        return reply.code(400).send(backgroundDisabledErrorBody());
-      }
+      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
 
       const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
       const owner = ctx.user;
@@ -653,7 +645,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           source: 'api',
         }),
         // The same ceiling a synchronous /responses call has.
-        ...(background ? {} : { cancellationCell: { deadlineAt: Date.now() + limits.syncTimeoutMs, cancelled: false } }),
+        ...(background ? {} : { cancellationCell: { deadlineAt: Date.now() + limits.syncWaitMs, cancelled: false } }),
         audit: {
           ipAddress: request.ip,
           userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,

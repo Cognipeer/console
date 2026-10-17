@@ -76,7 +76,7 @@ import {
   listAgentRuns,
   requestAgentRunCancellation,
   reserveConversationForSyncTurn,
-  resolveAgentExecutionLimits,
+  resolveAgentRunLimits,
   runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -1329,12 +1329,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // Effective execution ceilings for this tenant/project (env ∧ quota) —
-  // the Build → Execution card shows them as the maximum an agent may set.
+  // Effective run limits for this tenant/project (env ∧ quota). Agents have no
+  // say in them any more; the Studio shows them for reference.
   app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const limits = await resolveAgentExecutionLimits({
+      const limits = await resolveAgentRunLimits({
         quotaContext: {
           tenantDbName: session.tenantDbName,
           tenantId: session.tenantId,
@@ -1344,10 +1344,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       });
       return reply.code(200).send({
-        syncTimeoutSeconds: Math.floor(limits.syncTimeoutMs / 1000),
-        backgroundMaxDurationMinutes: Math.floor(limits.backgroundMaxDurationMs / 60_000),
-        maxConcurrentRunsPerTenant: limits.maxConcurrentRunsPerTenant,
-        maxConcurrentRunsPerProject: limits.maxConcurrentRunsPerProject,
+        syncWaitSeconds: Math.floor(limits.syncWaitMs / 1000),
+        maxDurationMinutes: Math.floor(limits.maxDurationMs / 60_000),
+        maxActivePerTenant: limits.maxActivePerTenant,
+        maxActivePerProject: limits.maxActivePerProject,
       });
     } catch (error) {
       return sendRouteError(reply, error, 'Agent execution limits error', 'Failed to read execution limits');
@@ -1380,7 +1380,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         agentKey: agent.key,
-        mode: 'background',
+        // Every run (queued or inline); a dashboard reservation is not one.
+        excludeModes: ['sync'],
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
@@ -1400,7 +1401,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { runId } = request.params as { runId: string };
       // Ownership first: the run must belong to THIS agent, not merely to the project.
       const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
-      if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
+      if (!existing || existing.agentKey !== agent.key || existing.mode === 'sync') {
         return reply.code(404).send({ error: 'Run not found' });
       }
       // Cancelling a run is acting on its session: the session's owner always may, anybody else needs

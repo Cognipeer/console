@@ -70,7 +70,7 @@ import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
-import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
 import AgentFilesPanel from './studio/AgentFilesPanel';
 import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
@@ -96,7 +96,7 @@ import type {
   IAgentConfig,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
-  IAgentExecutionConfig,
+  IAgentCallbackConfig,
   IAgentClientToolSurfaces,
   IAgentHumanInTheLoopConfig,
   IAgentAdditionalModel,
@@ -209,7 +209,10 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   skills: { top: 'configure', sub: 'skills' },
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
-  execution: { top: 'configure', sub: 'execution' },
+  callback: { top: 'configure', sub: 'callback' },
+  // Old links to the removed Execution section land on what is left of it.
+  execution: { top: 'configure', sub: 'callback' },
+  budget: { top: 'configure', sub: 'callback' },
   files: { top: 'configure', sub: 'files' },
   attachments: { top: 'configure', sub: 'files' },
   hitl: { top: 'configure', sub: 'hitl' },
@@ -297,7 +300,8 @@ export default function AgentDetailPage() {
   const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
-  const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  const [callbackConfig, setCallbackConfig] = useState<IAgentCallbackConfig | undefined>(undefined);
+  const [budgetConfig, setBudgetConfig] = useState<IAgentConfig['budget']>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
@@ -410,7 +414,8 @@ export default function AgentDetailPage() {
         setSkillPolicy(cfg.skillPolicy);
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
-        setExecutionConfig(cfg.execution);
+        setCallbackConfig(cfg.callback);
+        setBudgetConfig(cfg.budget);
         setHitlConfig(cfg.humanInTheLoop);
         setClientToolsConfig(cfg.clientTools);
         setClientToolSurfaces(cfg.clientToolSurfaces);
@@ -668,7 +673,9 @@ export default function AgentDetailPage() {
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.
     nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
-    nextConfig.execution = executionConfig && Object.keys(executionConfig).length > 0 ? executionConfig : undefined;
+    // The callback secret comes back masked; sending the mask back keeps the stored value.
+    nextConfig.callback = callbackConfig && Object.keys(callbackConfig).length > 0 ? callbackConfig : undefined;
+    nextConfig.budget = budgetConfig ?? undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -1340,14 +1347,16 @@ export default function AgentDetailPage() {
               ) : null,
             )}
             {buildSection(
-              'execution',
-              'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
-              <AgentExecutionPanel
-                value={executionConfig}
-                onChange={setExecutionConfig}
+              'callback',
+              t('runSettings.sectionDescription'),
+              <AgentRunSettingsPanel
+                callback={callbackConfig}
+                onCallbackChange={setCallbackConfig}
+                budget={budgetConfig}
+                onBudgetChange={setBudgetConfig}
               />,
-              executionConfig?.defaultMode === 'background' ? (
-                <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              callbackConfig?.url ? (
+                <Badge size="xs" color="indigo" variant="light" w="fit-content">{t('runSettings.badgeCallback')}</Badge>
               ) : null,
             )}
             {buildSection(

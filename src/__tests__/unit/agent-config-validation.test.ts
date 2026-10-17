@@ -271,36 +271,29 @@ describe('validateAgentConfig', () => {
     });
 });
 
-describe('validateAgentConfigShape — execution settings', () => {
-    const shape = (execution: IAgentConfig['execution']) => validateAgentConfigShape({ modelKey: 'gpt-main', execution });
+describe('validateAgentConfigShape — callback', () => {
+    const shape = (callback: IAgentConfig['callback']) => validateAgentConfigShape({ modelKey: 'gpt-main', callback });
 
-    it('accepts limits inside the env ceilings', () => {
-        const result = shape({ syncTimeoutSeconds: 30, backgroundMaxDurationMinutes: 10, defaultMode: 'background', callbackUrl: 'https://hooks.example.com/x', callbackSecret: 'a'.repeat(16) });
-        expect(result.errors).toEqual([]);
-    });
-
-    it('rejects a limit above the env ceiling (an agent can only lower it) or below the floor', () => {
-        const result = shape({ syncTimeoutSeconds: 100_000, backgroundMaxDurationMinutes: 100_000 });
-        expect(fields(result.errors)).toEqual(expect.arrayContaining(['execution.syncTimeoutSeconds', 'execution.backgroundMaxDurationMinutes']));
-        expect(fields(shape({ syncTimeoutSeconds: 1 }).errors)).toContain('execution.syncTimeoutSeconds');
-    });
-
-    it('rejects an unknown defaultMode, and background default with background disabled', () => {
-        expect(fields(shape({ defaultMode: 'later' as never }).errors)).toContain('execution.defaultMode');
-        expect(fields(shape({ defaultMode: 'background', backgroundEnabled: false }).errors)).toContain('execution.defaultMode');
+    it('accepts an https URL with a 16+ character secret', () => {
+        expect(shape({ url: 'https://hooks.example.com/x', secret: 'a'.repeat(16) }).errors).toEqual([]);
     });
 
     it('rejects a non-http(s) callback URL, warns on plain http', () => {
-        expect(fields(shape({ callbackUrl: 'ftp://hooks.example.com' }).errors)).toContain('execution.callbackUrl');
-        const http = shape({ callbackUrl: 'http://hooks.example.com/x' });
+        expect(fields(shape({ url: 'ftp://hooks.example.com' }).errors)).toContain('callback.url');
+        const http = shape({ url: 'http://hooks.example.com/x' });
         expect(http.errors).toEqual([]);
-        expect(fields(http.warnings)).toContain('execution.callbackUrl');
+        expect(fields(http.warnings)).toContain('callback.url');
     });
 
     it('rejects a short secret and a secret without a URL; the read-back mask is not re-validated', () => {
-        expect(fields(shape({ callbackUrl: 'https://h.example.com', callbackSecret: 'short' }).errors)).toContain('execution.callbackSecret');
-        expect(fields(shape({ callbackSecret: 'a'.repeat(20) }).errors)).toContain('execution.callbackSecret');
-        expect(shape({ callbackUrl: 'https://h.example.com', callbackSecret: '••••••' }).errors).toEqual([]);
+        expect(fields(shape({ url: 'https://h.example.com', secret: 'short' }).errors)).toContain('callback.secret');
+        expect(fields(shape({ secret: 'a'.repeat(20) }).errors)).toContain('callback.secret');
+        expect(shape({ url: 'https://h.example.com', secret: '••••••' }).errors).toEqual([]);
+    });
+
+    it('ignores the removed execution settings a stored config may still carry', () => {
+        const legacy = { modelKey: 'gpt-main', execution: { syncTimeoutSeconds: 1, defaultMode: 'later' } } as unknown as IAgentConfig;
+        expect(validateAgentConfigShape(legacy).errors).toEqual([]);
     });
 });
 

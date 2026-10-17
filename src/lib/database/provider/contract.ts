@@ -2199,6 +2199,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     tenantId: string,
     options: { dueBefore: Date; limit: number },
   ): Promise<IAgentRun[]>;
+  /**
+   * CAS `queued` / `scheduled` -> `failed` with `errorReason: 'expired'` (a
+   * deferred or scheduled run that never started in time), freeing the
+   * conversation slot a queued row holds. Null when the row has moved on.
+   */
+  expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null>;
   /** CAS on `running`: stamps `detachedAt` (the caller of an inline run stopped waiting). */
   markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
   /** Stamps `lastPublishedAt` after a queue publish (no status guard). */

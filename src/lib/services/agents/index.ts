@@ -26,14 +26,16 @@ export type {
 export { prepareConnectionForStorage } from './externalAgent';
 
 export {
+  startAgentRun,
+  cancelAgentRun,
+  waitForAgentRun,
+  resolveAgentRunLimits,
   runSyncAgentTurn,
   createBackgroundAgentRun,
   getAgentRunStatus,
   requestAgentRunCancellation,
   isBackgroundModeRequested,
   agentRunConflictErrorBody,
-  agentSyncTimeoutErrorBody,
-  idempotencyKeyRequiresBackgroundErrorBody,
   idempotencyKeyConflictErrorBody,
   agentRunConcurrencyLimitErrorBody,
 } from './agentRunService';

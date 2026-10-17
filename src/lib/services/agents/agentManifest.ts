@@ -19,6 +19,7 @@ import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { maskAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
 import { assertMayNameBucket, type CanNameBucket } from './attachmentsBucketAccess';
 import type { ManifestResources } from './manifestResources';
 
@@ -74,7 +75,12 @@ function sanitizeConfig(config: IAgentConfig): IAgentConfig {
         // sees which secrets to fill in), the sealed values never do.
         spec.sandbox = maskAgentSandboxConfig(spec.sandbox);
     }
-    return spec;
+    if (spec.callback) {
+        // The callback URL travels; its sealed secret never does (masked, so an
+        // importer sees one is expected and an import over this agent keeps its own).
+        spec.callback = maskAgentCallbackConfig(spec.callback);
+    }
+    return stripLegacyExecutionConfig(spec);
 }
 
 function collectBindingDependencies(

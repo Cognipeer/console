@@ -251,7 +251,7 @@ describe('cancelling a background run that is inside a tool call', () => {
     const created = await createBackgroundAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
-      limits: { backgroundMaxDurationMs: 2_500, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 2_500, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
     if (created.kind !== 'created') throw new Error(created.kind);
     const runId = String(created.run._id);
@@ -274,7 +274,7 @@ describe('cancelling a background run that is inside a tool call', () => {
     const created = await createBackgroundAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
-      limits: { backgroundMaxDurationMs: 2_500, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 2_500, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
     if (created.kind !== 'created') throw new Error(created.kind);
     const runId = String(created.run._id);

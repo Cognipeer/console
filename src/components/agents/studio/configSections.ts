@@ -16,7 +16,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     skills: 'Skills',
     memory: 'Memory',
     sandbox: 'Sandbox',
-    execution: 'Execution',
+    callback: 'Callback & budget',
     files: 'Files',
     hitl: 'Approvals & questions',
     clienttools: 'Client tools',
@@ -29,6 +29,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
  * rest of the headings are English until their sections are localized.
  */
 export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
+    callback: 'runSettings.sectionTitle',
     files: 'attachments.sectionTitle',
     hitl: 'hitl.sectionTitle',
     clienttools: 'clientTools.sectionTitle',
@@ -47,7 +48,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     skills: ['skills', 'skillPolicy'],
     memory: ['memory'],
     sandbox: ['sandbox'],
-    execution: ['execution'],
+    callback: ['callback', 'budget'],
     files: ['attachments'],
     hitl: ['humanInTheLoop'],
     clienttools: ['clientTools'],

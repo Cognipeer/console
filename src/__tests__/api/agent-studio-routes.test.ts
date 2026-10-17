@@ -71,7 +71,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
     return {
         ...actual,
-        resolveAgentExecutionLimits: vi.fn(),
+        resolveAgentRunLimits: vi.fn(),
         listAgentRuns: vi.fn(),
         getAgentRunStatus: vi.fn(),
         requestAgentRunCancellation: vi.fn(),
@@ -121,7 +121,7 @@ import {
     getAgentRunStatus,
     listAgentRuns,
     requestAgentRunCancellation,
-    resolveAgentExecutionLimits,
+    resolveAgentRunLimits,
 } from '@/lib/services/agents/agentRunService';
 import {
     AgentImportError,
@@ -474,29 +474,27 @@ describe('execution limits and background runs', () => {
         createdAt: new Date('2026-09-24T10:00:00Z'),
     };
 
-    it('GET /agents/execution/limits returns the effective ceilings for this project', async () => {
-        mockFn(resolveAgentExecutionLimits).mockResolvedValue({
-            syncTimeoutMs: 120_000,
-            backgroundEnabled: true,
-            backgroundMaxDurationMs: 600_000,
-            defaultMode: 'sync',
-            maxConcurrentRunsPerTenant: 5,
-            maxConcurrentRunsPerProject: 0,
+    it('GET /agents/execution/limits returns the effective run limits for this project', async () => {
+        mockFn(resolveAgentRunLimits).mockResolvedValue({
+            syncWaitMs: 120_000,
+            maxDurationMs: 600_000,
+            maxActivePerTenant: 5,
+            maxActivePerProject: 0,
         });
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/execution/limits' });
         expect(res.statusCode).toBe(200);
         expect(parseJsonBody(res.body)).toEqual({
-            syncTimeoutSeconds: 120,
-            backgroundMaxDurationMinutes: 10,
-            maxConcurrentRunsPerTenant: 5,
-            maxConcurrentRunsPerProject: 0,
+            syncWaitSeconds: 120,
+            maxDurationMinutes: 10,
+            maxActivePerTenant: 5,
+            maxActivePerProject: 0,
         });
-        const call = mockFn(resolveAgentExecutionLimits).mock.calls[0][0];
+        const call = mockFn(resolveAgentRunLimits).mock.calls[0][0];
         expect(call.quotaContext).toMatchObject({ tenantId: 'tenant-1', projectId: 'proj-1' });
     });
 
-    it('GET /agents/:agentId/runs lists this agent\'s background runs without secrets or caller headers', async () => {
+    it('GET /agents/:agentId/runs lists this agent\'s runs (queued and inline, not reservations) without secrets or caller headers', async () => {
         mockFn(listAgentRuns).mockResolvedValue([RUN]);
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/runs?status=running,bogus' });
@@ -506,7 +504,7 @@ describe('execution limits and background runs', () => {
         expect(JSON.stringify(body)).not.toContain('sealed-secret');
         expect(JSON.stringify(body)).not.toContain('runtimeContext');
         expect(mockFn(listAgentRuns)).toHaveBeenCalledWith('tenant_acme', expect.objectContaining({
-            agentKey: 'field-ops', projectId: 'proj-1', mode: 'background', status: ['running'],
+            agentKey: 'field-ops', projectId: 'proj-1', excludeModes: ['sync'], status: ['running'],
         }));
     });
 

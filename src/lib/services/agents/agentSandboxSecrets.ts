@@ -10,7 +10,8 @@
  */
 
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import type { IAgentConfig, IAgentExecutionConfig, IAgentSandboxConfig } from '@/lib/database';
+import type { IAgentConfig, IAgentSandboxConfig } from '@/lib/database';
+import { maskAgentCallbackConfig, sealAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
 
 export const AGENT_SANDBOX_SECRET_MASK = '••••••';
 
@@ -48,39 +49,16 @@ export function sealAgentSandboxConfig(
 }
 
 /**
- * Seals the execution callback secret the same way: plaintext in, sealed
- * stored, mask back means "keep", empty string means "remove".
+ * Applies the sandbox and callback sealing to a whole agent config, and drops
+ * the removed Execution settings a stored config may still carry.
  */
-export function sealAgentExecutionConfig(
-    incoming: IAgentExecutionConfig | undefined,
-    current: IAgentExecutionConfig | undefined,
-): IAgentExecutionConfig | undefined {
-    if (!incoming) return incoming;
-    const { callbackSecret, callbackSecretSealed: _ignored, ...rest } = incoming;
-    if (callbackSecret === undefined || callbackSecret === AGENT_SANDBOX_SECRET_MASK) {
-        return current?.callbackSecretSealed ? { ...rest, callbackSecretSealed: current.callbackSecretSealed } : rest;
-    }
-    return callbackSecret ? { ...rest, callbackSecretSealed: encryptObject(callbackSecret) } : rest;
-}
-
-/** The decrypted execution callback secret, for signing a callback. */
-export function openAgentCallbackSecret(execution: IAgentExecutionConfig | undefined): string | undefined {
-    if (!execution?.callbackSecretSealed) return undefined;
-    try {
-        return decryptObject<string>(execution.callbackSecretSealed) || undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-/** Applies the sandbox and execution sealing to a whole agent config. */
 export function sealAgentConfigSecrets(
     config: IAgentConfig,
     current: IAgentConfig | undefined,
 ): IAgentConfig {
-    let next = config;
+    let next = stripLegacyExecutionConfig(config);
     if (next.sandbox) next = { ...next, sandbox: sealAgentSandboxConfig(next.sandbox, current?.sandbox) };
-    if (next.execution) next = { ...next, execution: sealAgentExecutionConfig(next.execution, current?.execution) };
+    if (next.callback) next = { ...next, callback: sealAgentCallbackConfig(next.callback, current?.callback) };
     return next;
 }
 
@@ -94,15 +72,16 @@ export function maskAgentSandboxConfig(sandbox: IAgentSandboxConfig | undefined)
         : rest;
 }
 
-/** Masks the sandbox and execution secrets of an agent-shaped object (`{ config }`) for an API response. */
+/**
+ * Masks the sandbox and callback secrets of an agent-shaped object (`{ config }`)
+ * for an API response; a legacy `execution` blob is not returned either.
+ */
 export function maskAgentSandboxSecrets<T extends { config?: IAgentConfig }>(agent: T): T {
-    if (!agent?.config?.sandbox && !agent?.config?.execution) return agent;
-    const config: IAgentConfig = { ...agent.config };
+    const raw = agent?.config as (IAgentConfig & { execution?: unknown }) | undefined;
+    if (!raw?.sandbox && !raw?.callback && raw?.execution === undefined) return agent;
+    const config: IAgentConfig = stripLegacyExecutionConfig({ ...agent.config! });
     if (config.sandbox) config.sandbox = maskAgentSandboxConfig(config.sandbox);
-    if (config.execution) {
-        const { callbackSecretSealed, callbackSecret: _plain, ...rest } = config.execution;
-        config.execution = callbackSecretSealed ? { ...rest, callbackSecret: AGENT_SANDBOX_SECRET_MASK } : rest;
-    }
+    if (config.callback) config.callback = maskAgentCallbackConfig(config.callback);
     return { ...agent, config };
 }
 

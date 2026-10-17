@@ -18,7 +18,7 @@ const hoisted = vi.hoisted(() => ({
   getAgentRunStatus: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
-  resolveAgentExecutionLimits: vi.fn(),
+  resolveAgentRunLimits: vi.fn(),
   resolveAction: vi.fn(),
   blocking: vi.fn(),
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -81,7 +81,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     runSyncAgentTurn: hoisted.runSyncAgentTurn,
     createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
-    resolveAgentExecutionLimits: hoisted.resolveAgentExecutionLimits,
+    resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
   };
 });
 
@@ -107,11 +107,11 @@ const AUTH_CTX = {
 // An agent whose admin set a session budget and did not let API clients change it.
 const BOUND_AGENT = {
   _id: 'agent-1', tenantId: 'tenant-1', projectId: 'proj-1', key: 'support-agent', name: 'Support', status: 'active',
-  config: { modelKey: 'gpt-4o', execution: { sessionBudget: { maxCostUsd: 2, onReach: 'pause' } } },
+  config: { modelKey: 'gpt-4o', budget: { maxCostUsd: 2, onReach: 'pause' } },
 };
 const EXISTING_SESSION = { _id: 'conv-1', tenantId: 'tenant-1', projectId: 'proj-1', agentKey: 'support-agent', messages: [], createdBy: 'user-1' };
 
-const LIMITS = { syncTimeoutMs: 60_000, backgroundEnabled: true, backgroundMaxDurationMs: 1_800_000, defaultMode: 'sync' as const };
+const LIMITS = { syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 };
 const responses = (payload: Record<string, unknown>, extraHeaders: Record<string, string> = {}) => ({
   method: 'POST' as const,
   url: '/api/client/v1/agents/responses',
@@ -129,7 +129,7 @@ beforeEach(async () => {
   hoisted.getConversationById.mockResolvedValue(EXISTING_SESSION);
   hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
   hoisted.getAgentRunStatus.mockResolvedValue(null);
-  hoisted.resolveAgentExecutionLimits.mockResolvedValue(LIMITS);
+  hoisted.resolveAgentRunLimits.mockResolvedValue(LIMITS);
   hoisted.blocking.mockResolvedValue(null);
   hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-1', status: 'completed' } });
   app = await createFastifyApiTestApp(async (instance) => {

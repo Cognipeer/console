@@ -43,7 +43,7 @@ import {
   reconcileOrphanedAgentRuns,
   triggerAgentRunReconcilerRun,
 } from '@/lib/services/agents/agentRunReconciler';
-import { AGENT_RUN_QUEUE } from '@/lib/services/agents/agentRunService';
+import { AGENT_RUN_DEFERRED_QUEUE, AGENT_RUN_QUEUE } from '@/lib/services/agents/agentRunService';
 
 let db: SQLiteProvider;
 let tmpDir: string;
@@ -91,6 +91,7 @@ afterEach(async () => {
   delete process.env.AGENT_RUN_HEARTBEAT_STALE_MS;
   delete process.env.AGENT_SYNC_TIMEOUT_MS;
   delete process.env.AGENT_RUN_REQUEUE_AFTER_MS;
+  delete process.env.AGENT_DEFERRED_MAX_RUNNING_PER_TENANT;
   vi.useRealTimers();
   reloadConfig();
   await db.disconnect();
@@ -220,5 +221,80 @@ describe('agent-run crash-recovery reconciler (§7.1)', () => {
 
     expect(result.requeuedRuns).toBe(0);
     expect(result.failedRunningRuns).toBe(1);
+  });
+});
+
+describe('agent-run reconciler: scheduled, deferred and expired runs (§4.4–§4.6)', () => {
+  const runJobs = (queue: string) => hoisted.publish.mock.calls.filter(([q, name]) => q === queue && name === 'run');
+
+  it('promotes a scheduled run that came due and publishes it; a future one stays scheduled', async () => {
+    const due = await db.createAgentRun({ ...baseRecord('conv-due'), status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
+    const later = await db.createAgentRun({ ...baseRecord('conv-later'), status: 'scheduled', notBefore: new Date(Date.now() + 3_600_000) });
+
+    const result = await triggerAgentRunReconcilerRun();
+
+    expect(result.promotedRuns).toBe(1);
+    expect((await db.getAgentRunById(String(due._id), tenantId, PROJECT_ID))?.status).toBe('queued');
+    expect((await db.getAgentRunById(String(later._id), tenantId, PROJECT_ID))?.status).toBe('scheduled');
+    expect(runJobs(AGENT_RUN_QUEUE).map(([, , payload]) => payload.runId)).toEqual([String(due._id)]);
+  });
+
+  it('a due scheduled run whose conversation is busy stays scheduled and is promoted on a later tick', async () => {
+    const busy = await db.createAgentRun({ ...baseRecord('conv-busy') });
+    await db.claimAgentRun(String(busy._id), tenantId, 'healthy-worker', new Date());
+    const waiting = await db.createAgentRun({ ...baseRecord('conv-busy'), status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
+
+    const first = await triggerAgentRunReconcilerRun();
+    expect(first.promotedRuns).toBe(0);
+    expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('scheduled');
+
+    await db.finalizeAgentRun(String(busy._id), tenantId, { status: 'succeeded', completedAt: new Date() });
+    const second = await triggerAgentRunReconcilerRun();
+    expect(second.promotedRuns).toBe(1);
+    expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('queued');
+  });
+
+  it('a promoted deferred run is not published directly: the dispatcher hands it out', async () => {
+    const run = await db.createAgentRun({ ...baseRecord('conv-deferred-due'), runClass: 'deferred', status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
+
+    const result = await triggerAgentRunReconcilerRun();
+
+    expect(result.promotedRuns).toBe(1);
+    expect(runJobs(AGENT_RUN_QUEUE)).toHaveLength(0);
+    expect(runJobs(AGENT_RUN_DEFERRED_QUEUE).map(([, , payload]) => payload.runId)).toEqual([String(run._id)]);
+  });
+
+  it('dispatches queued deferred runs only up to the class running cap', async () => {
+    process.env.AGENT_DEFERRED_MAX_RUNNING_PER_TENANT = '2';
+    reloadConfig();
+    const running = await db.createAgentRun({ ...baseRecord('conv-d-running'), runClass: 'deferred' });
+    await db.claimAgentRun(String(running._id), tenantId, 'healthy-worker', new Date());
+    for (const c of ['conv-d-1', 'conv-d-2', 'conv-d-3']) {
+      await db.createAgentRun({ ...baseRecord(c), runClass: 'deferred' });
+    }
+
+    const result = await triggerAgentRunReconcilerRun();
+
+    // One of the two slots is taken: exactly one more is handed out.
+    expect(result.dispatchedDeferredRuns).toBe(1);
+    expect(runJobs(AGENT_RUN_DEFERRED_QUEUE)).toHaveLength(1);
+    // The requeue step leaves deferred rows to the dispatcher.
+    expect(runJobs(AGENT_RUN_QUEUE)).toHaveLength(0);
+  });
+
+  it('expires runs that waited past AGENT_DEFERRED_MAX_WAIT_MS, freeing the conversation', async () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
+    const deferred = await db.createAgentRun({ ...baseRecord('conv-expired-deferred'), runClass: 'deferred', notBefore: twoDaysAgo });
+    const scheduled = await db.createAgentRun({ ...baseRecord('conv-expired-scheduled'), status: 'scheduled', notBefore: new Date(Date.now() + 3_600_000) });
+    const fresh = await db.createAgentRun({ ...baseRecord('conv-fresh-deferred'), runClass: 'deferred' });
+
+    const result = await triggerAgentRunReconcilerRun();
+
+    expect(result.expiredRuns).toBe(1);
+    expect(await db.getAgentRunById(String(deferred._id), tenantId, PROJECT_ID)).toMatchObject({ status: 'failed', errorReason: 'expired' });
+    expect((await db.getAgentRunById(String(scheduled._id), tenantId, PROJECT_ID))?.status).toBe('scheduled');
+    expect((await db.getAgentRunById(String(fresh._id), tenantId, PROJECT_ID))?.status).toBe('queued');
+    // The expired run's conversation takes a new run again.
+    expect((await db.createAgentRun(baseRecord('conv-expired-deferred')))._id).toBeTruthy();
   });
 });

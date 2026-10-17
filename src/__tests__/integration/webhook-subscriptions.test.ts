@@ -44,7 +44,7 @@ import {
   sweepDueWebhookDeliveries,
 } from '@/lib/services/webhooks/webhookService';
 import { signWebhookBody } from '@/lib/services/webhooks/webhookDeliverer';
-import { fireAgentRunCallback, AGENT_RUN_QUEUE } from '@/lib/services/agents/agentRunService';
+import { fireAgentRunCallback, AGENT_RUN_CALLBACK_QUEUE } from '@/lib/services/agents/agentRunService';
 import { triggerAgentRunReconcilerRun } from '@/lib/services/agents/agentRunReconciler';
 
 let db: SQLiteProvider;
@@ -423,7 +423,7 @@ describe('reconciler durability', () => {
         .prepare('UPDATE agent_runs SET updatedAt = ? WHERE id = ?')
         .run(new Date(Date.now() - 10 * 60_000).toISOString(), String(id));
     };
-    const callbackJobs = () => hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_QUEUE && name === 'callback');
+    const callbackJobs = () => hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_CALLBACK_QUEUE && name === 'callback');
 
     it('sends again a finished run whose callback is still pending or failed with attempts to spare', async () => {
       const pending = await callbackRun();
@@ -505,7 +505,7 @@ describe('agent_run events', () => {
       type: 'agent_run.succeeded',
       data: { runId: `run_${String(run._id)}`, conversationId: 'conv-9', agentKey: 'bot' },
     });
-    // No callback of its own: nothing went to the agent-runs queue.
-    expect(hoisted.publish.mock.calls.filter(([queue]) => queue === AGENT_RUN_QUEUE)).toHaveLength(0);
+    // No callback of its own: nothing went to the callback queue.
+    expect(hoisted.publish.mock.calls.filter(([queue]) => queue === AGENT_RUN_CALLBACK_QUEUE)).toHaveLength(0);
   });
 });

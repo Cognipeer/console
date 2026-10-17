@@ -569,6 +569,17 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
+    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null> {
+      const now = new Date();
+      const run = await this.setAgentRun(
+        { _id: objectId(runId), tenantId, status: { $in: ['queued', 'scheduled'] } },
+        { status: 'failed', errorReason: 'expired', errorMessage, stopReason: 'error', completedAt: now, updatedAt: now },
+      );
+      // A queued row holds the conversation's slot; a scheduled one never took it (no-op).
+      if (run) await this.releaseConversationLock(run.conversationId, runId);
+      return run;
+    }
+
     async markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null> {
       return this.setAgentRun(
         { _id: objectId(runId), tenantId, status: 'running' },

@@ -28,7 +28,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       const { runId } = request.params as { runId: string };
       const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
       // A sync reservation is an internal lock row, not a run a caller owns.
-      if (!run || run.mode !== 'background') {
+      if (!run || run.mode === 'sync') {
         return reply.code(404).send(agentRunNotFoundErrorBody());
       }
       // A run is a handle on its session (its `result` is the answer): reading it is reading the session - the
@@ -53,7 +53,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       const { runId } = request.params as { runId: string };
       // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
       const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
-      if (run && run.mode === 'background') {
+      if (run && run.mode !== 'sync') {
         // Cancelling a run is acting on its session: the owner always may, anybody else needs
         // `agent.session_manage_others`.
         const refusal = await refuseSessionLinked(request, run.conversationId, 'manage', {
@@ -62,7 +62,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         });
         if (refusal) return sendClientSessionRefusal(reply, request, refusal);
       }
-      if (run && run.mode === 'background' && run.status === 'requires_action') {
+      if (run && run.mode !== 'sync' && run.status === 'requires_action') {
         const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
         if (conversation && conversation.projectId === ctx.projectId) {
           const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
