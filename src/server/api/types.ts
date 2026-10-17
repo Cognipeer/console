@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { JWTPayload } from '@/lib/license/token-manager';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import type { IUser } from '@/lib/database';
+import type { PermissionService } from '@/lib/security/rbac';
 
 export interface CookieMutation {
   action: 'set' | 'delete';
@@ -61,6 +62,11 @@ declare module 'fastify' {
      * (authorizeServiceForRequest). A 403 answer carries it as X-Decision-Id.
      */
     iamDecisionId?: string;
+    /**
+     * The permission service the request was admitted on: the gate's (for a route open to several services, the
+     * one that allowed it), or the one a handler authorized for the resource it resolved. Audit rows name it.
+     */
+    iamGateService?: PermissionService;
   }
 }
 

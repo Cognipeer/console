@@ -20,7 +20,12 @@
  *   service        gated by a permission service, exactly like the entries of
  *                  ROUTE_PREFIXES: GET/HEAD/OPTIONS need `read`, other methods
  *                  `write` (`admin` on adminService services). `level`
- *                  overrides the required level of that route.
+ *                  overrides the required level of that route. `anyOf` names
+ *                  more services for a route that serves the resources of
+ *                  several (`/responses`: models and agents): a holder of ANY of
+ *                  them passes the gate, and the handler authorizes the
+ *                  resource it resolved (authorizeServiceForRequest).
+ *                  `service` stays the route's owner (path map, audit).
  *
  * Effective declaration of a request = the explicit `config.authz`, else the
  * ROUTE_PREFIXES / resolver mapping of its path (a `service` declaration), else
@@ -52,7 +57,7 @@ export type RouteAuthz =
   | { kind: 'public' }
   | { kind: 'authenticated' }
   | { kind: 'self'; reason: string }
-  | { kind: 'service'; service: PermissionService; level?: RouteAuthzLevel };
+  | { kind: 'service'; service: PermissionService; level?: RouteAuthzLevel; anyOf?: PermissionService[] };
 
 /** The fragment that goes into a Fastify route's `config`. */
 export interface RouteAuthzConfig {
@@ -107,6 +112,15 @@ export const authz = {
     }
     return { authz: level ? { kind: 'service', service, level } : { kind: 'service', service } };
   },
+  /** A route serving several services' resources; the first is its owner (see `anyOf` above). */
+  serviceAnyOf(services: readonly [PermissionService, PermissionService, ...PermissionService[]], level?: RouteAuthzLevel): RouteAuthzConfig {
+    for (const service of services) authz.service(service, level); // the same checks, per service
+    if (new Set(services).size !== services.length) {
+      throw new Error('authz.serviceAnyOf(): a service is named twice');
+    }
+    const [service, ...anyOf] = services;
+    return { authz: level ? { kind: 'service', service, level, anyOf } : { kind: 'service', service, anyOf } };
+  },
 } as const;
 
 /** Defensive parse of whatever sits in `routeOptions.config.authz` (a bad value is "undeclared"). */
@@ -124,9 +138,17 @@ export function readRouteAuthz(config: unknown): RouteAuthz | undefined {
       return typeof decl.reason === 'string' && decl.reason ? { kind: 'self', reason: decl.reason } : undefined;
     case 'service': {
       if (!isPermissionService(decl.service)) return undefined;
-      if (decl.level === undefined) return { kind: 'service', service: decl.service };
+      let anyOf: PermissionService[] | undefined;
+      if (decl.anyOf !== undefined) {
+        const others = decl.anyOf;
+        if (!Array.isArray(others) || others.length === 0 || !others.every(isPermissionService)
+          || new Set([decl.service, ...others]).size !== others.length + 1) return undefined;
+        anyOf = [...others];
+      }
+      const extra = anyOf ? { anyOf } : {};
+      if (decl.level === undefined) return { kind: 'service', service: decl.service, ...extra };
       if (!isServicePermissionLevel(decl.level) || decl.level === 'none') return undefined;
-      return { kind: 'service', service: decl.service, level: decl.level as RouteAuthzLevel };
+      return { kind: 'service', service: decl.service, level: decl.level as RouteAuthzLevel, ...extra };
     }
     default:
       return undefined;
@@ -137,7 +159,7 @@ export type EffectiveRouteAuthz =
   | { kind: 'public'; declared: true }
   | { kind: 'authenticated'; declared: true }
   | { kind: 'self'; declared: true; reason: string }
-  | { kind: 'service'; declared: boolean; service: PermissionService; level?: RouteAuthzLevel }
+  | { kind: 'service'; declared: boolean; service: PermissionService; level?: RouteAuthzLevel; anyOf?: PermissionService[] }
   | { kind: 'undeclared' };
 
 export interface RouteAuthzResolution {
@@ -161,6 +183,7 @@ export function resolveRouteAuthz(config: unknown, pathname: string): RouteAuthz
       declared: true,
       service: declaration.service,
       ...(declaration.level ? { level: declaration.level } : {}),
+      ...(declaration.anyOf ? { anyOf: declaration.anyOf } : {}),
     };
   } else if (declaration) {
     effective = declaration.kind === 'self'

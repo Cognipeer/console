@@ -36,7 +36,9 @@ import {
   getHeaderValue,
   readJsonBody,
   withClientApiRequestContext,
+  withOpenAiApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
 import {
   connectedConfigForUpdate,
   normalizeA2aUpdate,
@@ -52,6 +54,7 @@ import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { advertisedModelsForRequest } from './agent-model-authz';
 import { sendAuthorizationUnavailable } from './agent-session-access';
 import {
+  authorizeInvocationTarget,
   checkSessionContinuable,
   invocationApiTokenId,
   invocationRuntimeContext,
@@ -151,7 +154,7 @@ function openAiOutcomeRefusal(outcome: StartAgentRunOutcome): { status: number; 
  * the request pins `version: N` or asks for `"draft"`.
  */
 function createResponsesHandler(agentsOnly: boolean) {
-  return withClientApiRequestContext(async (request, reply) => {
+  return withOpenAiApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -166,6 +169,8 @@ function createResponsesHandler(agentsOnly: boolean) {
       if (resolvedTarget.kind === 'not_found') {
         return openAiFail(reply, 404, `The model "${model}" does not exist in this project`, 'model_not_found', { param: 'model' });
       }
+      // §5.8: agents for an agent target, models for a model target.
+      await authorizeInvocationTarget(request, resolvedTarget.kind);
       if (resolvedTarget.kind === 'model') {
         return openAiFail(reply, 400, 'model targets are not supported on this route yet', 'model_target_unsupported', { param: 'model' });
       }
@@ -356,6 +361,8 @@ function createResponsesHandler(agentsOnly: boolean) {
       }
       return openAiFail(reply, 500, 'Internal error', 'internal_error', { type: 'server_error' });
     } catch (error) {
+      // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope).
+      if (authorizationRefusalOf(error)) throw error;
       if (error instanceof AgentGuardrailBlockedError) {
         // Info, not error: a refused prompt is policy working as configured.
         logger.info('Client agent response blocked by guardrail', {
@@ -482,7 +489,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
   // Both run the published version by default (`version: "draft"` asks for the draft);
   // /agents/responses is the agents-only alias, /responses resolves models and agents (§1.2).
   app.post('/client/v1/agents/responses', createResponsesHandler(true));
-  app.post('/client/v1/responses', createResponsesHandler(false));
+  app.post('/client/v1/responses', { config: authz.serviceAnyOf(['models', 'agents']) }, createResponsesHandler(false));
 
   // ── Authoring: create an agent definition ──
   app.post('/client/v1/agents', withClientApiRequestContext(async (request, reply) => {

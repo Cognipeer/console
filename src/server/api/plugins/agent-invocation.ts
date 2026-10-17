@@ -48,7 +48,7 @@ import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/se
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { createLogger } from '@/lib/core/logger';
-import { getHeaderValue } from '../fastify-utils';
+import { authorizeServiceForRequest, getHeaderValue, serviceRefusalError } from '../fastify-utils';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import {
   AgentModelError,
@@ -197,6 +197,20 @@ export async function resolveInvocationTarget(
   }
   const agent = await getAgentByKey(ctx.tenantDbName, key, ctx.projectId);
   return agent ? { kind: 'agent', agentKey: key } : { kind: 'not_found' };
+}
+
+/**
+ * §5.8: a route serving models and agents admits a holder of either service (`authz.serviceAnyOf`); what the
+ * request resolved to decides what it needs: `agents` for an agent, `models` for a model, at the level of its
+ * method. The engine is asked again only when the gate admitted the caller on the other service. A refusal
+ * throws the gate's 403 (503 when the engine cannot decide), which the route's wrapper answers in its dialect.
+ */
+export async function authorizeInvocationTarget(request: FastifyRequest, kind: 'agent' | 'model'): Promise<void> {
+  const service = kind === 'agent' ? 'agents' : 'models';
+  if (request.iamGateService === service) return;
+  const result = await authorizeServiceForRequest(request, service, { method: request.method });
+  if (!result.allowed) throw serviceRefusalError(request, result);
+  request.iamGateService = service;
 }
 
 // ── Input ────────────────────────────────────────────────────────────────

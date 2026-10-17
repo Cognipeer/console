@@ -256,6 +256,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/batches', service: 'models' },
   { prefix: '/api/client/v1/spend', service: 'models' },
   { prefix: '/api/client/v1/budgets', service: 'models' },
+  // /chat/completions and /responses also serve agents: their routes declare
+  // `authz.serviceAnyOf(['models', 'agents'])` and the handler asks for the
+  // service of the target it resolved (agent-invocation.ts authorizeInvocationTarget).
   { prefix: '/api/client/v1/chat', service: 'models' },
   // Anthropic Messages dialect over the same Model Hub — same permission as
   // chat/completions, because it is the same capability with a different wire.

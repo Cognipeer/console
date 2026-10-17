@@ -22,10 +22,11 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
-import { agentRunLocation, parseInvocationResponseFormat, resolveInvocationInputs, resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
+import { agentRunLocation, authorizeInvocationTarget, parseInvocationResponseFormat, resolveInvocationInputs, resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
 import { publicAgentRunId } from '@/lib/services/agents/agentRunService';
 import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
+  AGENT_MODEL_PREFIX,
   resolveAgentModel,
   runAgentCompletion,
   toChatChunk,
@@ -56,10 +57,12 @@ import {
 } from '@/lib/services/models/anthropicWire';
 import {
   applyStreamHeaders,
+  authorizationRefusalOf,
   readJsonBody,
   withAnthropicApiRequestContext,
   withOpenAiApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
 
 const logger = createLogger('api:client-inference');
 
@@ -439,7 +442,9 @@ async function handleAgentChatCompletion(input: {
 }
 
 export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/client/v1/chat/completions', withOpenAiApiRequestContext(async (request, reply, auth) => {
+  // Models and agents (`agent:<key>`, or an agent's bare key): a holder of either service gets in, the target
+  // decides what is needed (§5.8, authorizeInvocationTarget).
+  app.post('/client/v1/chat/completions', { config: authz.serviceAnyOf(['models', 'agents']) }, withOpenAiApiRequestContext(async (request, reply, auth) => {
     const startedAt = Date.now();
     let body: ChatCompletionRequest = {};
     let modelKey = '';
@@ -479,11 +484,20 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
        * entry point `/responses` uses — so there is one agent runtime, not a
        * second one hiding behind an OpenAI-shaped door.
        */
+      // `agent:<key>` needs the agents service before it is even looked up; a bare name once it is resolved.
+      const explicitAgent = modelKey.startsWith(AGENT_MODEL_PREFIX);
+      if (explicitAgent) await authorizeInvocationTarget(request, 'agent');
       const agent = await resolveAgentModel(
         modelKey,
         { tenantDbName: auth.tenantDbName, projectId: auth.projectId },
         async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
       );
+      if (explicitAgent && !agent) {
+        return reply.code(404).send({
+          error: { message: `The model \`${modelKey}\` does not exist`, type: 'invalid_request_error', param: 'model', code: 'model_not_found' },
+        });
+      }
+      if (!explicitAgent) await authorizeInvocationTarget(request, agent ? 'agent' : 'model');
       if (agent) {
         // Continuing a session that waits on a request, under `cancel_pending`, cancels that request: it takes
         // the permission to answer it.
@@ -639,6 +653,8 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         request_id: result.requestId,
       });
     } catch (error) {
+      // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope), not a model error.
+      if (authorizationRefusalOf(error)) throw error;
       logger.error('Client chat completion error', { error });
 
       if (error instanceof GuardrailBlockError) {

@@ -479,11 +479,11 @@ describe('continuing a session by its id, whichever service gate let the token i
     expect(json(res).error).toMatchObject({ code: 'session_forbidden', decision_id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 
-  it('is refused for a token that holds the Models service only: the Write level it lacks on Agents stops it (the /responses route is gated as Models)', async () => {
+  it('is refused for a token that holds the Models service only: /responses admits it, the agent target needs Agents', async () => {
     await tokenOf('other', { models: 'write' });
     const res = await respond('starters', '/client/v1/responses');
     expect(res.statusCode).toBe(403);
-    expect(json(res).error).toMatchObject({ code: 'session_forbidden' });
+    expect(json(res).error).toMatchObject({ code: 'forbidden', message: 'Forbidden: agents requires write permission' });
   });
 
   it('is an engine outage (503), not a refusal, when the engine cannot decide', async () => {

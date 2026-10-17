@@ -42,10 +42,12 @@ import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
-import { getHeaderValue, readJsonBody, withClientApiRequestContext } from '../fastify-utils';
+import { authorizationRefusalOf, getHeaderValue, readJsonBody, withClientApiRequestContext, withOpenAiApiRequestContext } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
 import { authorizeEndingOpenRequests } from './agent-approval-authz';
 import { sendAgentGuardrailBlock } from './agent-config-write';
 import {
+  authorizeInvocationTarget,
   checkSessionContinuable,
   invocationApiTokenId,
   invocationRuntimeContext,
@@ -754,11 +756,13 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
     return run && run.mode !== 'sync' ? run : null;
   };
 
-  const getResponse = withClientApiRequestContext(async (request, reply, ctx) => {
+  // A stored response is an agent run: on /responses (open to models too) it needs the agents service.
+  const getResponse = withOpenAiApiRequestContext(async (request, reply, ctx) => {
     try {
       const { responseId } = request.params as { responseId: string };
       const run = await loadResponseRun(ctx, responseId);
       if (!run) return responseNotFound(reply, responseId);
+      await authorizeInvocationTarget(request, 'agent');
       const refusal = await refuseSessionLinked(request, run.conversationId, 'view', {
         actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
         alsoOwnedBy: [run.userId],
@@ -766,20 +770,23 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       if (refusal) return sendOpenAiSessionRefusal(reply, request, refusal);
       return reply.code(200).send(toAgentResponseObject(run));
     } catch (error) {
+      if (authorizationRefusalOf(error)) throw error;
       logger.error('Client response get error', { error });
       return reply.code(500).send(openAiEnvelopeOf(INTERNAL_ERROR_BODY));
     }
   });
-  app.get('/client/v1/responses/:responseId', getResponse);
+  app.get('/client/v1/responses/:responseId', { config: authz.serviceAnyOf(['models', 'agents']) }, getResponse);
   app.get('/client/v1/agents/responses/:responseId', getResponse);
 
   // Cancel (§4.7) → the Response object (`cancelled`, or `in_progress` while a cooperative
   // cancel lands); an already finished one answers 200 with its final object, as OpenAI does.
   // A `resp_<conversationId>` from before responses were run-scoped still stops its session's turn.
-  const cancelResponse = withClientApiRequestContext(async (request, reply, ctx) => {
+  const cancelResponse = withOpenAiApiRequestContext(async (request, reply, ctx) => {
     try {
       const { responseId } = request.params as { responseId: string };
       const run = await loadResponseRun(ctx, responseId);
+      // A run, or a legacy `resp_<conversationId>`: both are agent sessions.
+      if (run || responseId.startsWith('resp_')) await authorizeInvocationTarget(request, 'agent');
       if (run) {
         if (await refuseRunCancel(request, reply, ctx, run, 'openai')) return reply;
         const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: String(run._id) });
@@ -792,11 +799,12 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       if (reply.sent || !('cancelled' in outcome)) return reply;
       return reply.code(200).send({ id: responseId, conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
     } catch (error) {
+      if (authorizationRefusalOf(error)) throw error;
       logger.error('Client response cancel error', { error });
       return reply.code(500).send(openAiEnvelopeOf(INTERNAL_ERROR_BODY));
     }
   });
-  app.post('/client/v1/responses/:responseId/cancel', cancelResponse);
+  app.post('/client/v1/responses/:responseId/cancel', { config: authz.serviceAnyOf(['models', 'agents']) }, cancelResponse);
   app.post('/client/v1/agents/responses/:responseId/cancel', cancelResponse);
 };
 

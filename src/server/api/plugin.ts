@@ -274,12 +274,14 @@ export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply
 /** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
 export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
-  // The service of the matched route: an explicit `config.authz` service
-  // declaration, else the path map.
+  // The service the request was admitted on (a route open to several services
+  // names the one that let it in), else the matched route's: an explicit
+  // `config.authz` service declaration, else the path map.
   const denial = request.iamDenial;
   // A refusal of the engine is always audited, also when no service is involved
   // (an undeclared route): it is a security event of the authorization engine.
-  const service = serviceForRequest(request.routeOptions?.config, pathname)
+  const service = request.iamGateService
+    ?? serviceForRequest(request.routeOptions?.config, pathname)
     ?? (denial ? 'iam' : null);
   if (!service || pathname.startsWith('/api/audit')) {
     return;
