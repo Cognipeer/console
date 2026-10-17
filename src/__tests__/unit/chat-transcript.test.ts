@@ -30,8 +30,28 @@ describe('transcript digest', () => {
   it('the string and the content-part spellings, and padding, are the same message', () => {
     const left = transcriptDigestAfterTurn([u('q1')], 'a1');
     expect(priorTranscriptDigest([u([{ type: 'text', text: ' q1 ' }]), a([{ type: 'text', text: 'a1\n' }]), u('q2')])).toBe(left);
-    // images and ids do not change what was said
-    expect(priorTranscriptDigest([u([{ type: 'text', text: 'q1' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }]), a('a1'), u('q2')])).toBe(left);
+  });
+
+  it('the files and images a message carried take part: the same question about another image is another transcript', () => {
+    const withImage = (url: string) => u([{ type: 'text', text: 'what is this?' }, { type: 'image_url', image_url: { url } }]);
+    const left = transcriptDigestAfterTurn([withImage('data:image/png;base64,AA')], 'a cat');
+    expect(priorTranscriptDigest([withImage('data:image/png;base64,AA'), a('a cat'), u('q2')])).toBe(left);
+    expect(priorTranscriptDigest([withImage('data:image/png;base64,BB'), a('a cat'), u('q2')])).not.toBe(left);
+    expect(priorTranscriptDigest([withImage('https://img.example.com/1.png'), a('a cat'), u('q2')])).not.toBe(left);
+    expect(priorTranscriptDigest([u('what is this?'), a('a cat'), u('q2')])).not.toBe(left);
+    // a file by id, in either spelling
+    const fileLeft = transcriptDigestAfterTurn([u([{ type: 'text', text: 'sum it' }, { type: 'file', file: { file_id: 'file-1' } }])], 'done');
+    expect(priorTranscriptDigest([u([{ type: 'text', text: 'sum it' }, { type: 'file', file: { file_id: 'file-2' } }]), a('done'), u('q2')])).not.toBe(fileLeft);
+    expect(priorTranscriptDigest([u([{ type: 'text', text: 'sum it' }, { type: 'file', file: { file_id: 'file-1' } }]), a('done'), u('q2')])).toBe(fileLeft);
+  });
+
+  it('the OpenAI user field takes part when it is sent', () => {
+    const left = transcriptDigestAfterTurn([u('hi')], 'Hello! How can I help you today?', 'end-user-a');
+    expect(priorTranscriptDigest([u('hi'), a('Hello! How can I help you today?'), u('q2')], 'end-user-a')).toBe(left);
+    expect(priorTranscriptDigest([u('hi'), a('Hello! How can I help you today?'), u('q2')], 'end-user-b')).not.toBe(left);
+    expect(priorTranscriptDigest([u('hi'), a('Hello! How can I help you today?'), u('q2')])).not.toBe(left);
+    // without it a text transcript digests as it always did
+    expect(priorTranscriptDigest([u('hi'), a('Hello! How can I help you today?'), u('q2')])).toBe(transcriptDigestAfterTurn([u('hi')], 'Hello! How can I help you today?'));
   });
 
   it('a different history, role or answer is a different digest', () => {

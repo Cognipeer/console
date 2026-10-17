@@ -3541,7 +3541,7 @@ export interface IAgentConversation {
   /**
    * sha256 of the transcript a chat-completions client holds after this session's last turn (its messages
    * without system/developer ones, plus the answer it was given). A client that resends its whole transcript
-   * and no session id is matched back to the session by it (`findAgentConversationByTranscriptHash`).
+   * and no session id is matched back to the session by it (`findAgentConversationsByTranscriptHash`).
    */
   transcriptHash?: string;
   /**

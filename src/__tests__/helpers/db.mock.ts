@@ -222,6 +222,8 @@ function buildPrimers(): Record<string, Mock> {
     countActiveAlerts: vi.fn().mockResolvedValue(0),
     cleanupAgentTracingRetention: vi.fn().mockResolvedValue({ sessionsDeleted: 0, eventsDeleted: 0 }),
     agentTracingAgentExists: vi.fn().mockResolvedValue(false),
+    // A transcript lookup answers the sessions it matched (never null).
+    findAgentConversationsByTranscriptHash: vi.fn().mockResolvedValue([]),
 
     // Entity health rollup, alert state and stale-session finalizer
     // (`list*` / `find*` already default to [] / null; these have shaped returns).

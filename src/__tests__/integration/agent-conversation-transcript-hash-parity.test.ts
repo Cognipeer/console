@@ -34,18 +34,20 @@ describeForEachProvider('Sessions found by their transcript digest', (getDb) => 
     return created;
   };
 
+  const ids = (found: Array<{ _id?: unknown }>) => found.map((entry) => String(entry._id));
+
   it('finds the session by project, agent, owner and digest; nothing for another one of those', async () => {
     const db = getDb();
     const mine = await conversation('bot-a', 'ann');
     await db.updateAgentConversationRuntime(String(mine._id), { transcriptHash: 'h1' });
     const filter = { projectId, agentKey: 'bot-a', createdBy: 'ann', transcriptHash: 'h1' };
 
-    expect(String((await db.findAgentConversationByTranscriptHash(filter))?._id)).toBe(String(mine._id));
-    expect((await db.findAgentConversationByTranscriptHash(filter))?.transcriptHash).toBe('h1');
-    expect(await db.findAgentConversationByTranscriptHash({ ...filter, transcriptHash: 'h2' })).toBeNull();
-    expect(await db.findAgentConversationByTranscriptHash({ ...filter, createdBy: 'bob' })).toBeNull();
-    expect(await db.findAgentConversationByTranscriptHash({ ...filter, agentKey: 'bot-b' })).toBeNull();
-    expect(await db.findAgentConversationByTranscriptHash({ ...filter, projectId: 'proj-2' })).toBeNull();
+    expect(ids(await db.findAgentConversationsByTranscriptHash(filter, 2))).toEqual([String(mine._id)]);
+    expect((await db.findAgentConversationsByTranscriptHash(filter, 2))[0]?.transcriptHash).toBe('h1');
+    expect(await db.findAgentConversationsByTranscriptHash({ ...filter, transcriptHash: 'h2' }, 2)).toEqual([]);
+    expect(await db.findAgentConversationsByTranscriptHash({ ...filter, createdBy: 'bob' }, 2)).toEqual([]);
+    expect(await db.findAgentConversationsByTranscriptHash({ ...filter, agentKey: 'bot-b' }, 2)).toEqual([]);
+    expect(await db.findAgentConversationsByTranscriptHash({ ...filter, projectId: 'proj-2' }, 2)).toEqual([]);
   });
 
   it('a newer digest replaces the older one on the same session', async () => {
@@ -54,19 +56,22 @@ describeForEachProvider('Sessions found by their transcript digest', (getDb) => 
     const filter = { projectId, agentKey: 'bot-a', createdBy: 'ann' };
     await db.updateAgentConversationRuntime(String(session._id), { transcriptHash: 'h1' });
     await db.updateAgentConversationRuntime(String(session._id), { transcriptHash: 'h2' });
-    expect(await db.findAgentConversationByTranscriptHash({ ...filter, transcriptHash: 'h1' })).toBeNull();
-    expect(String((await db.findAgentConversationByTranscriptHash({ ...filter, transcriptHash: 'h2' }))?._id)).toBe(String(session._id));
+    expect(await db.findAgentConversationsByTranscriptHash({ ...filter, transcriptHash: 'h1' }, 2)).toEqual([]);
+    expect(ids(await db.findAgentConversationsByTranscriptHash({ ...filter, transcriptHash: 'h2' }, 2))).toEqual([String(session._id)]);
   });
 
-  it('answers the most recently updated session when two of the owner\'s carry the same digest', async () => {
+  it('answers every session of the owner that carries the digest, most recently updated first, up to the limit', async () => {
     const db = getDb();
     const older = await conversation('bot-a', 'ann');
     const newer = await conversation('bot-a', 'ann');
+    const third = await conversation('bot-a', 'ann');
+    await db.updateAgentConversationRuntime(String(third._id), { transcriptHash: 'same' });
     await db.updateAgentConversationRuntime(String(newer._id), { transcriptHash: 'same' });
     await db.updateAgentConversationRuntime(String(older._id), { transcriptHash: 'same' });
     await db.updateAgentConversation(String(newer._id), { title: 'touched later' });
-    const found = await db.findAgentConversationByTranscriptHash({ projectId, agentKey: 'bot-a', createdBy: 'ann', transcriptHash: 'same' });
-    expect(String(found?._id)).toBe(String(newer._id));
+    const filter = { projectId, agentKey: 'bot-a', createdBy: 'ann', transcriptHash: 'same' };
+    expect(ids(await db.findAgentConversationsByTranscriptHash(filter, 2))).toEqual([String(newer._id), String(third._id)]);
+    expect(await db.findAgentConversationsByTranscriptHash(filter, 5)).toHaveLength(3);
   });
 
   it('is served by an index', async () => {
@@ -76,7 +81,7 @@ describeForEachProvider('Sessions found by their transcript digest', (getDb) => 
     if (db instanceof SQLiteProvider) {
       const sqlite = (db as unknown as { getTenantDb(): import('better-sqlite3').Database }).getTenantDb();
       const plan = (sqlite.prepare(
-        'EXPLAIN QUERY PLAN SELECT * FROM agent_conversations WHERE projectId = @p AND agentKey = @a AND createdBy = @u AND transcriptHash = @h ORDER BY updatedAt DESC LIMIT 1',
+        'EXPLAIN QUERY PLAN SELECT * FROM agent_conversations WHERE projectId = @p AND agentKey = @a AND createdBy = @u AND transcriptHash = @h ORDER BY updatedAt DESC LIMIT 2',
       ).all({ p: projectId, a: 'bot-a', u: 'ann', h: 'h1' }) as Array<{ detail: string }>).map((row) => row.detail).join(' | ');
       expect(plan).toContain('idx_aconv_transcript');
     }

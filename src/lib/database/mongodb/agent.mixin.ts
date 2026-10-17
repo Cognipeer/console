@@ -353,19 +353,19 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation;
     }
 
-    async findAgentConversationByTranscriptHash(filter: {
+    async findAgentConversationsByTranscriptHash(filter: {
       projectId: string;
       agentKey: string;
       createdBy: string;
       transcriptHash: string;
-    }): Promise<IAgentConversation | null> {
-      const doc = await this.getTenantDb()
+    }, limit: number): Promise<IAgentConversation[]> {
+      const docs = await this.getTenantDb()
         .collection(COLLECTIONS.agentConversations)
-        .findOne(
-          { projectId: filter.projectId, agentKey: filter.agentKey, createdBy: filter.createdBy, transcriptHash: filter.transcriptHash },
-          { sort: { updatedAt: -1 } },
-        );
-      return doc ? withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation : null;
+        .find({ projectId: filter.projectId, agentKey: filter.agentKey, createdBy: filter.createdBy, transcriptHash: filter.transcriptHash })
+        .sort({ updatedAt: -1 })
+        .limit(Math.max(1, Math.floor(limit)))
+        .toArray();
+      return docs.map((doc) => withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation);
     }
 
     async listAgentConversations(
