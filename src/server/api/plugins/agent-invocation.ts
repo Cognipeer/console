@@ -27,9 +27,11 @@ import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
 import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
+  RESERVED_IDEMPOTENCY_PREFIXES,
   agentDefaultCallback,
   agentRunConcurrencyLimitErrorBody,
   agentRunConflictErrorBody,
+  isReservedIdempotencyKey,
   apiErrorBody,
   idempotencyKeyConflictErrorBody,
   publicAgentRunId,
@@ -402,7 +404,11 @@ export function resolveInvocationLimits(ctx: ApiTokenContext): Promise<AgentRunL
 
 // ── Idempotency, callback, metadata, format, inputs ──────────────────────
 
-/** The `Idempotency-Key` header (every mode keeps its run, so it works on waited calls too). */
+/**
+ * The `Idempotency-Key` header (every mode keeps its run, so it works on waited calls too).
+ * Keys starting with a reserved prefix (`hook:`, `routine:`) name the runs routines start
+ * themselves and are refused, so a client key can never match one of those runs.
+ */
 export function readIdempotencyKey(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -412,6 +418,12 @@ export function readIdempotencyKey(
   if (!key) return {};
   if (key.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
     return fail(reply, dialect, invalid(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
+  }
+  if (isReservedIdempotencyKey(key)) {
+    return fail(reply, dialect, invalid(
+      `Idempotency-Key values starting with ${RESERVED_IDEMPOTENCY_PREFIXES.map((prefix) => `"${prefix}"`).join(' or ')} are reserved`,
+      'idempotency_key_reserved',
+    ));
   }
   return { key };
 }

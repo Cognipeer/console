@@ -25,6 +25,7 @@ import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
+import { agentRoutinesApiPlugin } from './plugins/agent-routines';
 import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
 import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
 import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
@@ -51,6 +52,7 @@ import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
 import { publicA2aApiPlugin } from './plugins/public-a2a';
+import { publicHooksApiPlugin } from './plugins/public-hooks';
 import { publicMcpApiPlugin } from './plugins/public-mcp';
 import { clientPiiApiPlugin } from './plugins/client-pii';
 import { clientEvaluationsApiPlugin } from './plugins/client-evaluations';
@@ -139,6 +141,8 @@ const PUBLIC_API_PREFIXES = [
   '/api/public/mcp/',
   // Agents exposed over A2A with accessMode 'public' (same slug-URL model).
   '/api/public/a2a/',
+  // Incoming routine webhooks (random hook id; every delivery proves the routine secret).
+  '/api/public/hooks/',
   ...enterprisePublicApiPrefixes,
 ];
 
@@ -525,6 +529,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(agentRoutinesApiPlugin);
   await app.register(clientWebhooksApiPlugin);
   await app.register(clientAgentSessionsApiPlugin);
   await app.register(agentSessionFilesApiPlugin);
@@ -558,6 +563,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(publicMcpApiPlugin);
   // Unauthenticated A2A endpoints for agents with accessMode 'public'.
   await app.register(publicA2aApiPlugin);
+  // Incoming routine webhooks: own body parsers and error handler (encapsulated, not fastify-plugin).
+  await app.register(publicHooksApiPlugin);
   await app.register(clientPiiApiPlugin);
   await app.register(clientEvaluationsApiPlugin);
   await app.register(clientPromptsApiPlugin);

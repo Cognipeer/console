@@ -24,9 +24,10 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconPlayerStop, IconRefresh } from '@tabler/icons-react';
+import { IconPlayerStop, IconRefresh, IconX } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { serializeAgentRun } from '@/lib/services/agents/agentRunService';
 
@@ -53,6 +54,9 @@ export interface AgentRunsTableProps {
     onOpenConversation: (conversationId: string) => void;
     /** Reports how many runs are queued/running, for a badge elsewhere. */
     onActiveCountChange?: (count: number) => void;
+    /** Only the runs this routine started (its history), with a way back to all runs. */
+    routine?: { id: string; name: string } | null;
+    onClearRoutine?: () => void;
 }
 
 function durationOf(run: AgentRunRow): number | null {
@@ -61,21 +65,23 @@ function durationOf(run: AgentRunRow): number | null {
     return Math.max(0, end - run.started_at) * 1000;
 }
 
-export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange }: AgentRunsTableProps) {
+export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, routine, onClearRoutine }: AgentRunsTableProps) {
+    const tRoutines = useTranslations('agents.routines');
     const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const res = await fetch(`/api/agents/${agentId}/runs?limit=200`, { cache: 'no-store' });
+            const routineQuery = routine ? `&routineId=${encodeURIComponent(routine.id)}` : '';
+            const res = await fetch(`/api/agents/${agentId}/runs?limit=200${routineQuery}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json() as { runs: AgentRunRow[] };
             setRuns(data.runs ?? []);
         } catch {
             setRuns((prev) => prev ?? []);
         }
-    }, [agentId]);
+    }, [agentId, routine]);
 
     useEffect(() => { void load(); }, [load]);
 
@@ -114,7 +120,30 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
         return <Stack gap="xs">{[0, 1, 2].map((i) => <Skeleton key={i} h={36} />)}</Stack>;
     }
 
+    const routineFilter = routine ? (
+        <Group gap={6}>
+            <Badge
+                variant="light"
+                rightSection={onClearRoutine ? (
+                    <ActionIcon size="xs" variant="transparent" color="gray" aria-label={tRoutines('runsFilterClear')} onClick={onClearRoutine}>
+                        <IconX size={10} />
+                    </ActionIcon>
+                ) : null}
+            >
+                {tRoutines('runsFilter', { name: routine.name })}
+            </Badge>
+        </Group>
+    ) : null;
+
     if (runs.length === 0) {
+        if (routineFilter) {
+            return (
+                <Stack gap="sm">
+                    {routineFilter}
+                    <Text size="sm" c="dimmed" ta="center" py="lg">No runs match this filter.</Text>
+                </Stack>
+            );
+        }
         return (
             <EmptyState
                 title="No background runs yet"
@@ -126,6 +155,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
 
     return (
         <Stack gap="sm">
+            {routineFilter}
             <Group justify="space-between">
                 <SegmentedControl
                     size="xs"

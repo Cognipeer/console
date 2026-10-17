@@ -17,6 +17,7 @@ import type { AgentRunClass, IAgentConversation, IAgentRun } from '@/lib/databas
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { cancelAgentRun, getAgentByKey, getAgentRunStatus, getConversationById } from '@/lib/services/agents';
 import {
+  AGENT_RUN_TRIGGERS,
   MAX_RUN_SCHEDULE_AHEAD_MS,
   agentRunNotFoundErrorBody,
   apiErrorBody,
@@ -141,7 +142,7 @@ export function parseRunSchedule(body: Record<string, unknown>, now = Date.now()
 }
 
 /** Seconds to wait (body `wait`, query `?wait=`): a non-negative number; undefined when absent. */
-function parseWaitSeconds(value: unknown): number | undefined | null {
+export function parseWaitSeconds(value: unknown): number | undefined | null {
   if (value === undefined || value === null || value === '') return undefined;
   const n = typeof value === 'string' ? Number(value) : value;
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null;
@@ -410,6 +411,8 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       if (runClass && runClass !== 'default' && runClass !== 'deferred') return bad('class must be "default" or "deferred"', 'invalid_class');
       const channel = text('channel');
       if (channel && !RUN_CHANNELS.includes(channel as NonNullable<IAgentRun['channel']>)) return bad(`channel must be one of: ${RUN_CHANNELS.join(', ')}`, 'invalid_channel');
+      const trigger = text('trigger');
+      if (trigger && !AGENT_RUN_TRIGGERS.includes(trigger as NonNullable<IAgentRun['trigger']>)) return bad(`trigger must be one of: ${AGENT_RUN_TRIGGERS.join(', ')}`, 'invalid_trigger');
       const metadata = readMetadataFilter(query);
       if ('error' in metadata) return bad(String(metadata.error), 'invalid_metadata');
       const range: { createdAfter?: Date; createdBefore?: Date } = {};
@@ -439,6 +442,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(runClass ? { runClass: runClass as AgentRunClass } : {}),
         ...(text('routine_id') ? { routineId: text('routine_id') } : {}),
         ...(channel ? { channel: channel as NonNullable<IAgentRun['channel']> } : {}),
+        ...(trigger ? { trigger: trigger as NonNullable<IAgentRun['trigger']> } : {}),
         ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
         ...range,
         ...(after ? { cursor: normalizeAgentRunId(after) } : {}),

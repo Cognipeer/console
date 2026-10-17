@@ -20,6 +20,8 @@ import path from 'node:path';
 
 const hoisted = vi.hoisted(() => ({
   executeAgentChatLocal: vi.fn(),
+  executeAgentResumeLocal: vi.fn(),
+  executeAgentContinueLocal: vi.fn(),
   getDatabase: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
@@ -41,6 +43,8 @@ vi.mock('@/lib/core/queue', () => ({
 vi.mock('@/lib/services/agents/agentService', () => ({
   executeAgentChat: vi.fn(),
   executeAgentChatLocal: hoisted.executeAgentChatLocal,
+  executeAgentResumeLocal: hoisted.executeAgentResumeLocal,
+  executeAgentContinueLocal: hoisted.executeAgentContinueLocal,
 }));
 
 vi.mock('@/lib/database', async (importOriginal) => {
@@ -62,6 +66,7 @@ import {
   AGENT_RUN_DEFERRED_QUEUE,
   cancelAgentRun,
   drainLocalAgentRuns,
+  queueAgentRunContinue,
   queueAgentRunResume,
   startAgentRun,
   type StartAgentRunInput,
@@ -519,7 +524,7 @@ describe('worker hardening', () => {
     expect(finalStatus?.errorReason).toBe('owner_unverifiable');
   });
 
-  it.each(['system:agent-scheduler', 'a2a-public'])('synthetic actor %s skips the owner lookup entirely', async (actor) => {
+  it.each(['system:routine:rt1', 'a2a-public'])('synthetic actor %s skips the owner lookup entirely', async (actor) => {
     hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_actor'));
     hoisted.getUserAuthState.mockRejectedValue(new Error('would throw on a non-ObjectId'));
     const run = await createRun(`conv-${actor}`, { userId: actor });
@@ -834,6 +839,69 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0][1]).toBe('resume');
     expect(jobs[0][3]).toMatchObject({ dedupKey: `ar_${String(run._id)}_2` });
+  });
+
+  describe('a routine run with external content (§2.4a): its inputs never reach the system prompt', () => {
+    const routineRun = { userId: 'system:routine:rt1', actorType: 'system' as const, channel: 'routine' as const, routineId: 'rt1', trigger: 'schedule' as const, unattended: true, externalContent: true, inputs: { region: 'eu' } };
+    const jobOf = (runId: string) => hoisted.publish.mock.calls.find(([, name, payload]) => (name === 'run' || name === 'resume') && (payload as { runId: string }).runId === runId)?.[2] as Parameters<typeof runAgentJobLocal>[0];
+
+    it('the first turn runs unattended with inputs kept out of the prompt variables', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_first'));
+      const run = await startQueued('conv-ext-first', routineRun);
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      expect(hoisted.executeAgentChatLocal).toHaveBeenCalledWith(expect.objectContaining({
+        unattended: true, externalContent: true, inputsAsPromptVariables: false, inputs: { region: 'eu' },
+      }));
+    });
+
+    it('a paused one resumed by the worker continues with inputsAsPromptVariables false', async () => {
+      const run = await startQueued('conv-ext-resume', routineRun);
+      await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+      await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+      hoisted.publish.mockClear();
+      hoisted.executeAgentResumeLocal.mockResolvedValue({ response: fakeResponse('resp_resumed') });
+
+      const outcome = await queueAgentRunResume({
+        tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: 'conv-ext-resume',
+        userId: 'system:routine:rt1', resumeActionIds: ['act_1'],
+      });
+      expect(outcome.kind).toBe('queued');
+      if (outcome.kind !== 'queued') return;
+      expect(outcome.run).toMatchObject({ unattended: true, externalContent: true, routineId: 'rt1' });
+      await runAgentJobLocal(jobOf(String(run._id)));
+
+      expect(hoisted.executeAgentResumeLocal).toHaveBeenCalledTimes(1);
+      expect(hoisted.executeAgentResumeLocal.mock.calls[0][0]).toMatchObject({ inputsAsPromptVariables: false, unattended: true, inputs: { region: 'eu' } });
+    });
+
+    it('a budget continuation (no paused run) copies the routine, flags and inputs from the session\'s last run', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_budget_first'));
+      const run = await startQueued('conv-ext-continue', routineRun);
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      hoisted.publish.mockClear();
+      hoisted.executeAgentContinueLocal.mockResolvedValue({ response: fakeResponse('resp_continued') });
+
+      const outcome = await queueAgentRunContinue({
+        tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: 'conv-ext-continue', userId: 'user-1',
+      });
+      expect(outcome.kind).toBe('queued');
+      if (outcome.kind !== 'queued') return;
+      expect(String(outcome.run._id)).not.toBe(String(run._id));
+      expect(outcome.run).toMatchObject({ routineId: 'rt1', channel: 'routine', trigger: 'schedule', unattended: true, externalContent: true, inputs: { region: 'eu' } });
+      await runAgentJobLocal(jobOf(String(outcome.run._id)));
+
+      expect(hoisted.executeAgentContinueLocal).toHaveBeenCalledTimes(1);
+      expect(hoisted.executeAgentContinueLocal.mock.calls[0][0]).toMatchObject({ inputsAsPromptVariables: false, unattended: true, inputs: { region: 'eu' } });
+    });
+
+    it('an ordinary run keeps its inputs as prompt variables (nothing is turned off by default)', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_plain'));
+      const run = await startQueued('conv-plain-inputs', { inputs: { region: 'eu' } });
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      const request = hoisted.executeAgentChatLocal.mock.calls[0][0];
+      expect(request.inputsAsPromptVariables).toBeUndefined();
+      expect(request.unattended).toBeUndefined();
+    });
   });
 
   it('the shutdown drain waits for local runs, then fails the ones still going as interrupted', async () => {

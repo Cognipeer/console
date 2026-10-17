@@ -1213,6 +1213,64 @@ describe('background runs', () => {
     expect((await storedConversation(id)).messages).toHaveLength(3);
   });
 
+  describe('a routine run with external content (§2.4a)', () => {
+    const SECRET = 'NORTHPOLE7';
+    const systemTexts = (model: ScriptedModel) => model.seen.flatMap((messages) => messages.filter((m) => m.role === 'system').map((m) => String(m.content)));
+    const routineAgent = () => createAgent({
+      systemPrompt: 'Serve region {{input.region}}.',
+      inputs: [{ name: 'region', type: 'string' }],
+      humanInTheLoop: { ...HITL_ON, unattended: 'pause' },
+    });
+    const startPaused = async (id: string, external: boolean) => {
+      const created = await queueAgentRun({
+        tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+        conversationId: id, userMessage: 'list files', userId: 'system:routine:rt1', actorType: 'system',
+        channel: 'routine', routineId: 'rt1', trigger: 'manual', unattended: true, inputs: { region: SECRET },
+        ...(external ? { externalContent: true } : {}),
+      });
+      if (created.kind !== 'accepted') throw new Error(created.kind);
+      await runAgentJobLocal({ runId: String(created.run._id), tenantId, tenantDbName: DB_NAME });
+      const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
+      return { runId: String(created.run._id), actionId: String(action._id) };
+    };
+
+    it('answered from the dashboard (inline), the continuation keeps the input out of the system prompt', async () => {
+      await routineAgent();
+      const model = scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { actionId } = await startPaused(id, true);
+
+      const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
+      expect(outcome.kind).toBe('resumed');
+      expect(model.seen).toHaveLength(2);
+      expect(systemTexts(model).length).toBeGreaterThan(0);
+      for (const text of systemTexts(model)) expect(text).not.toContain(SECRET);
+    });
+
+    it('answered in the background (worker resume), the same holds', async () => {
+      await routineAgent();
+      const model = scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await startPaused(id, true);
+
+      const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'background');
+      expect(outcome.kind).toBe('queued');
+      await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+      expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('succeeded');
+      expect(model.seen).toHaveLength(2);
+      for (const text of systemTexts(model)) expect(text).not.toContain(SECRET);
+    });
+
+    it('without external content the input is a prompt variable as usual (the check above is meaningful)', async () => {
+      await routineAgent();
+      const model = scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { actionId } = await startPaused(id, false);
+      await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
+      expect(systemTexts(model).every((text) => text.includes(SECRET))).toBe(true);
+    });
+  });
+
   it('answering a paused background run inline settles its run row', async () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));

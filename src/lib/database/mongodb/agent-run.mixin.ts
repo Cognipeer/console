@@ -59,6 +59,7 @@ type IAgentRunListFn = (filter: {
   runClass?: AgentRunClass;
   routineId?: string;
   channel?: NonNullable<IAgentRun['channel']>;
+  trigger?: NonNullable<IAgentRun['trigger']>;
   metadata?: Record<string, string>;
   createdAfter?: Date;
   createdBefore?: Date;
@@ -471,6 +472,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       if (filter.runClass) and.push(runClassFilter(filter.runClass));
       if (filter.routineId) and.push({ routineId: filter.routineId });
       if (filter.channel) and.push({ channel: filter.channel });
+      if (filter.trigger) and.push({ trigger: filter.trigger });
       if (filter.userId) and.push({ userId: filter.userId });
       for (const [key, value] of Object.entries(filter.metadata ?? {})) and.push(metadataFilter(key, value));
       if (filter.createdAfter) and.push({ createdAt: { $gt: filter.createdAfter } });

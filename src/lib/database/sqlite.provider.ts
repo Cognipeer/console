@@ -51,6 +51,7 @@ import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { EntityMetricsMixin } from './sqlite/entity-metrics.mixin';
 import { AlertStateMixin } from './sqlite/alert-state.mixin';
 import { SchedulerClaimMixin } from './sqlite/scheduler-claim.mixin';
+import { AgentRoutineMixin } from './sqlite/agent-routine.mixin';
 import { AlertChannelLibraryMixin } from './sqlite/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './sqlite/external-model-pricing.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
@@ -61,6 +62,7 @@ import { IamInvalidationMixin } from './iam-invalidation.mixin';
 import { IamDocsMixin } from './sqlite/iam-docs.mixin';
 import { IamDirectoryMixin } from './sqlite/iam-directory.mixin';
 import { applyEnterpriseSqliteDbMixins } from '@/enterprise/registry';
+import type { Constructor } from './sqlite/types';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
 // Order follows the MongoDB provider composition for consistency.
@@ -90,7 +92,13 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkBase)));
+// A named instance type here caps how deep the checker walks the mixin chain:
+// past ~50 nested mixins, generic helpers over the provider type (`vi.spyOn`)
+// fail with "type instantiation is excessively deep" (TS2589).
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- an interface (not an alias) is what caps the depth
+interface BulkInstance extends InstanceType<typeof BulkBase> {}
+const BulkFlat: Constructor<BulkInstance> = BulkBase;
+const PricingBase = AgentRoutineMixin(SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkFlat))));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the

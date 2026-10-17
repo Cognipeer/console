@@ -414,6 +414,13 @@ export interface AppConfig {
     routineMisfireGraceMs: number;
     /** Concurrent agent chat turns per node (the `agent` queue). */
     chatConcurrency: number;
+    /** Incoming routine webhooks (`POST /api/public/hooks/:tenantId/:hookId`). */
+    webhooks: {
+      /** Largest accepted delivery body (min 16 KiB, max 25 MiB). */
+      bodyLimitBytes: number;
+      /** Runs one routine's webhook starts per minute; 0 = off. */
+      rateLimitPerMinute: number;
+    };
   };
 
   /**
@@ -529,6 +536,10 @@ function boundedAgentRunConfig(source: ConfigSource) {
     routineTickMs: atLeast(int(source, 'AGENT_ROUTINE_TICK_MS', 30_000), 5_000),
     routineMisfireGraceMs: atLeast(int(source, 'AGENT_ROUTINE_MISFIRE_GRACE_MS', 3_600_000), 0),
     chatConcurrency: atLeast(int(source, 'AGENT_CHAT_CONCURRENCY', 4), 1),
+    webhooks: {
+      bodyLimitBytes: Math.min(atLeast(int(source, 'AGENT_WEBHOOK_BODY_LIMIT_BYTES', 5_242_880), 16_384), 26_214_400),
+      rateLimitPerMinute: atLeast(int(source, 'AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE', 60), 0),
+    },
   };
 }
 

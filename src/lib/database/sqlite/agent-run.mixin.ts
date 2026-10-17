@@ -43,7 +43,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            runClass, notBefore, detachedAt, metadata, channel, routineId, runTrigger,
-           responseFormat, inputs, queueGeneration, lastPublishedAt,
+           responseFormat, inputs, queueGeneration, lastPublishedAt, unattended, externalContent,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
            @userMessage, @attachments, @version, @usePublished, @runtimeContext,
@@ -52,7 +52,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
            @runClass, @notBefore, @detachedAt, @metadata, @channel, @routineId, @runTrigger,
-           @responseFormat, @inputs, @queueGeneration, @lastPublishedAt,
+           @responseFormat, @inputs, @queueGeneration, @lastPublishedAt, @unattended, @externalContent,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
           id,
@@ -96,6 +96,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           inputs: record.inputs ? this.toJson(record.inputs) : null,
           queueGeneration: record.queueGeneration ?? 1,
           lastPublishedAt: record.lastPublishedAt ? new Date(record.lastPublishedAt).toISOString() : null,
+          unattended: record.unattended ? 1 : null,
+          externalContent: record.externalContent ? 1 : null,
           createdAt: now,
           startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
           completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
@@ -388,6 +390,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       runClass?: AgentRunClass;
       routineId?: string;
       channel?: NonNullable<IAgentRun['channel']>;
+      trigger?: NonNullable<IAgentRun['trigger']>;
       metadata?: Record<string, string>;
       createdAfter?: Date;
       createdBefore?: Date;
@@ -402,6 +405,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
       if (filter.routineId) { conds.push('routineId = @routineId'); params.routineId = filter.routineId; }
       if (filter.channel) { conds.push('channel = @channel'); params.channel = filter.channel; }
+      if (filter.trigger) { conds.push('runTrigger = @runTrigger'); params.runTrigger = filter.trigger; }
       if (filter.userId) { conds.push('userId = @userId'); params.userId = filter.userId; }
       if (filter.runClass) conds.push(this.runClassCondition(filter.runClass));
       const inList = (column: string, prefix: string, values: string[], negate = false) => {
@@ -630,6 +634,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         inputs: row.inputs ? this.parseJson(row.inputs, null as Record<string, unknown> | null) : null,
         queueGeneration: row.queueGeneration === null || row.queueGeneration === undefined ? undefined : Number(row.queueGeneration),
         lastPublishedAt: this.toDate(row.lastPublishedAt) ?? null,
+        ...(Number(row.unattended) === 1 ? { unattended: true } : {}),
+        ...(Number(row.externalContent) === 1 ? { externalContent: true } : {}),
         createdAt: this.toDate(row.createdAt),
         startedAt: this.toDate(row.startedAt) ?? null,
         completedAt: this.toDate(row.completedAt) ?? null,

@@ -1,7 +1,7 @@
 /**
  * Where webhook events come from: the session event writer (idle, work done,
  * action required, budget reached — every path that writes the log), a turn's
- * finish / fail, and schedule fires. The webhook service is faked; what is
+ * finish / fail. Routine fires are covered with fireRoutine. The webhook service is faked; what is
  * checked is which events are published, in what order, and that a failure
  * there never reaches the code that published.
  */
@@ -10,21 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   publishWebhookEvent: vi.fn(),
-  createConversation: vi.fn(),
-  executeAgentChat: vi.fn(),
 }));
 
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhookEvent }));
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/services/agents/agentService', () => ({
-  createConversation: hoisted.createConversation,
-  executeAgentChat: hoisted.executeAgentChat,
-}));
 
 import { createSessionEventWriter } from '@/lib/services/agents/sessionEvents';
 import { startSessionTurnEvents } from '@/lib/services/agents/sessionTurnEvents';
-import { runAgentSchedule } from '@/lib/services/agents/agentScheduleService';
-import type { IAgent, IAgentSchedule } from '@/lib/database';
 
 const calls = () => hoisted.publishWebhookEvent.mock.calls.map(([input]) => input as { type: string; data: Record<string, unknown>; projectId: string; tenantDbName: string });
 
@@ -125,45 +117,5 @@ describe('a turn', () => {
     const events = turn();
     await events.fail(new Error('boom'));
     expect(calls().map((c) => [c.type, c.data.stopReason])).toEqual([['session.idled', 'error']]);
-  });
-});
-
-describe('schedules', () => {
-  const agent = { _id: 'agent-1', key: 'report-bot', projectId: 'p-1' } as unknown as IAgent;
-  const schedule = { id: 'sch_1', name: 'Nightly', message: 'run' } as unknown as IAgentSchedule;
-  const ctx = (trigger: 'schedule' | 'manual' = 'schedule') => ({
-    tenantDbName: 'tenant_acme', tenantId: 't-1', projectId: 'p-1', agent, schedule, trigger, userId: 'system:schedule',
-  });
-
-  it('a fire publishes schedule.fired with the conversation it created', async () => {
-    hoisted.createConversation.mockResolvedValue({ _id: 'conv-77' });
-    hoisted.executeAgentChat.mockResolvedValue({ output: [{ content: [{ text: 'report' }] }] });
-
-    await expect(runAgentSchedule(ctx())).resolves.toEqual({ conversationId: 'conv-77', content: 'report' });
-
-    expect(calls()).toHaveLength(1);
-    expect(calls()[0]).toMatchObject({
-      type: 'schedule.fired', projectId: 'p-1', tenantDbName: 'tenant_acme',
-      data: { scheduleId: 'sch_1', agentKey: 'report-bot', conversationId: 'conv-77', trigger: 'schedule' },
-    });
-  });
-
-  it('a failed fire publishes schedule.failed with the conversation (when one was made) and a client-safe error, and rethrows', async () => {
-    hoisted.createConversation.mockResolvedValue({ _id: 'conv-78' });
-    hoisted.executeAgentChat.mockRejectedValue(new Error('upstream exploded at 10.0.0.7:5432 password=hunter2'));
-
-    await expect(runAgentSchedule(ctx('manual'))).rejects.toThrow('upstream exploded');
-
-    const [event] = calls();
-    expect(event.type).toBe('schedule.failed');
-    expect(event.data).toMatchObject({ scheduleId: 'sch_1', conversationId: 'conv-78', trigger: 'manual' });
-    expect(String(event.data.error)).not.toContain('hunter2');
-  });
-
-  it('a failure before any conversation exists omits conversationId', async () => {
-    hoisted.createConversation.mockRejectedValue(new Error('db down'));
-    await expect(runAgentSchedule(ctx())).rejects.toThrow();
-    expect(calls()[0].type).toBe('schedule.failed');
-    expect(calls()[0].data).not.toHaveProperty('conversationId');
   });
 });

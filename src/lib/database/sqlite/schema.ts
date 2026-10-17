@@ -750,6 +750,57 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_scheduler_claims_expires ON scheduler_claims(expires_at);
 
+  -- Agent routines (a saved prompt + trigger per agent). The trigger is JSON
+  -- (triggerSpec: TRIGGER is an SQL keyword); nextFireAt drives the scheduler.
+  CREATE TABLE IF NOT EXISTS agent_routines (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    agentKey TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    triggerSpec TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    inputs TEXT,
+    version INTEGER,
+    runClass TEXT NOT NULL DEFAULT 'default',
+    metadata TEXT,
+    callback TEXT,
+    responseFormat TEXT,
+    nextFireAt TEXT,
+    lastFireAt TEXT,
+    lastRunId TEXT,
+    lastStatus TEXT,
+    lastError TEXT,
+    hookId TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_routines_scope ON agent_routines(tenantId, projectId, agentKey);
+  CREATE INDEX IF NOT EXISTS idx_agent_routines_due ON agent_routines(enabled, nextFireAt);
+
+  -- A webhook trigger's delivery log: outcome and normalized ids only, never the payload.
+  CREATE TABLE IF NOT EXISTS agent_routine_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    routineId TEXT NOT NULL,
+    receivedAt TEXT NOT NULL,
+    expiresAt TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    httpStatus INTEGER NOT NULL,
+    event TEXT,
+    deliveryId TEXT,
+    runId TEXT,
+    reason TEXT,
+    bytes INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_routine ON agent_routine_deliveries(tenantId, routineId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_expires ON agent_routine_deliveries(expiresAt);
+
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
   CREATE TABLE IF NOT EXISTS external_model_pricing (
@@ -2413,6 +2464,8 @@ export const TENANT_SCHEMA_SQL = `
     inputs TEXT,
     queueGeneration INTEGER,
     lastPublishedAt TEXT,
+    unattended INTEGER,
+    externalContent INTEGER,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,

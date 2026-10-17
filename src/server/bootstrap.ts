@@ -31,7 +31,7 @@ import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evalu
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startWebhookQueueConsumer } from '@/lib/services/webhooks/webhookConsumer';
-import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
+import { startAgentRoutineScheduler, stopAgentRoutineScheduler } from '@/lib/services/agents/agentRoutineScheduler';
 import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
 import { startTracingSessionFinalizer } from '@/lib/services/tracing/sessionFinalizer';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
@@ -350,7 +350,11 @@ async function runBootstrap(): Promise<void> {
   });
 
   startCrawlerScheduler();
-  startAgentScheduler();
+  // Every node ticks; the per-slot claim in the tenant DB decides who fires.
+  startAgentRoutineScheduler();
+  registerShutdownHandler('agent-routine-scheduler', async () => {
+    stopAgentRoutineScheduler();
+  });
   startAgentRunReconciler();
   startTracingSessionFinalizer();
   startAnalysisScheduler();

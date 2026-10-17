@@ -661,7 +661,7 @@ describe('dashboard /api/webhooks', () => {
       expect(events.map((e: { type: string }) => e.type)).toEqual(expect.arrayContaining([
         'session.idled', 'session.work_done', 'action.required', 'budget.reached',
         'agent_run.succeeded', 'agent_run.failed', 'agent_run.canceled', 'agent_run.requires_action',
-        'schedule.fired', 'schedule.failed',
+        'routine.fired', 'routine.failed',
       ]));
       expect(events.map((e: { type: string }) => e.type)).not.toContain('webhook.test');
     });

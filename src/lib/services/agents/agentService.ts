@@ -47,7 +47,7 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
-import { getDatabase, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -2688,9 +2688,17 @@ export async function deleteAgentRecord(
     tenantDbName: string,
     agentId: string,
 ): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.deleteAgent(agentId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentById(agentId);
+        const deleted = await db.deleteAgent(agentId);
+        // Its routines (and their webhook delivery logs) go with it: nothing could fire them any more.
+        if (deleted && agent) {
+            const routines = await db.listAgentRoutines({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            for (const routine of routines) await db.deleteAgentRoutineDeliveries(String(routine._id));
+            await db.deleteAgentRoutinesForAgent(agent.tenantId, agent.projectId, agent.key);
+        }
+        return deleted;
+    });
 }
 
 export async function getAgentById(
@@ -2972,7 +2980,7 @@ export async function checkAgentModel(
  * existed carry no source. `portal` is end-user traffic through an enterprise
  * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam' | 'portal';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'routine' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,

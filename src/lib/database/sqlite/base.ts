@@ -69,6 +69,8 @@ export const TABLES = {
   alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
   schedulerClaims: 'scheduler_claims',
+  agentRoutines: 'agent_routines',
+  agentRoutineDeliveries: 'agent_routine_deliveries',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',
@@ -1132,12 +1134,17 @@ export class SQLiteProviderBase {
       ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
       ['channel', 'TEXT'], ['routineId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
       ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+      // Routine runs: unattended (no one to ask) and external content (inputs stay out of the system prompt).
+      ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status_class_created ON ${TABLES.agentRuns}(tenantId, status, runClass, createdAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_status_notBefore ON ${TABLES.agentRuns}(status, notBefore)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_routine_created ON ${TABLES.agentRuns}(tenantId, routineId, createdAt)`);
+    // An incoming webhook finds its routine by the URL's hook id (copied out of the trigger JSON).
+    this.ensureTableColumn(db, TABLES.agentRoutines, 'hookId', 'hookId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_routines_hook ON ${TABLES.agentRoutines}(hookId)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.

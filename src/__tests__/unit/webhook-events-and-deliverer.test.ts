@@ -38,7 +38,7 @@ describe('event matching', () => {
     expect(patternMatches('agent_run.*', 'agent_run.requires_action')).toBe(true);
     expect(patternMatches('agent_run.*', 'agent_run')).toBe(false);
     expect(patternMatches('session.*', 'agent_run.succeeded')).toBe(false);
-    expect(patternMatches('*', 'schedule.failed')).toBe(true);
+    expect(patternMatches('*', 'routine.failed')).toBe(true);
   });
 
   it('alerts are a catalog group: alert.fired and alert.resolved are selectable and covered by alert.*', () => {
@@ -55,8 +55,8 @@ describe('event matching', () => {
   });
 
   it('covers a type when any entry of the subscription does', () => {
-    expect(eventMatches(['budget.reached', 'schedule.*'], 'schedule.fired')).toBe(true);
-    expect(eventMatches(['budget.reached', 'schedule.*'], 'session.idled')).toBe(false);
+    expect(eventMatches(['budget.reached', 'routine.*'], 'routine.fired')).toBe(true);
+    expect(eventMatches(['budget.reached', 'routine.*'], 'session.idled')).toBe(false);
     expect(eventMatches([], 'session.idled')).toBe(false);
   });
 
