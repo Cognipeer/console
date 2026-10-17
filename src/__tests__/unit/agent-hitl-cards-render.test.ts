@@ -96,7 +96,7 @@ describe('AgentHumanInTheLoopPanel', () => {
     expect(html).toContain('When time runs out');
     expect(html).toContain('Who can answer');
     expect(html).toContain('A new message while waiting');
-    expect(html).toContain('When nobody can answer (schedules, API bridges, evaluations)');
+    expect(html).toContain('When nobody can answer (routines, API bridges, evaluations)');
   });
 
   it('shows the unattended policy as deny by default, and the stored choice otherwise', () => {
