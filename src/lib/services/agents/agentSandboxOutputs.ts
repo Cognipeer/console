@@ -47,6 +47,8 @@ export interface CollectOutputsDeps {
     list: () => Promise<OutputEntry[]>;
     readBytes: (entry: OutputEntry) => Promise<Buffer>;
     store: (file: { name: string; data: Buffer }) => Promise<IAgentMessageAttachment>;
+    /** Masks secret values in a text file before it is stored; binary files are never passed through it. */
+    scrub?: (text: string) => string;
     /** path -> signature of what was delivered before. */
     seen: Record<string, string>;
     maxFiles?: number;
@@ -118,13 +120,29 @@ export async function collectSandboxOutputs(deps: CollectOutputsDeps): Promise<C
             if (data.length === 0) continue;
             const signature = quick ?? `${data.length}:h${createHash('sha1').update(data).digest('hex')}`;
             if (seen[entry.path] === signature) continue;
-            attachments.push(await deps.store({ name, data }));
+            attachments.push(await deps.store({ name, data: deps.scrub ? scrubTextFile(data, deps.scrub) : data }));
             seen[entry.path] = signature;
         } catch (error) {
             warnings.push(`Output file "${name}" could not be saved: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
     return { attachments, seen, warnings };
+}
+
+/**
+ * Applies `scrub` to a text file's content. A file with a NUL byte or invalid
+ * UTF-8 is binary (documents, images, archives) and is returned as it is.
+ */
+export function scrubTextFile(data: Buffer, scrub: (text: string) => string): Buffer {
+    if (data.includes(0)) return data;
+    let text: string;
+    try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+    } catch {
+        return data;
+    }
+    const scrubbed = scrub(text);
+    return scrubbed === text ? data : Buffer.from(scrubbed, 'utf8');
 }
 
 /** Quotes a path for `sh -c`. */

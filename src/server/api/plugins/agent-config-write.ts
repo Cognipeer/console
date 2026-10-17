@@ -74,6 +74,16 @@ export function redactAgent<T extends IAgent>(input: T): T {
 }
 
 /**
+ * A version as it leaves the API: its snapshot froze the agent's config, so it
+ * gets the same redaction as the agent itself (sandbox and callback secrets,
+ * the connection's encrypted key).
+ */
+export function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
+  if (!version?.snapshot) return version;
+  return { ...version, snapshot: redactAgent(version.snapshot as unknown as IAgent) } as T;
+}
+
+/**
  * Normalize an incoming agent config. For connected (external) agents the
  * connection is validated and its inline API key encrypted; native agents must
  * carry a modelKey. Throws (Error) on invalid input — callers map to 400.

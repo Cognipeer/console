@@ -7,7 +7,6 @@ import {
   type ApplyAgentDocumentImportInput,
 } from '@/lib/services/agents/import/importService';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -140,6 +139,7 @@ import {
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
+  redactVersion,
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
@@ -155,12 +155,6 @@ import {
 } from '@/lib/services/agents/agentFeedback';
 
 const logger = createLogger('api:agents');
-
-/** A version snapshot carries the config it froze — sandbox secrets included. */
-function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
-  if (!version?.snapshot?.config?.sandbox) return version;
-  return { ...version, snapshot: maskAgentSandboxSecrets(version.snapshot) } as T;
-}
 
 /**
  * Resolve an agent by id within the caller's project scope.
@@ -1294,7 +1288,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         session.userId,
       );
       if ('badRequest' in published) return reply.code(400).send(published.badRequest);
-      return reply.code(201).send({ version: published.version });
+      return reply.code(201).send({ version: redactVersion(published.version) });
     } catch (error) {
       return sendRouteError(
         reply,

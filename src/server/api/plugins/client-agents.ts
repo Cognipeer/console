@@ -46,6 +46,7 @@ import {
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
+  redactVersion,
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
@@ -653,7 +654,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.tokenRecord.userId,
       );
       if ('badRequest' in published) return reply.code(400).send(published.badRequest);
-      return reply.code(201).send({ version: published.version });
+      return reply.code(201).send({ version: redactVersion(published.version) });
     } catch (error) {
       logger.error('Publish client agent error', { error });
       return reply.code(500).send({

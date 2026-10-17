@@ -10,7 +10,10 @@
  */
 
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
+import { createLogger } from '@/lib/core/logger';
 import type { IAgentCallbackConfig, IAgentConfig } from '@/lib/database';
+
+const logger = createLogger('agent:callback-config');
 
 /** Same mask the sandbox secrets use (one write-only convention on the agent form). */
 export const AGENT_CALLBACK_SECRET_MASK = '••••••';
@@ -34,6 +37,8 @@ export function openAgentCallbackSecret(callback: IAgentCallbackConfig | undefin
   try {
     return decryptObject<string>(callback.secretSealed) || undefined;
   } catch {
+    // Not silent: the callback goes out unsigned until the secret is entered again.
+    logger.error('Agent callback secret cannot be decrypted (the encryption key has changed); callbacks are sent unsigned');
     return undefined;
   }
 }
