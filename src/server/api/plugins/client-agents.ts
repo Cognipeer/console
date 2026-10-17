@@ -333,6 +333,7 @@ function createResponsesHandler(agentsOnly: boolean) {
         runClass,
         channel: 'responses' as const,
         trigger: 'request' as const,
+        ...(background ? { background: true } : {}),
         metadata: metadata.metadata,
         callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,
         ...(idempotencyKey ? { idempotencyKey } : {}),

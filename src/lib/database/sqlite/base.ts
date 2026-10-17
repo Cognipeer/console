@@ -1136,6 +1136,8 @@ export class SQLiteProviderBase {
       ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
       // Routine runs: unattended (no one to ask) and external content (inputs stay out of the system prompt).
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
+      // The request's `background: true` on a run that streams inline.
+      ['background', 'INTEGER'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }

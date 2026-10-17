@@ -301,6 +301,24 @@ describe('POST /responses — an agent target, streamed', () => {
     expect(framesOf(res.body).at(-1)!.data.response).toMatchObject({ background: true });
   });
 
+  it('background: true is kept on the run, so GET /responses/{id} reads it back (a plain stream reads false)', async () => {
+    streamed();
+    await post({ model: 'agent:support', input: 'hello', stream: true, background: true });
+    await post({ model: 'agent:support', input: 'hello', stream: true });
+    const [asked, plain] = hoisted.startAgentRun.mock.calls.map(([input]) => input as { background?: boolean });
+    expect(asked.background).toBe(true);
+    expect(plain.background).toBeUndefined();
+
+    for (const [row, expected] of [[run({ status: 'succeeded', background: true }), true], [run({ status: 'succeeded' }), false]] as const) {
+      hoisted.getAgentRunStatus.mockResolvedValue(row);
+      for (const url of ['/api/client/v1/responses/resp_r7', '/api/client/v1/agents/responses/resp_r7']) {
+        const res = await app.inject({ method: 'GET', url, headers: HEADERS });
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ id: 'resp_r7', background: expected });
+      }
+    }
+  });
+
   it('include_reasoning: false streams no reasoning item', async () => {
     streamed();
     const res = await post({ model: 'agent:support', input: 'hello', stream: true, include_reasoning: false });

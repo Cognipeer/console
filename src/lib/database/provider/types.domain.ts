@@ -4740,6 +4740,12 @@ export interface IAgentRun extends IUsageAttributionFields {
   notBefore?: Date | null;
   /** Set when an `inline` run's caller stopped waiting (the call answered 202). */
   detachedAt?: Date | null;
+  /**
+   * The request asked for `background: true` (Responses). A queued run is
+   * background by its mode; this keeps the choice on a streamed one, which runs
+   * inline, so a read of the run reports it. Absent = not asked.
+   */
+  background?: boolean;
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */

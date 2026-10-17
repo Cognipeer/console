@@ -68,12 +68,17 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
     expect(read.detachedAt ?? null).toBeNull();
     expect(read.lastPublishedAt ?? null).toBeNull();
 
+    // The request's `background: true` on a run that streams inline.
+    const asked = await db.createAgentRun(rec({ mode: 'inline', status: 'running', conversationId: 'conv-bg', background: true }));
+    expect((await db.getAgentRunById(id(asked), tenantId, projectId))!.background).toBe(true);
+
     const plain = (await db.getAgentRunById(id(await db.createAgentRun(rec())), tenantId, projectId))!;
     expect(plain.runClass ?? null).toBeNull();
     expect(plain.metadata ?? null).toBeNull();
     expect(plain.responseFormat ?? null).toBeNull();
     expect(plain.inputs ?? null).toBeNull();
     expect(plain.channel ?? null).toBeNull();
+    expect(plain.background ?? false).toBe(false);
   });
 
   it('a scheduled row takes no conversation slot; an inline row holds it like an active row', async () => {

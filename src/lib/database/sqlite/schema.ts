@@ -2466,6 +2466,7 @@ export const TENANT_SCHEMA_SQL = `
     lastPublishedAt TEXT,
     unattended INTEGER,
     externalContent INTEGER,
+    background INTEGER,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,

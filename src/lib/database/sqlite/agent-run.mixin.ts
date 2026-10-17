@@ -43,7 +43,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            runClass, notBefore, detachedAt, metadata, channel, routineId, runTrigger,
-           responseFormat, inputs, queueGeneration, lastPublishedAt, unattended, externalContent,
+           responseFormat, inputs, queueGeneration, lastPublishedAt, unattended, externalContent, background,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
            @userMessage, @attachments, @version, @usePublished, @runtimeContext,
@@ -52,7 +52,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
            @runClass, @notBefore, @detachedAt, @metadata, @channel, @routineId, @runTrigger,
-           @responseFormat, @inputs, @queueGeneration, @lastPublishedAt, @unattended, @externalContent,
+           @responseFormat, @inputs, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @background,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
           id,
@@ -98,6 +98,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           lastPublishedAt: record.lastPublishedAt ? new Date(record.lastPublishedAt).toISOString() : null,
           unattended: record.unattended ? 1 : null,
           externalContent: record.externalContent ? 1 : null,
+          background: record.background ? 1 : null,
           createdAt: now,
           startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
           completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
@@ -636,6 +637,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         lastPublishedAt: this.toDate(row.lastPublishedAt) ?? null,
         ...(Number(row.unattended) === 1 ? { unattended: true } : {}),
         ...(Number(row.externalContent) === 1 ? { externalContent: true } : {}),
+        ...(Number(row.background) === 1 ? { background: true } : {}),
         createdAt: this.toDate(row.createdAt),
         startedAt: this.toDate(row.startedAt) ?? null,
         completedAt: this.toDate(row.completedAt) ?? null,

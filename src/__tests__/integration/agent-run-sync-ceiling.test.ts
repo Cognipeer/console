@@ -56,6 +56,7 @@ import {
   type AgentRunLimits,
   type StartAgentRunInput,
 } from '@/lib/services/agents/agentRunService';
+import { toAgentResponseObject } from '@/server/api/plugins/agent-response-object';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 function delay(ms: number): Promise<void> {
@@ -311,6 +312,19 @@ describe('startAgentRun — inline runs (§4.2)', () => {
     expect(chunks).toEqual(['hello']);
     if (outcome.kind !== 'completed') return;
     expect(outcome.run.detachedAt ?? null).toBeNull();
+  });
+
+  it('a stream that asked for background reads back background: true (Responses object); a plain turn reads false', async () => {
+    hoisted.executeAgentChat.mockResolvedValue(okResponse('resp_x'));
+    const streamed = await startAgentRun({ ...inlineInput('conv-stream-bg', { stream: {} }), background: true });
+    const plain = await syncTurn('conv-plain');
+    if (streamed.kind !== 'completed' || plain.kind !== 'completed') throw new Error('expected completed turns');
+    const streamedRow = (await db.getAgentRunById(String(streamed.run._id), tenantId, PROJECT_ID))!;
+    const plainRow = (await db.getAgentRunById(String(plain.run._id), tenantId, PROJECT_ID))!;
+    expect(streamedRow).toMatchObject({ mode: 'inline', status: 'succeeded', background: true });
+    expect(toAgentResponseObject(streamedRow).background).toBe(true);
+    expect(plainRow.background ?? false).toBe(false);
+    expect(toAgentResponseObject(plainRow).background).toBe(false);
   });
 
   it('a disconnect with cancelOnDisconnect stops the turn and finalizes the run canceled', async () => {
