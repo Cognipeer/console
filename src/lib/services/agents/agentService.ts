@@ -3423,6 +3423,10 @@ export interface ResponseUsage {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    /** The cached slice of `input_tokens` (0 when the run did not report one). */
+    input_tokens_details: { cached_tokens: number };
+    /** The reasoning slice of `output_tokens` (0 when the run did not report one). */
+    output_tokens_details: { reasoning_tokens: number };
 }
 
 /** OpenAI Responses API–compatible response shape */
@@ -4454,7 +4458,7 @@ function toAgentChatResponse(input: {
     messages: IAgentConversation['messages'];
     reasoning?: string;
     outcome?: { stopReason: AgentStopReason | 'budget_reached'; stopDetail?: string };
-    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
     /** The approvals / questions the turn paused on — makes the response `requires_action`. */
@@ -4500,6 +4504,8 @@ function toAgentChatResponse(input: {
             input_tokens: usage?.inputTokens ?? 0,
             output_tokens: usage?.outputTokens ?? 0,
             total_tokens: usage?.totalTokens ?? ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)),
+            input_tokens_details: { cached_tokens: usage?.cachedInputTokens ?? 0 },
+            output_tokens_details: { reasoning_tokens: usage?.reasoningTokens ?? 0 },
         },
         created_at: Math.floor(Date.now() / 1000),
         previous_response_id: input.priorMessageCount > 0 ? responseId : null,

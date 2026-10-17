@@ -108,6 +108,30 @@ export async function enforceAgentRunQuota(caller: AgentRunCaller): Promise<void
 }
 
 /**
+ * Whether the caller is already at one of its agent limits, without counting
+ * anything: throws `AgentQuotaExceededError` when the next run would be refused.
+ * A stream asks this before it opens, so a refusal can still be a plain 429;
+ * the run itself is counted (and refused when needed) by `enforceAgentRunQuota`.
+ * A failure of the quota subsystem lets the call through, as there.
+ */
+export async function peekAgentRunQuota(caller: AgentRunCaller): Promise<void> {
+  let result: Awaited<ReturnType<typeof checkRateLimit>>;
+  try {
+    result = await checkRateLimit(quotaContextFor(caller), { requests: 0, tokens: 0 }, { headroom: ['requests', 'tokens'] });
+  } catch (error) {
+    logger.warn('Agent run quota pre-check failed; letting the call through', {
+      tenantId: caller.tenantId,
+      agentKey: caller.agentKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  if (!result.allowed) {
+    throw new AgentQuotaExceededError(result.reason || 'Agent run quota exceeded');
+  }
+}
+
+/**
  * Charges a run that is over - however it ended - for the larger of what the
  * run reported and what its model calls were seen to spend (`sink`, runUsage.ts).
  * A failed or aborted run reports nothing, but its tokens are spent all the same.

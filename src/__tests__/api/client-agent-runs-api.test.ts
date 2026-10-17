@@ -15,6 +15,7 @@ const hoisted = vi.hoisted(() => ({
   getAgentByKey: vi.fn(),
   getConversationById: vi.fn(),
   createConversation: vi.fn(),
+  deleteConversation: vi.fn(),
   resolveAgentConfig: vi.fn(),
   startAgentRun: vi.fn(),
   waitForAgentRun: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   getAgentByKey: hoisted.getAgentByKey,
   getConversationById: hoisted.getConversationById,
   createConversation: hoisted.createConversation,
+  deleteConversation: hoisted.deleteConversation,
   resolveAgentConfig: hoisted.resolveAgentConfig,
   executeAgentChat: vi.fn(),
 }));
@@ -200,14 +202,14 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     const res = await create({ input: 'hello', wait: 30 });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody(res.body)).toMatchObject({ status: 'succeeded', output_text: 'Hi there' });
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1', projectId: 'proj-1' }), 30_000);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1', projectId: 'proj-1' }), 30_000, expect.any(AbortSignal));
   });
 
   it('wait that ends first is a 202 with the run still going; the wait never exceeds the window', async () => {
     hoisted.waitForAgentRun.mockResolvedValue(run({ status: 'running' }));
     const res = await create({ input: 'hello', wait: 10_000 });
     expect(res.statusCode).toBe(202);
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.anything(), LIMITS.syncWaitMs);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.anything(), LIMITS.syncWaitMs, expect.any(AbortSignal));
   });
 
   it('honours Prefer: wait=N (and says so), and Prefer: respond-async', async () => {
@@ -215,7 +217,7 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     let res = await create({ input: 'hello' }, { prefer: 'wait=3' });
     expect(res.statusCode).toBe(202);
     expect(res.headers['preference-applied']).toBe('wait=3');
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.anything(), 3_000);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.anything(), 3_000, expect.any(AbortSignal));
 
     hoisted.waitForAgentRun.mockClear();
     res = await create({ input: 'hello' }, { prefer: 'respond-async, wait=5' });
@@ -457,6 +459,71 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
   });
 });
 
+describe('POST /client/v1/agents/:agentKey/runs: bodies, refusals and replays', () => {
+  it('a body that is not JSON, empty, or not an object is a 400 invalid_json (the server keeps JSON bodies as strings)', async () => {
+    const raw = await createFastifyApiTestApp(async (instance) => {
+      instance.removeContentTypeParser('application/json');
+      instance.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+      await instance.register(clientAgentRunsApiPlugin);
+    });
+    try {
+      for (const payload of ['{', '', '[1]', '"text"']) {
+        const res = await raw.inject({ method: 'POST', url: '/api/client/v1/agents/support/runs', headers: HEADERS, payload });
+        expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+        expect(parseJsonBody<{ error: { type: string; code: string } }>(res.body).error, payload).toMatchObject({ type: 'invalid_request_error', code: 'invalid_json' });
+      }
+      expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+      expect(hoisted.createConversation).not.toHaveBeenCalled();
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it('a refused start removes the session this request created, and its 429 carries Retry-After', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 250, scope: 'tenant', runClass: 'default' });
+    const res = await create({ input: 'hello' });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('30');
+    expect(hoisted.deleteConversation).toHaveBeenCalledWith('tenant_acme', 'conv-new');
+  });
+
+  it('a refused start on a continued session leaves that session alone', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
+    const res = await create({ input: 'hello', session_id: 'conv-1' });
+    expect(res.statusCode).toBe(409);
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.deleteConversation).not.toHaveBeenCalled();
+  });
+
+  it('stream: over the active-run cap is a plain 429 with Retry-After before the stream opens, and no session is created', async () => {
+    hoisted.getDatabase.mockResolvedValue(createMockDb({
+      runWithTenant: (_name: string, fn: () => unknown) => fn(),
+      countActiveAgentRuns: vi.fn().mockResolvedValue(LIMITS.maxActivePerTenant),
+    } as never));
+    const res = await create({ input: 'hello', stream: true });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.headers['retry-after']).toBe('30');
+    expect(parseJsonBody(res.body)).toMatchObject({ error: { type: 'rate_limit_error', code: 'agent_run_concurrency_limit', scope: 'tenant' } });
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('Idempotency-Key: a retried stream is answered as a stream (the run as it stands), not as JSON', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({
+      kind: 'replay',
+      run: run({ mode: 'inline', status: 'succeeded', result: { status: 'completed', output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }] } }),
+    });
+    const res = await create({ input: 'hello', stream: true }, { 'idempotency-key': 'k1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const events = res.body.split('\n\n').filter(Boolean).map((frame) => JSON.parse(frame.split('data: ')[1]) as { type: string; response?: Record<string, unknown> });
+    expect(events.at(-1)).toMatchObject({ type: 'response.completed', response: { id: 'resp_r1', status: 'completed', output_text: 'done' } });
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /client/v1/agents/runs', () => {
   it('lists runs with every filter, newest first, as an OpenAI list with a cursor', async () => {
     hoisted.listAgentRuns.mockResolvedValue([run({ _id: 'a' }), run({ _id: 'b' }), run({ _id: 'c' })]);
@@ -531,7 +598,7 @@ describe('GET /client/v1/agents/runs/:runId', () => {
     const res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run_r1?wait=5', headers: HEADERS });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody(res.body)).toMatchObject({ status: 'succeeded', output_text: 'ok' });
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1', projectId: 'proj-1' }), 5_000);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1', projectId: 'proj-1' }), 5_000, expect.any(AbortSignal));
   });
 
   it('without wait (or for a finished run) answers at once', async () => {

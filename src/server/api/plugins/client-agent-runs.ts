@@ -30,7 +30,6 @@ import {
   publicAgentRunId,
   runWithTenantDb,
   serializeAgentRun,
-  startAgentRun,
   waitForAgentRun,
   type StartAgentRunExecution,
 } from '@/lib/services/agents/agentRunService';
@@ -40,13 +39,14 @@ import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
-import { authorizationRefusalOf, getHeaderValue, readJsonBody, withClientApiRequestContext, withOpenAiApiRequestContext } from '../fastify-utils';
+import { authorizationRefusalOf, getHeaderValue, withClientApiRequestContext, withOpenAiApiRequestContext } from '../fastify-utils';
 import { authz } from '@/lib/iam/routeAuthz';
 import { authorizeEndingOpenRequests } from './agent-approval-authz';
 import { sendAgentGuardrailBlock } from './agent-config-write';
 import {
   authorizeInvocationTarget,
   checkSessionContinuable,
+  clientGoneSignal,
   invocationApiTokenId,
   invocationRuntimeContext,
   openAiEnvelopeOf,
@@ -57,6 +57,8 @@ import {
   parseRunMetadata,
   prepareInvocationSession,
   readIdempotencyKey,
+  readInvocationBody,
+  refuseStreamAdmission,
   resolveInvocationAgent,
   resolveInvocationCallback,
   resolveInvocationConfig,
@@ -65,9 +67,11 @@ import {
   resolveInvocationModel,
   runOutcomeRefusal,
   sendRunAccepted,
+  sendRunRefusal,
+  startRunOnSession,
 } from './agent-invocation';
 import { toAgentResponseObject } from './agent-response-object';
-import { streamAgentRunAsResponses } from './agent-responses-stream';
+import { streamAgentRunAsResponses, streamRunSnapshot } from './agent-responses-stream';
 import { listSessionEvents, streamSessionEvents } from './agent-session-events';
 import {
   refuseSessionLinked,
@@ -222,7 +226,8 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/agents/:agentKey/runs', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { agentKey } = request.params as { agentKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readInvocationBody(request, reply, 'client');
+      if (!body) return reply;
       const bad = (message: string, code: string) => reply.code(400).send(invalidRequestErrorBody(message, code));
 
       const target = await resolveInvocationAgent(reply, 'client', ctx, agentKey, body.version);
@@ -303,6 +308,9 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const ref = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
       const idempotencyConversationScope = conversation ? String(conversation._id) : null;
+      const object = { model: agent.key, ...(chosenModel.modelChoice ? { agentModel: chosenModel.modelChoice.modelKey } : {}) };
+      // A long-poll stops polling when its client goes away.
+      const gone = clientGoneSignal(reply);
 
       // A replayed request must not mint a fresh session first.
       if (idempotency.key) {
@@ -318,8 +326,10 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
         if (prior.kind === 'replay') {
           const settled = isAgentRunActive(prior.run) && waitMs > 0
-            ? (await waitForAgentRun({ ...ref, runId: String(prior.run._id) }, waitMs)) ?? prior.run
+            ? (await waitForAgentRun({ ...ref, runId: String(prior.run._id) }, waitMs, gone)) ?? prior.run
             : prior.run;
+          // A stream retried is answered as a stream: the run as it stands (its stored answer once it ended).
+          if (stream) return streamRunSnapshot(reply, settled, object);
           return isAgentRunActive(settled) ? sendRunAccepted(reply, settled) : reply.code(200).send(serializeAgentRun(settled));
         }
       }
@@ -327,6 +337,9 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
       if (!stream) {
         await assertQueuedTurnSpendAllowed({ ...ref, agentKey: agent.key, userId: ctx.tokenRecord.userId });
+      } else if (await refuseStreamAdmission(reply, 'client', ctx, agent.key, limits)) {
+        // Over a cap or the quota: a plain 429 before the stream opens (and before a session exists).
+        return reply;
       }
 
       const prepared = await prepareInvocationSession(ctx, {
@@ -367,18 +380,19 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
           modelKey: chosenModel.modelChoice?.modelKey,
           requestReasoning: reasoning.value,
           streamReasoning: true,
-          object: { model: agent.key, ...(chosenModel.modelChoice ? { agentModel: chosenModel.modelChoice.modelKey } : {}) },
+          object,
+          newSession: prepared.created,
         });
       }
 
       const execution: StartAgentRunExecution = { kind: 'queued', ...(schedule.notBefore ? { notBefore: schedule.notBefore } : {}) };
-      const outcome = await startAgentRun({ ...base, execution });
+      const outcome = await startRunOnSession({ ...base, execution }, { tenantDbName: ctx.tenantDbName, conversationId: prepared.conversationId, created: prepared.created });
       const refusal = runOutcomeRefusal(outcome);
-      if (refusal) return reply.code(refusal.status).send(refusal.body);
+      if (refusal) return sendRunRefusal(reply, 'client', refusal);
       if (outcome.kind !== 'accepted' && outcome.kind !== 'replay') return reply.code(500).send(INTERNAL_ERROR_BODY);
       const run = outcome.run;
       const settled = waitMs > 0 && isAgentRunActive(run) && run.status !== 'scheduled'
-        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, waitMs)) ?? run
+        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, waitMs, gone)) ?? run
         : run;
       return sendRun(reply, settled);
     } catch (error) {
@@ -518,7 +532,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         const limits = await resolveInvocationLimits(ctx);
         run = (await waitForAgentRun({
           tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: String(run._id),
-        }, Math.min(waitSeconds * 1000, limits.syncWaitMs))) ?? run;
+        }, Math.min(waitSeconds * 1000, limits.syncWaitMs), clientGoneSignal(reply))) ?? run;
       }
       return reply.code(200).send(serializeAgentRun(run));
     } catch (error) {

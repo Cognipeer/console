@@ -26,15 +26,18 @@ import {
   agentRunLocation,
   authorizeInvocationTarget,
   checkSessionContinuable,
+  clientGoneSignal,
   openAiEnvelopeOf,
   parseInvocationInput,
   parseInvocationResponseFormat,
   parseRunMetadata,
   prepareInvocationSession,
   readIdempotencyKey,
+  refuseStreamAdmission,
+  resolveInvocationConfig,
   resolveInvocationInputs,
   resolveInvocationLimits,
-  resolvePublishedAgentConfig,
+  resolveInvocationVersion,
   sendInvocationFailure,
   type InvocationInput,
 } from './agent-invocation';
@@ -46,7 +49,7 @@ import { findChatTranscriptSessionId, rememberChatTranscript } from '@/lib/servi
 import { agentResponseStatus } from './agent-response-object';
 import { sendAgentGuardrailBlock } from './agent-config-write';
 import { openSseConnection } from './sse-connection';
-import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
+import { AgentModelError, requestedAgentModel, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
   AGENT_MODEL_PREFIX,
   completionOfRun,
@@ -207,7 +210,10 @@ async function runAgentChat(input: {
   const includeReasoning = shouldReturnReasoning(undefined, body);
   const messages = Array.isArray(body.messages) ? body.messages as OpenAiMessage[] : undefined;
   const answeringToolCalls = extractToolAnswers(messages).length > 0;
-  const version = typeof body.version === 'number' ? body.version : undefined;
+  // `version`: a published version number (or numeric string) or `"draft"`, refused otherwise - as on /responses.
+  const target = await resolveInvocationVersion(reply, 'openai', auth, agent, body.version);
+  if (!target) return reply;
+  const { version, usePublished } = target;
 
   const ignored = AGENT_IGNORED_CHAT_PARAMS.filter((name) => body[name] !== undefined && body[name] !== null);
   if (ignored.length > 0) void reply.header('X-Cognipeer-Ignored-Params', ignored.join(','));
@@ -228,7 +234,8 @@ async function runAgentChat(input: {
   // `metadata`: all refused here, before a run exists, in OpenAI's envelope.
   const responseFormat = parseInvocationResponseFormat(reply, 'openai', body.response_format, 'response_format');
   if (!responseFormat) return reply;
-  const runInputs = resolveInvocationInputs(reply, 'openai', await resolvePublishedAgentConfig(auth.tenantDbName, agent, auth.projectId, version), body.inputs);
+  const runConfig = await resolveInvocationConfig(auth, target);
+  const runInputs = resolveInvocationInputs(reply, 'openai', runConfig, body.inputs);
   if (!runInputs) return reply;
   const metadata = parseRunMetadata(body.metadata);
   if (!metadata.ok) return chatFail(reply, 400, metadata.message, 'invalid_metadata', { param: 'metadata' });
@@ -258,9 +265,11 @@ async function runAgentChat(input: {
     return chatFail(reply, 400, 'conversation_id and X-Cognipeer-Session-Id name different sessions: send one of them', 'session_conflict');
   }
   const named = namedBySession ?? namedByHeader;
+  // OpenAI's `user` (the end user an application serves) takes part in the transcript match.
+  const endUser = typeof body.user === 'string' && body.user !== '' ? body.user : undefined;
   const matched = named || answeringToolCalls
     ? undefined
-    : await findChatTranscriptSessionId(auth.tenantDbName, { projectId: auth.projectId, agentKey: agent.key, userId: String(auth.tokenRecord.userId ?? '') }, messages);
+    : await findChatTranscriptSessionId(auth.tenantDbName, { projectId: auth.projectId, agentKey: agent.key, userId: String(auth.tokenRecord.userId ?? '') }, messages, endUser);
   const sessionId = named ?? matched;
   if (answeringToolCalls && !sessionId) {
     return chatFail(reply, 400, 'conversation_id is required to answer a tool call: send the one the reply carried', 'missing_conversation_id', { param: 'conversation_id' });
@@ -294,7 +303,6 @@ async function runAgentChat(input: {
   const askedModel = requestedAgentModel(request, body);
   if (askedModel || agent.config.additionalModels?.length) {
     try {
-      const runConfig = await resolveAgentConfigForModels(auth.tenantDbName, agent, auth.projectId, version);
       if (askedModel || runConfig.additionalModels?.length) {
         modelChoice = await resolveRunModelForRequest(request, { agent, config: runConfig, projectId: auth.projectId, requested: askedModel, conversation });
       }
@@ -328,6 +336,9 @@ async function runAgentChat(input: {
   // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
   if (runClass === 'deferred' && userInput && !replayed) {
     await assertQueuedTurnSpendAllowed({ ...ref, agentKey: agent.key, userId: auth.tokenRecord.userId });
+  } else if (streaming && userInput && !replayed && await refuseStreamAdmission(reply, 'openai', auth, agent.key, limits)) {
+    // Over a cap or the quota: a plain 429 before the stream opens (and before a session exists).
+    return reply;
   }
 
   // The session (new or continued), the model choice stored on it, the message's files as its files.
@@ -356,6 +367,7 @@ async function runAgentChat(input: {
     ...(turn ? { turn } : {}),
     conversationId,
     ...(version !== undefined ? { version } : {}),
+    usePublished,
     runtimeContext,
     ctx: {
       tenantDbName: auth.tenantDbName,
@@ -380,20 +392,23 @@ async function runAgentChat(input: {
     },
   };
   // A retry's run waits up to the window when it is still going; every other call goes through the engine.
+  // A wait stops when the client goes away.
+  const gone = clientGoneSignal(reply);
   const execute = async (hooks: Pick<RunAgentCompletionInput, 'signal' | 'onTextChunk' | 'onReasoningChunk'> = {}) => {
-    if (!replayed) return runAgentCompletion({ ...common, ...hooks });
+    if (!replayed) return runAgentCompletion({ ...common, ...hooks, waitSignal: gone });
     const settled = isAgentRunActive(replayed) && replayed.status !== 'scheduled'
-      ? (await waitForAgentRun({ ...ref, runId: String(replayed._id) }, limits.syncWaitMs)) ?? replayed
+      ? (await waitForAgentRun({ ...ref, runId: String(replayed._id) }, limits.syncWaitMs, gone)) ?? replayed
       : replayed;
     return completionOfRun(settled, conversationId);
   };
   // The next request of this client carries what it holds now: remember it (a retry's answer is not a new turn).
   const remember = (result: { content: string; toolCalls?: unknown[] }) =>
-    replayed || result.toolCalls?.length ? undefined : rememberChatTranscript(auth.tenantDbName, conversationId, messages, result.content);
+    replayed || result.toolCalls?.length ? undefined : rememberChatTranscript(auth.tenantDbName, conversationId, messages, result.content, endUser);
 
   if (!streaming) {
     const result = await execute();
     if ('error' in result) {
+      if (result.retryAfterSeconds) void reply.header('Retry-After', String(result.retryAfterSeconds));
       return reply.code(result.status).send({
         error: {
           message: result.error,

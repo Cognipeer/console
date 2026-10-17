@@ -27,6 +27,7 @@ const hoisted = vi.hoisted(() => ({
   refuseCancelPending: vi.fn(),
   storeResponseInputFiles: vi.fn(),
   assertQueuedTurnSpendAllowed: vi.fn(),
+  deleteConversation: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({
@@ -60,7 +61,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   createConversation: hoisted.createConversation,
   getConversationById: hoisted.getConversationById,
   listConversations: vi.fn(),
-  deleteConversation: vi.fn(),
+  deleteConversation: hoisted.deleteConversation,
   executeAgentChat: vi.fn(),
   executePlaygroundChat: vi.fn(),
 }));
@@ -150,10 +151,9 @@ beforeEach(async () => {
   hoisted.getDatabase.mockResolvedValue(createMockDb({
     runWithTenant: <T>(_name: string, fn: () => T) => fn(),
     updateAgentConversationRuntime: vi.fn(async (id: string, patch: { transcriptHash?: string }) => { if (patch.transcriptHash) hashes.set(id, patch.transcriptHash); return true; }),
-    findAgentConversationByTranscriptHash: vi.fn(async (filter: { transcriptHash: string; createdBy: string }) => {
-      const found = [...hashes].find(([, hash]) => hash === filter.transcriptHash);
-      return found && filter.createdBy === 'user-1' ? { _id: found[0] } : null;
-    }),
+    findAgentConversationsByTranscriptHash: vi.fn(async (filter: { transcriptHash: string; createdBy: string }, limit: number) => (filter.createdBy === 'user-1'
+      ? [...hashes].filter(([, hash]) => hash === filter.transcriptHash).slice(0, limit).map(([id]) => ({ _id: id }))
+      : [])),
   } as never));
   hoisted.requireApiTokenFromHeader.mockResolvedValue(AUTH_CTX);
   hoisted.getAgentByKey.mockResolvedValue(agent());
@@ -248,6 +248,29 @@ describe('the session of an agent chat completion', () => {
     expect(res.statusCode).toBe(403);
     expect(error(res)).toMatchObject({ code: 'session_forbidden' });
     expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('a transcript two of the owner\'s sessions share is ambiguous: neither is continued, a new session starts', async () => {
+    // Two end users of one application token, each greeted the same way.
+    hoisted.startAgentRun.mockResolvedValueOnce(completed('Hello! How can I help you today?'));
+    await post({ messages: [user('hi')] });
+    hoisted.startAgentRun.mockResolvedValueOnce(completed('Hello! How can I help you today?'));
+    await post({ messages: [user('hi')] });
+    expect(hashes.get('conv-1')).toBe(hashes.get('conv-2'));
+    await post({ messages: [user('hi'), assistant('Hello! How can I help you today?'), user('my order is late')] });
+    expect(hoisted.createConversation).toHaveBeenCalledTimes(3);
+    expect(runInput(2).conversationId).toBe('conv-3');
+  });
+
+  it('the OpenAI user field keeps the end users of one token apart', async () => {
+    hoisted.startAgentRun.mockResolvedValueOnce(completed('Hello!'));
+    await post({ messages: [user('hi')], user: 'end-user-a' });
+    hoisted.startAgentRun.mockResolvedValueOnce(completed('Hello!'));
+    await post({ messages: [user('hi')], user: 'end-user-b' });
+    expect(hashes.get('conv-1')).not.toBe(hashes.get('conv-2'));
+    await post({ messages: [user('hi'), assistant('Hello!'), user('more')], user: 'end-user-b' });
+    expect(hoisted.createConversation).toHaveBeenCalledTimes(2);
+    expect(runInput(2).conversationId).toBe('conv-2');
   });
 
   it('answering a tool call needs the session named: there is no transcript to match', async () => {
@@ -431,7 +454,7 @@ describe('service_tier flex on an agent chat completion', () => {
     const res = await post({ messages: [user('hi')], service_tier: 'flex' });
     expect(res.statusCode, res.body).toBe(200);
     expect(runInput()).toMatchObject({ runClass: 'deferred', execution: { kind: 'queued' } });
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r7' }), LIMITS.syncWaitMs);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r7' }), LIMITS.syncWaitMs, expect.any(AbortSignal));
     expect(parseJsonBody<{ choices: Array<{ message: { content: string } }> }>(res.body).choices[0].message.content).toBe('done later');
     expect(hoisted.assertQueuedTurnSpendAllowed).toHaveBeenCalled();
   });
@@ -516,5 +539,65 @@ describe('Idempotency-Key on an agent chat completion', () => {
     await post({ messages: [user('hi')], conversation_id: 'conv-1' }, { 'idempotency-key': 'k-2' });
     expect(runInput(1)).toMatchObject({ idempotencyKey: 'k-2', idempotencyConversationScope: 'conv-1' });
     expect(hoisted.lookupIdempotentAgentRun).toHaveBeenLastCalledWith(expect.objectContaining({ idempotencyKey: 'k-2', idempotencyConversationScope: 'conv-1', userMessage: 'hi' }));
+  });
+});
+
+describe('version on an agent chat completion', () => {
+  it('a version that is not a positive integer or "draft" is 400 invalid_version, before a session or a run exists', async () => {
+    for (const version of ['abc', 0, -1, 1.5, true]) {
+      const res = await post({ messages: [user('hi')], version });
+      expect(res.statusCode, JSON.stringify(version)).toBe(400);
+      expect(error(res), JSON.stringify(version)).toMatchObject({ type: 'invalid_request_error', code: 'invalid_version', param: 'version' });
+    }
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('"draft" runs the draft; a version number (or numeric string) runs that version; an unknown one is 404', async () => {
+    await post({ messages: [user('hi')], version: 'draft' });
+    expect(runInput(0)).toMatchObject({ usePublished: false });
+    expect(runInput(0).version).toBeUndefined();
+
+    await post({ messages: [user('hi')], version: '2' });
+    expect(runInput(1)).toMatchObject({ version: 2, usePublished: true });
+    expect(hoisted.resolveAgentConfig).toHaveBeenCalledWith('tenant_acme', 'support', 'proj-1', 2);
+
+    await post({ messages: [user('hi')] });
+    expect(runInput(2)).toMatchObject({ usePublished: true });
+
+    hoisted.resolveAgentConfig.mockRejectedValueOnce(new Error('Version 9 not found'));
+    const missing = await post({ messages: [user('hi')], version: 9 });
+    expect(missing.statusCode).toBe(404);
+    expect(error(missing)).toMatchObject({ code: 'version_not_found', param: 'version' });
+    expect(hoisted.startAgentRun).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('admission and refusals of an agent chat completion', () => {
+  it('stream over the active-run cap: a plain 429 with Retry-After before the stream opens, no session created', async () => {
+    hoisted.getDatabase.mockResolvedValue(createMockDb({
+      runWithTenant: <T>(_name: string, fn: () => T) => fn(),
+      countActiveAgentRuns: vi.fn().mockResolvedValue(LIMITS.maxActivePerTenant),
+    } as never));
+    const res = await post({ messages: [user('hi')], stream: true });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.headers['retry-after']).toBe('30');
+    expect(error(res)).toMatchObject({ type: 'rate_limit_error', code: 'agent_run_concurrency_limit' });
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('a refused start removes the session the request created (429 with Retry-After), and leaves a named one alone', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10, scope: 'tenant', runClass: 'default' });
+    const res = await post({ messages: [user('hi')] });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('30');
+    expect(hoisted.deleteConversation).toHaveBeenCalledWith('tenant_acme', 'conv-1');
+
+    hoisted.deleteConversation.mockClear();
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
+    expect((await post({ messages: [user('hi')], conversation_id: 'conv-1' })).statusCode).toBe(409);
+    expect(hoisted.deleteConversation).not.toHaveBeenCalled();
   });
 });

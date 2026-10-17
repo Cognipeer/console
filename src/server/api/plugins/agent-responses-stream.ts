@@ -10,9 +10,9 @@ import type { FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgentRun } from '@/lib/database';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
-import { startAgentRun } from '@/lib/services/agents/agentRunService';
+import type { startAgentRun } from '@/lib/services/agents/agentRunService';
 import { createResponsesEventEncoder, type ResponsesEventEncoder } from '@/lib/services/models/responsesWire';
-import { runOutcomeRefusal } from './agent-invocation';
+import { runOutcomeRefusal, startRunOnSession } from './agent-invocation';
 import { toAgentResponseObject, type AgentResponseObjectOptions } from './agent-response-object';
 import { openSseConnection } from './sse-connection';
 
@@ -73,12 +73,14 @@ export async function streamAgentRunAsResponses(
     /** Stream reasoning text (the agent shows it and the caller did not opt out). */
     streamReasoning: boolean;
     object: AgentResponseObjectOptions;
+    /** The request created the session: a start the engine refuses removes it again. */
+    newSession?: boolean;
   },
 ): Promise<FastifyReply> {
   const writer = createResponsesStreamWriter(reply);
   let started: IAgentRun | null = null;
   try {
-    const outcome = await startAgentRun({
+    const outcome = await startRunOnSession({
       ...base,
       ...(options.modelKey ? { modelKey: options.modelKey } : {}),
       ...(options.requestReasoning ? { requestReasoning: options.requestReasoning } : {}),
@@ -96,7 +98,7 @@ export async function streamAgentRunAsResponses(
           writer.started(toAgentResponseObject(run, options.object));
         },
       },
-    });
+    }, { tenantDbName: base.tenantDbName, conversationId: base.conversationId, created: options.newSession === true });
     const refusal = runOutcomeRefusal(outcome);
     if (refusal) {
       writer.error((refusal.body as { error: { message: string; code?: string; type?: string } }).error);

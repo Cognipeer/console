@@ -289,7 +289,7 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
       expect(res.statusCode).toBe(200);
       expect(res.headers['preference-applied']).toBe('wait=10');
       expect(json(res)).toMatchObject({ id: 'run_r1', status: 'succeeded' });
-      expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1' }), 10_000);
+      expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1' }), 10_000, expect.any(AbortSignal));
     });
 
     it('a reserved Idempotency-Key is refused before anything fires', async () => {

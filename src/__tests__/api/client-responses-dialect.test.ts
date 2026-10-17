@@ -26,6 +26,7 @@ const hoisted = vi.hoisted(() => ({
   resolveAgentRunLimits: vi.fn(),
   handleChatCompletion: vi.fn(),
   logModelUsage: vi.fn(),
+  deleteConversation: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({
@@ -59,7 +60,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   createConversation: hoisted.createConversation,
   getConversationById: hoisted.getConversationById,
   listConversations: vi.fn(),
-  deleteConversation: vi.fn(),
+  deleteConversation: hoisted.deleteConversation,
   executeAgentChat: vi.fn(),
   executePlaygroundChat: vi.fn(),
 }));
@@ -350,6 +351,88 @@ describe('POST /responses — an agent target, streamed', () => {
     expect(res.statusCode).toBe(400);
     expect(error(res)).toMatchObject({ code: 'unsupported_parameter', param: 'service_tier' });
     expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /responses — bodies, admission and refusals', () => {
+  it('a body that is not JSON, empty, or not an object is a 400 invalid_json in the OpenAI envelope (bodies arrive as strings)', async () => {
+    const raw = await createFastifyApiTestApp(async (instance) => {
+      instance.removeContentTypeParser('application/json');
+      instance.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+      await instance.register(clientAgentsApiPlugin);
+    });
+    try {
+      for (const url of ['/api/client/v1/responses', '/api/client/v1/agents/responses']) {
+        for (const payload of ['{', '', '[]']) {
+          const res = await raw.inject({ method: 'POST', url, headers: HEADERS, payload });
+          expect(res.statusCode, `${url} ${JSON.stringify(payload)}`).toBe(400);
+          expect(error(res), url).toMatchObject({ type: 'invalid_request_error', code: 'invalid_json' });
+        }
+      }
+      expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+      expect(hoisted.handleChatCompletion).not.toHaveBeenCalled();
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it('stream over the active-run cap: a plain 429 with Retry-After before the stream opens, no session created', async () => {
+    hoisted.getDatabase.mockResolvedValue(createMockDb({ countActiveAgentRuns: vi.fn().mockResolvedValue(LIMITS.maxActivePerTenant) } as never));
+    const res = await post({ model: 'agent:support', input: 'hello', stream: true });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.headers['retry-after']).toBe('30');
+    expect(error(res)).toMatchObject({ type: 'rate_limit_error', code: 'agent_run_concurrency_limit' });
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('a refused start removes the session the request created: sync (429 + Retry-After) and stream (409 error event)', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10, scope: 'tenant', runClass: 'default' });
+    const res = await post({ model: 'agent:support', input: 'hello' });
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('30');
+    expect(hoisted.deleteConversation).toHaveBeenCalledWith('tenant_acme', 'conv-1');
+
+    hoisted.deleteConversation.mockClear();
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
+    await post({ model: 'agent:support', input: 'hello', stream: true });
+    expect(hoisted.deleteConversation).toHaveBeenCalledWith('tenant_acme', 'conv-1');
+  });
+
+  it('a refused start on a continued session leaves the session alone', async () => {
+    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-9', agentKey: 'support', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
+    const res = await post({ model: 'agent:support', input: 'hello', conversation: 'conv-9' });
+    expect(res.statusCode).toBe(409);
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.deleteConversation).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /responses/{id} — the object read back', () => {
+  const read = async (row: Record<string, unknown>) => {
+    hoisted.getAgentRunStatus.mockResolvedValue(row);
+    const res = await app.inject({ method: 'GET', url: '/api/client/v1/responses/resp_r7', headers: HEADERS });
+    expect(res.statusCode).toBe(200);
+    return parseJsonBody<Record<string, any>>(res.body);
+  };
+
+  it('background is what the Responses request asked for: a flex call is queued but not background', async () => {
+    expect(await read(run({ channel: 'responses', mode: 'background', runClass: 'deferred', status: 'queued' }))).toMatchObject({ service_tier: 'flex', background: false });
+    expect(await read(run({ channel: 'responses', mode: 'background', runClass: 'deferred', status: 'queued', background: true }))).toMatchObject({ background: true });
+    // A run another surface queued is background.
+    expect(await read(run({ channel: 'runs', mode: 'background', status: 'queued' }))).toMatchObject({ background: true });
+  });
+
+  it('usage carries its detail objects, zero when the run did not report them', async () => {
+    const usage = (await read(run({ status: 'succeeded', result: { status: 'completed', output: [], usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 } } }))).usage;
+    expect(usage).toEqual({ input_tokens: 4, output_tokens: 2, total_tokens: 6, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } });
+    const reported = (await read(run({
+      status: 'succeeded',
+      result: { status: 'completed', output: [], usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6, input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 1 } } },
+    }))).usage;
+    expect(reported).toMatchObject({ input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 1 } });
   });
 });
 

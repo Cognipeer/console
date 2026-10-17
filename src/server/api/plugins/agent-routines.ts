@@ -68,6 +68,7 @@ import {
   readIdempotencyKey,
   resolvePublishedAgentConfig,
   sendRunAccepted,
+  clientGoneSignal,
 } from './agent-invocation';
 import { requireScopedAgent } from './agents';
 import { parsePreferHeader, parseTimestamp, parseWaitSeconds } from './client-agent-runs';
@@ -493,7 +494,7 @@ async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, calle
         void reply.header('Preference-Applied', prefer.respondAsync ? 'respond-async' : `wait=${Math.round(waitMs / 1000)}`);
       }
       const run = waitMs > 0 && isAgentRunActive(fired.run)
-        ? (await waitForAgentRun({ ...caller.scope, runId: String(fired.run._id) }, waitMs)) ?? fired.run
+        ? (await waitForAgentRun({ ...caller.scope, runId: String(fired.run._id) }, waitMs, clientGoneSignal(reply))) ?? fired.run
         : fired.run;
       return isAgentRunActive(run) ? sendRunAccepted(reply, run) : reply.code(200).send(serializeAgentRun(run));
     }

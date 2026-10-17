@@ -21,7 +21,7 @@ import type {
 } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
-import { createConversation, getAgentByKey } from '@/lib/services/agents';
+import { createConversation, deleteConversation, getAgentByKey } from '@/lib/services/agents';
 import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
@@ -29,6 +29,7 @@ import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   RESERVED_IDEMPOTENCY_PREFIXES,
   agentDefaultCallback,
+  agentRunCapacityPrecheck,
   agentRunConcurrencyLimitErrorBody,
   agentRunConflictErrorBody,
   isReservedIdempotencyKey,
@@ -37,10 +38,14 @@ import {
   publicAgentRunId,
   resolveAgentRunLimits,
   serializeAgentRun,
+  startAgentRun,
   validateCallbackRequest,
   type AgentRunLimits,
+  type StartAgentRunInput,
   type StartAgentRunOutcome,
 } from '@/lib/services/agents/agentRunService';
+import { AgentQuotaExceededError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { peekAgentRunQuota } from '@/lib/services/agents/agentQuota';
 import { resolveAgentConfig } from '@/lib/services/agents/agentService';
 import { resolveRunInputs } from '@/lib/services/agents/agentInputs';
 import { resolveResponseFormatSchema } from '@/lib/services/agents/agentRuntimeConfig';
@@ -55,7 +60,7 @@ import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/se
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { createLogger } from '@/lib/core/logger';
-import { authorizeServiceForRequest, getHeaderValue, serviceRefusalError } from '../fastify-utils';
+import { authorizeServiceForRequest, getHeaderValue, readJsonBody, serviceRefusalError } from '../fastify-utils';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import {
   AgentModelError,
@@ -111,9 +116,32 @@ const invalid = (message: string, code: string, param?: string): InvocationFailu
   status: 400, type: 'invalid_request_error', message, code, ...(param ? { param } : {}),
 });
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 function fail(reply: FastifyReply, dialect: InvocationDialect, failure: InvocationFailure): null {
   sendInvocationFailure(reply, dialect, failure);
   return null;
+}
+
+/**
+ * The request's JSON object body; a body that is not one (empty, malformed, or JSON that is not an object)
+ * is a 400 `invalid_json` in the dialect's envelope, not a server error.
+ */
+export function readInvocationBody(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  dialect: InvocationDialect,
+): Record<string, unknown> | null {
+  let body: unknown;
+  try {
+    body = readJsonBody<unknown>(request);
+  } catch (error) {
+    if (error instanceof SyntaxError) return fail(reply, dialect, invalid('The body is not valid JSON', 'invalid_json'));
+    throw error;
+  }
+  if (!isPlainObject(body)) return fail(reply, dialect, invalid('The body must be a JSON object', 'invalid_json'));
+  return body;
 }
 
 // ── Agent + version ──────────────────────────────────────────────────────
@@ -148,13 +176,30 @@ export async function resolveInvocationAgent(
   agentKey: string,
   versionValue: unknown,
 ): Promise<ResolvedInvocationAgent | null> {
-  const requested = parseRequestedVersion(versionValue);
-  if ('error' in requested) return fail(reply, dialect, invalid(requested.error, 'invalid_version', 'version'));
+  if ('error' in parseRequestedVersion(versionValue)) return resolveInvocationVersion(reply, dialect, ctx, null, versionValue);
   const agent = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
   if (!agent) {
     return fail(reply, dialect, { status: 404, type: 'not_found_error', message: `Agent "${agentKey}" not found`, code: 'agent_not_found' });
   }
   if (agent.status !== 'active') return fail(reply, dialect, invalid('Agent is not active', 'agent_inactive'));
+  return resolveInvocationVersion(reply, dialect, ctx, agent, versionValue);
+}
+
+/**
+ * The version of `agent` a request runs (`version`: a positive integer, a numeric string, `"draft"`, or
+ * absent): 400 `invalid_version` for anything else, 404 `version_not_found` for a version that does not exist.
+ * `agent` null only checks the value (the refusal it answers with is the same).
+ */
+export async function resolveInvocationVersion(
+  reply: FastifyReply,
+  dialect: InvocationDialect,
+  ctx: Pick<ApiTokenContext, 'tenantDbName' | 'projectId'>,
+  agent: IAgent | null,
+  versionValue: unknown,
+): Promise<ResolvedInvocationAgent | null> {
+  const requested = parseRequestedVersion(versionValue);
+  if ('error' in requested) return fail(reply, dialect, invalid(requested.error, 'invalid_version', 'version'));
+  if (!agent) return null;
   if (requested.version !== undefined) {
     try {
       await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId, requested.version);
@@ -465,9 +510,6 @@ export function parseRunMetadata(value: unknown): { ok: true; metadata: Record<s
   return { ok: true, metadata: entries.length > 0 ? Object.fromEntries(entries) as Record<string, string> : null };
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 /**
  * A per-request structured output, in either spelling: chat's
  * `{ type: 'json_schema', json_schema: { name, schema, strict } }` or the
@@ -573,6 +615,8 @@ export function parseRunInputs(value: unknown): { ok: true; inputs: Record<strin
 export interface PreparedInvocationSession {
   conversationId: string;
   conversation: IAgentConversation;
+  /** This request created the session (it did not continue one): a start the engine refuses removes it again. */
+  created: boolean;
   /** Ids of the session files the message attaches. */
   attachments: string[];
   /** The part of `attachments` the caller named by id (what makes a retry "the same"). */
@@ -595,6 +639,7 @@ export async function prepareInvocationSession(
   },
 ): Promise<PreparedInvocationSession> {
   let conversation = input.conversation;
+  const created = !conversation;
   if (!conversation) {
     conversation = await createConversation(
       ctx.tenantDbName,
@@ -625,7 +670,7 @@ export async function prepareInvocationSession(
     attachments = stored.attachments;
     namedAttachments = stored.named;
   }
-  return { conversationId: String(conversation._id), conversation, attachments, namedAttachments };
+  return { conversationId: String(conversation._id), conversation, created, attachments, namedAttachments };
 }
 
 export function invocationApiTokenId(ctx: ApiTokenContext): string | undefined {
@@ -643,18 +688,133 @@ export function invocationRuntimeContext(request: FastifyRequest, ctx: ApiTokenC
 
 // ── Replies ──────────────────────────────────────────────────────────────
 
+/** Seconds a caller refused by the run concurrency cap is told to wait (`Retry-After`). */
+export const CONCURRENCY_RETRY_AFTER_SECONDS = 30;
+/** Seconds a caller refused by its agent-run quota is told to wait (`Retry-After`). */
+export const QUOTA_RETRY_AFTER_SECONDS = 60;
+
+/** A start refused before it ran: the status, the body (client envelope) and when to try again. */
+export interface RunRefusal {
+  status: number;
+  body: unknown;
+  retryAfterSeconds?: number;
+}
+
 /** The 409 / 429 a start outcome is refused with (client envelope; `openAiEnvelopeOf` for OpenAI), or null for a run. */
-export function runOutcomeRefusal(outcome: StartAgentRunOutcome): { status: number; body: unknown } | null {
+export function runOutcomeRefusal(outcome: StartAgentRunOutcome): RunRefusal | null {
   switch (outcome.kind) {
     case 'conflict':
       return { status: 409, body: agentRunConflictErrorBody() };
     case 'idempotency_conflict':
       return { status: 409, body: idempotencyKeyConflictErrorBody() };
     case 'concurrency_limit':
-      return { status: 429, body: agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass) };
+      return {
+        status: 429,
+        body: agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass),
+        retryAfterSeconds: CONCURRENCY_RETRY_AFTER_SECONDS,
+      };
     default:
       return null;
   }
+}
+
+/** Sends a refused start in the dialect's envelope, `Retry-After` included when it has one. */
+export function sendRunRefusal(reply: FastifyReply, dialect: InvocationDialect, refusal: RunRefusal): FastifyReply {
+  if (refusal.retryAfterSeconds) void reply.header('Retry-After', String(refusal.retryAfterSeconds));
+  return reply.code(refusal.status).send(dialect === 'openai' ? openAiEnvelopeOf(refusal.body) : refusal.body);
+}
+
+/**
+ * Before a stream opens (and before a session is created for it): is the tenant or project at its run cap, or
+ * the caller at its agent-run quota? A cheap read that reserves nothing, so the refusal can still be a plain 429
+ * with `Retry-After`. Not binding: the run start checks again, and a race between the two still ends in the
+ * stream's in-band error. True when refused (the reply is sent).
+ */
+export async function refuseStreamAdmission(
+  reply: FastifyReply,
+  dialect: InvocationDialect,
+  ctx: ApiTokenContext,
+  agentKey: string,
+  limits: AgentRunLimits,
+): Promise<boolean> {
+  const cap = await agentRunCapacityPrecheck({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, limits });
+  if (cap) {
+    sendRunRefusal(reply, dialect, runOutcomeRefusal({ kind: 'concurrency_limit', ...cap, runClass: 'default' })!);
+    return true;
+  }
+  try {
+    await peekAgentRunQuota({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      agentKey,
+      userId: ctx.tokenRecord.userId,
+      tokenId: invocationApiTokenId(ctx),
+    });
+  } catch (error) {
+    if (!(error instanceof AgentQuotaExceededError)) throw error;
+    const classified = classifyAgentRunError(error);
+    sendRunRefusal(reply, dialect, { status: classified.status, body: { error: classified.error }, retryAfterSeconds: QUOTA_RETRY_AFTER_SECONDS });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Removes a session this request created when its run was refused before it existed (a cap, a conflict, the
+ * quota, the spend limit): a client retrying a refusal must not leave one empty session per attempt. Its
+ * files go with it. Best effort: the refusal is the answer either way.
+ */
+export async function discardRefusedSession(tenantDbName: string, conversationId: string): Promise<void> {
+  try {
+    await deleteConversation(tenantDbName, conversationId);
+  } catch (error) {
+    logger.warn('Could not remove the session of a refused run start', {
+      conversationId, error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * `startAgentRun` on a session the request prepared. When the request created the session, a start the
+ * engine refuses, or one that throws before its run exists, removes it again; a continued session is never
+ * removed. A run that exists keeps its session, however it ends.
+ */
+export async function startRunOnSession(
+  input: StartAgentRunInput,
+  session: { tenantDbName: string; conversationId: string; created: boolean },
+): Promise<StartAgentRunOutcome> {
+  if (!session.created) return startAgentRun(input);
+  const state = { started: false };
+  const execution = input.execution.kind === 'inline'
+    ? {
+      ...input.execution,
+      onStarted: (run: IAgentRun) => {
+        state.started = true;
+        if (input.execution.kind === 'inline') input.execution.onStarted?.(run);
+      },
+    }
+    : input.execution;
+  let outcome: StartAgentRunOutcome;
+  try {
+    outcome = await startAgentRun({ ...input, execution });
+  } catch (error) {
+    // Inline: thrown before the run was started; queued: no row is kept for a start that throws.
+    if (!state.started) await discardRefusedSession(session.tenantDbName, session.conversationId);
+    throw error;
+  }
+  if (runOutcomeRefusal(outcome)) await discardRefusedSession(session.tenantDbName, session.conversationId);
+  return outcome;
+}
+
+/** Aborted when the client goes away before its answer was sent (a long-poll then stops polling). */
+export function clientGoneSignal(reply: FastifyReply): AbortSignal {
+  const controller = new AbortController();
+  const raw = reply.raw;
+  raw.once('close', () => {
+    if (!raw.writableFinished) controller.abort();
+  });
+  return controller.signal;
 }
 
 /** The runs API URL of a run (`Location` of every 202). */
