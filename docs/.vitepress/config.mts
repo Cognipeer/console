@@ -1,3 +1,6 @@
+import { copyFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitepress';
 
 const docsBase = process.env.GITHUB_PAGES === 'true' ? '/console/' : '/';
@@ -30,6 +33,10 @@ export default defineConfig({
   description:
     'Open-source, self-hosted AI gateway: LLM routing, RAG, MCP hub, GPU fleet, sandboxes, AI red-teaming, guardrails, and cost optimization for multi-tenant orgs.',
   base: docsBase,
+  // The canonical OpenAPI document lives in the repository root; the site serves a copy next to the pages.
+  buildEnd: ({ outDir }) => {
+    copyFileSync(fileURLToPath(new URL('../../openapi.yaml', import.meta.url)), join(outDir, 'openapi.yaml'));
+  },
   // Kept strict on purpose. This was `true`, and it was quietly hiding a whole
   // sidebar section's worth of links to pages that did not exist yet.
   ignoreDeadLinks: false,

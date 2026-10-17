@@ -51,6 +51,9 @@ jobs:
       - name: Endpoint auth-coverage gate
         run: npm run test:endpoints
 
+      - name: OpenAPI route gate
+        run: npm run test:openapi
+
       - name: Build docs
         run: npm run docs:build
 

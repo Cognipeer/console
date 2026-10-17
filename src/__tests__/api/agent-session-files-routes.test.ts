@@ -795,7 +795,7 @@ describe('client Responses: input_file / input_image', () => {
     // The change is written down where clients look for it.
     const root = process.cwd();
     expect(readFileSync(join(root, 'docs/guide/session-files.md'), 'utf8')).toContain('now answers a request that carries such a part with `403 attachments_disabled`');
-    expect(readFileSync(join(root, 'docs/public/openapi.yaml'), 'utf8')).toContain('earlier releases ignored those parts and ran the text');
+    expect(readFileSync(join(root, 'openapi.yaml'), 'utf8')).toContain('The agent takes no attachments (`attachments_disabled`');
   });
 
   it('a file_id needs the session it was uploaded to (session_id, conversation or previous_response_id)', async () => {

@@ -15,6 +15,7 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
     "test:endpoints": "tsx scripts/check-endpoint-coverage.ts",
+    "test:openapi": "tsx scripts/check-openapi-routes.ts",
     "test:smoke": "node --import tsx scripts/smoke/run.ts",
     "test:flake": "tsx scripts/flake-hunter.ts",
     "format": "prettier --log-level warn --no-error-on-unmatched-pattern --write ./src/{,*/**/,*/**/**/,*/**/**/**/}*.{js,jsx,ts}",

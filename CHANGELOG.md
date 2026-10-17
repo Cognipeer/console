@@ -110,8 +110,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   [Configuration](docs/guide/configuration.md#agent-runs): `AGENT_SYNC_TIMEOUT_MS`, `AGENT_BACKGROUND_MAX_DURATION_MS`,
   `AGENT_RUN_MAX_ACTIVE_PER_TENANT` / `_PER_PROJECT` (replacing `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_*`), `AGENT_DEFERRED_*`, `AGENT_RUN_RETENTION_DAYS`, `AGENT_ROUTINE_*` and
   `AGENT_WEBHOOK_*`. `.env.example` and `docker-compose.yml` list them.
-- `docs/public/openapi.yaml` is the one canonical OpenAPI description of the client API, and CI checks that its paths and
-  the registered routes agree.
+- `openapi.yaml` in the repository root is the one canonical OpenAPI description of the client API (the copy under
+  `docs/public` is gone; the docs build publishes the root file), and CI (`npm run test:openapi`) checks that its
+  paths and the registered routes agree.
 
 ### Authorization
 
