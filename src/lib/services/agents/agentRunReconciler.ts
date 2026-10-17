@@ -31,9 +31,11 @@
  * crawler's documented failure mode) IS safe to republish as-is, since it
  * never started executing: every queued run at boot, and on each tick those
  * older than `runRequeueAfterMs`. `claimAgentRun` is a CAS, so a duplicate
- * delivery no-ops. Each republish carries the run's job dedup key
- * (`ar_<id>_<generation>`), so a job still waiting in the queue is not
- * duplicated. Deferred rows are never swept this way: the deferred dispatcher
+ * delivery no-ops. A run published within the last requeue window is left
+ * alone (its job may still be waiting), and a republish carries a job id of
+ * its own time bucket (`ar_<id>_<generation>_r<bucket>`): the queue drops a job
+ * under an id it still remembers, finished or failed, so the first id cannot be
+ * reused. Deferred rows are never swept this way: the deferred dispatcher
  * hands them out within their class cap on every tick.
  *
  * Scheduled rows (`run_at` / `delay_seconds`) are promoted to `queued` when
@@ -46,14 +48,18 @@ import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
 import { AgentRunConflictError } from '@/lib/database';
+import type { DatabaseProvider, IAgentRun } from '@/lib/database';
 import {
   AGENT_RUN_CALLBACK_MAX_ATTEMPTS,
+  agentRunRetainedUntil,
   dispatchDeferredRuns,
   fireAgentRunCallback,
   isAbandonedSyncReservation,
   publishAgentRunJob,
   redeliverAgentRunCallback,
+  resolveAgentRunLimits,
   runWithTenantDb,
+  type AgentRunLimits,
 } from './agentRunService';
 import { cleanupWebhookDeliveries, sweepDueWebhookDeliveries } from '@/lib/services/webhooks/webhookService';
 import { sweepExpiredPendingActions } from './agentActionResolution';
@@ -104,6 +110,24 @@ const EMPTY_SWEEP: SweepResult = {
   tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, promotedRuns: 0, expiredRuns: 0,
   dispatchedDeferredRuns: 0, retentionDeleted: 0, expiredActions: 0, requeuedWebhookDeliveries: 0, redeliveredCallbacks: 0,
 };
+
+/**
+ * Would one more default-class run go over the active caps of its tenant or
+ * project? Asked before a scheduled run is promoted: over the cap it stays
+ * scheduled for the next tick (a scheduled row is uncapped until then).
+ */
+async function promotionOverCap(
+  db: DatabaseProvider,
+  run: IAgentRun,
+  limitsFor: (run: IAgentRun) => Promise<AgentRunLimits>,
+): Promise<boolean> {
+  const limits = await limitsFor(run);
+  if (limits.maxActivePerTenant > 0
+    && await db.countActiveAgentRuns(run.tenantId, undefined, { runClass: 'default' }) >= limits.maxActivePerTenant) return true;
+  if (limits.maxActivePerProject > 0
+    && await db.countActiveAgentRuns(run.tenantId, run.projectId, { runClass: 'default' }) >= limits.maxActivePerProject) return true;
+  return false;
+}
 
 /** Whether a sweep did anything worth a log line. */
 function sweepDidWork(sweep: SweepResult): boolean {
@@ -178,13 +202,15 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
             continue;
           }
 
+          const completedAt = new Date();
           const finalized = await tenantDb.finalizeAgentRun(runId, tenantId, {
             status: 'failed',
             errorReason: 'worker_lost',
             errorMessage: ORPHANED_RUNNING_MESSAGE,
             stopReason: 'error',
-            completedAt: new Date(),
+            completedAt,
             runtimeContext: null,
+            expiresAt: agentRunRetainedUntil(completedAt),
           });
           if (finalized) {
             failedRunningRuns += 1;
@@ -197,12 +223,35 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
         }
 
-        // Scheduled runs that came due. A default-class run is published at once;
-        // a deferred one waits for the dispatcher below.
+        // Scheduled runs that came due. A default-class run is published at once,
+        // within its class's active caps (min(env, tenant quota) for whom it
+        // counts against); a deferred one waits for the dispatcher below.
+        const limitsCache = new Map<string, Promise<AgentRunLimits>>();
+        const limitsFor = (run: IAgentRun): Promise<AgentRunLimits> => {
+          const userId = run.accountableUserId ?? run.userId;
+          const tokenId = run.accountableUserId ? run.accountableTokenId ?? undefined : run.apiTokenId;
+          const key = `${run.projectId}:${userId ?? ''}:${tokenId ?? ''}`;
+          let limits = limitsCache.get(key);
+          if (!limits) {
+            limits = resolveAgentRunLimits({
+              quotaContext: {
+                tenantDbName: tenant.dbName!,
+                tenantId,
+                projectId: run.projectId,
+                ...(tenant.licenseType ? { licenseType: tenant.licenseType as never } : {}),
+                ...(userId ? { userId } : {}),
+                ...(tokenId ? { tokenId } : {}),
+              },
+            });
+            limitsCache.set(key, limits);
+          }
+          return limits;
+        };
         const due = await tenantDb.listDueScheduledAgentRuns(tenantId, new Date(now), SCHEDULED_BATCH);
         for (const run of due) {
           const runId = String(run._id);
           try {
+            if (run.runClass !== 'deferred' && await promotionOverCap(tenantDb, run, limitsFor)) continue;
             const promoted = await tenantDb.promoteScheduledAgentRun(runId, tenantId);
             if (!promoted) continue;
             promotedRuns += 1;
@@ -223,7 +272,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           limit: SCHEDULED_BATCH,
         });
         for (const run of expired) {
-          const finalized = await tenantDb.expireWaitingAgentRun(String(run._id), tenantId, EXPIRED_RUN_MESSAGE);
+          const finalized = await tenantDb.expireWaitingAgentRun(String(run._id), tenantId, EXPIRED_RUN_MESSAGE, agentRunRetainedUntil());
           if (!finalized) continue;
           expiredRuns += 1;
           await fireAgentRunCallback(finalized, 'failed', { errorReason: 'expired', message: EXPIRED_RUN_MESSAGE }).catch((error) => {
@@ -236,8 +285,10 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
 
         const queued = await tenantDb.listQueuedAgentRuns(tenantId, { createdBefore: requeueBefore, limit: REQUEUE_BATCH });
         for (const run of queued) {
+          // Published within the last requeue window: its job may still be waiting (at boot every run goes again).
+          if (requeueBefore && run.lastPublishedAt && new Date(run.lastPublishedAt).getTime() > requeueBefore.getTime()) continue;
           try {
-            await publishAgentRunJob(run);
+            await publishAgentRunJob(run, { republish: true });
             requeuedRuns += 1;
           } catch (error) {
             logger.warn('Failed to republish a queued agent run', {

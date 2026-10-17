@@ -18,6 +18,21 @@ import { applyStreamHeaders } from '../fastify-utils';
 
 const logger = createLogger('api:agent-session-events');
 
+/** The session event streams open on this node, ended at shutdown (`closeSessionEventStreams`). */
+const openEventStreams = new Set<AbortController>();
+
+/**
+ * Ends every session event stream open on this node — at shutdown, once the
+ * agent runs are drained: a follower never ends by itself and would hold the
+ * HTTP server open. Each client reconnects (Last-Event-ID) to another node.
+ */
+export function closeSessionEventStreams(): number {
+  const count = openEventStreams.size;
+  for (const controller of openEventStreams) controller.abort();
+  openEventStreams.clear();
+  return count;
+}
+
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 1_000;
 
@@ -140,6 +155,7 @@ export async function streamSessionEvents(
 
   const controller = new AbortController();
   reply.raw.on('close', () => controller.abort());
+  openEventStreams.add(controller);
 
   const writeRaw = (chunk: string) => {
     if (controller.signal.aborted) return;
@@ -173,6 +189,7 @@ export async function streamSessionEvents(
     logger.warn('Session event stream failed', { conversationId, error: error instanceof Error ? error.message : String(error) });
     writeRaw(`event: error\ndata: ${JSON.stringify({ error: 'event stream failed' })}\n\n`);
   } finally {
+    openEventStreams.delete(controller);
     if (!reply.raw.writableEnded) reply.raw.end();
   }
   return reply;

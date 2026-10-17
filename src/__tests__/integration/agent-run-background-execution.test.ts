@@ -822,6 +822,7 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       conversationId: 'conv-resume',
       userId: 'user-1',
       resumeActionIds: ['act_1'],
+      ownerRunId: String(run._id),
     });
     expect(outcome.kind).toBe('queued');
     if (outcome.kind !== 'queued') return;
@@ -863,7 +864,7 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
 
       const outcome = await queueAgentRunResume({
         tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: 'conv-ext-resume',
-        userId: 'system:routine:rt1', resumeActionIds: ['act_1'],
+        userId: 'system:routine:rt1', resumeActionIds: ['act_1'], ownerRunId: String(run._id),
       });
       expect(outcome.kind).toBe('queued');
       if (outcome.kind !== 'queued') return;

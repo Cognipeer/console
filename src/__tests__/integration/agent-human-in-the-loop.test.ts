@@ -65,7 +65,8 @@ import {
   type ApprovalRequest,
   type ResolveActor,
 } from '@/lib/services/agents/agentActionResolution';
-import { runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
+import { RESUME_TIMEOUT_ACTOR, runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
+import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTruncate';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
@@ -1452,5 +1453,155 @@ describe('the pending action as stored', () => {
     const open: IAgentPendingAction[] = await db.listAgentPendingActions(id, { status: 'pending' });
     expect(open).toHaveLength(1);
     expect(open[0]).toMatchObject({ tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, kind: 'tool_approval' });
+  });
+});
+
+describe('a paused run follows its pause', () => {
+  const callbackJobs = () => hoisted.publish.mock.calls
+    .filter((call) => call[1] === 'callback')
+    .map((call) => call[2] as { runId: string; event: string });
+  const webhookTypes = () => hoisted.publishWebhook.mock.calls.map(([input]) => (input as { type: string }).type);
+  const expire = (actionId: string) => db.updateAgentPendingAction(actionId, { expiresAt: new Date(Date.now() - 60_000) });
+
+  /** A queued run (with a callback) that paused on one approval. */
+  const pausedQueuedRun = async (id: string) => {
+    const created = await queueAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'list files', userId: OWNER, callbackUrl: 'https://example.com/hook',
+    });
+    if (created.kind !== 'accepted') throw new Error(created.kind);
+    const runId = String(created.run._id);
+    await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
+    expect(action.runId).toBe(runId);
+    hoisted.publish.mockClear();
+    hoisted.publishWebhook.mockClear();
+    return { runId, actionId: String(action._id) };
+  };
+
+  /** A run row left paused on the conversation by an earlier turn, owned by somebody else. */
+  const stalePausedRun = async (id: string) => {
+    const run = await db.createAgentRun({
+      mode: 'background', tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'earlier', status: 'running', callbackAttempts: 0,
+      userId: 'user-a', callbackUrl: 'https://a.example/cb',
+    });
+    await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+    return String(run._id);
+  };
+  const statusOf = async (runId: string) => (await db.getAgentRunById(runId, tenantId, PROJECT_ID))!;
+
+  it('a new message that drops the pause (cancel_pending) ends the paused run canceled, with its callback and webhook event', async () => {
+    await createAgent({ humanInTheLoop: { ...HITL_ON, onUserMessageWhilePending: 'cancel_pending' } });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const { runId } = await pausedQueuedRun(id);
+
+    await chat(id, 'never mind, say hi');
+
+    expect(await statusOf(runId)).toMatchObject({ status: 'canceled', errorReason: 'canceled_by_caller', stopReason: 'cancelled' });
+    expect(callbackJobs()).toEqual([expect.objectContaining({ runId, event: 'canceled' })]);
+    expect(webhookTypes()).toContain('agent_run.canceled');
+  });
+
+  it('a session truncate that drops the pause ends the paused run canceled, with its callback', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const { runId } = await pausedQueuedRun(id);
+
+    await truncateSessionAfterMessage({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, keepThrough: -1,
+      actor: { userId: OWNER, channel: 'api' },
+    });
+
+    expect(await statusOf(runId)).toMatchObject({ status: 'canceled', errorReason: 'canceled_by_caller' });
+    expect(callbackJobs()).toEqual([expect.objectContaining({ runId, event: 'canceled' })]);
+  });
+
+  it('a timeout that cancels the pause (onTimeout "cancel") fires the run callback and the agent_run.canceled event', async () => {
+    await createAgent({ humanInTheLoop: { ...HITL_ON, onTimeout: 'cancel' } });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const { runId, actionId } = await pausedQueuedRun(id);
+    await expire(actionId);
+
+    expect(await sweepExpiredPendingActions(db, DB_NAME, new Date())).toMatchObject({ expired: 1 });
+
+    expect(await statusOf(runId)).toMatchObject({ status: 'canceled', stopReason: 'cancelled' });
+    expect(callbackJobs()).toEqual([expect.objectContaining({ runId, event: 'canceled' })]);
+    expect(webhookTypes()).toContain('agent_run.canceled');
+  });
+
+  it('answered inline, the continuation is the paused run\'s: it settles only that run, writes its events with the run id and answers resp_<runId>', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const stale = await stalePausedRun(id);
+    const { runId, actionId } = await pausedQueuedRun(id);
+
+    const outcome = await resolve(id, actionId, { decision: 'allow' });
+    expect(outcome.kind).toBe('resumed');
+    if (outcome.kind !== 'resumed') return;
+    expect(outcome.runId).toBe(runId);
+    expect(outcome.response.id).toBe(`resp_${runId}`);
+
+    expect(await statusOf(runId)).toMatchObject({ status: 'succeeded' });
+    // The other paused row is not this pause's: it is neither settled nor sent this run's answer.
+    expect(await statusOf(stale)).toMatchObject({ status: 'requires_action' });
+    expect(callbackJobs().map((job) => job.runId)).toEqual([runId]);
+
+    const runEvents = await db.listAgentSessionEvents(id, { runId });
+    expect(runEvents.map((event) => event.type)).toContain('agent.tool_result');
+    expect(runEvents.filter((event) => event.type === 'session.status_idle').at(-1)?.data).toMatchObject({ stopReason: 'end_turn' });
+  });
+
+  it('answered with another request of the pause still open, the answer names the paused run', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const { runId, actionId } = await pausedQueuedRun(id);
+    // A second request of the same pause, still open.
+    await db.createAgentPendingActions([{
+      tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, runId, kind: 'tool_approval',
+      sdkId: 'sdk-second', toolCallId: 'c2', toolName: 'sandbox_exec', args: { command: 'two' },
+      status: 'pending', requestedAt: new Date(), createdBy: OWNER,
+    }]);
+
+    const outcome = await resolve(id, actionId, { decision: 'allow' });
+    expect(outcome).toMatchObject({ kind: 'pending', runId });
+  });
+
+  it('a pause no run owns (a dashboard turn) is continued by a new run, never by another paused row of the session', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const stale = await stalePausedRun(id);
+    const paused = await chat(id, 'go');
+    const actionId = paused.required_action!.actions[0].id;
+
+    const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'background');
+    expect(outcome.kind).toBe('queued');
+    if (outcome.kind !== 'queued') return;
+    expect(String(outcome.run._id)).not.toBe(stale);
+    expect(outcome.run.userId).toBe(OWNER);
+    expect(await statusOf(stale)).toMatchObject({ status: 'requires_action', userId: 'user-a' });
+  });
+
+  it('a timeout "deny" continuation of a paused run is recorded as a timeout, answered by the timeout actor', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const { runId, actionId } = await pausedQueuedRun(id);
+    await expire(actionId);
+
+    expect(await sweepExpiredPendingActions(db, DB_NAME, new Date())).toMatchObject({ denied: 1, continued: 1 });
+    const requeued = await statusOf(runId);
+    expect(requeued).toMatchObject({ status: 'queued', userId: OWNER, resumeTrigger: 'timeout', resumeUserId: RESUME_TIMEOUT_ACTOR });
+
+    await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    expect(await statusOf(runId)).toMatchObject({ status: 'succeeded' });
+    const running = (await db.listAgentSessionEvents(id, { runId })).filter((event) => event.type === 'session.status_running');
+    expect(running.at(-1)?.data).toMatchObject({ trigger: 'timeout' });
   });
 });

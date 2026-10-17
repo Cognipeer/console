@@ -4778,10 +4778,34 @@ export interface IAgentRun extends IUsageAttributionFields {
   callbackStatus?: AgentRunCallbackStatus | null;
   /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
   callbackAttempts?: number;
+  /**
+   * The event id (`evt_…`) `callbackStatus` / `callbackAttempts` belong to: a
+   * delivery job of an older event of the run does not write over them.
+   */
+  callbackEventId?: string | null;
+  /**
+   * Set while the run is queued to continue a paused turn: what continues it
+   * (`resume` = somebody answered, `timeout` = the timeout sweep) and who
+   * answered (user and API token). The worker reads them.
+   */
+  resumeTrigger?: 'resume' | 'timeout' | null;
+  resumeUserId?: string | null;
+  resumeApiTokenId?: string | null;
+  /**
+   * The principal whose spend and quota policies the run counts against when
+   * its owner is a synthetic actor (a routine fire): the routine's last
+   * updater (or creator), or the person and token that pressed Run now.
+   */
+  accountableUserId?: string | null;
+  accountableTokenId?: string | null;
   createdAt?: Date;
   startedAt?: Date | null;
   completedAt?: Date | null;
-  /** Retention cutoff (§12.10) — userMessage/result are not kept indefinitely. */
+  /**
+   * Retention cutoff (§12.10) — userMessage/result are not kept indefinitely.
+   * Counted from the run's earliest possible end at insert, and again from
+   * `completedAt` once the run is terminal.
+   */
   expiresAt?: Date | null;
   updatedAt?: Date;
 }

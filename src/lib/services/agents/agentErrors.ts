@@ -150,6 +150,25 @@ export class AgentRunTimeoutError extends Error {
 }
 
 /**
+ * An inline run whose row was ended elsewhere while the caller was still
+ * waiting on it: the shutdown drain (`interrupted`), the reconciler
+ * (`worker_lost`), or a cancel. The caller gets the row's outcome, never the
+ * partial answer the turn had produced (it was not stored).
+ */
+export class AgentRunInterruptedError extends Error {
+    readonly status = 503;
+    readonly code = 'agent_run_interrupted';
+    /** The row's `errorReason` (`interrupted`, `worker_lost`, `canceled_by_caller`, …). */
+    readonly reason: string;
+
+    constructor(reason: string, message?: string | null) {
+        super(message || 'The agent run was stopped before it finished. It was not completed; retry it.');
+        this.name = 'AgentRunInterruptedError';
+        this.reason = reason;
+    }
+}
+
+/**
  * The tenant's daily / monthly spend limit is used up, so the turn does not
  * start. Answered 429 in the gateway's own error shape (`rate_limit_error`).
  */
@@ -235,6 +254,13 @@ export function classifyAgentRunError(
         return {
             status: 504,
             error: { message: error.message, type: 'timeout', code: error.code, side_effects_possible: true, retryable: false },
+        };
+    }
+
+    if (error instanceof AgentRunInterruptedError) {
+        return {
+            status: 503,
+            error: { message: error.message, type: 'server_error', code: error.code, side_effects_possible: true, retryable: true },
         };
     }
 

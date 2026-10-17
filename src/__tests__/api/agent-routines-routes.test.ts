@@ -278,7 +278,11 @@ describe('client API: /client/v1/agents/:agentKey/routines', () => {
       const [routine, tenant, input] = hoisted.fireRoutine.mock.calls[0];
       expect(String(routine._id)).toBe(id);
       expect(tenant).toMatchObject({ tenantDbName: DB_NAME, tenantId });
-      expect(input).toEqual({ trigger: 'manual', message: 'Summarise.', inputs: { region: 'eu', days: 3 }, metadata: { reason: 'manual' }, idempotencyKey: 'k-1' });
+      // Run now counts against the person and the token that pressed it.
+      expect(input).toEqual({
+        trigger: 'manual', message: 'Summarise.', inputs: { region: 'eu', days: 3 }, metadata: { reason: 'manual' }, idempotencyKey: 'k-1',
+        principal: { userId: 'user-1', apiTokenId: 'tok-1' },
+      });
       expect(hoisted.waitForAgentRun).not.toHaveBeenCalled();
     });
 

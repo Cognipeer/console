@@ -14,7 +14,7 @@ const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   publish: vi.fn(),
   publishWebhook: vi.fn(),
-  spendCheck: { refuse: false },
+  spendCheck: { refuse: false, calls: [] as Array<{ userId?: string }> },
   db: { current: null as unknown },
 }));
 
@@ -34,6 +34,7 @@ vi.mock('@/lib/services/agents/agentSpendLimits', async (importOriginal) => {
   return {
     ...actual,
     assertQueuedTurnSpendAllowed: async (...args: Parameters<typeof actual.assertQueuedTurnSpendAllowed>) => {
+      hoisted.spendCheck.calls.push(args[0]);
       if (hoisted.spendCheck.refuse) throw new AgentSpendLimitError('Spend limit reached' as never);
       return actual.assertQueuedTurnSpendAllowed(...args);
     },
@@ -83,6 +84,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   resetRoutineEventThrottle();
   hoisted.spendCheck.refuse = false;
+  hoisted.spendCheck.calls = [];
   tmpDir = mkdtempSync(path.join(tmpdir(), 'agent-routines-'));
   db = new SQLiteProvider(tmpDir, 'test_main');
   await db.connect();
@@ -211,6 +213,30 @@ describe('fireRoutine (§2.4a)', () => {
     expect(result).toMatchObject({ kind: 'spend_limit', reason: 'spend limit reached' });
     expect(await conversations()).toHaveLength(0);
     expect((await reload(routine)).lastStatus ?? null).toBeNull();
+  });
+
+  it('a scheduled fire is accountable to the routine\'s last updater (else its creator); the session stays the routine\'s', async () => {
+    const routine = await newRoutine();
+    await updateAgentRoutine(scope(), routine, { prompt: 'Summarise again.' }, 'user-2');
+    const result = await fireRoutine(await reload(routine), tenant(), { trigger: 'schedule', message: 'x' });
+    expect(result.kind).toBe('accepted');
+    const [run] = await routineRuns(String(routine._id));
+    expect(run).toMatchObject({ userId: `system:routine:${String(routine._id)}`, accountableUserId: 'user-2' });
+    expect(hoisted.spendCheck.calls.at(-1)).toMatchObject({ userId: 'user-2' });
+
+    const fresh = await newRoutine({ name: 'Fresh' });
+    await fireRoutine(fresh, tenant(), { trigger: 'schedule', message: 'x' });
+    const [freshRun] = await routineRuns(String(fresh._id));
+    expect(freshRun).toMatchObject({ accountableUserId: 'user-1' });
+    expect(hoisted.spendCheck.calls.at(-1)).toMatchObject({ userId: 'user-1' });
+  });
+
+  it('Run now is accountable to its caller and the caller\'s token', async () => {
+    const routine = await newRoutine();
+    await fireRoutine(routine, tenant(), { trigger: 'manual', message: 'x', principal: { userId: 'user-3', apiTokenId: 'tok-3' } });
+    const [run] = await routineRuns(String(routine._id));
+    expect(run).toMatchObject({ accountableUserId: 'user-3', accountableTokenId: 'tok-3' });
+    expect(hoisted.spendCheck.calls.at(-1)).toMatchObject({ userId: 'user-3' });
   });
 
   it('too many metadata keys together is a failed fire', async () => {

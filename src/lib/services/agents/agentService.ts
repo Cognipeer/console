@@ -241,6 +241,27 @@ import { composeUserMessageWithInputs } from './agentInputs';
 
 const logger = createLogger('agents');
 
+/**
+ * A new message dropped the session's pause (`cancel_pending`): the run that
+ * waited on it ends `canceled`, with its notifications, instead of staying
+ * `requires_action` for good. Never fails the turn.
+ */
+async function endRunsOfDroppedPause(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    scope: { tenantId: string; projectId: string; conversationId: string },
+): Promise<void> {
+    try {
+        // Loaded here: agentRunService imports this module.
+        const { cancelPausedAgentRuns } = await import('./agentRunService');
+        await cancelPausedAgentRuns(db, scope);
+    } catch (error) {
+        logger.warn('Could not end the paused run of a dropped pause', {
+            conversationId: scope.conversationId,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+}
+
 /** How many replaced answers a regenerated message remembers. */
 const MAX_PREVIOUS_VERSIONS = 5;
 
@@ -3165,6 +3186,11 @@ export interface AgentChatRequest {
     /** Ids of the conversation's files this message attaches (uploaded to the session first). */
     attachments?: string[];
     userId: string;
+    /**
+     * Whose spend limits the turn counts against when `userId` is a synthetic
+     * owner (a routine run): the routine's accountable person.
+     */
+    accountableUserId?: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
     /**
@@ -4636,7 +4662,7 @@ async function runAgentChatTurn(
     // Every turn adds its spend to the session's total — with a budget or without one.
     const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
     const spend = callsModel && config.modelKey
-        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.userId })
+        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? request.userId })
         : undefined;
     if (spend) await assertAgentTurnSpendAllowed(spend, config);
 
@@ -4658,8 +4684,9 @@ async function runAgentChatTurn(
         superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
-    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
+        await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
     }
     // Text deltas ride the caller's own stream callback: a caller that did not
     // ask for text must not switch the model call into streaming mode.
@@ -5385,8 +5412,10 @@ async function runPlaygroundChatTurn(
         })
         : undefined;
     scope.events = turnEvents;
-    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
+        && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
+        await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId: String(sessionConversation._id) });
     }
     // Text deltas ride the caller's own stream callback (see `runAgentChatTurn`).
     const onTextChunk = turnEvents && request.onTextChunk
@@ -5793,6 +5822,8 @@ export interface AgentResumeRequest {
     conversationId: string;
     /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
     userId: string;
+    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a routine run). */
+    accountableUserId?: string;
     trigger: 'resume' | 'timeout';
     /** The background run executing this continuation, when there is one. */
     runId?: string;
@@ -6100,7 +6131,7 @@ async function runAgentResumeTurn(
     const anchorAction = bySdkId.get(approvals[0]?.id ?? questions[0]?.id ?? '');
     const spend = config.modelKey
         ? await resolveAgentSpendScope({
-            tenantDbName, tenantId, projectId, userId: anchorAction?.createdBy ?? request.userId,
+            tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? anchorAction?.createdBy ?? request.userId,
         })
         : undefined;
     if (spend) await assertAgentTurnSpendAllowed(spend, config);

@@ -39,7 +39,7 @@ import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
-import { AgentRunTimeoutError, classifyAgentRunError } from './agentErrors';
+import { AgentRunInterruptedError, AgentRunTimeoutError, classifyAgentRunError } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import {
@@ -505,6 +505,11 @@ export interface StartAgentRunInput {
   userId: string;
   apiTokenId?: string;
   actorType?: IAgentRun['actorType'];
+  /**
+   * Whose spend and quota policies the run counts against when `userId` is a
+   * synthetic owner (a routine fire): kept on the row for the worker.
+   */
+  accountable?: { userId: string; apiTokenId?: string } | null;
   version?: number;
   usePublished?: boolean;
   runtimeContext?: AgentRuntimeContext;
@@ -671,6 +676,15 @@ export async function waitForAgentRun(ref: AgentRunRef, timeoutMs: number, signa
   }
 }
 
+/** The retention cutoff of a run that ends at `end`: `AGENT_RUN_RETENTION_DAYS` after it. */
+export function agentRunRetainedUntil(end: Date | number = Date.now()): Date {
+  return new Date(new Date(end).getTime() + getConfig().agent.runRetentionDays * 86_400_000);
+}
+
+/** How long an identical request waits for the run whose Idempotency-Key it lost to (the row follows the key's lock). */
+const IDEMPOTENCY_REPOLL_ATTEMPTS = 5;
+const IDEMPOTENCY_REPOLL_DELAY_MS = 100;
+
 /** Over the default class's active cap after this row's insert? (every mode counts, dashboard reservations included) */
 async function defaultClassOverCap(
   db: DatabaseProvider,
@@ -723,27 +737,45 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       return { kind: 'replay', run: existing };
     };
     const lookupKey = () => db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey!);
+    // The key is taken but its row is not there yet (an identical request is
+    // between its key lock and its row insert): wait for that row briefly.
+    const lookupTakenKey = async (): Promise<IAgentRun | null> => {
+      for (let attempt = 0; ; attempt += 1) {
+        const existing = await lookupKey();
+        if (existing || attempt >= IDEMPOTENCY_REPOLL_ATTEMPTS) return existing;
+        await new Promise((resolve) => setTimeout(resolve, IDEMPOTENCY_REPOLL_DELAY_MS));
+      }
+    };
 
     if (input.idempotencyKey) {
       const existing = await lookupKey();
       if (existing) return settleReplay(existing);
     }
 
-    if (input.execution.kind === 'queued') {
-      // Agent-run quota (domain `agent`), counted HERE once for the whole run:
-      // the worker executes `executeAgentChatLocal`, which does not count again,
-      // and a caller over its limit gets the 429 now rather than a run that
-      // fails later. An inline run is counted by `executeAgentChat` itself.
-      // Throws `AgentQuotaExceededError` (classified as a 429).
-      await enforceAgentRunQuota({
-        tenantDbName: input.tenantDbName,
-        tenantId: input.tenantId,
-        projectId: input.projectId,
-        agentKey: input.agentKey,
-        userId: input.userId,
-        tokenId: input.apiTokenId,
-      });
-    }
+    // Who the run counts against: the accountable principal of a synthetic owner, else the caller.
+    const quotaUserId = input.accountable?.userId ?? input.userId;
+    const quotaTokenId = input.accountable ? input.accountable.apiTokenId : input.apiTokenId;
+    // Agent-run quota (domain `agent`) of a queued run, counted once for the
+    // whole run and only once it is admitted (inserted, within the caps): the
+    // worker executes `executeAgentChatLocal`, which does not count again, and
+    // a caller over its limit gets the 429 now rather than a run that fails
+    // later. A refusal removes the row again. An inline run is counted by
+    // `executeAgentChat` itself. Throws `AgentQuotaExceededError` (a 429).
+    const admitQueued = async (runId: string): Promise<void> => {
+      try {
+        await enforceAgentRunQuota({
+          tenantDbName: input.tenantDbName,
+          tenantId: input.tenantId,
+          projectId: input.projectId,
+          agentKey: input.agentKey,
+          userId: quotaUserId,
+          tokenId: quotaTokenId,
+        });
+      } catch (error) {
+        await db.deleteAgentRun(runId).catch(() => undefined);
+        throw error;
+      }
+    };
 
     const base: Omit<IAgentRun, '_id' | 'createdAt' | 'updatedAt' | 'mode' | 'status'> = {
       tenantId: input.tenantId,
@@ -765,7 +797,14 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       userId: input.userId,
       ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
       actorType: input.actorType ?? (input.apiTokenId ? 'api_token' : input.userId.startsWith('system:') ? 'system' : 'user'),
-      expiresAt: new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000),
+      ...(input.accountable?.userId ? { accountableUserId: input.accountable.userId } : {}),
+      ...(input.accountable?.apiTokenId ? { accountableTokenId: input.accountable.apiTokenId } : {}),
+      // From the run's earliest possible end: a scheduled run cannot end before its start,
+      // a deferred one may wait its class's longest wait first. Stamped again when it ends.
+      expiresAt: agentRunRetainedUntil(
+        Math.max(Date.now(), input.execution.kind === 'queued' ? input.execution.notBefore?.getTime() ?? 0 : 0)
+        + (runClass === 'deferred' ? cfg.agent.deferredMaxWaitMs : 0),
+      ),
       runClass,
       channel: input.channel ?? null,
       metadata: input.metadata && Object.keys(input.metadata).length > 0 ? input.metadata : null,
@@ -783,7 +822,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       try {
         return await db.createAgentRun(record);
       } catch (error) {
-        if (error instanceof AgentRunIdempotencyKeyTakenError) return settleReplay(await lookupKey());
+        if (error instanceof AgentRunIdempotencyKeyTakenError) return settleReplay(await lookupTakenKey());
         if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
         throw error;
       }
@@ -850,6 +889,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
         await db.deleteAgentRun(runId).catch(() => undefined);
         return { kind: 'concurrency_limit', limit: cfg.agent.deferredMaxQueuedPerTenant, scope: 'tenant', runClass };
       }
+      await admitQueued(runId);
       // Deferred rows are not published at insert: the dispatcher hands them out within the class's running cap.
       if (!scheduled) {
         await dispatchDeferredRuns(input.tenantDbName, input.tenantId).catch((error) => {
@@ -863,12 +903,16 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
     }
 
     // A scheduled row is not active: no slot, no cap until it is promoted.
-    if (scheduled) return { kind: 'accepted', run: inserted };
+    if (scheduled) {
+      await admitQueued(runId);
+      return { kind: 'accepted', run: inserted };
+    }
     const cap = await defaultClassOverCap(db, input.tenantId, input.projectId, limits);
     if (cap) {
       await db.deleteAgentRun(runId).catch(() => undefined);
       return { kind: 'concurrency_limit', ...cap, runClass };
     }
+    await admitQueued(runId);
     try {
       await publishAgentRunJob(inserted);
     } catch (error) {
@@ -885,6 +929,8 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
 
 /** Wins the race when the caller's wait window ends first. */
 const WINDOW_SENTINEL = Symbol('agent-run-wait-window');
+/** Wins the race when the row was finalized elsewhere while the turn was still out. */
+const ENDED_ELSEWHERE_SENTINEL = Symbol('agent-run-ended-elsewhere');
 
 type InlineSettlement =
   | { kind: 'response'; run: IAgentRun; response: AgentChatResponse }
@@ -907,7 +953,10 @@ interface LocalRun {
   projectId: string;
   conversationId: string;
   cell: AgentRunCancellationCell;
-  /** Stops the turn (signal / supersede). */
+  /**
+   * Stops the turn (signal / supersede) after its row was ended elsewhere; an
+   * inline run's caller is answered with that row at once.
+   */
   abort: () => void;
   settled: Promise<unknown>;
 }
@@ -948,6 +997,12 @@ function executeInlineRun(
   });
   let cancelRequested = false;
   let superseded = false;
+  // The row was ended elsewhere (the shutdown drain): the caller is answered
+  // from the row now, without waiting for the turn to come back.
+  let resolveEndedElsewhere: (() => void) | undefined;
+  const endedElsewhere = new Promise<typeof ENDED_ELSEWHERE_SENTINEL>((resolve) => {
+    resolveEndedElsewhere = () => resolve(ENDED_ELSEWHERE_SENTINEL);
+  });
 
   const detach = async (): Promise<IAgentRun | null> => db.markAgentRunDetached(runId, tenantId, new Date()).catch((error) => {
     logger.warn('Could not mark the inline run detached', { runId, error: error instanceof Error ? error.message : String(error) });
@@ -1023,12 +1078,13 @@ function executeInlineRun(
     const paused = status === 'requires_action';
     const stopReason = data.stopReason
       ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
+    const completedAt = new Date();
     const finalized = await db.finalizeAgentRun(runId, tenantId, {
       ...data,
       ...(stopReason ? { stopReason } : {}),
       status,
       // A paused run is not done; the sealed caller headers stay for its continuation.
-      ...(paused ? {} : { completedAt: new Date(), runtimeContext: null }),
+      ...(paused ? {} : { completedAt, runtimeContext: null, expiresAt: agentRunRetainedUntil(completedAt) }),
     }).catch((error) => {
       logger.warn('Could not finalize the inline agent run', { runId, error: error instanceof Error ? error.message : String(error) });
       return null;
@@ -1041,11 +1097,29 @@ function executeInlineRun(
     return finalized;
   };
 
+  /**
+   * The row was finalized by somebody else (the drain, the reconciler, a
+   * cancel): the caller gets what the row says, not what the turn produced —
+   * a turn that was cut off is not stored, so it cannot be the answer.
+   */
+  const settleFromRow = async (response?: AgentChatResponse): Promise<InlineSettlement> => {
+    const current = await db.getAgentRunById(runId, tenantId, run.projectId).catch(() => null) ?? run;
+    if (response && (current.status === 'succeeded' || current.status === 'canceled' || current.status === 'requires_action')) {
+      return { kind: 'response', run: current, response };
+    }
+    return {
+      kind: 'error',
+      run: current,
+      error: new AgentRunInterruptedError(current.errorReason ?? 'interrupted', current.status === 'failed' ? current.errorMessage : null),
+    };
+  };
+
   const settled = (async (): Promise<InlineSettlement> => {
     try {
-      const raced = await Promise.race([invoke, deadline.promise]);
+      const raced = await Promise.race([invoke, deadline.promise, endedElsewhere]);
       clearInterval(heartbeatTimer);
       deadline.clear();
+      if (raced === ENDED_ELSEWHERE_SENTINEL) return await settleFromRow();
       if (raced === TIMEOUT_SENTINEL) {
         cancellationCell.cancelled = true;
         // Finalized without waiting: the turn may still be inside a call and must
@@ -1060,7 +1134,7 @@ function executeInlineRun(
         return { kind: 'timeout', run: finalized ?? run };
       }
       if (!raced.ok) {
-        if (superseded) return { kind: 'error', run, error: raced.error };
+        if (superseded) return await settleFromRow();
         const message = publicFailureMessage(raced.error);
         const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
         return { kind: 'error', run: finalized ?? run, error: raced.error };
@@ -1068,18 +1142,19 @@ function executeInlineRun(
       const { _conversation_messages: _omitted, ...body } = raced.response;
       void _omitted;
       const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
-      if (superseded) return { kind: 'response', run, response: raced.response };
+      if (superseded) return await settleFromRow();
       if (raced.response.status === 'requires_action') {
         const paused = await finalize('requires_action', { result, stopReason: 'requires_action' }, { result });
-        return { kind: 'response', run: paused ?? run, response: raced.response };
+        return paused ? { kind: 'response', run: paused, response: raced.response } : await settleFromRow(raced.response);
       }
       // A Stop ends the turn with what it had streamed: that is the answer, and the run is `canceled`.
       if (cancelRequested || watch.stopRequested()) {
         const canceled = await finalize('canceled', { errorReason: 'canceled_by_caller', result, stopReason: 'cancelled' });
-        return { kind: 'response', run: canceled ?? run, response: raced.response };
+        return canceled ? { kind: 'response', run: canceled, response: raced.response } : await settleFromRow(raced.response);
       }
       const done = await finalize('succeeded', { result, stopReason: toSessionStopReason(raced.response.stop_reason) }, { result });
-      return { kind: 'response', run: done ?? run, response: raced.response };
+      // Null: the row was ended elsewhere (drain, worker_lost) — that is the outcome.
+      return done ? { kind: 'response', run: done, response: raced.response } : await settleFromRow();
     } catch (error) {
       logger.error('Inline agent run failed unexpectedly', { runId, error: error instanceof Error ? error.message : String(error) });
       const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_FAILURE_MESSAGE }, { errorReason: 'agent_error' });
@@ -1100,7 +1175,12 @@ function executeInlineRun(
     projectId: run.projectId,
     conversationId: run.conversationId,
     cell: cancellationCell,
-    abort: () => stop.abort(),
+    abort: () => {
+      superseded = true;
+      cancellationCell.cancelled = true;
+      stop.abort();
+      resolveEndedElsewhere?.();
+    },
     settled,
   });
   return { settled, detach };
@@ -1156,13 +1236,30 @@ export type QueueAgentRunResumeOutcome =
   | { kind: 'conflict' };
 
 /**
+ * The run that owns a pause: the run its pending actions were raised by
+ * (`IAgentPendingAction.runId`), while that run is still paused on them. Null
+ * for a pause no run owns (a dashboard turn) or whose run has moved on.
+ */
+export async function findPausedOwnerRun(
+  db: DatabaseProvider,
+  scope: { tenantId: string; projectId: string; conversationId: string },
+  ownerRunId: string | null | undefined,
+): Promise<IAgentRun | null> {
+  if (!ownerRunId) return null;
+  const run = await db.getAgentRunById(normalizeAgentRunId(ownerRunId), scope.tenantId, scope.projectId).catch(() => null);
+  if (!run || run.conversationId !== scope.conversationId || run.status !== 'requires_action' || run.mode === 'sync') return null;
+  return run;
+}
+
+/**
  * Queues a run that continues a paused turn (every action it waited on is
- * answered). A paused run (queued or inline) is put back in the queue under
- * its own id, keeping its class, channel, labels, response format and inputs
- * (a new queue generation, so its job is not mistaken for the first one); a
- * turn that paused inside a dashboard call has no run, so a new `background`
- * one of the default class is created for it. `conflict` = another run holds
- * the conversation.
+ * answered). The paused run that owns the pause (`ownerRunId`, the run the
+ * actions were raised by) is put back in the queue under its own id, keeping
+ * its class, channel, labels, response format and inputs (a new queue
+ * generation, so its job is not mistaken for the first one) and recording
+ * what continues it (`trigger`) and who answered; a turn that paused inside a
+ * dashboard call has no run, so a new `background` one of the default class
+ * is created for it. `conflict` = another run holds the conversation.
  *
  * Admission: a continuation is not refused by the class caps — it continues
  * work that was already admitted.
@@ -1177,6 +1274,10 @@ export async function queueAgentRunResume(input: {
   resumeActionIds: string[];
   apiTokenId?: string;
   actorType?: IAgentRun['actorType'];
+  /** The run the answered actions were raised by (`IAgentPendingAction.runId`); none = no run owns the pause. */
+  ownerRunId?: string | null;
+  /** What continues the turn: an answer (`resume`, default) or the timeout sweep. */
+  trigger?: 'resume' | 'timeout';
   /** Which config a budget continuation runs with (a pause's answers carry their own). */
   usePublished?: boolean;
   version?: number;
@@ -1185,18 +1286,17 @@ export async function queueAgentRunResume(input: {
   limits?: AgentRunLimits;
 }): Promise<QueueAgentRunResumeOutcome> {
   const db = await withTenantDb(input.tenantDbName);
-  const cfg = getConfig();
+  const trigger = input.trigger ?? (input.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume');
   let run: IAgentRun | null = null;
   try {
-    const [paused] = await db.listAgentRuns({
-      tenantId: input.tenantId,
-      projectId: input.projectId,
-      conversationId: input.conversationId,
-      status: ['requires_action'],
-      mode: ['background', 'inline'],
-      limit: 1,
-    });
-    if (paused) run = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds);
+    const paused = await findPausedOwnerRun(db, input, input.ownerRunId);
+    if (paused) {
+      run = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds, {
+        trigger,
+        userId: input.userId,
+        apiTokenId: input.apiTokenId ?? null,
+      });
+    }
     if (!run) {
       // The turn this continues: the paused run, else the session's latest run (a
       // budget continuation) — its routine, flags and inputs carry over (§2.4a).
@@ -1243,7 +1343,10 @@ export async function queueAgentRunResume(input: {
         userId: input.userId,
         ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
         actorType: input.actorType ?? (input.userId.startsWith('system:') ? 'system' : 'user'),
-        expiresAt: new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000),
+        ...(input.resumeActionIds.includes(CONTINUE_RUN_MARKER) ? {} : { resumeTrigger: trigger }),
+        ...(source?.accountableUserId ? { accountableUserId: source.accountableUserId } : {}),
+        ...(source?.accountableTokenId ? { accountableTokenId: source.accountableTokenId } : {}),
+        expiresAt: agentRunRetainedUntil(),
       });
     }
   } catch (error) {
@@ -1269,39 +1372,96 @@ export async function queueAgentRunContinue(input: Omit<Parameters<typeof queueA
 }
 
 /**
- * A continuation ran inline (the dashboard answered while a run was paused):
- * settle that run's row. Still waiting → it keeps `requires_action` with the
- * fresh actions; otherwise it ends `succeeded` like any finished run.
+ * A continuation ran inline (somebody answered while a run was paused): settle
+ * the run that owned the pause (`ownerRunId`), and only that one. Still
+ * waiting → it keeps `requires_action` with the fresh actions; otherwise it
+ * ends `succeeded` like any finished run.
  */
 export async function settlePausedAgentRuns(
   tenantDbName: string,
   scope: { tenantId: string; projectId: string; conversationId: string },
   response: AgentChatResponse,
+  ownerRunId: string | null | undefined,
 ): Promise<void> {
   const db = await withTenantDb(tenantDbName);
-  const paused = await db.listAgentRuns({ ...scope, status: ['requires_action'], mode: ['background', 'inline'], limit: 5 });
+  const run = await findPausedOwnerRun(db, scope, ownerRunId);
+  if (!run) return;
   const { _conversation_messages: _omitted, ...body } = response;
   void _omitted;
-  for (const run of paused) {
-    const runId = String(run._id);
-    const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
-    if (response.status === 'requires_action') {
-      await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
-      continue;
-    }
-    const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
-      status: 'succeeded',
-      result,
-      stopReason: toSessionStopReason(response.stop_reason),
-      completedAt: new Date(),
-      runtimeContext: null,
+  const runId = String(run._id);
+  const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
+  if (response.status === 'requires_action') {
+    await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
+    return;
+  }
+  const completedAt = new Date();
+  const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
+    status: 'succeeded',
+    result,
+    stopReason: toSessionStopReason(response.stop_reason),
+    completedAt,
+    runtimeContext: null,
+    expiresAt: agentRunRetainedUntil(completedAt),
+  });
+  if (finalized) {
+    await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
+      logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
     });
-    if (finalized) {
-      await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
-        logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * Ends a paused run as `canceled` (`canceled_by_caller`) with its
+ * notifications — the run callback and the `agent_run.canceled` event. Null
+ * when the run was not paused any more. The pause's requests are the caller's
+ * to drop (`beforeNotify`, so subscribers hear of the run after the session).
+ */
+async function cancelPausedRun(
+  db: DatabaseProvider,
+  run: IAgentRun,
+  beforeNotify?: () => Promise<void>,
+): Promise<IAgentRun | null> {
+  const runId = String(run._id);
+  const completedAt = new Date();
+  const cancelled = await db.finalizeAgentRun(runId, run.tenantId, {
+    status: 'canceled',
+    errorReason: 'canceled_by_caller',
+    stopReason: 'cancelled',
+    completedAt,
+    runtimeContext: null,
+    expiresAt: agentRunRetainedUntil(completedAt),
+  });
+  if (!cancelled) return null;
+  await beforeNotify?.();
+  await fireAgentRunCallback(cancelled, 'canceled', {}).catch((error) => {
+    logger.warn('Could not queue the canceled callback', { runId, error: error instanceof Error ? error.message : String(error) });
+  });
+  return cancelled;
+}
+
+/**
+ * The conversation's pause was dropped without its run (a new message with
+ * `cancel_pending`, a session truncate, a timeout with `onTimeout: cancel`):
+ * every run still paused on the conversation ends `canceled`, with its
+ * notifications, as `cancelAgentRun` ends one. Returns how many it ended.
+ */
+export async function cancelPausedAgentRuns(
+  db: DatabaseProvider,
+  scope: { tenantId: string; projectId: string; conversationId: string },
+): Promise<number> {
+  const paused = await db.listAgentRuns({ ...scope, status: ['requires_action'], mode: ['background', 'inline'], limit: 20 });
+  let cancelled = 0;
+  for (const run of paused) {
+    try {
+      if (await cancelPausedRun(db, run)) cancelled += 1;
+    } catch (error) {
+      logger.warn('Could not end a paused run whose pause was dropped', {
+        runId: String(run._id),
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }
+  return cancelled;
 }
 
 /**
@@ -1408,18 +1568,8 @@ export async function cancelAgentRun(ref: AgentRunRef): Promise<CancelAgentRunOu
     if (owned.status === 'requires_action') {
       // Paused for a person: nothing is executing, so cancelling settles the run
       // and drops the open requests.
-      const cancelled = await db.finalizeAgentRun(runId, tenantId, {
-        status: 'canceled',
-        errorReason: 'canceled_by_caller',
-        stopReason: 'cancelled',
-        completedAt: new Date(),
-        runtimeContext: null,
-      });
+      const cancelled = await cancelPausedRun(db, owned, () => dropPausedConversation(db, owned));
       if (!cancelled) return { kind: 'already_terminal', run: owned };
-      await dropPausedConversation(db, owned);
-      await fireAgentRunCallback(cancelled, 'canceled', {}).catch((error) => {
-        logger.warn('Could not queue the canceled callback', { runId, error: error instanceof Error ? error.message : String(error) });
-      });
       return { kind: 'accepted', run: cancelled };
     }
     if (!isAgentRunActive(owned)) return { kind: 'already_terminal', run: owned };
@@ -1472,6 +1622,7 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     userMessage: run.userMessage,
     ...(run.attachments?.length ? { attachments: run.attachments } : {}),
     userId: run.userId ?? '',
+    ...(run.accountableUserId ? { accountableUserId: run.accountableUserId } : {}),
     version: run.version ?? undefined,
     usePublished: run.usePublished,
     runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
@@ -1524,20 +1675,28 @@ function publicFailureMessage(error: unknown): string {
  * `failed` run, never an escaped exception that leaves the row `running`.
  */
 export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<void> {
-  const { runId, tenantId, tenantDbName } = payload;
+  const { runId } = payload;
   let release: (() => void) | undefined;
   const settled = new Promise<void>((resolve) => { release = resolve; });
+  const progress = { claimed: false };
   try {
-    await runAgentJobInTenant(payload, settled);
+    await runAgentJobInTenant(payload, settled, progress);
+  } catch (error) {
+    // Before the claim nothing ran and the row is still `queued`: the job
+    // completes instead of failing (a failed job id is kept for a day, and a
+    // republish under it would be dropped); the reconciler republishes the row.
+    if (progress.claimed) throw error;
+    logger.warn('Agent run job failed before the claim; the reconciler republishes the run', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   } finally {
     activeLocalRuns.delete(runId);
     release?.();
   }
-  void tenantId;
-  void tenantDbName;
 }
 
-async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise<void>): Promise<void> {
+async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise<void>, progress: { claimed: boolean }): Promise<void> {
   const { runId, tenantId, tenantDbName } = payload;
   return runWithTenantDb(tenantDbName, async (db) => {
     const cfg = getConfig();
@@ -1559,6 +1718,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       logger.info('Agent run already claimed or not queued; skipping duplicate delivery', { runId });
       return;
     }
+    progress.claimed = true;
     // A paused inline turn continued by a worker has nobody waiting on it: from
     // here it is an async run (notifications follow it).
     if (claimed.mode === 'inline' && !claimed.detachedAt) {
@@ -1583,13 +1743,15 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       const stopReason = data.stopReason
         ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
       // The sealed caller headers are only needed while the turn runs.
+      const completedAt = new Date();
       const finalized = await db.finalizeAgentRun(runId, tenantId, {
         ...data,
         ...(stopReason ? { stopReason } : {}),
         status,
-        completedAt: new Date(),
+        completedAt,
         runtimeContext: null,
         resumeActionIds: null,
+        expiresAt: agentRunRetainedUntil(completedAt),
       });
       // A continuation that died leaves the conversation marked as waiting;
       // its requests are answered, so there is nothing left to wait for.
@@ -1723,13 +1885,14 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       // The tokens the turn's model calls spend are tallied as they happen, so a run that
       // fails, times out or is cancelled is still charged for them (runUsage.ts).
       const usage = createRunUsageSink();
+      // A synthetic owner (a routine) counts against its accountable principal.
       const quotaCaller = {
         tenantDbName: claimed.tenantDbName,
         tenantId: claimed.tenantId,
         projectId: claimed.projectId,
         agentKey: claimed.agentKey,
-        userId: claimed.userId,
-        tokenId: claimed.apiTokenId,
+        userId: claimed.accountableUserId ?? claimed.userId,
+        tokenId: claimed.accountableUserId ? claimed.accountableTokenId ?? undefined : claimed.apiTokenId,
       };
       // Attribution: usage recorded by the turn reads the request context,
       // which a queue worker otherwise has none of. A rejection settles as a
@@ -1756,6 +1919,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             agentKey: request.agentKey,
             conversationId: request.conversationId,
             userId: request.userId,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             runId,
             runtimeContext: request.runtimeContext,
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
@@ -1776,8 +1940,10 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             projectId: request.projectId,
             agentKey: request.agentKey,
             conversationId: request.conversationId,
-            userId: request.userId,
-            trigger: request.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume',
+            // Who answered drives the continuation (the row keeps its owner).
+            userId: claimed.resumeUserId ?? request.userId,
+            trigger: claimed.resumeTrigger ?? (request.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume'),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             runId,
             runtimeContext: request.runtimeContext,
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
@@ -1897,6 +2063,8 @@ interface AgentRunCallbackJobPayload extends QueuePayload {
   callbackUrl: string;
   event: 'succeeded' | 'failed' | 'canceled' | 'requires_action';
   data: Record<string, unknown>;
+  /** The delivery's event id (`agentRunCallbackEventId`); absent on jobs queued before it existed. */
+  eventId?: string;
 }
 
 /** `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` — the crawler/OCR webhook scheme (shared with webhook subscriptions). */
@@ -1905,6 +2073,21 @@ export function signAgentRunCallback(secret: string, body: string, timestamp = M
 }
 
 type AgentRunCallbackEvent = AgentRunCallbackJobPayload['event'];
+
+/**
+ * The id of one callback event of a run, stable across its retries and
+ * redeliveries: `evt_<runId>_<event>`, with the queue generation appended
+ * once the run was resumed (`evt_<runId>_<event>_<generation>`), so a second
+ * pause (or the outcome after a resume) is a new event, not a repeat of one
+ * a receiver has already seen.
+ */
+export function agentRunCallbackEventId(
+  run: Pick<IAgentRun, '_id' | 'queueGeneration'>,
+  event: AgentRunCallbackEvent,
+): string {
+  const generation = run.queueGeneration ?? 1;
+  return generation > 1 ? `evt_${String(run._id)}_${event}_${generation}` : `evt_${String(run._id)}_${event}`;
+}
 
 export async function fireAgentRunCallback(
   run: IAgentRun,
@@ -1936,9 +2119,13 @@ export async function fireAgentRunCallback(
   // A new event starts a new count: a run that was `requires_action` (callback
   // delivered) and later finishes owes a fresh `succeeded` callback, and the
   // reconciler keys off `pending` / `failed` to find callbacks that never made it.
+  // The row records which event the count is for: a late job of an older event
+  // does not write over it.
+  const eventId = agentRunCallbackEventId(run, event);
   await runWithTenantDb(run.tenantDbName, (db) => db.updateAgentRunCallback(String(run._id), run.tenantId, {
     callbackStatus: 'pending',
     callbackAttempts: 0,
+    callbackEventId: eventId,
   })).catch(() => undefined);
   await enqueueAgentRunCallback(run, event, data, { attempts: CALLBACK_ATTEMPTS, backoffMs: CALLBACK_BACKOFF_MS });
 }
@@ -1959,6 +2146,7 @@ async function enqueueAgentRunCallback(
     callbackUrl: run.callbackUrl!,
     event,
     data,
+    eventId: agentRunCallbackEventId(run, event),
   };
   await queue.publish(AGENT_RUN_CALLBACK_QUEUE, CALLBACK_JOB_NAME, payload, options);
 }
@@ -1986,10 +2174,12 @@ export async function redeliverAgentRunCallback(run: IAgentRun): Promise<boolean
       ? { errorReason: run.errorReason ?? 'agent_error', ...(run.errorMessage ? { message: run.errorMessage } : {}) }
       : {};
   // Touch the row first, so the next tick does not queue it again while this one is in flight.
+  const eventId = agentRunCallbackEventId(run, event);
   await runWithTenantDb(run.tenantDbName, (db) => db.updateAgentRunCallback(String(run._id), run.tenantId, {
     callbackStatus: run.callbackStatus === 'failed' ? 'failed' : 'pending',
     callbackAttempts: run.callbackAttempts ?? 0,
-  })).catch(() => undefined);
+    callbackEventId: eventId,
+  }, { onlyIfEventId: eventId })).catch(() => undefined);
   await enqueueAgentRunCallback(run, event, data, { attempts: 1 });
   return true;
 }
@@ -2005,11 +2195,13 @@ export async function deliverAgentRunCallbackJob(
 ): Promise<void> {
   return runWithTenantDb(payload.tenantDbName, async (db) => {
     const current = await db.getAgentRunById(payload.runId, payload.tenantId, payload.projectId);
-    const nextAttempts = (current?.callbackAttempts ?? 0) + 1;
     const publicRunId = `run_${payload.runId}`;
     const eventName = `agent_run.${payload.event}`;
-    // Stable per run+event, so a receiver can dedupe retries and queue redeliveries.
-    const eventId = `evt_${payload.runId}_${payload.event}`;
+    // Stable per run+event (+ generation), so a receiver can dedupe retries and queue redeliveries.
+    const eventId = payload.eventId ?? `evt_${payload.runId}_${payload.event}`;
+    // The row counts the attempts of the event it is waiting on; an older event's job starts from zero.
+    const sameEvent = !current?.callbackEventId || current.callbackEventId === eventId;
+    const nextAttempts = (sameEvent ? current?.callbackAttempts ?? 0 : 0) + 1;
 
     const body = JSON.stringify({
       id: eventId,
@@ -2043,11 +2235,12 @@ export async function deliverAgentRunCallbackJob(
     }
 
     // Callback bookkeeping only — not `finalizeAgentRun`, whose `running` CAS
-    // would no-op on a run that already finished.
+    // would no-op on a run that already finished. Only for the event the row
+    // waits on: a newer event's status is not this delivery's to settle.
     await db.updateAgentRunCallback(payload.runId, payload.tenantId, {
       callbackStatus: deliveryError ? 'failed' : 'delivered',
       callbackAttempts: nextAttempts,
-    }).catch(() => undefined);
+    }, { onlyIfEventId: eventId }).catch(() => undefined);
 
     if (deliveryError) throw deliveryError;
   });
@@ -2060,12 +2253,18 @@ export function agentRunJobDedupKey(run: Pick<IAgentRun, '_id' | 'queueGeneratio
 
 /**
  * Queues a run's job — at submit, from the deferred dispatcher, and again from
- * the reconciler for a queued run no worker picked up. Deferred runs go to
- * their own queue.
+ * the reconciler for a queued run no worker picked up (`republish`). Deferred
+ * runs go to their own queue.
+ *
+ * A republish carries a job id of its own time bucket (`AGENT_RUN_REQUEUE_AFTER_MS`
+ * wide): the queue keeps a finished or failed job's id for a while and would
+ * drop a second job under it, so a run whose job ended before its claim could
+ * otherwise not be handed out again. A duplicate delivery no-ops at the claim CAS.
  */
-export async function publishAgentRunJob(run: IAgentRun): Promise<void> {
+export async function publishAgentRunJob(run: IAgentRun, options: { republish?: boolean } = {}): Promise<void> {
   const queue = await getQueue();
   const deferred = run.runClass === 'deferred';
+  const republishBucket = Math.floor(Date.now() / getConfig().agent.runRequeueAfterMs);
   // A run queued to continue a paused turn is a `resume` job; the worker
   // dispatches on the row either way, so a requeue by the reconciler stays right.
   await queue.publish(deferred ? AGENT_RUN_DEFERRED_QUEUE : AGENT_RUN_QUEUE, run.resumeActionIds?.length ? 'resume' : 'run', {
@@ -2078,7 +2277,9 @@ export async function publishAgentRunJob(run: IAgentRun): Promise<void> {
     // A deferred job the claim guard skipped has completed, and BullMQ keeps a
     // completed job id for an hour: a per-minute suffix lets the dispatcher hand
     // the row out again soon (a duplicate delivery no-ops at the claim CAS).
-    dedupKey: deferred ? `${agentRunJobDedupKey(run)}_${Math.floor(Date.now() / 60_000)}` : agentRunJobDedupKey(run),
+    dedupKey: deferred
+      ? `${agentRunJobDedupKey(run)}_${Math.floor(Date.now() / 60_000)}`
+      : options.republish ? `${agentRunJobDedupKey(run)}_r${republishBucket}` : agentRunJobDedupKey(run),
   });
   await runWithTenantDb(run.tenantDbName, (db) => db.markAgentRunPublished(String(run._id), run.tenantId, new Date()))
     .catch(() => undefined);
@@ -2110,13 +2311,15 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   let interrupted = 0;
   for (const local of leftovers) {
     try {
+      const completedAt = new Date();
       const finalized = await runWithTenantDb(local.tenantDbName, (db) => db.finalizeAgentRun(local.runId, local.tenantId, {
         status: 'failed',
         errorReason: 'interrupted',
         errorMessage: INTERRUPTED_RUN_MESSAGE,
         stopReason: 'error',
-        completedAt: new Date(),
+        completedAt,
         runtimeContext: null,
+        expiresAt: agentRunRetainedUntil(completedAt),
       }));
       if (finalized) {
         interrupted += 1;
@@ -2129,6 +2332,7 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
       });
     }
     // Abandoned: the row is final; whatever the turn still does must not land.
+    // An inline run's caller is answered with the row at once (its stream ends).
     local.cell.cancelled = true;
     local.cell.abandoned = true;
     local.abort();

@@ -61,18 +61,33 @@ function runJobHandler(queueName: string, deferred: boolean) {
   };
 }
 
+let draining: Promise<void> | null = null;
+
 /**
- * Shutdown (§4.8): stop taking runs, give the ones executing here
- * `AGENT_RUN_DRAIN_TIMEOUT_MS` to finish, then mark the rest interrupted.
+ * Shutdown (§4.8): stop taking runs, give the ones executing here (inline
+ * turns and queue workers) `AGENT_RUN_DRAIN_TIMEOUT_MS` to finish, then mark
+ * the rest interrupted with their notifications — an inline run's caller is
+ * answered with that outcome, which ends its stream. Runs once per process:
+ * the HTTP server's close calls it before it waits for open connections (an
+ * open stream would otherwise keep the drain from ever starting), and the
+ * `agent-runs` shutdown handler gets the same drain.
  */
-export async function drainAgentRunConsumers(): Promise<void> {
-  await Promise.all(runWorkers.map((worker) => worker.pause().catch((error) => {
-    log.warn('Could not pause an agent run consumer', {
-      queueName: worker.queueName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  })));
-  await drainLocalAgentRuns(getConfig().agent.runDrainTimeoutMs);
+export function drainAgentRunConsumers(): Promise<void> {
+  draining ??= (async () => {
+    await Promise.all(runWorkers.map((worker) => worker.pause().catch((error) => {
+      log.warn('Could not pause an agent run consumer', {
+        queueName: worker.queueName,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })));
+    await drainLocalAgentRuns(getConfig().agent.runDrainTimeoutMs);
+  })();
+  return draining;
+}
+
+/** Test seam: the next `drainAgentRunConsumers` drains again. */
+export function resetAgentRunDrainForTests(): void {
+  draining = null;
 }
 
 export async function startAgentQueueConsumer(): Promise<void> {
