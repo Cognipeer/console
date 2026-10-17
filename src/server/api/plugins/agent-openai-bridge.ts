@@ -1,12 +1,11 @@
 import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import { rememberSessionModel } from './agent-model-authz';
-import type { PreparedInvocationSession } from './agent-invocation';
+import { CONCURRENCY_RETRY_AFTER_SECONDS, startRunOnSession, type PreparedInvocationSession } from './agent-invocation';
 import {
     agentRunConcurrencyLimitErrorBody,
     isAgentRunActive,
     resolveAgentRunLimits,
-    startAgentRun,
     waitForAgentRun,
     type AgentRunLimits,
 } from '@/lib/services/agents/agentRunService';
@@ -209,7 +208,9 @@ export async function resolveConversation(
     agent: IAgent,
     ctx: AgentCompletionContext,
     source: AgentConversationSource,
-): Promise<{ conversationId: string } | { error: string }> {
+    /** More session metadata for a session this call creates. */
+    metadata: Record<string, unknown> = {},
+): Promise<{ conversationId: string; created?: true } | { error: string }> {
     if (conversationId) {
         const conversation = await getConversationById(ctx.tenantDbName, conversationId);
         if (
@@ -228,9 +229,9 @@ export async function resolveConversation(
         ctx.userId,
         agent.key,
         undefined,
-        { source },
+        { ...metadata, source },
     );
-    return { conversationId: String(created._id) };
+    return { conversationId: String(created._id), created: true };
 }
 
 export interface AgentCompletionUsage {
@@ -376,6 +377,8 @@ export interface RunAgentCompletionInput {
     messages: OpenAiMessage[] | undefined;
     conversationId?: string;
     version?: number;
+    /** Run the published version (the default); false = the draft (`version: "draft"`). */
+    usePublished?: boolean;
     runtimeContext?: Parameters<typeof executeAgentChat>[0]['runtimeContext'];
     ctx: AgentCompletionContext;
     /** Present for the streaming form; the deltas go here as they arrive. */
@@ -397,6 +400,8 @@ export interface RunAgentCompletionInput {
     apiTokenId?: string;
     /** Aborts when the client disconnects: a stream then stops the run (OpenAI semantics), a plain call leaves it running. */
     signal?: AbortSignal;
+    /** Aborts when the client goes away: a wait on a queued run stops then (the run is not touched). */
+    waitSignal?: AbortSignal;
     /**
      * The user turn the route prepared: its text, and the session it runs on (created or continued, the
      * message's files stored on it). Absent, the turn is the last user message of `messages` on
@@ -427,7 +432,7 @@ function answerRefusal(outcome: ResolveOutcome): { error: string; status: number
 }
 
 export type AgentCompletionResult =
-    | { error: string; status: number; code?: string; type?: string; extra?: Record<string, unknown> }
+    | { error: string; status: number; code?: string; type?: string; extra?: Record<string, unknown>; retryAfterSeconds?: number }
     /** The wait window ended with the run still going: it continues (202, follow it on the runs API). */
     | { accepted: IAgentRun; conversationId: string }
     | {
@@ -460,7 +465,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     if (toolAnswers.length > 0) return answerToolCalls(input, toolAnswers);
 
     let userMessage: string;
-    let session: { conversationId: string; attachments?: string[]; namedAttachments?: string[] };
+    let session: { conversationId: string; created?: boolean; attachments?: string[]; namedAttachments?: string[] };
     if (input.turn) {
         userMessage = input.turn.userMessage;
         session = input.turn.session;
@@ -481,7 +486,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     const streaming = Boolean(input.onTextChunk);
     const limits = input.limits ?? await resolveAgentRunLimits();
     const deferred = input.runClass === 'deferred';
-    const outcome = await startAgentRun({
+    const outcome = await startRunOnSession({
         tenantDbName: input.ctx.tenantDbName,
         tenantId: input.ctx.tenantId,
         projectId: input.ctx.projectId,
@@ -492,8 +497,8 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         userId: input.ctx.userId,
         ...(input.apiTokenId ? { apiTokenId: input.apiTokenId, actorType: 'api_token' as const } : {}),
         // API traffic runs the published version, exactly as /responses does:
-        // a draft saved mid-afternoon must not become what callers get.
-        usePublished: true,
+        // a draft saved mid-afternoon must not become what callers get (unless it asks for `"draft"`).
+        usePublished: input.usePublished !== false,
         ...(input.version !== undefined ? { version: input.version } : {}),
         ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
         ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
@@ -525,7 +530,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
                 cancelOnDisconnect: streaming,
             },
         limits,
-    });
+    }, { tenantDbName: input.ctx.tenantDbName, conversationId: session.conversationId, created: session.created === true });
 
     switch (outcome.kind) {
         case 'completed':
@@ -536,7 +541,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         case 'replay': {
             // A queued run waits up to the window, as the other dialects do (an inline retry was waited on already).
             const settled = deferred && isAgentRunActive(outcome.run) && outcome.run.status !== 'scheduled'
-                ? (await waitForAgentRun({ tenantDbName: input.ctx.tenantDbName, tenantId: input.ctx.tenantId, projectId: input.ctx.projectId, runId: String(outcome.run._id) }, limits.syncWaitMs)) ?? outcome.run
+                ? (await waitForAgentRun({ tenantDbName: input.ctx.tenantDbName, tenantId: input.ctx.tenantId, projectId: input.ctx.projectId, runId: String(outcome.run._id) }, limits.syncWaitMs, input.waitSignal)) ?? outcome.run
                 : outcome.run;
             return completionOfRun(settled, session.conversationId);
         }
@@ -546,7 +551,10 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
             return { error: 'This Idempotency-Key was already used with a different request.', status: 409, type: 'idempotency_key_conflict', code: 'idempotency_key_conflict' };
         case 'concurrency_limit': {
             const body = agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope, outcome.runClass).error;
-            return { error: body.message, status: 429, code: body.code, type: 'rate_limit_error', extra: { class: outcome.runClass, scope: outcome.scope, limit: outcome.limit } };
+            return {
+                error: body.message, status: 429, code: body.code, type: 'rate_limit_error',
+                extra: { class: outcome.runClass, scope: outcome.scope, limit: outcome.limit }, retryAfterSeconds: CONCURRENCY_RETRY_AFTER_SECONDS,
+            };
         }
         default:
             return { error: 'the agent run could not be started', status: 500 };

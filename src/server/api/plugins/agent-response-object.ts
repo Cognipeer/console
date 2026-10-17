@@ -78,7 +78,30 @@ function outputTextOf(output: unknown[]): string {
   return parts.join('');
 }
 
-const toEpochSeconds = (value: Date | string | null | undefined) =>
+/**
+ * `background` of a run read back. A Responses request records `background: true` on its run when it asked
+ * for it, so for those runs that flag alone answers (a `service_tier: "flex"` call is queued, yet was not a
+ * background request); a run another surface started is background when it was queued.
+ */
+function backgroundOf(run: Pick<IAgentRun, 'channel' | 'mode' | 'background'>): boolean {
+  if (run.channel === 'responses') return run.background === true;
+  return run.mode === 'background' || run.background === true;
+}
+
+/** A usage block with the detail objects of the Responses usage (zero when the run did not report them). */
+function responsesUsageOf(usage: unknown): Record<string, unknown> | null {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
+  const value = usage as Record<string, unknown>;
+  const inputDetails = (value.input_tokens_details ?? {}) as Record<string, unknown>;
+  const outputDetails = (value.output_tokens_details ?? {}) as Record<string, unknown>;
+  return {
+    ...value,
+    input_tokens_details: { ...inputDetails, cached_tokens: typeof inputDetails.cached_tokens === 'number' ? inputDetails.cached_tokens : 0 },
+    output_tokens_details: { ...outputDetails, reasoning_tokens: typeof outputDetails.reasoning_tokens === 'number' ? outputDetails.reasoning_tokens : 0 },
+  };
+}
+
+const toEpochSeconds =(value: Date | string | null | undefined) =>
   (value ? Math.floor(new Date(value).getTime() / 1000) : Math.floor(Date.now() / 1000));
 
 /**
@@ -110,7 +133,7 @@ export function toAgentResponseObject(
     model: options.model ?? (typeof body?.model === 'string' ? body.model : run.agentKey),
     output,
     output_text: outputTextOf(output),
-    usage: body?.usage ?? null,
+    usage: responsesUsageOf(body?.usage),
     error: status === 'failed'
       ? { code: run.errorReason ?? 'agent_error', message: run.errorMessage ?? 'The run failed.' }
       : null,
@@ -118,7 +141,7 @@ export function toAgentResponseObject(
     metadata: run.metadata ?? {},
     text: { format: textFormatOf(run.responseFormat) },
     service_tier: run.runClass === 'deferred' ? 'flex' : 'default',
-    background: options.background ?? (run.mode === 'background' || run.background === true),
+    background: options.background ?? backgroundOf(run),
     previous_response_id: options.previousResponseId !== undefined
       ? options.previousResponseId
       : (typeof body?.previous_response_id === 'string' ? body.previous_response_id : null),

@@ -17,7 +17,6 @@ import {
 import {
   isAgentRunActive,
   lookupIdempotentAgentRun,
-  startAgentRun,
   waitForAgentRun,
 } from '@/lib/services/agents/agentRunService';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
@@ -54,6 +53,7 @@ import { sendAuthorizationUnavailable } from './agent-session-access';
 import {
   authorizeInvocationTarget,
   checkSessionContinuable,
+  clientGoneSignal,
   invocationApiTokenId,
   invocationRuntimeContext,
   openAiEnvelopeOf,
@@ -64,6 +64,8 @@ import {
   parseRunMetadata,
   prepareInvocationSession,
   readIdempotencyKey,
+  readInvocationBody,
+  refuseStreamAdmission,
   resolveInvocationAgent,
   resolveInvocationCallback,
   resolveInvocationConfig,
@@ -74,6 +76,8 @@ import {
   resolvePublishedAgentConfig,
   runOutcomeRefusal,
   sendInvocationFailure,
+  sendRunRefusal,
+  startRunOnSession,
 } from './agent-invocation';
 import { sendAgentResponseObject } from './agent-response-object';
 import { streamAgentRunAsResponses, streamRunSnapshot } from './agent-responses-stream';
@@ -146,7 +150,8 @@ function createResponsesHandler(agentsOnly: boolean) {
   return withOpenAiApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readInvocationBody(request, reply, 'openai');
+      if (!body) return reply;
       const model = body.model;
       if (typeof model !== 'string' || model.trim() === '') {
         return openAiFail(reply, 400, agentsOnly
@@ -279,8 +284,10 @@ function createResponsesHandler(agentsOnly: boolean) {
       // A stream is always an inline turn: the caller is receiving it.
       const queued = !stream && (background || runClass === 'deferred');
       // A plain (or flex) call waits up to the window on a run that is still going; `background` never waits.
+      // The wait stops when the client goes away.
+      const gone = clientGoneSignal(reply);
       const settle = async (run: IAgentRun) => (!background && isAgentRunActive(run) && run.status !== 'scheduled'
-        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, limits.syncWaitMs)) ?? run
+        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, limits.syncWaitMs, gone)) ?? run
         : run);
 
       // A replayed request must not mint a fresh conversation first — every
@@ -305,6 +312,9 @@ function createResponsesHandler(agentsOnly: boolean) {
       // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
       if (queued) {
         await assertQueuedTurnSpendAllowed({ ...ref, agentKey: agent.key, userId: ctx.tokenRecord.userId });
+      } else if (stream && await refuseStreamAdmission(reply, 'openai', ctx, agent.key, limits)) {
+        // Over a cap or the quota: a plain 429 before the stream opens (and before a session exists).
+        return reply;
       }
 
       // The session (new or continued), the model choice stored on it, the request's files as its files.
@@ -348,19 +358,21 @@ function createResponsesHandler(agentsOnly: boolean) {
           requestReasoning: reasoningRequest.value,
           streamReasoning: objectOptions.includeReasoning && agentShowsReasoning(runConfig),
           object: objectOptions,
+          newSession: prepared.created,
         });
       }
 
-      const outcome = await startAgentRun(queued
+      const session = { tenantDbName: ctx.tenantDbName, conversationId: prepared.conversationId, created: prepared.created };
+      const outcome = await startRunOnSession(queued
         ? { ...base, execution: { kind: 'queued' } }
         : {
           ...base,
           ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
           ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
           execution: { kind: 'inline', waitMs: limits.syncWaitMs, cancelOnDisconnect: false },
-        });
+        }, session);
       const refusal = runOutcomeRefusal(outcome);
-      if (refusal) return reply.code(refusal.status).send(openAiEnvelopeOf(refusal.body));
+      if (refusal) return sendRunRefusal(reply, 'openai', refusal);
       if (outcome.kind === 'completed') {
         const { _conversation_messages, ...responseBody } = outcome.response;
         void _conversation_messages;

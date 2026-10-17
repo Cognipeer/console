@@ -704,6 +704,33 @@ async function defaultClassOverCap(
 }
 
 /**
+ * Would a new default-class run be over a cap right now? A cheap read with no
+ * reservation: a stream asks it before it opens, so a refusal can still be a
+ * plain 429. Not binding: `startAgentRun` checks again after its insert, and a
+ * race between the two still ends in the stream's in-band error.
+ */
+export async function agentRunCapacityPrecheck(input: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  limits: AgentRunLimits;
+}): Promise<{ limit: number; scope: 'tenant' | 'project' } | null> {
+  const { limits } = input;
+  if (limits.maxActivePerTenant <= 0 && limits.maxActivePerProject <= 0) return null;
+  return runWithTenantDb(input.tenantDbName, async (db) => {
+    if (limits.maxActivePerTenant > 0) {
+      const active = await db.countActiveAgentRuns(input.tenantId, undefined, { runClass: 'default' });
+      if (active >= limits.maxActivePerTenant) return { limit: limits.maxActivePerTenant, scope: 'tenant' as const };
+    }
+    if (limits.maxActivePerProject > 0) {
+      const active = await db.countActiveAgentRuns(input.tenantId, input.projectId, { runClass: 'default' });
+      if (active >= limits.maxActivePerProject) return { limit: limits.maxActivePerProject, scope: 'project' as const };
+    }
+    return null;
+  });
+}
+
+/**
  * Starts an agent turn as a run — the one way API callers, routines and the
  * runs API start one (§4.1). The dialect has already resolved and validated
  * the agent, session, files, budget, model and inputs.

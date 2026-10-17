@@ -245,7 +245,7 @@ describe('an agent run over its quota', () => {
         expect(error.code).toBe('agent_quota_exceeded');
     }, IMPORT_TIMEOUT_MS);
 
-    it('A2A: a JSON-RPC error that carries the type and the code', async () => {
+    it('A2A: the run started, so the refusal is a failed Task that carries the type and the code', async () => {
         const { clientA2aApiPlugin } = await import('@/server/api/plugins/client-a2a');
         const app = await createFastifyApiTestApp(clientA2aApiPlugin);
         const res = await app.inject({
@@ -260,8 +260,9 @@ describe('an agent run over its quota', () => {
             },
         });
 
-        const rpc = parseJsonBody<{ error: { message: string; data: Record<string, unknown> } }>(res.body);
-        expect(rpc.error.message).toBe(REFUSAL);
-        expect(rpc.error.data).toEqual({ type: 'rate_limit_error', code: 'agent_quota_exceeded' });
+        const rpc = parseJsonBody<{ result: { kind: string; status: { state: string; message: { parts: Array<{ text: string }> } }; metadata: Record<string, unknown> } }>(res.body);
+        expect(rpc.result).toMatchObject({ kind: 'task', status: { state: 'failed' } });
+        expect(rpc.result.status.message.parts[0].text).toBe(REFUSAL);
+        expect(rpc.result.metadata).toEqual({ errorType: 'rate_limit_error', errorCode: 'agent_quota_exceeded' });
     }, IMPORT_TIMEOUT_MS);
 });

@@ -1,7 +1,8 @@
 /**
  * `GET /client/v1/models` lists the project's models AND its active agents (`agent:<key>`) to a caller who may
- * read the agents service, and only the models to one who may not; `GET /client/v1/models/agent:<key>` retrieves
- * one under the same condition (§5.5). The REAL routes, gate and policy engine over a real SQLite provider; only
+ * read the agents service, and only the models to one who may not; a caller who reads agents but not models is
+ * admitted and sees only the agents. `GET /client/v1/models/agent:<key>` retrieves one under the same condition,
+ * a model needs `models` (§5.5). The REAL routes, gate and policy engine over a real SQLite provider; only
  * the token's own authentication is stood in for.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -97,6 +98,7 @@ beforeAll(async () => {
   token('tok-both', user, { models: 'read', agents: 'read' });
   token('tok-models', user, { models: 'read' });
   token('tok-agents', user, { agents: 'read' });
+  token('tok-none', user, { prompts: 'read' });
 
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientModelsApiPlugin);
@@ -143,8 +145,16 @@ describe('GET /client/v1/models', () => {
     expect(res.body.data.map((entry: { id: string }) => entry.id)).toEqual(['chat-alpha']);
   });
 
-  it('is refused at the gate for a token that holds agents but not models', async () => {
-    expect((await get('/client/v1/models', 'tok-agents')).status).toBe(403);
+  it('lists only the agents to a token that holds agents but not models (no models, no providers)', async () => {
+    const res = await get('/client/v1/models?includeProviders=true', 'tok-agents');
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.data.map((entry: { id: string }) => entry.id)).toEqual(['agent:support']);
+    expect(res.body.models).toEqual([]);
+    expect(res.body.providers).toBeUndefined();
+  });
+
+  it('is refused at the gate for a token that holds neither', async () => {
+    expect((await get('/client/v1/models', 'tok-none')).status).toBe(403);
   });
 
   it('adds no agents when the query narrows to a category other than llm, or to a provider', async () => {
@@ -159,10 +169,19 @@ describe('GET /client/v1/models', () => {
 });
 
 describe('GET /client/v1/models/agent:<key>', () => {
-  it('retrieves an active agent of the project', async () => {
-    const res = await get('/client/v1/models/agent:support', 'tok-both');
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body).toMatchObject({ id: 'agent:support', object: 'model', owned_by: 'cognipeer-agent', name: 'Support', cognipeer: { kind: 'agent', key: 'support' } });
+  it('retrieves an active agent of the project, also with a token that holds agents but not models', async () => {
+    for (const tok of ['tok-both', 'tok-agents']) {
+      const res = await get('/client/v1/models/agent:support', tok);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({ id: 'agent:support', object: 'model', owned_by: 'cognipeer-agent', name: 'Support', cognipeer: { kind: 'agent', key: 'support' } });
+    }
+  });
+
+  it('a model needs models: 403 for a token that holds only agents, 200 for one that holds models', async () => {
+    const id = String((await env.db.findModelByKey('chat-alpha', projectId))!._id);
+    expect((await get(`/client/v1/models/${id}`, 'tok-agents')).status).toBe(403);
+    expect((await get(`/client/v1/models/${id}`, 'tok-models')).status).toBe(200);
+    expect((await get(`/client/v1/models/${id}`, 'tok-none')).status).toBe(403);
   });
 
   it('is 404 for an agent that is not active, one of another project, an unknown key, and for a caller who may not read agents', async () => {

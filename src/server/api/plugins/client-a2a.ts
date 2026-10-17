@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   cancelAgentRun,
   getAgentRunStatus,
@@ -5,7 +6,6 @@ import {
   publicAgentRunId,
   resolveAgentRunLimits,
   runWithTenantDb,
-  startAgentRun,
   waitForAgentRun,
   type AgentRunLimits,
   type StartAgentRunInput,
@@ -41,6 +41,14 @@ import { followSessionEvents } from '@/lib/services/agents/sessionEvents';
  * (`run_<runId>`), so `tasks/get` reads the run and `tasks/cancel` cancels it.
  * Ids from before (`task_<conversationId>_<messageIndex>`) still resolve
  * against the conversation's messages.
+ *
+ * On the public route every anonymous caller shares one identity, so a task is
+ * bound to the caller that created it instead: the first message of a
+ * conversation draws a random caller nonce (its digest is kept on the
+ * conversation), and the ids handed out carry it (`run_<runId>.<nonce>`,
+ * `<conversationId>.<nonce>`). Reading, following, cancelling or continuing
+ * needs the id as handed out; anything else is answered like an unknown task
+ * or context.
  */
 
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
@@ -70,7 +78,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
-import { resolveInvocationLimits, resolvePublishedAgentConfig } from './agent-invocation';
+import { discardRefusedSession, resolveInvocationLimits, resolvePublishedAgentConfig, startRunOnSession } from './agent-invocation';
 import { openSseConnection } from './sse-connection';
 import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
@@ -81,7 +89,7 @@ const JSONRPC_VERSION = '2.0';
 
 // A2A-specific JSON-RPC error codes (spec §8).
 const ERR_TASK_NOT_FOUND = -32001;
-const ERR_UNSUPPORTED_OPERATION = -32004;
+const ERR_TASK_NOT_CANCELABLE = -32002;
 // Not one of the spec's: a caller the policy engine does not let answer the request this call would end.
 const ERR_FORBIDDEN = -32010;
 /** The policy engine could not decide: try again (the JSON-RPC "internal error" code; nothing was refused on merit). */
@@ -117,6 +125,50 @@ export interface A2aCallContext {
   allowNonBlocking?: boolean;
   /** The caller's run limits (its wait window included); the env ceilings otherwise. */
   limits?: AgentRunLimits;
+  /**
+   * An anonymous caller of the public route: its tasks and contexts are bound to it by a caller nonce, and
+   * what it sends is external content (its `data` inputs never fill the system prompt).
+   */
+  publicCaller?: boolean;
+}
+
+/** Where a conversation keeps the digest of its public caller's nonce (`metadata`). */
+const CALLER_NONCE_FIELD = 'a2aCallerNonceSha256';
+
+/** A new caller nonce: 144 random bits, base64url (no `.`, so it can follow an id after one). */
+function newCallerNonce(): string {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
+function callerNonceDigest(nonce: string): Buffer {
+  return crypto.createHash('sha256').update(nonce).digest();
+}
+
+/** Whether `nonce` is the caller nonce of `conversation` (constant-time; a conversation without one matches nothing). */
+function callerNonceMatches(conversation: { metadata?: Record<string, unknown> } | null | undefined, nonce: string | undefined): boolean {
+  const stored = conversation?.metadata?.[CALLER_NONCE_FIELD];
+  if (typeof stored !== 'string' || !nonce) return false;
+  const expected = Buffer.from(stored, 'hex');
+  const presented = callerNonceDigest(nonce);
+  return expected.length === presented.length && crypto.timingSafeEqual(expected, presented);
+}
+
+/** `<id>.<nonce>` split at its last `.`; null when there is no nonce. */
+function splitCallerNonce(value: string): { id: string; nonce: string } | null {
+  const dot = value.lastIndexOf('.');
+  if (dot <= 0 || dot === value.length - 1) return null;
+  return { id: value.slice(0, dot), nonce: value.slice(dot + 1) };
+}
+
+/** The ids a conversation's tasks are handed out with: as they are on the token route, with the caller nonce on the public one. */
+interface A2aIds {
+  contextId: string;
+  taskId(run: Pick<IAgentRun, '_id'>): string;
+}
+
+function a2aIds(conversationId: string, nonce?: string): A2aIds {
+  const suffix = nonce ? `.${nonce}` : '';
+  return { contextId: `${conversationId}${suffix}`, taskId: (run) => `${publicAgentRunId(run)}${suffix}` };
 }
 
 /**
@@ -238,24 +290,34 @@ function stateTask(id: string, contextId: string, state: string, text?: string):
   };
 }
 
+/** A run that failed after it started, as its task: `failed`, the error's message and what classifies it. */
+function failedTask(id: string, contextId: string, error: Record<string, unknown>): Record<string, unknown> {
+  const { message, type, code, ...extra } = error;
+  return {
+    ...stateTask(id, contextId, 'failed', typeof message === 'string' ? message : 'The run failed.'),
+    metadata: { errorType: type, ...(code ? { errorCode: code } : {}), ...extra },
+  };
+}
+
 /** The task a run is, in A2A states: submitted (waiting), working, input-required, completed, failed, canceled. */
-function taskFromRun(run: IAgentRun, baseUrl: string): Record<string, unknown> {
-  const id = publicAgentRunId(run);
+function taskFromRun(run: IAgentRun, baseUrl: string, ids: A2aIds = a2aIds(run.conversationId)): Record<string, unknown> {
+  const id = ids.taskId(run);
+  const contextId = ids.contextId;
   const result = run.result as unknown as AgentChatResponse | null | undefined;
   switch (run.status) {
     case 'scheduled':
     case 'queued':
-      return stateTask(id, run.conversationId, 'submitted');
+      return stateTask(id, contextId, 'submitted');
     case 'running':
-      return stateTask(id, run.conversationId, 'working');
+      return stateTask(id, contextId, 'working');
     case 'requires_action':
-      return inputRequiredTask(id, run.conversationId, answerTextOf(result), result?.required_action?.actions ?? []);
+      return inputRequiredTask(id, contextId, answerTextOf(result), result?.required_action?.actions ?? []);
     case 'succeeded':
-      return result ? taskFromResponse(id, run.conversationId, result, baseUrl) : completedTask(id, run.conversationId, '');
+      return result ? taskFromResponse(id, contextId, result, baseUrl) : completedTask(id, contextId, '');
     case 'canceled':
-      return stateTask(id, run.conversationId, 'canceled');
+      return stateTask(id, contextId, 'canceled');
     default:
-      return stateTask(id, run.conversationId, 'failed', run.errorMessage ?? 'The run failed.');
+      return stateTask(id, contextId, 'failed', run.errorMessage ?? 'The run failed.');
   }
 }
 
@@ -438,7 +500,14 @@ function a2aInputFiles(parts: A2aPart[] | undefined): ResponseInputFile[] {
 
 type A2aTurn =
   | { failure: ReturnType<typeof jsonRpcError> }
-  | { base: Omit<StartAgentRunInput, 'execution'>; limits: AgentRunLimits };
+  | {
+    base: Omit<StartAgentRunInput, 'execution'>;
+    limits: AgentRunLimits;
+    /** The ids this turn's task is handed out with. */
+    ids: A2aIds;
+    /** The call created the conversation (a refused start removes it again). */
+    createdSession: boolean;
+  };
 
 /**
  * Everything a `message/send` / `message/stream` needs before its run starts:
@@ -481,18 +550,41 @@ async function prepareA2aTurn(
   }
 
   // contextId ↔ conversationId: reuse the Responses API conversation
-  // store, scoped on agent AND project like every other agent surface.
-  const contextId = typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined;
-  if (contextId && !conversationVisibleTo(await getConversationById(ctx.tenantDbName, contextId), agent, ctx)) {
-    return fail(-32602, 'Invalid params: unknown contextId');
+  // store, scoped on agent AND project like every other agent surface. A public caller
+  // names it with its caller nonce (`<conversationId>.<nonce>`); without the right one it is unknown.
+  const requestedContextId = typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined;
+  let contextId: string | undefined;
+  let callerNonce: string | undefined;
+  if (requestedContextId && ctx.publicCaller) {
+    const bound = splitCallerNonce(requestedContextId);
+    const conversation = bound ? await getConversationById(ctx.tenantDbName, bound.id) : null;
+    if (!bound || !conversationVisibleTo(conversation, agent, ctx) || !callerNonceMatches(conversation, bound.nonce)) {
+      return fail(-32602, 'Invalid params: unknown contextId');
+    }
+    contextId = bound.id;
+    callerNonce = bound.nonce;
+  } else if (requestedContextId) {
+    if (!conversationVisibleTo(await getConversationById(ctx.tenantDbName, requestedContextId), agent, ctx)) {
+      return fail(-32602, 'Invalid params: unknown contextId');
+    }
+    contextId = requestedContextId;
   }
   // A queued turn learns of an exhausted spend limit now, before a session is created for it.
   if (queued) {
     await assertQueuedTurnSpendAllowed({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, agentKey: agent.key, userId: ctx.userId });
   }
-  const resolved = await resolveConversation(contextId, agent, ctx, 'a2a');
+  // A public caller's new conversation draws its caller nonce; only its digest is stored.
+  if (ctx.publicCaller && !contextId) callerNonce = newCallerNonce();
+  const resolved = await resolveConversation(
+    contextId,
+    agent,
+    ctx,
+    'a2a',
+    !contextId && callerNonce ? { [CALLER_NONCE_FIELD]: callerNonceDigest(callerNonce).toString('hex') } : {},
+  );
   if ('error' in resolved) return fail(-32602, 'Invalid params: unknown contextId');
   const { conversationId } = resolved;
+  const createdSession = resolved.created === true;
 
   // A new message to a task that waits on a request, under `cancel_pending`, cancels that request. Over the
   // token route the caller is a principal the engine can be asked about (the public route's callers are
@@ -526,6 +618,8 @@ async function prepareA2aTurn(
         actor: { userId: ctx.userId, licenseType: ctx.licenseType ?? '', ...(ctx.tokenId ? { tokenId: ctx.tokenId } : {}) },
       }));
     } catch (error) {
+      // No run starts: a conversation this call created goes again.
+      if (createdSession) await discardRefusedSession(ctx.tenantDbName, conversationId);
       if (error instanceof AgentAttachmentError) {
         return fail(error.status === 429 ? ERR_AUTHORIZATION_UNAVAILABLE : -32602, `Invalid params: ${error.message}`, { type: 'invalid_request_error', code: error.code });
       }
@@ -545,6 +639,8 @@ async function prepareA2aTurn(
   const limits = ctx.limits ?? await resolveAgentRunLimits();
   return {
     limits,
+    ids: a2aIds(conversationId, callerNonce),
+    createdSession,
     base: {
       tenantDbName: ctx.tenantDbName,
       tenantId: ctx.tenantId,
@@ -558,6 +654,9 @@ async function prepareA2aTurn(
       usePublished: true,
       runtimeContext,
       ...(resolvedInputs.inputs ? { inputs: resolvedInputs.inputs } : {}),
+      // An anonymous caller's message and inputs are external content: inputs never fill the system prompt
+      // (as a webhook payload's); an authenticated caller's inputs stay prompt variables.
+      ...(ctx.publicCaller ? { externalContent: true } : {}),
       channel: 'a2a',
       trigger: 'request',
       limits,
@@ -649,16 +748,17 @@ function openA2aTaskStream(reply: FastifyReply, rpcId: string | number | null, t
 async function streamA2aTurn(
   reply: FastifyReply,
   rpcId: string | number | null,
-  base: Omit<StartAgentRunInput, 'execution'>,
+  prepared: Extract<A2aTurn, { base: unknown }>,
   baseUrl: string,
 ): Promise<FastifyReply> {
-  const contextId = base.conversationId;
+  const { base, ids } = prepared;
+  const contextId = ids.contextId;
   const disconnected = new AbortController();
   const open: { stream: A2aTaskStream | null } = { stream: null };
   let taskId = '';
 
   try {
-    const outcome = await startAgentRun({
+    const outcome = await startRunOnSession({
       ...base,
       execution: {
         kind: 'inline',
@@ -667,7 +767,7 @@ async function streamA2aTurn(
         signal: disconnected.signal,
         cancelOnDisconnect: false,
         onStarted: (run) => {
-          taskId = publicAgentRunId(run);
+          taskId = ids.taskId(run);
           const stream = openA2aTaskStream(reply, rpcId, taskId, contextId);
           open.stream = stream;
           stream.signal.addEventListener('abort', () => disconnected.abort(), { once: true });
@@ -675,7 +775,7 @@ async function streamA2aTurn(
           stream.status({ state: 'working', timestamp: new Date().toISOString() }, false);
         },
       },
-    });
+    }, { tenantDbName: base.tenantDbName, conversationId: base.conversationId, created: prepared.createdSession });
     const refusal = runRefusalRpc(rpcId, outcome);
     if (refusal) return await reply.code(200).send(refusal);
     if (outcome.kind === 'completed') {
@@ -683,7 +783,7 @@ async function streamA2aTurn(
         ? stateTask(taskId, contextId, 'canceled')
         : taskFromResponse(taskId, contextId, outcome.response, baseUrl));
     } else if ('run' in outcome) {
-      open.stream?.finish(taskFromRun(outcome.run, baseUrl));
+      open.stream?.finish(taskFromRun(outcome.run, baseUrl, ids));
     }
   } catch (error) {
     // Before the stream opened this is the call's error like any other; after, the run ended in failure.
@@ -717,7 +817,7 @@ async function resubscribeA2aTask(
   reply: FastifyReply,
   rpcId: string | number | null,
   ctx: A2aCallContext,
-  found: { task: Record<string, unknown>; run?: IAgentRun },
+  found: { task: Record<string, unknown>; run?: IAgentRun; ids?: A2aIds },
   baseUrl: string,
 ): Promise<FastifyReply> {
   const { task, run } = found;
@@ -767,7 +867,7 @@ async function resubscribeA2aTask(
     );
     follow.abort();
     await following;
-    if (settled && !isAgentRunActive(settled)) stream.finish(taskFromRun(settled, baseUrl), { wholeText: true });
+    if (settled && !isAgentRunActive(settled)) stream.finish(taskFromRun(settled, baseUrl, found.ids), { wholeText: true });
   } catch (error) {
     logAgentRouteError(logger, 'A2A resubscribe error', error);
   } finally {
@@ -808,24 +908,37 @@ export async function handleA2aRpc(
       const prepared = await prepareA2aTurn(ctx, agent, request, body.params, rpcId, queued);
       if ('failure' in prepared) return reply.code(200).send(prepared.failure);
       const baseUrl = externalBaseUrl(request);
-      if (streaming) return await streamA2aTurn(reply, rpcId, prepared.base, baseUrl);
+      if (streaming) return await streamA2aTurn(reply, rpcId, prepared, baseUrl);
 
-      const outcome = await startAgentRun({
-        ...prepared.base,
-        // Past the window the run carries on and the caller gets a `working` task to poll with tasks/get.
-        execution: queued ? { kind: 'queued' } : { kind: 'inline', waitMs: prepared.limits.syncWaitMs, cancelOnDisconnect: false },
-      });
+      const { ids } = prepared;
+      const turn: { run: IAgentRun | null } = { run: null };
+      let outcome: StartAgentRunOutcome;
+      try {
+        outcome = await startRunOnSession({
+          ...prepared.base,
+          // Past the window the run carries on and the caller gets a `working` task to poll with tasks/get.
+          execution: queued
+            ? { kind: 'queued' }
+            : { kind: 'inline', waitMs: prepared.limits.syncWaitMs, cancelOnDisconnect: false, onStarted: (run) => { turn.run = run; } },
+        }, { tenantDbName: ctx.tenantDbName, conversationId: prepared.base.conversationId, created: prepared.createdSession });
+      } catch (error) {
+        // Before the run existed this is the call's error; after, the run failed: its task says so (as tasks/get does).
+        if (!turn.run) throw error;
+        const classified = logAgentRouteError(logger, 'A2A run failed', error);
+        return reply.code(200).send(jsonRpcOk(rpcId, failedTask(ids.taskId(turn.run), ids.contextId, toClientErrorBody(classified.error))));
+      }
       const refusal = runRefusalRpc(rpcId, outcome);
       if (refusal) return reply.code(200).send(refusal);
       if (outcome.kind === 'completed') {
-        return reply.code(200).send(jsonRpcOk(
-          rpcId,
-          taskFromResponse(publicAgentRunId(outcome.run), prepared.base.conversationId, outcome.response, baseUrl),
-        ));
+        const taskId = ids.taskId(outcome.run);
+        // A run stopped while the call waited ended canceled, whatever partial answer it had.
+        return reply.code(200).send(jsonRpcOk(rpcId, outcome.run.status === 'canceled'
+          ? stateTask(taskId, ids.contextId, 'canceled')
+          : taskFromResponse(taskId, ids.contextId, outcome.response, baseUrl)));
       }
       // `detached` (the window ended first), `accepted` (queued): the run as it stands.
       if (!('run' in outcome)) throw new Error(`Unexpected start outcome: ${outcome.kind}`);
-      return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, baseUrl)));
+      return reply.code(200).send(jsonRpcOk(rpcId, taskFromRun(outcome.run, baseUrl, ids)));
     }
 
     if (method === 'tasks/get' || method === 'tasks/resubscribe') {
@@ -842,9 +955,11 @@ export async function handleA2aRpc(
       // holds the conversation's run slot, which every node reads. A task that waits on a person
       // (`input-required`) is cancelled with it — its open approvals and questions end as cancelled.
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
-      if (isRunTaskId(requestedId)) {
-        const run = await loadTaskRun(ctx, agent, requestedId);
-        if (!run) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+      const ref = readTaskId(ctx, requestedId);
+      if (ref && 'runTaskId' in ref) {
+        const found = await loadTaskRun(ctx, agent, ref.runTaskId, ref.nonce);
+        if (!found) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+        const { run } = found;
         if (run.status === 'requires_action' && request.apiTokenContext) {
           // Ending a task that waits on a request is answering it with "no": the engine says whether this caller may.
           const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
@@ -862,18 +977,20 @@ export async function handleA2aRpc(
             }
           }
         }
-        const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: requestedId });
+        const outcome = await cancelAgentRun({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, runId: ref.runTaskId });
         if (outcome.kind === 'not_found') return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
         if (outcome.kind === 'already_terminal') {
-          return reply.code(200).send(jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'));
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_CANCELABLE, 'The task cannot be canceled: it is not running'));
         }
         // A running turn stops at its next checkpoint; the task is canceled from here on.
-        return reply.code(200).send(jsonRpcOk(rpcId, stateTask(requestedId, run.conversationId, 'canceled')));
+        return reply.code(200).send(jsonRpcOk(rpcId, stateTask(requestedId, found.ids.contextId, 'canceled')));
       }
-      const parsed = requestedId ? parseTaskId(requestedId) : null;
+      // A public caller names only the run tasks it was handed (with their nonce): anything else is unknown.
+      if (ctx.publicCaller) return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+      const parsed = ref && 'legacy' in ref ? ref.legacy : null;
       if (!parsed) {
         // Not an id this server hands out: nothing to look up, and nothing that could be canceled.
-        return reply.code(200).send(jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'));
+        return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_CANCELABLE, 'The task cannot be canceled: it is not running'));
       }
       const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
       if (!conversationVisibleTo(conversation, agent, ctx)) {
@@ -912,13 +1029,13 @@ export async function handleA2aRpc(
         if (waitingOn.length > 0) {
           return reply.code(200).send(jsonRpcError(
             rpcId,
-            ERR_UNSUPPORTED_OPERATION,
+            ERR_TASK_NOT_CANCELABLE,
             'The task is waiting for an approval or an answer, so there is no running turn to stop; answer the open requests (or reject them) through the actions endpoint to end the wait.',
             { pending_action_ids: waitingOn },
           ));
         }
         return reply.code(200).send(
-          jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'),
+          jsonRpcError(rpcId, ERR_TASK_NOT_CANCELABLE, 'The task cannot be canceled: it is not running'),
         );
       }
       return reply.code(200).send(jsonRpcOk(rpcId, {
@@ -954,13 +1071,14 @@ async function findTask(
   agent: IAgent,
   requestedId: string,
   baseUrl: string,
-): Promise<{ task: Record<string, unknown>; run?: IAgentRun } | null> {
-  if (isRunTaskId(requestedId)) {
-    const run = await loadTaskRun(ctx, agent, requestedId);
-    return run ? { task: taskFromRun(run, baseUrl), run } : null;
+): Promise<{ task: Record<string, unknown>; run?: IAgentRun; ids?: A2aIds } | null> {
+  const ref = readTaskId(ctx, requestedId);
+  if (!ref) return null;
+  if ('runTaskId' in ref) {
+    const found = await loadTaskRun(ctx, agent, ref.runTaskId, ref.nonce);
+    return found ? { task: taskFromRun(found.run, baseUrl, found.ids), run: found.run, ids: found.ids } : null;
   }
-  const parsed = requestedId ? parseTaskId(requestedId) : null;
-  if (!parsed) return null;
+  const parsed = ref.legacy;
   const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
   const message = conversationVisibleTo(conversation, agent, ctx)
     ? conversation?.messages?.[parsed.messageIndex]
@@ -981,12 +1099,41 @@ async function findTask(
   };
 }
 
-/** The run a `run_<id>` task names, when this caller may see it (this agent, this project, a conversation it started). */
-async function loadTaskRun(ctx: A2aCallContext, agent: IAgent, taskIdValue: string): Promise<IAgentRun | null> {
+/**
+ * What a task id names for this caller: a run task (`run_<runId>`; a public caller's carries its nonce,
+ * `run_<runId>.<nonce>`), an older message task (`task_<conversationId>_<index>`, the token route only), or
+ * nothing.
+ */
+function readTaskId(
+  ctx: A2aCallContext,
+  id: string,
+): { runTaskId: string; nonce?: string } | { legacy: { conversationId: string; messageIndex: number } } | null {
+  if (!id) return null;
+  if (ctx.publicCaller) {
+    const bound = splitCallerNonce(id);
+    return bound && isRunTaskId(bound.id) ? { runTaskId: bound.id, nonce: bound.nonce } : null;
+  }
+  if (isRunTaskId(id)) return { runTaskId: id };
+  const legacy = parseTaskId(id);
+  return legacy ? { legacy } : null;
+}
+
+/**
+ * The run a `run_<id>` task names, when this caller may see it (this agent, this project, a conversation it
+ * started; on the public route also the conversation's caller nonce), and the ids its task is handed out with.
+ */
+async function loadTaskRun(
+  ctx: A2aCallContext,
+  agent: IAgent,
+  taskIdValue: string,
+  nonce?: string,
+): Promise<{ run: IAgentRun; ids: A2aIds } | null> {
   const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, taskIdValue);
   if (!run || run.mode === 'sync' || run.agentKey !== agent.key) return null;
   const conversation = await getConversationById(ctx.tenantDbName, run.conversationId).catch(() => null);
-  return conversationVisibleTo(conversation, agent, ctx) ? run : null;
+  if (!conversationVisibleTo(conversation, agent, ctx)) return null;
+  if (ctx.publicCaller && !callerNonceMatches(conversation, nonce)) return null;
+  return { run, ids: a2aIds(run.conversationId, ctx.publicCaller ? nonce : undefined) };
 }
 
 async function loadExposedAgent(

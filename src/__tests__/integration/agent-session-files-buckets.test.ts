@@ -209,23 +209,33 @@ describe('what a client is told about an agent’s attachments', () => {
     expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads' } })).toMatchObject({ enabled: false, acceptsImages: false });
   });
 
-  it('off by default, and not set up without a bucket', async () => {
+  it('off by default, and not set up without a bucket; with uploads off no image is accepted, whatever the model reads', async () => {
     await model('gpt-4o');
     expect(await describeFor({ modelKey: 'main' })).toEqual({
-      enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: true,
+      enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: false,
       outputs: { enabled: false, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv', 'txt', 'json', 'html', 'xml', 'yaml', 'yml'] },
     });
-    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true } })).toMatchObject({ enabled: false });
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true } })).toMatchObject({ enabled: false, acceptsImages: false });
+    // Switched off with a working bucket named: still no image.
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: false, bucketKey: 'uploads' } })).toMatchObject({ enabled: false, acceptsImages: false });
   });
 
+  const UPLOADS_ON = { enabled: true, bucketKey: 'uploads' };
+
   it('an explicit "text only" on the model beats its name', async () => {
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
     await model('gpt-4o', { metadata: { capabilities: { inputModalities: ['text'], inputModalitiesExplicit: true } } });
-    expect((await describeFor({ modelKey: 'main' })).acceptsImages).toBe(false);
+    expect((await describeFor({ modelKey: 'main', attachments: UPLOADS_ON })).acceptsImages).toBe(false);
   });
 
   it('a model that is gone, or a connected agent, accepts no images', async () => {
-    expect((await describeFor({ modelKey: 'nope' })).acceptsImages).toBe(false);
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    expect((await describeFor({ modelKey: 'nope', attachments: UPLOADS_ON })).acceptsImages).toBe(false);
     await model('gpt-4o');
-    expect((await describeFor({ kind: 'external', connection: { protocol: 'a2a', url: 'https://x' } } as never)).acceptsImages).toBe(false);
+    expect((await describeFor({ kind: 'external', connection: { protocol: 'a2a', url: 'https://x' }, attachments: UPLOADS_ON } as never)).acceptsImages).toBe(false);
   });
 });

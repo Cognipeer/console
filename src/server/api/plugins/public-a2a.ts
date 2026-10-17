@@ -106,6 +106,8 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: agent.projectId,
           userId: PUBLIC_A2A_USER_ID,
           licenseType: tenant.licenseType,
+          // Every anonymous caller is `a2a-public`: its tasks are bound to it by a caller nonce instead.
+          publicCaller: true,
         },
         agent,
         request,

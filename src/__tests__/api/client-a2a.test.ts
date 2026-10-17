@@ -82,12 +82,14 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   executeAgentChat: vi.fn(),
   createConversation: vi.fn(),
   getConversationById: vi.fn(),
+  deleteConversation: vi.fn(),
 }));
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
 import {
   createConversation,
+  deleteConversation,
   executeAgentChat,
   getAgentByKey,
   getConversationById,
@@ -269,7 +271,7 @@ describe('message/send', () => {
     expect(body.result.id).toBe('run_run-1');
   });
 
-  it('a message sent while the task waits on a person names the ids to answer', async () => {
+  it('a message sent while the task waits on a person: the run fails, its task names the ids to answer', async () => {
     const { AgentPendingActionError } = await import('@/lib/services/agents/agentErrors');
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockRejectedValue(new AgentPendingActionError(['act_1', 'act_2']));
@@ -280,8 +282,10 @@ describe('message/send', () => {
       headers: { authorization: 'Bearer tok' },
       payload: { jsonrpc: '2.0', id: 9, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
     });
-    const body = parseJsonBody<{ error: { data: Record<string, unknown> } }>(res.body);
-    expect(body.error.data).toEqual({ type: 'pending_action', code: 'pending_action', pending_action_ids: ['act_1', 'act_2'] });
+    const body = parseJsonBody<{ result: { id: string; status: { state: string }; metadata: Record<string, unknown> } }>(res.body);
+    expect(body.result.id).toBe('run_run-1');
+    expect(body.result.status.state).toBe('failed');
+    expect(body.result.metadata).toEqual({ errorType: 'pending_action', errorCode: 'pending_action', pending_action_ids: ['act_1', 'act_2'] });
   });
 
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
@@ -366,7 +370,7 @@ describe('message/send — a recorded run, one active turn per conversation', ()
     expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
   });
 
-  it('a turn that throws is finalized failed and answered as a JSON-RPC error', async () => {
+  it('a turn that throws is finalized failed and answered as its Task in state failed, with the error', async () => {
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockRejectedValue(new Error('provider exploded'));
 
@@ -378,7 +382,10 @@ describe('message/send — a recorded run, one active turn per conversation', ()
       payload: { jsonrpc: '2.0', id: 6, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
     });
 
-    expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32603);
+    const body = parseJsonBody<{ result: { kind: string; id: string; contextId: string; status: { state: string; message: { parts: Array<{ text: string }> } }; metadata: Record<string, unknown> } }>(res.body);
+    expect(body.result).toMatchObject({ kind: 'task', id: 'run_run-1', contextId: 'conv-9', status: { state: 'failed' } });
+    expect(body.result.status.message.parts[0].text).toBe('The agent run failed.');
+    expect(body.result.metadata).toMatchObject({ errorType: 'server_error', errorCode: 'agent_run_failed' });
     expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed', errorReason: 'agent_error' }));
   });
 
@@ -463,9 +470,9 @@ describe('tasks/get and tasks/cancel on run ids (run_<runId>)', () => {
     expect(requestAgentRunCancel).toHaveBeenCalledWith('run-1', 'tenant-1', 'proj-1');
   });
 
-  it('tasks/cancel of a finished run cannot cancel it (-32004)', async () => {
+  it('tasks/cancel of a finished run cannot cancel it (-32002 TaskNotCancelable)', async () => {
     getAgentRunById.mockResolvedValue(row({ status: 'succeeded' }));
-    expect((await rpc('tasks/cancel', 'run_run-1')).error?.code).toBe(-32004);
+    expect((await rpc('tasks/cancel', 'run_run-1')).error?.code).toBe(-32002);
   });
 });
 
@@ -540,7 +547,7 @@ describe('tasks/get and unknown methods', () => {
       payload: { jsonrpc: '2.0', id: 10, method: 'tasks/cancel', params: { id: 'task_conv-1_1' } },
     });
     const body = parseJsonBody<{ error: { code: number; message: string; data: Record<string, unknown> } }>(res.body);
-    expect(body.error.code).toBe(-32004);
+    expect(body.error.code).toBe(-32002);
     expect(body.error.message).toContain('waiting for an approval or an answer');
     expect(body.error.message).not.toContain('synchronously');
     expect(body.error.data).toEqual({ pending_action_ids: ['act_1'] });
@@ -572,11 +579,11 @@ describe('tasks/get and unknown methods', () => {
       }));
     });
 
-    it('tasks/cancel keeps its answer (-32004: nothing to stop, answer through the actions endpoint) for a caller who may answer', async () => {
+    it('tasks/cancel keeps its answer (-32002: nothing to stop, answer through the actions endpoint) for a caller who may answer', async () => {
       mockFn(getConversationById).mockResolvedValue(waiting);
       const app = await buildApp();
       const res = await app.inject(rpc('tasks/cancel', { id: 'task_conv-1_1' }));
-      expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32004);
+      expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32002);
     });
 
     it('a message that would cancel the open request (cancel_pending) is refused for a caller who may not answer it', async () => {
@@ -622,7 +629,7 @@ describe('tasks/get and unknown methods', () => {
         payload: { jsonrpc: '2.0', id: 11, method: 'tasks/cancel', params: { id } },
       });
       const body = parseJsonBody<{ error: { code: number; message: string; data?: unknown } }>(res.body);
-      expect(body.error.code).toBe(-32004);
+      expect(body.error.code).toBe(-32002);
       expect(body.error.message).toContain('cannot be canceled');
       expect(body.error.message).not.toContain('synchronously');
       expect(body.error.data).toBeUndefined();
@@ -1220,7 +1227,7 @@ describe('message/send — file parts', () => {
     files.fetch.mockResolvedValue(new Response('%PDF-1.4', { headers: { 'content-type': 'application/pdf' } }));
     const body = await send([{ kind: 'file', file: { uri: 'https://files.example.com/docs/report.pdf' } }]);
     expect(body.error).toBeUndefined();
-    expect(files.fetch).toHaveBeenCalledWith('https://files.example.com/docs/report.pdf', { method: 'GET' });
+    expect(files.fetch).toHaveBeenCalledWith('https://files.example.com/docs/report.pdf', expect.objectContaining({ method: 'GET' }), expect.anything());
     expect(files.upload).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report.pdf', contentType: 'application/pdf' }));
     expect(Buffer.isBuffer(files.upload.mock.calls[0][0].data)).toBe(true);
     expect(mockFn(executeAgentChat).mock.calls[0][0]).toMatchObject({ userMessage: '', attachments: ['file-1'] });
@@ -1245,5 +1252,65 @@ describe('message/send — file parts', () => {
     const body = await send([{ kind: 'file', file: { bytes: 'aGk=', name: 'big.bin' } }]);
     expect(body.error).toMatchObject({ code: -32602, data: { code: 'file_too_large' } });
     expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('message/send — how a run that did not finish normally is answered', () => {
+  const answer = (text: string) => ({
+    output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }],
+    _conversation_messages: [{}, {}],
+    stop_reason: 'cancelled',
+  });
+  const send = async (message: Record<string, unknown> = { parts: [{ kind: 'text', text: 'Hi' }] }) => {
+    const app = await buildApp();
+    return app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 21, method: 'message/send', params: { message } },
+    });
+  };
+
+  it('a run stopped while the call waited is a Task in state canceled, not completed', async () => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    mockFn(executeAgentChat).mockImplementation(async () => {
+      abortLocalTurns('tenant-1', 'conv-1');
+      return answer('Half');
+    });
+    const body = parseJsonBody<{ result: { id: string; contextId: string; status: { state: string } } }>((await send()).body);
+    expect(body.result).toMatchObject({ id: 'run_run-1', contextId: 'conv-1', status: { state: 'canceled' } });
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'canceled' }));
+  });
+
+  it('a start refused on a new conversation removes that conversation; a continued one is kept', async () => {
+    const deleteAgentConversation = mockFn(deleteConversation).mockResolvedValue(true);
+    mockFn(getDatabase).mockResolvedValue(createMockDb({
+      runWithTenant, createAgentRun, deleteAgentRun, finalizeAgentRun, markAgentRunDetached, getAgentRunById, requestAgentRunCancel,
+      countActiveAgentRuns: vi.fn().mockResolvedValue(2),
+    } as never));
+    limits.override = { maxActivePerTenant: 1 };
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-new' });
+
+    const fresh = parseJsonBody<{ error: { data: { code: string } } }>((await send()).body);
+    expect(fresh.error.data.code).toBe('agent_run_concurrency_limit');
+    expect(deleteAgentConversation).toHaveBeenCalledWith('tenant_acme', 'conv-new');
+
+    deleteAgentConversation.mockClear();
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    const continued = parseJsonBody<{ error: { data: { code: string } } }>((await send({ parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' })).body);
+    expect(continued.error.data.code).toBe('agent_run_concurrency_limit');
+    expect(deleteAgentConversation).not.toHaveBeenCalled();
+    expect(executeAgentChat).not.toHaveBeenCalled();
+  });
+
+  it('an authenticated caller\'s data inputs stay prompt variables (not external content)', async () => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    mockFn(getAgentByKey).mockResolvedValue({ ...EXPOSED_AGENT, config: { ...EXPOSED_AGENT.config, inputs: [{ name: 'topic', type: 'string' }] } });
+    mockFn(executeAgentChat).mockResolvedValue(answer('ok'));
+    await send({ parts: [{ kind: 'text', text: 'Go' }, { kind: 'data', data: { topic: 'billing' } }] });
+    const request = mockFn(executeAgentChat).mock.calls[0][0];
+    expect(request.inputs).toEqual({ topic: 'billing' });
+    expect(request.inputsAsPromptVariables).toBeUndefined();
+    expect(request.externalContent).toBeUndefined();
   });
 });

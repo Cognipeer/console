@@ -251,7 +251,7 @@ describe('POST /responses — an agent turn is a run, answered as its Response o
 
     expect(res.statusCode).toBe(200);
     expect(startInput()).toMatchObject({ runClass: 'deferred', execution: { kind: 'queued' } });
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', projectId: 'proj-1' }), DEFAULT_LIMITS.syncWaitMs);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', projectId: 'proj-1' }), DEFAULT_LIMITS.syncWaitMs, expect.any(AbortSignal));
     expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ status: 'completed', service_tier: 'flex', output_text: 'hi there' });
   });
 
@@ -431,7 +431,7 @@ describe('POST /responses — Idempotency-Key on every mode (§4.6)', () => {
 
     const res = await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'idem-1' });
 
-    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-5' }), DEFAULT_LIMITS.syncWaitMs);
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-5' }), DEFAULT_LIMITS.syncWaitMs, expect.any(AbortSignal));
     expect(res.statusCode).toBe(202);
     expect(parseJsonBody<{ status: string }>(res.body).status).toBe('in_progress');
   });

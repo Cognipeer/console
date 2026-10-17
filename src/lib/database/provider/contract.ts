@@ -1649,15 +1649,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   /**
-   * The session `createdBy` started on `agentKey` in `projectId` whose last chat-completions turn left
-   * `transcriptHash`; the most recently updated one when several match, null when none does.
+   * The sessions `createdBy` started on `agentKey` in `projectId` whose last chat-completions turn left
+   * `transcriptHash`, most recently updated first, at most `limit` (more than one = an ambiguous match).
    */
-  findAgentConversationByTranscriptHash(filter: {
+  findAgentConversationsByTranscriptHash(filter: {
     projectId: string;
     agentKey: string;
     createdBy: string;
     transcriptHash: string;
-  }): Promise<IAgentConversation | null>;
+  }, limit: number): Promise<IAgentConversation[]>;
   listAgentConversations(
     agentKey: string,
     filters?: {

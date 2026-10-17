@@ -378,18 +378,18 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return row ? this.mapConversation(row) : null;
     }
 
-    async findAgentConversationByTranscriptHash(filter: {
+    async findAgentConversationsByTranscriptHash(filter: {
       projectId: string;
       agentKey: string;
       createdBy: string;
       transcriptHash: string;
-    }): Promise<IAgentConversation | null> {
-      const row = this.getTenantDb().prepare(
+    }, limit: number): Promise<IAgentConversation[]> {
+      const rows = this.getTenantDb().prepare(
         `SELECT * FROM ${TABLES.agentConversations}
          WHERE projectId = @projectId AND agentKey = @agentKey AND createdBy = @createdBy AND transcriptHash = @transcriptHash
-         ORDER BY updatedAt DESC LIMIT 1`,
-      ).get(filter) as SqliteRow | undefined;
-      return row ? this.mapConversation(row) : null;
+         ORDER BY updatedAt DESC LIMIT @limit`,
+      ).all({ ...filter, limit: Math.max(1, Math.floor(limit)) }) as SqliteRow[];
+      return rows.map((row) => this.mapConversation(row));
     }
 
     async listAgentConversations(
