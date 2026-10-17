@@ -54,7 +54,35 @@ The response preserves the OpenAI list envelope and Console's legacy model recor
 
 `data[].id` is the stable public alias and must be sent as the `model` in inference requests. `cognipeer.canonical_model_id` is the provider-facing model identifier used for capability correlation; clients must not substitute it for the public alias. Consumers that only implement the OpenAI core schema can ignore all additional fields.
 
+The list also carries the project's **active agents**, as `agent:<key>`, when the token's owner may read the Agents service (a token without it simply sees the models; the agents are not an error):
+
+```json
+{
+  "id": "agent:support",
+  "object": "model",
+  "created": 1785403593,
+  "owned_by": "cognipeer-agent",
+  "name": "Support",
+  "description": "Answers customer questions",
+  "cognipeer": { "kind": "agent", "key": "support" }
+}
+```
+
+`GET /api/client/v1/models/agent:support` retrieves one (404 when it is not an active agent of the project, or the token may not read agents). A narrowing query (`category` other than `llm`, `providerKey`, `providerDriver`) lists models only. Agents are not part of the legacy `models` array.
+
 Capability values come from the explicit Model Hub profile. Legacy model records without that profile continue to work through normalized fallback fields, so upgrading does not require a database migration.
+
+## Calling an agent on chat completions
+
+`POST /api/client/v1/chat/completions` takes `model: "agent:<key>"` (a bare agent key also works when no model has that key) and runs the agent's published version, so any OpenAI client or SDK can call an agent. The token's owner needs the Agents service for it; a model needs the Models service. What differs from a model call:
+
+- **Only the last user message is the turn.** System and developer messages are ignored (the agent owns its prompt), and so are `temperature`, `top_p`, `max_tokens`, `tools` and the other sampling parameters (listed back in the `X-Cognipeer-Ignored-Params` response header). The text parts of that message are joined with a blank line; `image_url` and `file` parts (`file_data`, `file_id`) become files of the session when the agent takes attachments (otherwise 403), and a message with only an image is a valid message.
+- **The session is kept by the agent.** Continue one with `conversation_id` in the body or the `X-Cognipeer-Session-Id` header. A client that resends its whole transcript and names no session is matched back automatically: after every turn the session remembers a digest of the transcript the client now holds (its messages without system and developer ones, plus the answer), and a request whose earlier messages digest to it continues that session; any other request starts a new one. The matching is scoped to the agent, the project and the person who started the session, and a client that edits its history starts a new session. Every response carries the session in `X-Cognipeer-Session-Id`; the body (and, when streaming, the first and the last chunk) carries `conversation_id`.
+- **`response_format`** (`json_schema` or `json_object`) shapes the answer for that call; `message.content` is then the JSON string. `inputs` (the agent's declared inputs), `metadata` (up to 16 string pairs, kept on the run), `reasoning_effort` and `agent_model` are accepted as extensions.
+- **`Idempotency-Key`** makes a retry the same run: it gets the stored answer without a second run (409 when the key was used for a different request).
+- **`service_tier: "flex"`** queues the run in the low-priority class and waits for it like a plain call (it cannot be combined with `stream`).
+- **Streaming** opens with a chunk whose `delta.role` is `assistant`, sends a `: ping` comment every 15 seconds while the agent works, and ends with `data: [DONE]`; `stream_options.include_usage` adds a final chunk with the run's `usage`. A failure is an error chunk followed by `[DONE]`. A client that disconnects cancels the run.
+- **A call that is still running when the wait window ends** answers `202` with an empty `chat.completion` (`choices: []`) whose `cognipeer` object names the run (`status`, `run_id`, `session_id`) and a `Location` header on the [runs API](/guide/agent-background-execution); the run carries on in the background.
 
 ## Where inference is observed
 

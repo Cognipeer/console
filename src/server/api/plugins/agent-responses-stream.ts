@@ -2,9 +2,8 @@
  * An agent turn streamed as OpenAI Responses server-sent events (§5.3) — for
  * `POST /responses` with `stream: true` and for the runs API's `stream: true`.
  * The event sequence itself is `createResponsesEventEncoder` (responsesWire.ts,
- * shared with the model stream); this adds the HTTP side: headers, a `: ping`
- * every 15 s so idle proxies keep the connection, and an abort signal when the
- * client goes away (the run then stops, or carries on detached, per the caller).
+ * shared with the model stream); the HTTP side (headers, `: ping`, abort when
+ * the client goes away) is `openSseConnection`.
  */
 
 import type { FastifyReply } from 'fastify';
@@ -12,10 +11,10 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAgentRun } from '@/lib/database';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { startAgentRun } from '@/lib/services/agents/agentRunService';
-import { createResponsesEventEncoder, RESPONSES_PING_INTERVAL_MS, type ResponsesEventEncoder } from '@/lib/services/models/responsesWire';
-import { applyStreamHeaders } from '../fastify-utils';
+import { createResponsesEventEncoder, type ResponsesEventEncoder } from '@/lib/services/models/responsesWire';
 import { runOutcomeRefusal } from './agent-invocation';
 import { toAgentResponseObject, type AgentResponseObjectOptions } from './agent-response-object';
+import { openSseConnection } from './sse-connection';
 
 const logger = createLogger('api:agent-responses-stream');
 
@@ -26,41 +25,16 @@ export interface ResponsesStreamWriter extends Omit<ResponsesEventEncoder, 'func
 }
 
 export function createResponsesStreamWriter(reply: FastifyReply): ResponsesStreamWriter {
-  // Headers the route set on the reply (e.g. X-Cognipeer-Ignored-Params) go out with the raw stream too.
-  for (const [name, value] of Object.entries(reply.getHeaders())) {
-    if (value !== undefined) reply.raw.setHeader(name, value as string | number | string[]);
-  }
-  applyStreamHeaders(reply);
-  reply.raw.statusCode = 200;
-  reply.raw.flushHeaders?.();
-  const controller = new AbortController();
-  let ended = false;
-  reply.raw.on('close', () => { if (!ended) controller.abort(); });
-
-  const write = (chunk: string) => {
-    if (ended || controller.signal.aborted) return;
-    try {
-      reply.raw.write(chunk);
-    } catch {
-      controller.abort();
-    }
-  };
-  const events = createResponsesEventEncoder(write);
-  const ping = setInterval(() => write(': ping\n\n'), RESPONSES_PING_INTERVAL_MS);
-  ping.unref?.();
-
+  const connection = openSseConnection(reply);
+  const events = createResponsesEventEncoder(connection.write);
   return {
-    signal: controller.signal,
+    signal: connection.signal,
     started: events.started,
     text: events.text,
     reasoning: events.reasoning,
     finish: events.finish,
     error: events.error,
-    end() {
-      clearInterval(ping);
-      ended = true;
-      if (!reply.raw.writableEnded) reply.raw.end();
-    },
+    end: connection.end,
   };
 }
 

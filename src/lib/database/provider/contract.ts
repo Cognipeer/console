@@ -1569,7 +1569,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentConversation | null>;
   /**
    * Writes only the runtime fields (`runtimeStatus`, `stopReason`,
-   * `pendingActionIds`, `lastEventSeq`, and the session `budget` / `spentUsd`;
+   * `pendingActionIds`, `lastEventSeq`, `transcriptHash`, and the session `budget` / `spentUsd`;
    * `budget: null` removes the budget) — no `updatedAt` bump, no re-read. The
    * session event recorder calls this around every turn, so it stays much
    * cheaper than `updateAgentConversation` and cannot be mistaken for a
@@ -1584,7 +1584,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    */
   updateAgentConversationRuntime(
     id: string,
-    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId' | 'transcriptHash'>>,
     options?: { onlyIfTurn?: string },
   ): Promise<boolean | void>;
   /**
@@ -1597,6 +1597,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
+  /**
+   * The session `createdBy` started on `agentKey` in `projectId` whose last chat-completions turn left
+   * `transcriptHash`; the most recently updated one when several match, null when none does.
+   */
+  findAgentConversationByTranscriptHash(filter: {
+    projectId: string;
+    agentKey: string;
+    createdBy: string;
+    transcriptHash: string;
+  }): Promise<IAgentConversation | null>;
   listAgentConversations(
     agentKey: string,
     filters?: {

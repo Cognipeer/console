@@ -62,7 +62,7 @@ flowchart TD
 
 ## 4. How a Caller Requests Background Mode
 
-Because the same agent-invocation logic is reachable from more than one wire format (`/client/v1/agents/responses`, `/client/v1/responses`, and potentially future OpenAI-compatible surfaces such as `/client/v1/chat/completions` against an agent-backed model), the signal must be checked at a single shared point rather than duplicated per-endpoint, and it must work regardless of whether the specific request body shape has room for an extra field.
+Because the same agent-invocation logic is reachable from more than one wire format (`/client/v1/agents/responses`, `/client/v1/responses` and `/client/v1/chat/completions`, which take an agent as the `model`), the signal must be checked at a single shared point rather than duplicated per-endpoint, and it must work regardless of whether the specific request body shape has room for an extra field.
 
 | Mechanism | Example | Applies to |
 |---|---|---|

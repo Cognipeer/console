@@ -1,4 +1,4 @@
-import type { IModel } from '@/lib/database';
+import type { IAgent, IModel } from '@/lib/database';
 import {
   resolveModelCapabilities,
   type ResolvedModelCapabilities,
@@ -79,5 +79,28 @@ export function toOpenAiModelListResponse(models: IModel[]): OpenAiModelListResp
     data: models
       .filter((model) => model.category === 'llm')
       .map(toOpenAiModelListEntry),
+  };
+}
+
+/** An agent as a `/models` entry: its id is `agent:<key>`, the name `model` takes on the chat and Responses routes. */
+export type OpenAiAgentListEntry = {
+  id: string;
+  object: 'model';
+  created: number;
+  owned_by: 'cognipeer-agent';
+  name: string;
+  description: string;
+  cognipeer: { kind: 'agent'; key: string };
+};
+
+export function toOpenAiAgentListEntry(agent: Pick<IAgent, 'key' | 'name' | 'description' | 'createdAt'>): OpenAiAgentListEntry {
+  return {
+    id: `agent:${agent.key}`,
+    object: 'model',
+    created: agent.createdAt instanceof Date ? Math.floor(agent.createdAt.getTime() / 1000) : 0,
+    owned_by: 'cognipeer-agent',
+    name: agent.name,
+    description: agent.description ?? '',
+    cognipeer: { kind: 'agent', key: agent.key },
   };
 }
