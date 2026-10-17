@@ -894,7 +894,16 @@ export interface ISandboxTemplate {
   /** SandboxIsolation: runc | gvisor | kata. */
   isolation: string;
   resources: Record<string, unknown>;
-  env: Record<string, string>;
+  /**
+   * Legacy plaintext env. No longer written: the EE sandbox services seal the
+   * map into `envSealed` and clear this field. Kept optional so rows written
+   * before sealing can still be read (and sealed on first service read).
+   */
+  env?: Record<string, string>;
+  /** Encrypted env map (`encryptObject`). Values are write-only for API clients. */
+  envSealed?: string | null;
+  /** Names of the sealed env vars (not secret), for display and PATCH semantics. */
+  envKeys?: string[];
   entrypoint: string[] | null;
   toolboxPort: number;
   previewPorts: Array<Record<string, unknown>>;
@@ -980,8 +989,12 @@ export interface ISandboxInstance extends IUsageAttributionFields {
    */
   studioTemplateKey?: string | null;
   studioTemplateVersion?: number | null;
-  /** Per-instance environment variables passed to the container. */
-  env: Record<string, string>;
+  /** Legacy plaintext per-instance env (see `ISandboxTemplate.env`). */
+  env?: Record<string, string>;
+  /** Encrypted per-instance env map; decrypted only when the container is launched. */
+  envSealed?: string | null;
+  /** Names of the sealed env vars (not secret). */
+  envKeys?: string[];
   /**
    * Persistent sandbox: the control plane keeps it alive across node/daemon
    * failures (boot reconcile recreates the container and re-mounts the same
