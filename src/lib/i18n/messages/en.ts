@@ -4439,6 +4439,10 @@ export const en = {
       unchanged: 'Unchanged',
       noDifferences: 'No differences found',
     },
+    sandboxSecrets: {
+      unreadableTitle: 'Stored secrets cannot be decrypted',
+      unreadableBody: 'The secrets saved for this sandbox cannot be decrypted, probably because the encryption key changed. Until they are replaced, commands run without them. Enter all the values again to replace them.',
+    },
     sandboxSeed: {
       title: 'Preloaded files',
       description: 'Files written into the sandbox when it starts, before the agent works (for example a presentation template). Set where each one is placed; the agent is told about them.',
@@ -4804,8 +4808,7 @@ export const en = {
       publishNote: 'Portal users get the settings of the published version, not of the draft.',
       outputsTitle: 'Files the agent writes',
       cfgOutputs: 'Let the agent create files',
-      cfgOutputsDescription: 'Adds the session_files_create and session_files_append tools: the agent writes a text file ({types}) and it is delivered with its answer. Needs no sandbox; on by default once a bucket is chosen.',
-      cfgOutputsNeedsBucket: 'Needs a bucket to store the files: turn on “Let people attach files” and choose one.',
+      cfgOutputsDescription: 'Adds the session_files_create and session_files_append tools: the agent writes a text file ({types}) and it is delivered with its answer, and can list and read the files of the session. Needs no sandbox and no uploads, but a bucket to store the files. On by default when people can attach files and a bucket is chosen; otherwise turn it on here.',
       cfgOutputsMaxFiles: 'Files per turn',
       cfgOutputsMaxFileSize: 'Largest file (MB)',
       storageTitle: 'Where files are stored',

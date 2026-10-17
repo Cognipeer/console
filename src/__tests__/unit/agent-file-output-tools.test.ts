@@ -43,26 +43,35 @@ import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValid
 import { patchOutputs, outputsEnabled } from '@/components/agents/studio/filesSettings';
 
 describe('the settings', () => {
-  it('are on by default, with the documented limits', () => {
-    expect(resolveOutputsConfig(undefined)).toEqual({ enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2 });
-    expect(resolveOutputsConfig({ bucketKey: 'docs' })).toEqual({ enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2 });
+  it('have the documented limits, and by default follow the uploads: on with uploads and a bucket, off otherwise', () => {
+    const limits = { maxFilesPerTurn: 10, maxFileSizeMb: 2 };
+    expect(resolveOutputsConfig(undefined)).toEqual({ enabled: false, ...limits });
+    expect(resolveOutputsConfig({ bucketKey: 'docs' })).toEqual({ enabled: false, ...limits });
+    expect(resolveOutputsConfig({ enabled: true })).toEqual({ enabled: false, ...limits });
+    expect(resolveOutputsConfig({ enabled: true, bucketKey: ' docs ' })).toEqual({ enabled: true, ...limits });
   });
 
-  it('take a stored value, are switched off only by `enabled: false`, and are held to the most the server allows', () => {
-    expect(resolveOutputsConfig({ outputs: { maxFilesPerTurn: 5, maxFileSizeMb: 1.5 } })).toEqual({ enabled: true, maxFilesPerTurn: 5, maxFileSizeMb: 1.5 });
+  it('take a stored value over the default, and are held to the most the server allows', () => {
+    expect(resolveOutputsConfig({ outputs: { maxFilesPerTurn: 5, maxFileSizeMb: 1.5 } })).toEqual({ enabled: false, maxFilesPerTurn: 5, maxFileSizeMb: 1.5 });
+    expect(resolveOutputsConfig({ bucketKey: 'docs', outputs: { enabled: true } }).enabled).toBe(true);
+    expect(resolveOutputsConfig({ enabled: true, bucketKey: 'docs', outputs: { enabled: false } }).enabled).toBe(false);
     expect(resolveOutputsConfig({ outputs: { enabled: false } }).enabled).toBe(false);
     expect(resolveOutputsConfig({ outputs: { maxFilesPerTurn: 500, maxFileSizeMb: 500 } })).toMatchObject({ maxFilesPerTurn: 20, maxFileSizeMb: 10 });
     expect(resolveOutputsConfig({ outputs: { maxFilesPerTurn: 0, maxFileSizeMb: -1 } })).toMatchObject({ maxFilesPerTurn: 10, maxFileSizeMb: 2 });
     expect(resolveOutputsConfig({ outputs: { maxFilesPerTurn: 2.9 } }).maxFilesPerTurn).toBe(2);
   });
 
-  it('need a bucket, not the uploads switch; a connected agent never has them', () => {
+  it('need a bucket and the switch, not the uploads; a connected agent never has them', () => {
     expect(outputsAvailability({ modelKey: 'm' }).available).toBe(false);
     expect(outputsAvailability({ modelKey: 'm', attachments: { enabled: true } }).available).toBe(false);
-    // Uploads off, bucket named: the agent can still hand files back.
-    expect(outputsAvailability({ modelKey: 'm', attachments: { bucketKey: ' docs ' } })).toMatchObject({ available: true, cfg: { bucketKey: 'docs' } });
-    expect(outputsAvailability({ modelKey: 'm', attachments: { bucketKey: 'docs', outputs: { enabled: false } } }).available).toBe(false);
-    expect(outputsAvailability({ modelKey: 'm', kind: 'external', connection: { url: 'https://x' }, attachments: { bucketKey: 'docs' } } as never).available).toBe(false);
+    // Uploads off, bucket named: off until switched on, then the agent can hand files back without uploads.
+    expect(outputsAvailability({ modelKey: 'm', attachments: { bucketKey: 'docs' } }).available).toBe(false);
+    expect(outputsAvailability({ modelKey: 'm', attachments: { bucketKey: ' docs ', outputs: { enabled: true } } })).toMatchObject({ available: true, cfg: { bucketKey: 'docs' } });
+    expect(outputsAvailability({ modelKey: 'm', attachments: { outputs: { enabled: true } } }).available).toBe(false);
+    // Uploads on with a bucket: on unless switched off.
+    expect(outputsAvailability({ modelKey: 'm', attachments: { enabled: true, bucketKey: 'docs' } }).available).toBe(true);
+    expect(outputsAvailability({ modelKey: 'm', attachments: { enabled: true, bucketKey: 'docs', outputs: { enabled: false } } }).available).toBe(false);
+    expect(outputsAvailability({ modelKey: 'm', kind: 'external', connection: { url: 'https://x' }, attachments: { enabled: true, bucketKey: 'docs' } } as never).available).toBe(false);
     expect(outputsAvailability(undefined).available).toBe(false);
   });
 
@@ -70,6 +79,11 @@ describe('the settings', () => {
     const shape = (outputs: unknown) => validateAgentConfigShape({ modelKey: 'm', attachments: { bucketKey: 'docs', outputs } } as never);
     const fields = (outputs: unknown) => shape(outputs).errors.map((issue) => issue.field);
     expect(fields({ enabled: true, maxFilesPerTurn: 20, maxFileSizeMb: 10 })).toEqual([]);
+    // Outputs switched on need a bucket even with uploads off.
+    const noBucket = (attachments: unknown) => validateAgentConfigShape({ modelKey: 'm', attachments } as never).errors.map((issue) => issue.field);
+    expect(noBucket({ outputs: { enabled: true } })).toEqual(['attachments.bucketKey']);
+    expect(noBucket({ outputs: { enabled: false } })).toEqual([]);
+    expect(noBucket({ bucketKey: 'docs', outputs: { enabled: true } })).toEqual([]);
     expect(fields({ maxFilesPerTurn: 21 })).toEqual(['attachments.outputs.maxFilesPerTurn']);
     expect(fields({ maxFilesPerTurn: 0 })).toEqual(['attachments.outputs.maxFilesPerTurn']);
     expect(fields({ maxFilesPerTurn: 1.5 })).toEqual(['attachments.outputs.maxFilesPerTurn']);
@@ -91,13 +105,15 @@ describe('the settings', () => {
 });
 
 describe('the Studio edit of the settings', () => {
-  it('stores nothing for the defaults, and only what differs', () => {
-    expect(patchOutputs(undefined, { enabled: true })).toBeUndefined();
+  it('stores the switch as chosen (its default follows the uploads) and the limits only when set', () => {
+    expect(patchOutputs(undefined, { enabled: true })).toEqual({ outputs: { enabled: true } });
     expect(patchOutputs({ bucketKey: 'docs' }, { enabled: false })).toEqual({ bucketKey: 'docs', outputs: { enabled: false } });
-    expect(patchOutputs({ bucketKey: 'docs', outputs: { enabled: false, maxFilesPerTurn: 4 } }, { enabled: true })).toEqual({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 4 } });
+    expect(patchOutputs({ bucketKey: 'docs', outputs: { enabled: false, maxFilesPerTurn: 4 } }, { enabled: true })).toEqual({ bucketKey: 'docs', outputs: { enabled: true, maxFilesPerTurn: 4 } });
     expect(patchOutputs({ outputs: { maxFileSizeMb: 3 } }, { maxFileSizeMb: undefined })).toBeUndefined();
-    expect(outputsEnabled(undefined)).toBe(true);
-    expect(outputsEnabled({ outputs: { enabled: false } })).toBe(false);
+    expect(outputsEnabled(undefined)).toBe(false);
+    expect(outputsEnabled({ enabled: true, bucketKey: 'docs' })).toBe(true);
+    expect(outputsEnabled({ enabled: true, bucketKey: 'docs', outputs: { enabled: false } })).toBe(false);
+    expect(outputsEnabled({ outputs: { enabled: true } })).toBe(true);
   });
 });
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Configure → Files → "Files the agent writes": the switch and the two limits, driven the way a
- * person drives them. The default (on, default limits) is stored as nothing; a bucket is needed.
+ * person drives them. Its default follows the uploads switch; a bucket is needed once it is on.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -60,7 +60,8 @@ function mount(initial?: AttachmentsSettings) {
     .find((input) => input.closest('.mantine-Switch-root')?.textContent?.includes('Let the agent create files'))!;
   const limit = (label: string) => [...container!.querySelectorAll('.mantine-NumberInput-root')]
     .find((root) => root.querySelector('label')?.textContent === label)?.querySelector<HTMLInputElement>('input');
-  return { outputsSwitch, limit, seen };
+  const bucketField = () => [...container!.querySelectorAll('label')].find((label) => label.textContent?.startsWith('Bucket'));
+  return { outputsSwitch, limit, bucketField, seen };
 }
 
 function setValue(input: HTMLInputElement, value: string) {
@@ -72,8 +73,8 @@ function setValue(input: HTMLInputElement, value: string) {
 }
 
 describe('the files the agent writes, in the Files section', () => {
-  it('is on once a bucket is chosen — with uploads off — and shows the two limits', () => {
-    const { outputsSwitch, limit } = mount({ bucketKey: 'docs' });
+  it('follows the uploads by default: on with uploads and a bucket, and shows the two limits', () => {
+    const { outputsSwitch, limit } = mount({ enabled: true, bucketKey: 'docs' });
     expect(outputsSwitch().checked).toBe(true);
     expect(outputsSwitch().disabled).toBe(false);
     expect(limit('Files per turn')?.placeholder).toBe('10');
@@ -81,38 +82,50 @@ describe('the files the agent writes, in the Files section', () => {
     expect(container!.textContent).toContain('.md .csv .txt .json .html .xml .yaml .yml');
   });
 
-  it('needs a bucket: without one the switch is off and cannot be turned on, and the limits are hidden', () => {
-    const { outputsSwitch, limit } = mount(undefined);
+  it('is off with uploads off, whatever the bucket — and the switch works without uploads', () => {
+    const { outputsSwitch, limit, seen } = mount({ bucketKey: 'docs' });
     expect(outputsSwitch().checked).toBe(false);
-    expect(outputsSwitch().disabled).toBe(true);
+    expect(outputsSwitch().disabled).toBe(false);
     expect(limit('Files per turn')).toBeUndefined();
-    expect(container!.textContent).toContain('Needs a bucket');
+    act(() => outputsSwitch().click());
+    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { enabled: true } });
+    expect(outputsSwitch().checked).toBe(true);
+    expect(limit('Files per turn')).toBeDefined();
   });
 
-  it('switches off by storing `outputs.enabled: false`, and back on by storing nothing', () => {
-    const { outputsSwitch, limit, seen } = mount({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 5 } });
+  it('offers the bucket picker once the outputs are on, with uploads off', () => {
+    const { outputsSwitch, bucketField } = mount(undefined);
+    expect(bucketField()).toBeUndefined();
     act(() => outputsSwitch().click());
-    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 5, enabled: false } });
+    expect(bucketField()).toBeDefined();
+    // The upload-only limits stay with the uploads.
+    expect(container!.textContent).not.toContain('Files per session');
+  });
+
+  it('switches off by storing `outputs.enabled: false`, and back on by storing `true`', () => {
+    const { outputsSwitch, limit, seen } = mount({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 5 } });
+    act(() => outputsSwitch().click());
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 5, enabled: false } });
     expect(limit('Files per turn')).toBeUndefined();
     act(() => outputsSwitch().click());
-    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 5 } });
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 5, enabled: true } });
   });
 
   it('stores the limits typed, and clears one that is emptied', () => {
-    const { limit, seen } = mount({ bucketKey: 'docs' });
+    const { limit, seen } = mount({ enabled: true, bucketKey: 'docs' });
     setValue(limit('Files per turn')!, '7');
-    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 7 } });
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 7 } });
     setValue(limit('Largest file (MB)')!, '3');
-    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { maxFilesPerTurn: 7, maxFileSizeMb: 3 } });
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 7, maxFileSizeMb: 3 } });
     setValue(limit('Files per turn')!, '');
     setValue(limit('Largest file (MB)')!, '');
-    expect(seen.at(-1)).toEqual({ bucketKey: 'docs' });
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs' });
   });
 });
 
 describe('the strings', () => {
   it('exist in English and Turkish', () => {
-    const keys = ['outputsTitle', 'cfgOutputs', 'cfgOutputsDescription', 'cfgOutputsNeedsBucket', 'cfgOutputsMaxFiles', 'cfgOutputsMaxFileSize'];
+    const keys = ['outputsTitle', 'cfgOutputs', 'cfgOutputsDescription', 'cfgOutputsMaxFiles', 'cfgOutputsMaxFileSize'];
     for (const key of keys) {
       expect((en.agents.attachments as Record<string, string>)[key], `en ${key}`).toBeTruthy();
       expect((tr.agents.attachments as Record<string, string>)[key], `tr ${key}`).toBeTruthy();

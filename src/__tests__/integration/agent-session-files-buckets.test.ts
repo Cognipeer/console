@@ -179,20 +179,26 @@ describe('what a client is told about an agent’s attachments', () => {
     });
   });
 
-  it('the files the agent writes are reported apart from the uploads: with uploads off, switched off, with the author’s limits, bucket not usable', async () => {
+  it('the files the agent writes are reported apart from the uploads: off by default with uploads off, on once switched on, on with uploads, with the author’s limits, bucket not usable', async () => {
     await provider('s3-main');
     await bucket('uploads', 's3-main');
     await bucket('broken', 'ghost-provider');
     await model('gpt-4o');
-    // Uploads off, a bucket named: the agent can still hand files back.
+    // Uploads off, a bucket named, the outputs left at the default: off.
     expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads' } })).toMatchObject({
+      enabled: false, outputs: { enabled: false, maxFilesPerTurn: 10, maxFileSizeMb: 2 },
+    });
+    // Uploads off, switched on explicitly: the agent can hand files back without uploads.
+    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: true } } })).toMatchObject({
       enabled: false, outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2 },
     });
-    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: false } } })).toMatchObject({ outputs: { enabled: false } });
+    // Uploads on with a bucket: on by default, unless switched off.
+    expect((await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads' } })).outputs).toMatchObject({ enabled: true });
+    expect((await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', outputs: { enabled: false } } })).outputs).toMatchObject({ enabled: false });
     // The author's limits, clamped to what the server allows; limits are shown even while off.
-    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { maxFilesPerTurn: 4, maxFileSizeMb: 99 } } })).outputs)
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: true, maxFilesPerTurn: 4, maxFileSizeMb: 99 } } })).outputs)
       .toMatchObject({ enabled: true, maxFilesPerTurn: 4, maxFileSizeMb: 10 });
-    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'broken' } })).outputs).toMatchObject({ enabled: false, maxFilesPerTurn: 10 });
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'broken', outputs: { enabled: true } } })).outputs).toMatchObject({ enabled: false, maxFilesPerTurn: 10 });
     expect((await describeFor({ modelKey: 'main' })).outputs).toMatchObject({ enabled: false });
   });
 

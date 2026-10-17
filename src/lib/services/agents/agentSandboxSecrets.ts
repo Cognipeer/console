@@ -7,6 +7,11 @@
  * sends a key back with the mask keeps the stored value, a new value
  * replaces it, and a key left out is removed. Agent configs are copied into
  * version snapshots and manifests, so the plaintext must never be persisted.
+ *
+ * When the stored ciphertext cannot be opened (the encryption key changed) the
+ * secrets cannot be listed or merged: reads carry `secretsUnreadable: true`, a
+ * save that mixes masks with other values is refused (`sandboxSecretsConflict`),
+ * and a save without masks replaces them.
  */
 
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
@@ -17,6 +22,12 @@ import { maskAgentCallbackConfig, sealAgentCallbackConfig, stripLegacyExecutionC
 const logger = createLogger('agent:sandbox-secrets');
 
 export const AGENT_SANDBOX_SECRET_MASK = '••••••';
+
+/** Code of the 409 a save gets when it mixes masked values with new ones while the stored secrets cannot be opened. */
+export const SANDBOX_SECRETS_UNREADABLE_CODE = 'sandbox_secrets_unreadable';
+
+export const SANDBOX_SECRETS_UNREADABLE_MESSAGE =
+    'The stored sandbox secrets cannot be decrypted (the encryption key has changed), so masked values cannot be kept. Enter every secret value again to replace them.';
 
 /** Values shorter than this are neither scrubbed from output nor from files — masking them would garble ordinary text. */
 export const MIN_SCRUBBED_SECRET_LENGTH = 4;
@@ -52,6 +63,21 @@ export function openAgentSandboxSecrets(sandbox: IAgentSandboxConfig | undefined
 }
 
 /**
+ * A save that would drop what the sender typed: the stored ciphertext cannot be opened and the
+ * incoming secrets mix masked values (which stand for values nobody can read) with other ones.
+ * Only masks keep the ciphertext as it is; no masks replace it.
+ */
+export function sandboxSecretsConflict(
+    incoming: IAgentSandboxConfig | undefined,
+    current: IAgentSandboxConfig | undefined,
+): boolean {
+    const values = Object.values(incoming?.secrets ?? {});
+    return values.includes(AGENT_SANDBOX_SECRET_MASK)
+        && values.some((value) => value !== AGENT_SANDBOX_SECRET_MASK)
+        && inspectSecrets(current).unreadable;
+}
+
+/**
  * Seals an incoming sandbox config for storage, merging masked values with
  * what `current` already holds. A config without a `secrets` field keeps the
  * stored secrets untouched (a client that never saw them cannot erase them).
@@ -61,15 +87,14 @@ export function sealAgentSandboxConfig(
     current: IAgentSandboxConfig | undefined,
 ): IAgentSandboxConfig | undefined {
     if (!incoming) return incoming;
-    const { secrets, secretsSealed: _ignored, ...rest } = incoming;
+    const { secrets, secretsSealed: _ignored, secretsUnreadable: _readOnly, ...rest } = incoming;
     if (secrets === undefined) {
         return current?.secretsSealed ? { ...rest, secretsSealed: current.secretsSealed } : rest;
     }
     const { secrets: stored, unreadable } = inspectSecrets(current);
     if (unreadable && Object.values(secrets ?? {}).includes(AGENT_SANDBOX_SECRET_MASK)) {
-        // A mask stands for values that cannot be opened: re-sealing would drop
-        // them for good, so the ciphertext stays as it is (new values wait until
-        // the secrets are re-entered without masks).
+        // Only masks get here (a mix is refused before, see `sandboxSecretsConflict`): they stand for values
+        // that cannot be opened, and re-sealing would drop them for good, so the ciphertext stays as it is.
         logger.warn('Kept the stored sandbox secrets as they are: they cannot be decrypted, so masked values cannot be merged');
         return { ...rest, secretsSealed: current!.secretsSealed };
     }
@@ -98,7 +123,7 @@ export function sealAgentConfigSecrets(
 /** The sandbox config as clients may see it: secret keys, masked values, no ciphertext. */
 export function maskAgentSandboxConfig(sandbox: IAgentSandboxConfig | undefined): IAgentSandboxConfig | undefined {
     if (!sandbox) return sandbox;
-    const { secretsSealed: _sealed, secrets: _plain, ...rest } = sandbox;
+    const { secretsSealed: _sealed, secrets: _plain, secretsUnreadable: _flag, ...rest } = sandbox;
     const keys = Object.keys(inspectSecrets(sandbox).secrets);
     return keys.length > 0
         ? { ...rest, secrets: Object.fromEntries(keys.map((key) => [key, AGENT_SANDBOX_SECRET_MASK])) }
@@ -107,13 +132,17 @@ export function maskAgentSandboxConfig(sandbox: IAgentSandboxConfig | undefined)
 
 /**
  * Masks the sandbox and callback secrets of an agent-shaped object (`{ config }`)
- * for an API response; a legacy `execution` blob is not returned either.
+ * for an API response (with `sandbox.secretsUnreadable: true` when the stored
+ * secrets cannot be decrypted); a legacy `execution` blob is not returned either.
  */
 export function maskAgentSandboxSecrets<T extends { config?: IAgentConfig }>(agent: T): T {
     const raw = agent?.config as (IAgentConfig & { execution?: unknown }) | undefined;
     if (!raw?.sandbox && !raw?.callback && raw?.execution === undefined) return agent;
     const config: IAgentConfig = stripLegacyExecutionConfig({ ...agent.config! });
-    if (config.sandbox) config.sandbox = maskAgentSandboxConfig(config.sandbox);
+    if (config.sandbox) {
+        const unreadable = inspectSecrets(config.sandbox).unreadable;
+        config.sandbox = { ...maskAgentSandboxConfig(config.sandbox), ...(unreadable ? { secretsUnreadable: true } : {}) };
+    }
     if (config.callback) config.callback = maskAgentCallbackConfig(config.callback);
     return { ...agent, config };
 }

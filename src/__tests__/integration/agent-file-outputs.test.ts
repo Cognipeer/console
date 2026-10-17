@@ -114,8 +114,8 @@ const lastToolResult = (messages: Seen) => String([...messages].reverse().find((
 const toolResults = (messages: Seen) => messages.filter((m) => m.role === 'tool').map((m) => String(m.content));
 const systemOf = (messages: Seen) => String(messages.find((m) => m.role === 'system')?.content ?? '');
 
-/** An agent with a files bucket and uploads OFF — the files it writes need nothing more. */
-async function createAgent(config: Partial<IAgentConfig> = {}, attachments: IAgentConfig['attachments'] | null = { bucketKey: BUCKET }) {
+/** An agent with a files bucket, uploads OFF and the outputs switched on — the files it writes need no uploads. */
+async function createAgent(config: Partial<IAgentConfig> = {}, attachments: IAgentConfig['attachments'] | null = { bucketKey: BUCKET, outputs: { enabled: true } }) {
   await db.createAgent({
     tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Writer',
     config: { modelKey: 'gpt-4o', ...(attachments ? { attachments } : {}), ...config }, status: 'active', createdBy: OWNER,
@@ -218,7 +218,7 @@ describe('which runs get the tools', () => {
   });
 
   it('the author’s limits are the ones the model is told', async () => {
-    await createAgent({}, { bucketKey: BUCKET, outputs: { maxFilesPerTurn: 3, maxFileSizeMb: 0.5 } });
+    await createAgent({}, { bucketKey: BUCKET, outputs: { enabled: true, maxFilesPerTurn: 3, maxFileSizeMb: 0.5 } });
     const model = scriptModel(() => answer());
     await chat(String((await newConversation())._id), 'hi');
     expect(systemOf(model.seen[0]!)).toContain('3 new files per turn, 0.5 MB per file');
@@ -228,6 +228,8 @@ describe('which runs get the tools', () => {
     for (const [label, attachments] of [
       ['no attachments setting', null],
       ['no bucket', { enabled: true }],
+      ['uploads off and the outputs left at the default', { bucketKey: BUCKET }],
+      ['uploads on and the outputs switched off', { enabled: true, bucketKey: BUCKET, outputs: { enabled: false } }],
       ['switched off', { bucketKey: BUCKET, outputs: { enabled: false } }],
     ] as const) {
       const existing = await db.findAgentByKey(AGENT_KEY, PROJECT_ID);
@@ -239,16 +241,57 @@ describe('which runs get the tools', () => {
       expect(systemOf(model.seen[0]!), label).not.toContain('Files you can create');
     }
 
-    await db.updateAgent(String((await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!._id), { config: { modelKey: 'gpt-4o', attachments: { bucketKey: BUCKET } } });
+    await db.updateAgent(String((await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!._id), { config: { modelKey: 'gpt-4o', attachments: { bucketKey: BUCKET, outputs: { enabled: true } } } });
     const model = scriptModel(() => answer());
     await executePlaygroundChatLocal({ tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, userMessage: 'hi' });
     expect(model.toolNames.filter((name) => name.startsWith('session_files'))).toEqual([]);
   });
 
   it('no tools when the bucket cannot take a file now', async () => {
-    await createAgent({}, { bucketKey: 'ghost' });
+    await createAgent({}, { bucketKey: 'ghost', outputs: { enabled: true } });
     const model = scriptModel(() => answer());
     await chat(String((await newConversation())._id), 'hi');
+    expect(model.toolNames.filter((name) => name.startsWith('session_files'))).toEqual([]);
+  });
+
+  it('with uploads on, the outputs follow them by default: a bucket is all it takes', async () => {
+    await createAgent({}, { enabled: true, bucketKey: BUCKET });
+    const model = scriptModel(() => answer());
+    await chat(String((await newConversation())._id), 'hi');
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_create', 'session_files_append']));
+  });
+
+  it('the read tools come with the outputs while the session holds a file, uploads off', async () => {
+    await createAgent();
+    scriptModel((call) => (call === 0 ? calls(['session_files_create', { filename: 'plan.md', content: 'step one' }]) : answer()));
+    const id = String((await newConversation())._id);
+    await chat(id, 'write a plan');
+    const [record] = await filesOf(id);
+
+    // The next turn offers the read tools and they see the agent's own file.
+    const model = scriptModel((call, messages) => {
+      if (call === 0) return calls(['session_files_list', {}]);
+      if (call === 1) return calls(['session_files_read', { fileId: String(record!._id) }]);
+      return answer(lastToolResult(messages));
+    });
+    await chat(id, 'what did you write?');
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_create', 'session_files_append', 'session_files_list', 'session_files_read']));
+    const results = model.seen.flatMap(toolResults);
+    expect(results.some((text) => text.includes('plan.md'))).toBe(true);
+    expect(results.some((text) => text.includes('step one'))).toBe(true);
+  });
+
+  it('no read tools without uploads or the outputs, whatever the session holds', async () => {
+    await createAgent();
+    scriptModel((call) => (call === 0 ? calls(['session_files_create', { filename: 'plan.md', content: 'step one' }]) : answer()));
+    const id = String((await newConversation())._id);
+    await chat(id, 'write a plan');
+    expect(await filesOf(id)).toHaveLength(1);
+
+    // The outputs are left at their default (off with uploads off).
+    await db.updateAgent(String((await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!._id), { config: { modelKey: 'gpt-4o', attachments: { bucketKey: BUCKET } } });
+    const model = scriptModel(() => answer());
+    await chat(id, 'and now?');
     expect(model.toolNames.filter((name) => name.startsWith('session_files'))).toEqual([]);
   });
 
@@ -268,7 +311,7 @@ describe('which runs get the tools', () => {
 
 describe('creating a file', () => {
   it('stores it in the agent’s bucket as the agent’s own output and delivers it on the answer', async () => {
-    await createAgent({}, { bucketKey: BUCKET, folder: 'reports' });
+    await createAgent({}, { bucketKey: BUCKET, folder: 'reports', outputs: { enabled: true } });
     const model = scriptModel((call, messages) => (call === 0
       ? calls(['session_files_create', { filename: 'Q1 summary.md', content: '# Q1\n\nAll good.' }])
       : answer(`Wrote it: ${lastToolResult(messages)}`)));
@@ -316,7 +359,7 @@ describe('creating a file', () => {
 
   it('is not put on the person’s next message: nothing rides along, and no attachment is stored on it', async () => {
     // Uploads on: that is the setting under which files nobody has sent ride along with the next message.
-    await createAgent({}, { enabled: true, bucketKey: BUCKET });
+    await createAgent({}, { enabled: true, bucketKey: BUCKET, outputs: { enabled: true } });
     const model = scriptModel((call) => (call === 0 ? calls(['session_files_create', { filename: 'a.csv', content: 'x,y\n1,2' }]) : answer()));
     const id = String((await newConversation())._id);
     await chat(id, 'make a csv');
@@ -339,7 +382,7 @@ describe('creating a file', () => {
   });
 
   it('holds the turn to the author’s file count: the files past it are refused with a sentence, the turn goes on', async () => {
-    await createAgent({}, { bucketKey: BUCKET, outputs: { maxFilesPerTurn: 2 } });
+    await createAgent({}, { bucketKey: BUCKET, outputs: { enabled: true, maxFilesPerTurn: 2 } });
     const model = scriptModel((call) => (call === 0
       ? calls(
         ['session_files_create', { filename: 'a.md', content: 'a' }],
@@ -362,7 +405,7 @@ describe('creating a file', () => {
   });
 
   it('holds a file to the author’s size, and refuses a type or a mime_type that does not fit', async () => {
-    await createAgent({}, { bucketKey: BUCKET, outputs: { maxFileSizeMb: 0.01 } });
+    await createAgent({}, { bucketKey: BUCKET, outputs: { enabled: true, maxFileSizeMb: 0.01 } });
     const model = scriptModel((call) => (call === 0
       ? calls(
         ['session_files_create', { filename: 'big.txt', content: 'x'.repeat(11_000) }],
@@ -381,7 +424,7 @@ describe('creating a file', () => {
   });
 
   it('does not use up the person’s own file count', async () => {
-    await createAgent({}, { enabled: true, bucketKey: BUCKET, maxFiles: 1 });
+    await createAgent({}, { enabled: true, bucketKey: BUCKET, maxFiles: 1, outputs: { enabled: true } });
     scriptModel((call) => (call === 0
       ? calls(['session_files_create', { filename: 'a.md', content: 'a' }], ['session_files_create', { filename: 'b.md', content: 'b' }])
       : answer()));
@@ -442,7 +485,7 @@ describe('appending to a file', () => {
   });
 
   it('refuses a file the person uploaded, a file of another session and one that does not exist', async () => {
-    await createAgent({}, { enabled: true, bucketKey: BUCKET });
+    await createAgent({}, { enabled: true, bucketKey: BUCKET, outputs: { enabled: true } });
     const conversation = await newConversation();
     const other = await newConversation();
     const agent = (await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!;
@@ -471,7 +514,7 @@ describe('appending to a file', () => {
   });
 
   it('stops at the file size: the file is left as it was', async () => {
-    await createAgent({}, { bucketKey: BUCKET, outputs: { maxFileSizeMb: 0.01 } });
+    await createAgent({}, { bucketKey: BUCKET, outputs: { enabled: true, maxFileSizeMb: 0.01 } });
     let fileId = '';
     const model = scriptModel((call, messages) => {
       if (call === 0) return calls(['session_files_create', { filename: 'a.txt', content: 'x'.repeat(6000) }]);

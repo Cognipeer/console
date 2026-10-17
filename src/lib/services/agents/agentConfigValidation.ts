@@ -278,8 +278,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
         if (attachments.bucketKey !== undefined && typeof attachments.bucketKey !== 'string') {
             issues.errors.push({ field: 'attachments.bucketKey', message: 'must be a bucket key' });
-        } else if (attachments.enabled === true && !attachments.bucketKey?.trim()) {
-            // Files are kept in a bucket of the project; there is no built-in storage to fall back to.
+        } else if ((attachments.enabled === true || attachments.outputs?.enabled === true) && !attachments.bucketKey?.trim()) {
+            // Files (uploads or the agent's own outputs) are kept in a bucket of the project; there is no built-in storage to fall back to.
             issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
         }
     }
@@ -502,7 +502,7 @@ export async function validateAgentConfig(input: {
 
     // Session files need a bucket that can take a file: it exists in this project, is
     // active, and its provider exists, is assigned here and is active.
-    const filesBucketKey = config.attachments?.enabled === true && typeof config.attachments.bucketKey === 'string'
+    const filesBucketKey = (config.attachments?.enabled === true || config.attachments?.outputs?.enabled === true) && typeof config.attachments.bucketKey === 'string'
         ? config.attachments.bucketKey.trim()
         : '';
     if (filesBucketKey && input.tenantId) {

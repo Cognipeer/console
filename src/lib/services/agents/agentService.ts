@@ -3909,16 +3909,18 @@ async function buildLocalAgentRun(input: {
 
     // Files attached to the session: the agent can list them and read them page
     // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file. While it holds an
+    // uploads. Offered whenever the conversation holds a file and the agent takes uploads
+    // or writes files (then they are its own outputs). While it holds an
     // image and the model takes images, the agent can also look at the image
     // again (`session_files_view_image`).
     const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
     const filesCfg = resolveAttachmentsConfig(config.attachments);
     const sessionFilesScope = { tenantDbName, tenantId, projectId };
+    const outputsOn = outputsAvailability(config);
     let sessionImages: SessionImagesOptions | undefined;
     if (input.conversation) {
         const conversationId = String(input.conversation._id);
-        const facts = agentTakesAttachments(config)
+        const facts = agentTakesAttachments(config) || outputsOn.available
             ? await conversationFileFacts(db, conversationId)
             : { any: false, images: false };
         const viewImage = facts.images && modelTakesImages;
@@ -3948,7 +3950,6 @@ async function buildLocalAgentRun(input: {
     // session to attach them to and a files bucket that works. Built before the client tools so their name
     // reservation (`taken`, below) covers these too.
     let fileOutputs: FileOutputTools | undefined;
-    const outputsOn = outputsAvailability(config);
     if (input.conversation && outputsOn.available) {
         const bucket = await inspectFileBucket(db, tenantId, projectId, outputsOn.cfg.bucketKey).catch(() => null);
         if (bucket?.usable) {

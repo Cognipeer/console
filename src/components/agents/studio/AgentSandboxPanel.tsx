@@ -7,7 +7,9 @@
  *
  * Everything here edits `config.sandbox`. Secrets are write-only: the server
  * returns their keys with a masked value, and sending the mask back keeps the
- * stored secret (`agentSandboxSecrets.ts`).
+ * stored secret (`agentSandboxSecrets.ts`). When the stored secrets cannot be
+ * decrypted the list is empty and `secretsUnreadable` is set: the panel warns,
+ * and entering values again replaces them.
  */
 
 import { useEffect, useState } from 'react';
@@ -30,7 +32,7 @@ import {
     TextInput,
     Tooltip,
 } from '@mantine/core';
-import { IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconAlertTriangle, IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import { ConfigBlock } from './ConfigSection';
@@ -73,6 +75,7 @@ const SANDBOX_TOOLS = [
 
 export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSandboxPanelProps) {
     const tSeed = useTranslations('agents.sandboxSeed');
+    const tSecrets = useTranslations('agents.sandboxSecrets');
     const [capabilities, setCapabilities] = useState<SandboxCapabilities | null>(null);
     const enabled = value?.enabled ?? false;
     const mode = resolveSandboxMode(value?.mode);
@@ -324,6 +327,11 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                                     {' '}<Code>agent.sandbox.*</Code>.
                                 </Text>
                             </Alert>
+                            {value?.secretsUnreadable ? (
+                                <Alert variant="light" color="orange" p="xs" icon={<IconAlertTriangle size={14} />} title={tSecrets('unreadableTitle')} data-testid="sandbox-secrets-unreadable">
+                                    <Text size="xs">{tSecrets('unreadableBody')}</Text>
+                                </Alert>
+                            ) : null}
                             <KeyValueEditor
                                 value={value?.secrets}
                                 onChange={(secrets) => patch({ secrets: secrets ?? {} })}

@@ -9,7 +9,12 @@
  */
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
+import {
+  maskAgentSandboxSecrets,
+  SANDBOX_SECRETS_UNREADABLE_CODE,
+  SANDBOX_SECRETS_UNREADABLE_MESSAGE,
+  sandboxSecretsConflict,
+} from '@/lib/services/agents/agentSandboxSecrets';
 import type { IAgent, IAgentConfig, IAgentVersion, IUser } from '@/lib/database';
 import {
   normalizeA2aMetadataUpdate,
@@ -166,6 +171,16 @@ export interface AgentConfigWriteScope {
 /** A config write refused with a 400 (`badRequest` is the body) or a 403 (`forbidden`), or accepted. */
 type ConfigWriteOutcome<T> = { badRequest: Record<string, unknown> } | { forbidden: Record<string, unknown> } | T;
 
+/** The 409 body for a write that mixes masked sandbox secrets with new values while the stored ones cannot be decrypted. */
+export function sandboxSecretsUnreadableBody(): Record<string, unknown> {
+  return {
+    error: SANDBOX_SECRETS_UNREADABLE_MESSAGE,
+    type: SANDBOX_SECRETS_UNREADABLE_CODE,
+    code: SANDBOX_SECRETS_UNREADABLE_CODE,
+    field: 'config.sandbox.secrets',
+  };
+}
+
 /** The 403 body for a write that named a bucket its caller may not name (`bucketNamingRefusal` found it). */
 export function bucketNamingForbiddenBody(refusal: Pick<BucketNamingRefusal, 'decisionId'>): Record<string, unknown> {
   return {
@@ -233,14 +248,14 @@ export function connectedConfigForUpdate(cfg: Record<string, unknown>, existing:
   return normalizeAgentConfig({ ...cfg, connection });
 }
 
-/** A native config sent on update: guardrail bindings, then validation. */
+/** A native config sent on update: guardrail bindings, then validation; a 409 (`conflict`) when it cannot be saved over what is stored. */
 export async function validateNativeConfigUpdate(
   cfg: Record<string, unknown>,
   agentKey: string,
   scope: AgentConfigWriteScope,
   /** The config stored now: re-saving its bucket is not a change. */
   previous?: IAgentConfig,
-): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }>> {
+): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }> | { conflict: Record<string, unknown> }> {
   // The config replaces the stored one wholesale, so the projected legacy
   // slots must be written on the SAME object — leaving them out would clear
   // the columns an older binary still reads.
@@ -258,6 +273,7 @@ export async function validateNativeConfigUpdate(
     agentKey,
   });
   if (validation.errors.length > 0) return { badRequest: invalidConfigBody(validation) };
+  if (sandboxSecretsConflict(config.sandbox, previous?.sandbox)) return { conflict: sandboxSecretsUnreadableBody() };
   const refusal = await attachmentsBucketRefusal(config, previous, scope);
   if (refusal) return refusal;
   return { warnings: validation.warnings };

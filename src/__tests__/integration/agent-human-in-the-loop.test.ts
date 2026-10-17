@@ -1247,6 +1247,25 @@ describe('background runs', () => {
       for (const text of systemTexts(model)) expect(text).not.toContain(SECRET);
     });
 
+    it('answered from the dashboard, the paused run\'s own external-content mark keeps the input out even when the paused state carries no flag', async () => {
+      await routineAgent();
+      const model = scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await startPaused(id, true);
+      // The stored paused state remembers the flag; take it out so only the run row's mark is left to carry it.
+      const stored = (await db.findAgentConversationState(id))!;
+      const envelope = JSON.parse(stored.pausedSnapshot!);
+      expect(envelope.turn.inputsAsPromptVariables).toBe(false);
+      delete envelope.turn.inputsAsPromptVariables;
+      await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+      expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.externalContent).toBe(true);
+
+      const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
+      expect(outcome.kind).toBe('resumed');
+      expect(model.seen).toHaveLength(2);
+      for (const text of systemTexts(model)) expect(text).not.toContain(SECRET);
+    });
+
     it('answered in the background (worker resume), the same holds', async () => {
       await routineAgent();
       const model = scriptModel(oneToolScript('ls'));
