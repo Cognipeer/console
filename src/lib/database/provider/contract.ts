@@ -1127,6 +1127,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Retention: removes rows whose attemptAt is older than `before`; returns the number removed. */
   pruneAlertDeliveries(before: Date): Promise<number>;
 
+  // ── Scheduler claims (tenant-specific; exactly-once primitive) ──
+  /**
+   * Insert-once claim: true only for the single caller that created `key`
+   * (the database arbitrates); false when it was already claimed.
+   */
+  claimSchedulerSlot(key: string, expiresAt: Date): Promise<boolean>;
+  /** Retention: removes claims whose expiresAt is before `olderThan`; returns the number removed. */
+  cleanupSchedulerClaims(olderThan: Date): Promise<number>;
+
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
   /** Keyed by the unique (tenantId, ruleId, entityKey). */

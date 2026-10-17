@@ -50,6 +50,7 @@ import { BatchJobMixin } from './sqlite/batch.mixin';
 import { UsageRollupMixin } from './sqlite/usage.mixin';
 import { EntityMetricsMixin } from './sqlite/entity-metrics.mixin';
 import { AlertStateMixin } from './sqlite/alert-state.mixin';
+import { SchedulerClaimMixin } from './sqlite/scheduler-claim.mixin';
 import { AlertChannelLibraryMixin } from './sqlite/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './sqlite/external-model-pricing.mixin';
 import { AuditMixin } from './sqlite/audit.mixin';
@@ -89,7 +90,7 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = WebhookMixin(ExternalModelPricingMixin(BulkBase));
+const PricingBase = SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkBase)));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; the cluster ORCHESTRATION/admin lives in the
