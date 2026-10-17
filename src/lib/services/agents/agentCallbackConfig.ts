@@ -25,6 +25,8 @@ export function sealAgentCallbackConfig(
 ): IAgentCallbackConfig | undefined {
   if (!incoming) return incoming;
   const { secret, secretSealed: _ignored, ...rest } = incoming;
+  // A callback with no URL has nothing to sign: the mask coming back without one drops the stored secret.
+  if (secret === AGENT_CALLBACK_SECRET_MASK && !rest.url) return rest;
   if (secret === undefined || secret === AGENT_CALLBACK_SECRET_MASK) {
     return current?.secretSealed ? { ...rest, secretSealed: current.secretSealed } : rest;
   }

@@ -162,6 +162,12 @@ describe('agent callback secret (config.callback)', () => {
         expect(openAgentCallbackSecret(removed)).toBeUndefined();
     });
 
+    it('a masked secret without a URL drops the stored secret instead of keeping it', () => {
+        const dropped = sealAgentCallbackConfig({ secret: MASK }, stored)!;
+        expect(dropped.secretSealed).toBeUndefined();
+        expect(openAgentCallbackSecret(dropped)).toBeUndefined();
+    });
+
     it('a client cannot supply its own ciphertext through secretSealed', () => {
         const supplied = sealAgentCallbackConfig({ url: URL_, secretSealed: 'client-blob' }, undefined)!;
         expect(supplied.secretSealed).toBeUndefined();

@@ -83,7 +83,17 @@ describe('the editor', () => {
   it('marks a row the server would refuse', () => {
     const out = html([{ name: 'bad name', type: 'string' }, { name: 'n', type: 'integer', default: 'x' as unknown as number }]);
     expect(out).toContain('Name must start with a letter');
-    expect(out).toContain('Default must be an integer');
+    expect(out).toContain('The default must match the type (Integer)');
+  });
+
+  it('words a row the server would refuse in the language of the page, not in the server’s English', () => {
+    const out = html([{ name: 'bad name', type: 'string' }, { name: 'n', type: 'integer', default: 'x' as unknown as number }, { name: 'n', type: 'string', enum: [] }], 'tr');
+    expect(out).toContain(tr.agents.inputs.issue_name_invalid.replace(/"/g, '&quot;'));
+    expect(out).toContain('Varsayılan değer türle uyumlu olmalı (Tam sayı)');
+    expect(out).toContain('&quot;n&quot; girdisi iki kez tanımlanmış');
+    expect(out).toContain(tr.agents.inputs.issue_enum_invalid_strings);
+    expect(out).not.toContain('Name must start with a letter');
+    expect(out).not.toContain('is declared twice');
   });
 
   it('is in Turkish when the language is', () => {

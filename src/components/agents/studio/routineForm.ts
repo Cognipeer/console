@@ -42,9 +42,12 @@ export interface WebhookFilterRow {
     value: string;
 }
 
-/** The variables a prompt template / input mapping may use (routineWebhookView WEBHOOK_CONTEXT_ROOTS). */
+/**
+ * The variables the editor offers for a prompt template / input mapping. A subset of the roots the server accepts
+ * (routineWebhookView WEBHOOK_CONTEXT_ROOTS): `received_at` is valid in a template but is not offered as an example.
+ */
 export const WEBHOOK_TEMPLATE_VARIABLES = [
-    'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'received_at', 'routine.id', 'routine.name', 'agent.key',
+    'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'routine.id', 'routine.name', 'agent.key',
 ] as const;
 
 /** Event-name suggestions per preset (generic senders name their own). */
@@ -99,32 +102,66 @@ export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key:
     generic: [],
 };
 
-/** A sample delivery per preset for the editor's Test tab: what the sender would post. */
+/** A sample delivery per preset for the editor's Test tab: what the sender would post (trimmed to the fields a routine is likely to use). */
 export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, string>; payload: Record<string, unknown> }> = {
     github: {
-        headers: { 'x-github-event': 'pull_request', 'x-github-delivery': '00000000-0000-4000-8000-000000000001' },
+        headers: {
+            'x-github-event': 'pull_request',
+            'x-github-delivery': '00000000-0000-4000-8000-000000000001',
+            'x-github-hook-id': '123456789',
+            'user-agent': 'GitHub-Hookshot/0000000',
+        },
         payload: {
             action: 'opened',
             number: 42,
             pull_request: {
-                title: 'Add retry to the importer', draft: false, author_association: 'MEMBER',
-                html_url: 'https://github.com/example/repo/pull/42', user: { login: 'octocat' },
-                base: { ref: 'main' }, head: { ref: 'feature/retry' },
+                id: 1000000042,
+                number: 42,
+                state: 'open',
+                locked: false,
+                title: 'Add retry to the importer',
+                body: 'Retries a failed import up to three times with a short back-off.',
+                draft: false,
+                merged: false,
+                author_association: 'MEMBER',
+                html_url: 'https://github.com/example/repo/pull/42',
+                user: { login: 'octocat', id: 583231, type: 'User' },
+                labels: [{ name: 'enhancement' }],
+                base: { ref: 'main', sha: '9a4f1c2d8b7e6a5f4c3b2a1908f7e6d5c4b3a291', repo: { full_name: 'example/repo' } },
+                head: { ref: 'feature/retry', sha: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', repo: { full_name: 'example/repo' } },
+                commits: 3,
+                additions: 48,
+                deletions: 6,
+                changed_files: 4,
+                created_at: '2026-10-17T09:30:00Z',
+                updated_at: '2026-10-17T09:30:00Z',
             },
-            repository: { full_name: 'example/repo' },
-            sender: { login: 'octocat' },
+            repository: { id: 1296269, name: 'repo', full_name: 'example/repo', private: false, html_url: 'https://github.com/example/repo', default_branch: 'main' },
+            sender: { login: 'octocat', id: 583231, type: 'User' },
         },
     },
     gitlab: {
-        headers: { 'x-gitlab-event': 'Merge Request Hook', 'webhook-id': 'msg_sample_1' },
+        headers: { 'x-gitlab-event': 'Merge Request Hook', 'x-gitlab-event-uuid': '00000000-0000-4000-8000-000000000002', 'webhook-id': 'msg_sample_1' },
         payload: {
             object_kind: 'merge_request',
-            user: { username: 'jane' },
-            project: { path_with_namespace: 'example/repo' },
+            event_type: 'merge_request',
+            user: { id: 1, name: 'Jane Doe', username: 'jane' },
+            project: { id: 15, name: 'repo', path_with_namespace: 'example/repo', web_url: 'https://gitlab.example.com/example/repo', default_branch: 'main' },
             object_attributes: {
-                iid: 7, title: 'Add retry to the importer', action: 'open', state: 'opened', draft: false,
-                source_branch: 'feature/retry', target_branch: 'main', url: 'https://gitlab.example.com/example/repo/-/merge_requests/7',
+                id: 99,
+                iid: 7,
+                title: 'Add retry to the importer',
+                description: 'Retries a failed import up to three times with a short back-off.',
+                action: 'open',
+                state: 'opened',
+                draft: false,
+                source_branch: 'feature/retry',
+                target_branch: 'main',
+                url: 'https://gitlab.example.com/example/repo/-/merge_requests/7',
+                last_commit: { id: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1', message: 'Retry failed imports' },
+                created_at: '2026-10-17 09:30:00 UTC',
             },
+            labels: [{ title: 'enhancement' }],
         },
     },
     azure_devops: {
@@ -132,17 +169,35 @@ export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, st
         payload: {
             id: '6a1c3a1e-0000-4000-8000-000000000001',
             eventType: 'git.pullrequest.created',
+            publisherId: 'tfs',
+            message: { text: 'Jane Doe created pull request 12 (Add retry to the importer)' },
             resource: {
-                pullRequestId: 12, title: 'Add retry to the importer', status: 'active', isDraft: false,
-                sourceRefName: 'refs/heads/feature/retry', targetRefName: 'refs/heads/main',
+                pullRequestId: 12,
+                title: 'Add retry to the importer',
+                description: 'Retries a failed import up to three times with a short back-off.',
+                status: 'active',
+                mergeStatus: 'succeeded',
+                isDraft: false,
+                sourceRefName: 'refs/heads/feature/retry',
+                targetRefName: 'refs/heads/main',
+                lastMergeSourceCommit: { commitId: '3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1' },
                 createdBy: { displayName: 'Jane Doe', uniqueName: 'jane@example.com' },
-                repository: { name: 'repo' },
+                creationDate: '2026-10-17T09:30:00Z',
+                repository: { id: '5a1b2c3d-0000-4000-8000-000000000003', name: 'repo', project: { name: 'Example' } },
+                url: 'https://dev.azure.com/example/Example/_apis/git/repositories/repo/pullRequests/12',
             },
+            createdDate: '2026-10-17T09:30:01Z',
         },
     },
     generic: {
         headers: { 'x-cognipeer-event-id': 'evt_sample_1' },
-        payload: { event: 'ticket.created', ticket: { id: 'T-1001', title: 'Login page is slow', priority: 'high' } },
+        payload: {
+            id: 'evt_sample_1',
+            event: 'ticket.created',
+            created_at: '2026-10-17T09:30:00Z',
+            ticket: { id: 'T-1001', title: 'Login page is slow', priority: 'high', status: 'open', url: 'https://support.example.com/tickets/T-1001' },
+            actor: { name: 'Jane Doe', email: 'jane@example.com' },
+        },
     },
 };
 

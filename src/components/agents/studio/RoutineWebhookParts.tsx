@@ -12,6 +12,7 @@ import {
     ActionIcon,
     Alert,
     Badge,
+    Box,
     Button,
     Card,
     Code,
@@ -33,7 +34,7 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconCheck, IconCopy, IconInfoCircle, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
+import { IconAlertTriangle, IconCheck, IconCopy, IconInfoCircle, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { FormField } from '@/components/common/ui/FormShell';
 import { useConfirm } from '@/components/common/confirm';
 import { useLocale, useTranslations } from '@/lib/i18n';
@@ -179,7 +180,7 @@ export function WebhookTriggerFields({ form, set, storedStandardSecret, errorOf 
                 {form.webhookFilter.map((row, index) => (
                     <Group key={index} gap="xs" wrap="nowrap" align="flex-start">
                         <TextInput ff="monospace" style={{ flex: 2 }} value={row.path} aria-label={t('webhookFilterPath')} onChange={(event) => setRow(index, { path: event.currentTarget.value })} />
-                        <Select style={{ flex: 1 }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />
+                        <Select style={{ flex: '0 0 190px' }} comboboxProps={{ width: 'max-content' }} allowDeselect={false} data={ops} value={row.op} aria-label={t('webhookFilterOp')} onChange={(value) => value && setRow(index, { op: value as WebhookFilterOp })} />
                         <TextInput
                             style={{ flex: 2 }}
                             disabled={row.op === 'exists' || row.op === 'not_exists'}
@@ -198,7 +199,7 @@ export function WebhookTriggerFields({ form, set, storedStandardSecret, errorOf 
                     <Group gap={6}>
                         <Text size="xs" c="dimmed">{t('webhookFilterExamples')}</Text>
                         {WEBHOOK_FILTER_EXAMPLES[preset].map((example) => (
-                            <Badge key={example.key} variant="light" style={{ cursor: 'pointer' }} onClick={() => set('webhookFilter', [...form.webhookFilter, ...example.rows])}>
+                            <Badge key={example.key} component="button" type="button" variant="light" style={{ cursor: 'pointer' }} onClick={() => set('webhookFilter', [...form.webhookFilter, ...example.rows])}>
                                 {t(example.key)}
                             </Badge>
                         ))}
@@ -309,8 +310,13 @@ export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret
     const [grace, setGrace] = useState<GraceSeconds>('0');
     const [standardSecret, setStandardSecret] = useState('');
     const [rotating, setRotating] = useState(false);
-    const [hint, setHint] = useState(trigger.secret_hint ?? '');
-    const [previousUntil, setPreviousUntil] = useState<number | null>(trigger.previous_secret_valid_until ?? null);
+    // What the stored routine says is the source of truth; a rotation answers with newer values, which hold only
+    // until the routine itself is read again (a save that replaced the secret brings its own hint and grace).
+    const storedState = `${trigger.secret_hint ?? ''}|${trigger.previous_secret_valid_until ?? ''}`;
+    const [rotated, setRotated] = useState<{ base: string; hint: string; previousUntil: number | null } | null>(null);
+    const latest = rotated && rotated.base === storedState ? rotated : null;
+    const hint = latest ? latest.hint : trigger.secret_hint ?? '';
+    const previousUntil = latest ? latest.previousUntil : trigger.previous_secret_valid_until ?? null;
     const preset = (WEBHOOK_PRESETS as readonly string[]).includes(trigger.preset ?? '') ? trigger.preset as WebhookPreset : 'generic';
     const auth = (trigger.auth ?? WEBHOOK_PRESET_AUTH[preset][0]) as WebhookAuth;
     const standard = auth === 'standard_webhooks';
@@ -327,8 +333,7 @@ export function WebhookConnectCard({ agentId, routineId, trigger, revealedSecret
             });
             if (!res.ok) throw new Error(await errorMessage(res));
             const data = await res.json() as { secret?: string; secret_hint: string; previous_valid_until: number | null };
-            setHint(data.secret_hint);
-            setPreviousUntil(data.previous_valid_until);
+            setRotated({ base: storedState, hint: data.secret_hint, previousUntil: data.previous_valid_until });
             setStandardSecret('');
             onSecret(data.secret ?? null);
             notifications.show({ color: 'teal', message: t('rotated') });
@@ -477,9 +482,20 @@ interface DeliveryRow {
     reason: string | null;
 }
 
+/** A dot and the outcome in words: readable at any width, and the contrast comes from the theme's text colors. */
 const OUTCOME_COLOR: Record<string, string> = {
-    accepted: 'teal', duplicate: 'gray', filtered: 'gray', ignored: 'gray', unauthorized: 'red', rejected: 'orange', failed: 'red',
+    accepted: 'teal', duplicate: 'blue', filtered: 'yellow', ignored: 'gray', unauthorized: 'red', rejected: 'orange', failed: 'red',
 };
+
+function OutcomeLabel({ outcome, label }: { outcome: string; label: string }) {
+    const color = OUTCOME_COLOR[outcome] ?? 'gray';
+    return (
+        <Group gap={6} wrap="nowrap">
+            <Box w={8} h={8} style={{ borderRadius: '50%', flexShrink: 0, background: `var(--mantine-color-${color}-6)` }} />
+            <Text size="xs" fw={500} style={{ whiteSpace: 'nowrap' }}>{label}</Text>
+        </Group>
+    );
+}
 
 export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { agentId: string; routineId: string; onShowRuns: () => void }) {
     const t = useTranslations('agents.routines');
@@ -487,6 +503,7 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
     const [rows, setRows] = useState<DeliveryRow[] | null>(null);
     const [hasMore, setHasMore] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [loadFailed, setLoadFailed] = useState(false);
 
     const load = useCallback(async (before?: string) => {
         setLoading(true);
@@ -497,8 +514,10 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
             const data = await res.json() as { data: DeliveryRow[]; has_more: boolean };
             setRows((prev) => (before ? [...(prev ?? []), ...data.data] : data.data));
             setHasMore(data.has_more);
+            setLoadFailed(false);
         } catch {
-            setRows((prev) => prev ?? []);
+            // A failed load is not "no deliveries": show the error with a retry, and keep rows already loaded.
+            setLoadFailed(true);
             notifications.show({ color: 'red', message: t('deliveriesFailed') });
         } finally {
             setLoading(false);
@@ -513,14 +532,22 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
                 <Text size="sm" c="dimmed">{t('deliveriesHint')}</Text>
                 <Button size="xs" variant="subtle" leftSection={<IconRefresh size={14} />} loading={loading && rows !== null} onClick={() => void load()}>{t('refresh')}</Button>
             </Group>
-            {rows && rows.length === 0 ? <Text size="sm" c="dimmed">{t('deliveriesEmpty')}</Text> : null}
+            {loadFailed ? (
+                <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />} role="alert">
+                    <Group justify="space-between" wrap="nowrap" gap="sm">
+                        <Text size="sm">{t('deliveriesFailed')}</Text>
+                        <Button size="compact-xs" variant="light" color="red" loading={loading} onClick={() => void load()}>{t('retry')}</Button>
+                    </Group>
+                </Alert>
+            ) : null}
+            {!loadFailed && rows && rows.length === 0 ? <Text size="sm" c="dimmed">{t('deliveriesEmpty')}</Text> : null}
             {rows && rows.length > 0 ? (
                 <Table verticalSpacing={4} highlightOnHover>
                     <Table.Thead>
                         <Table.Tr>
                             <Table.Th w={170}>{t('colReceived')}</Table.Th>
                             <Table.Th>{t('colEvent')}</Table.Th>
-                            <Table.Th w={110}>{t('colOutcome')}</Table.Th>
+                            <Table.Th w={130}>{t('colOutcome')}</Table.Th>
                             <Table.Th w={60}>{t('colHttp')}</Table.Th>
                             <Table.Th>{t('colRun')}</Table.Th>
                             <Table.Th>{t('colReason')}</Table.Th>
@@ -534,7 +561,7 @@ export function WebhookDeliveriesPanel({ agentId, routineId, onShowRuns }: { age
                                     <Text size="xs">{row.event ?? t('none')}</Text>
                                     {row.delivery_id ? <Text size="xs" c="dimmed" ff="monospace" lineClamp={1}>{row.delivery_id}</Text> : null}
                                 </Table.Td>
-                                <Table.Td><Badge size="xs" variant="light" color={OUTCOME_COLOR[row.outcome] ?? 'gray'}>{t(`outcome_${row.outcome}`)}</Badge></Table.Td>
+                                <Table.Td><OutcomeLabel outcome={row.outcome} label={t(`outcome_${row.outcome}`)} /></Table.Td>
                                 <Table.Td><Text size="xs">{row.http_status}</Text></Table.Td>
                                 <Table.Td>
                                     {row.run_id ? (

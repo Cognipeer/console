@@ -15,7 +15,7 @@ import { Alert, Button, Group, NumberInput, Paper, Select, SimpleGrid, Stack, Sw
 import { IconInfoCircle, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentInputField } from '@/lib/database/provider/types.domain';
-import { MAX_AGENT_INPUT_FIELDS, validateInputDeclaration } from '@/lib/services/agents/agentInputs';
+import { MAX_AGENT_INPUT_FIELDS, validateInputDeclaration, type InputIssue } from '@/lib/services/agents/agentInputs';
 
 export interface AgentInputsEditorProps {
     value: IAgentInputField[] | undefined;
@@ -65,11 +65,29 @@ export function retypeInputField(field: IAgentInputField, type: InputType): IAge
     return next;
 }
 
+const INPUT_TYPE_LABEL_KEY: Record<string, string> = {
+    string: 'typeString', number: 'typeNumber', integer: 'typeInteger', boolean: 'typeBoolean', json: 'typeJson',
+};
+
 export default function AgentInputsEditor({ value, onChange }: AgentInputsEditorProps) {
     const t = useTranslations('agents.inputs');
     const fields = value ?? [];
     const issues = validateInputDeclaration(fields);
-    const problem = (index: number, key: string) => issues.find((issue) => issue.field === `inputs[${index}].${key}`)?.message;
+    const wording = (issue: InputIssue): string | undefined => {
+        if (!issue.code) return issue.message;
+        const params: Record<string, string | number> = { ...issue.params };
+        let key = `issue_${issue.code}`;
+        if (issue.code === 'enum_invalid') key = `issue_enum_invalid_${String(params.kind)}`;
+        if ((issue.code === 'default_type' || issue.code === 'enum_unsupported') && typeof params.type === 'string') {
+            params.type = t(INPUT_TYPE_LABEL_KEY[params.type] ?? 'typeString');
+        }
+        if (issue.code === 'text_expected') params.key = t(params.key === 'label' ? 'label' : 'description');
+        return t(key, params);
+    };
+    const problem = (index: number, key: string) => {
+        const issue = issues.find((entry) => entry.field === `inputs[${index}].${key}`);
+        return issue ? wording(issue) : undefined;
+    };
 
     const update = (index: number, patch: Partial<IAgentInputField>) =>
         onChange(inputsForSave(fields.map((field, i) => (i === index ? { ...field, ...patch } : field))));
@@ -202,7 +220,7 @@ export default function AgentInputsEditor({ value, onChange }: AgentInputsEditor
                 ) : null}
             </Group>
             {issues.some((issue) => issue.field === 'inputs') ? (
-                <Alert color="red" variant="light">{issues.find((issue) => issue.field === 'inputs')?.message}</Alert>
+                <Alert color="red" variant="light">{wording(issues.find((issue) => issue.field === 'inputs')!)}</Alert>
             ) : null}
         </Stack>
     );

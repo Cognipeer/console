@@ -53,10 +53,6 @@ function compactCallback(next: IAgentCallbackConfig): IAgentCallbackConfig | und
     return entries.length > 0 ? (Object.fromEntries(entries) as IAgentCallbackConfig) : undefined;
 }
 
-function formatSeconds(seconds: number): string {
-    return seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds}s`;
-}
-
 export default function AgentRunSettingsPanel({ callback, onCallbackChange, budget, onBudgetChange }: AgentRunSettingsPanelProps) {
     const t = useTranslations('agents.runSettings');
     const tb = useTranslations('agents.budget');
@@ -73,6 +69,9 @@ export default function AgentRunSettingsPanel({ callback, onCallbackChange, budg
 
     const currentCallback = callback ?? {};
     const setCallback = (patch: Partial<IAgentCallbackConfig>) => onCallbackChange(compactCallback({ ...currentCallback, ...patch }));
+    const formatSeconds = (seconds: number): string => (
+        seconds % 60 === 0 ? t('unitMinutes', { count: seconds / 60 }) : t('unitSeconds', { count: seconds })
+    );
     const secretStored = callback?.secret === SANDBOX_SECRET_MASK;
 
     return (
@@ -85,7 +84,12 @@ export default function AgentRunSettingsPanel({ callback, onCallbackChange, budg
                             label={t('callbackUrlLabel')}
                             placeholder="https://example.com/hooks/agent-runs"
                             value={currentCallback.url ?? ''}
-                            onChange={(event) => setCallback({ url: event.currentTarget.value || undefined })}
+                            onChange={(event) => {
+                                const url = event.currentTarget.value;
+                                // A cleared URL means no callback: the stored secret goes with it.
+                                if (url) setCallback({ url });
+                                else onCallbackChange(undefined);
+                            }}
                         />
                         <PasswordInput
                             label={t('callbackSecretLabel')}
@@ -147,7 +151,7 @@ export default function AgentRunSettingsPanel({ callback, onCallbackChange, budg
                     <Text size="xs">
                         {t('limitsNote', {
                             wait: formatSeconds(limits.syncWaitSeconds),
-                            max: `${limits.maxDurationMinutes} min`,
+                            max: t('unitMinutes', { count: limits.maxDurationMinutes }),
                         })}
                     </Text>
                 </Alert>
