@@ -77,12 +77,10 @@ import { resetResourceAuthzStatsForTests } from '@/lib/iam/resourceAuthzStats';
 import { compileSpec, type PolicySpec } from '@/lib/iam/policySpec';
 import { createPolicy } from '@/lib/iam/store';
 import { AGENT_MANIFEST_API_VERSION } from '@/lib/services/agents/agentManifest';
-import { sessionAllowedTools } from '@/lib/services/agents/agentHumanInTheLoop';
 import { listSkills } from '@/lib/services/agents/skillService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { clientAgentRunsApiPlugin } from '@/server/api/plugins/client-agent-runs';
 import { clientAgentSessionsApiPlugin } from '@/server/api/plugins/client-agent-sessions';
-import { clientAssistantsApiPlugin } from '@/server/api/plugins/client-assistants';
 import { clientFilesApiPlugin } from '@/server/api/plugins/client-files';
 import { clientTracingApiPlugin } from '@/server/api/plugins/client-tracing';
 import { filesApiPlugin } from '@/server/api/plugins/files';
@@ -213,7 +211,6 @@ beforeEach(async () => {
     await instance.register(agentsApiPlugin);
     await instance.register(clientAgentRunsApiPlugin);
     await instance.register(clientAgentSessionsApiPlugin);
-    await instance.register(clientAssistantsApiPlugin);
     await instance.register(clientFilesApiPlugin);
     await instance.register(clientTracingApiPlugin);
     await instance.register(filesApiPlugin);
@@ -238,48 +235,6 @@ afterEach(async () => {
   await drainPendingTasks();
   await db.disconnect();
   rmSync(tmpDir, { recursive: true, force: true });
-});
-
-// ── IAM-1 ────────────────────────────────────────────────────────────────
-
-describe('IAM-1: thread metadata is the caller\'s, not the server\'s', () => {
-  const patchThread = (conversationId: string, metadata: Record<string, unknown>) =>
-    viaToken('POST', `/client/v1/threads/thread_${conversationId}`, { metadata });
-
-  it('cannot write the session\'s tool allow-list, however the key is spelled in the body', async () => {
-    const thread = await db.createAgentConversation({
-      tenantId, projectId: p1, agentKey: 'bot-1', title: 't', messages: [], metadata: { source: 'api' }, createdBy: String(users.other._id),
-    } as never);
-    await tokenOf('starter'); // not the owner: a writer may manage somebody else's thread by default
-    const res = await patchThread(String(thread._id), { hitlAllowedTools: ['sandbox_exec', 'any_tool'], colour: 'red' });
-    expect(res.statusCode).toBe(200);
-    const stored = await db.findAgentConversationById(String(thread._id));
-    expect([...sessionAllowedTools(stored?.metadata as never)]).toEqual([]);
-    expect(stored?.metadata?.hitlAllowedTools).toBeUndefined();
-    // what is the caller's stays the caller's
-    expect(stored?.metadata?.colour).toBe('red');
-    expect(stored?.metadata?.source).toBe('api');
-  });
-
-  it('leaves an allow-list that a person\'s approval built exactly as it was', async () => {
-    const thread = await db.createAgentConversation({
-      tenantId, projectId: p1, agentKey: 'bot-1', title: 't', messages: [], createdBy: String(users.starter._id),
-      metadata: { source: 'api', hitlAllowedTools: ['web_search'], runtimeContext: { tenant: 'a' }, portalId: 'p', channel: 'portal' },
-    } as never);
-    await tokenOf('starter');
-    const res = await patchThread(String(thread._id), {
-      hitlAllowedTools: [], source: 'console', runtimeContext: { tenant: 'b' }, portalId: 'other', channel: 'api', sandbox: { id: 'someone-elses' }, assistantsApi: { runs: [] }, clientMetadata: { a: 'b' },
-    });
-    expect(res.statusCode).toBe(200);
-    const metadata = (await db.findAgentConversationById(String(thread._id)))?.metadata as Record<string, unknown>;
-    expect(metadata.hitlAllowedTools).toEqual(['web_search']);
-    expect(metadata.source).toBe('api');
-    expect(metadata.runtimeContext).toEqual({ tenant: 'a' });
-    expect(metadata.portalId).toBe('p');
-    expect(metadata.channel).toBe('portal');
-    expect(metadata.sandbox).toBeUndefined();
-    expect(metadata.clientMetadata).toBeUndefined();
-  });
 });
 
 // ── IAM-2 ────────────────────────────────────────────────────────────────

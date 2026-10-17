@@ -7,7 +7,7 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  *
  * Every other agent surface needs a client that knows about this console:
  * `/responses` takes an agent key in `model` but an OpenAI-shaped `input`,
- * `/a2a` speaks A2A, the Assistants API speaks threads-and-runs. The one
+ * `/a2a` speaks A2A. The one
  * thing missing was the shape every SDK in every language already speaks —
  * so an agent could be built here and then not be callable from the code a
  * team already has.

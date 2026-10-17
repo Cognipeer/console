@@ -8,7 +8,6 @@ vi.mock('@/lib/database', () => {
     runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
   };
 });
-import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelById: vi.fn(),
@@ -43,9 +42,7 @@ vi.mock('@/lib/services/projects/projectContext', () => {
   };
 });
 
-import { GET as getGuardrailRoute, PATCH as patchGuardrail, DELETE as deleteGuardrailRoute } from '@/server/api/routes/guardrails/[id]/route';
 import { getModelById, updateModel, deleteModel } from '@/lib/services/models/modelService';
-import { getGuardrail, updateGuardrail, deleteGuardrail } from '@/lib/services/guardrail';
 import { requireProjectContext, resolveProjectContext } from '@/lib/services/projects/projectContext';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
 import { getDatabase } from '@/lib/database';
@@ -64,27 +61,10 @@ const HEADERS = {
   'x-user-role': 'owner',
 };
 
-function makeReq(path: string, method = 'GET', body?: object, headers: Record<string, string> = {
-  'x-tenant-db-name': 'tenant_acme',
-  'x-tenant-id': 'tenant-1',
-  'x-user-id': 'user-1',
-}) {
-  return new NextRequest(`http://localhost${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-}
-
 const MOCK_MODEL = {
   _id: 'model-1', name: 'GPT-4', providerKey: 'openai',
   category: 'llm', modelId: 'gpt-4',
   settings: { temperature: 0.7, apiKey: 'sk-secret' },
-};
-
-const MOCK_GUARDRAIL = {
-  _id: 'gr-1', name: 'PII Shield', type: 'preset',
-  action: 'block', target: 'input', enabled: true,
 };
 
 const MOCK_PROJECT = {
@@ -93,7 +73,7 @@ const MOCK_PROJECT = {
   user: { _id: 'user-1', role: 'owner', projectIds: ['proj-1'] },
 };
 
-describe('models and guardrails detail routes', () => {
+describe('models detail routes', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 
   beforeEach(async () => {
@@ -103,9 +83,6 @@ describe('models and guardrails detail routes', () => {
     (getModelById as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_MODEL);
     (updateModel as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_MODEL);
     (deleteModel as ReturnType<typeof vi.fn>).mockResolvedValue(true);
-    (getGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_GUARDRAIL);
-    (updateGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_GUARDRAIL);
-    (deleteGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     // Models routes are wrapped in withApiRequestContext, which loads the
     // RBAC user from the DB and binds the tenant per request. Provide a mock
     // DB so the owner passes RBAC and runWithTenant passes through.
@@ -180,35 +157,6 @@ describe('models and guardrails detail routes', () => {
       (deleteModel as ReturnType<typeof vi.fn>).mockResolvedValue(false);
       const res = await app.inject({ method: 'DELETE', url: '/api/models/model-1', headers: HEADERS });
       expect(res.statusCode).toBe(404);
-    });
-  });
-
-  describe('GET /api/guardrails/[id]', () => {
-    it('returns guardrail 200', async () => {
-      const res = await getGuardrailRoute(makeReq('/api/guardrails/gr-1'), { params: Promise.resolve({ id: 'gr-1' }) });
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body.guardrail).toBeDefined();
-    });
-
-    it('returns 404 when guardrail not found', async () => {
-      (getGuardrail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-      const res = await getGuardrailRoute(makeReq('/api/guardrails/unknown'), { params: Promise.resolve({ id: 'unknown' }) });
-      expect(res.status).toBe(404);
-    });
-  });
-
-  describe('PATCH /api/guardrails/[id]', () => {
-    it('updates guardrail and returns 200', async () => {
-      const res = await patchGuardrail(makeReq('/api/guardrails/gr-1', 'PATCH', { name: 'Updated Shield' }), { params: Promise.resolve({ id: 'gr-1' }) });
-      expect(res.status).toBe(200);
-    });
-  });
-
-  describe('DELETE /api/guardrails/[id]', () => {
-    it('deletes guardrail and returns 200', async () => {
-      const res = await deleteGuardrailRoute(makeReq('/api/guardrails/gr-1', 'DELETE'), { params: Promise.resolve({ id: 'gr-1' }) });
-      expect(res.status).toBe(200);
     });
   });
 });

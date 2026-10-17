@@ -98,7 +98,7 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Stop a turn that is running now, by the id the client already has ──
   //
-  // An inline request (`/responses`, chat completions, A2A, Assistants) holds its
+  // An inline request (`/responses`, chat completions, A2A) holds its
   // connection until the answer is done, so the way to stop it is a second request
   // naming the conversation. The turn ends with what it had streamed as its answer
   // (`stop_reason: cancelled`) and the model call stops. Nothing running is a 200

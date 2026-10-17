@@ -5,6 +5,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ## Unreleased
 
+### Removed
+
+- OpenAI Assistants-compatible adapter (`/client/v1/assistants`, `/client/v1/threads`). Use the agent runs and sessions
+  API, the Responses API or chat completions instead.
+
 ### Authorization
 
 - The policy engine decides every request. The earlier legacy, shadow and monitor modes are gone: a policy is
@@ -36,7 +41,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   A refused approval that was asked through a portal names the agent as the resource and the portal apart from it, in the
   audit feed and in the decision lookup.
   Every path to a session's content asks the same question - the session routes, its files (also through the Document
-  Store and the client Files API), events, runs, tracing threads, Assistants threads and the continuation of a session
+  Store and the client Files API), events, runs, tracing threads and the continuation of a session
   by id in the Responses and chat completions routes, whichever service gate let the token in. A list shows the caller
   only their own sessions when a rule stops them from viewing others', cut in the database before the page (the sessions
   of a deleted agent count as others' too); the Sessions table shows who started each session. The tracing and Files
@@ -51,8 +56,6 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   path segment longer than eight characters hidden (`https://host/services/T0000/…`); only Admin sees it whole.
 - Importing an agent (`POST /agents/import`, `POST /agents/import/document`) that names a session-files bucket asks the
   same Files question as creating or updating one.
-- `POST /client/v1/threads/:id` only writes the keys of a thread's metadata that belong to the caller; the keys the
-  server keeps there (including the session's tool allow-list) are left as they are.
 - Levels add up in an allow rule: choosing Admin on a service (or the Admin level for every service) also allows Write and
   Read, and Write also allows Read, so a rule that names only `webhooks.admin` lets the person read, change and
   administer webhooks instead of administering what they cannot see. The policy editor shows the included levels and

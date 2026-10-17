@@ -2821,7 +2821,7 @@ export type AgentToolApprovalPolicy = 'always' | 'never';
 /**
  * What an approval-gated tool call or an ask-user question does on a run that
  * has no interactive user (a schedule, an evaluation or red-team case, an
- * OpenAI-shaped or Assistants client):
+ * OpenAI-shaped client):
  *  - `deny` (default): the call returns an error result to the model and never
  *    runs; the run continues. The ask-user tool is not offered.
  *  - `pause`: behaves as an attended run — the turn stops and the request waits

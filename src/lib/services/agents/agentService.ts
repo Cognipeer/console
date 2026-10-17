@@ -2644,7 +2644,7 @@ export async function createAgentRecord(
         name: data.name,
         description: data.description,
         // Sandbox secrets are sealed here, the one write path every creator
-        // (dashboard, client API, Assistants) goes through.
+        // (dashboard, client API) goes through.
         config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
         status: data.status || 'active',
         createdBy: userId,
@@ -3152,7 +3152,7 @@ export interface AgentChatRequest {
     runId?: string;
     /**
      * No interactive user on this turn (a schedule, an eval or red-team case, an
-     * OpenAI-shaped or Assistants client). An approval-gated tool call or a
+     * OpenAI-shaped client). An approval-gated tool call or a
      * question then follows the agent's `humanInTheLoop.unattended` setting —
      * `deny` (default: the call fails, the run goes on), `pause` (waits for
      * Studio, like an attended run) or `allow` (runs without approval) — rather

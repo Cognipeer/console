@@ -424,8 +424,8 @@ export async function reserveConversationForSyncTurn(
  * `executeAgentChat` holding the conversation's slot for the whole turn;
  * throws `AgentRunConflictError` (→ 409 via `classifyAgentRunError`) when
  * another run holds it. For entry points that run a turn on an EXISTING
- * conversation outside the /responses ceiling (OpenAI bridge, A2A,
- * Assistants): without the slot those turns could overlap a background run on
+ * conversation outside the /responses ceiling (OpenAI bridge, A2A):
+ * without the slot those turns could overlap a background run on
  * the same conversation and one would overwrite the other's history.
  */
 export async function executeAgentChatExclusive(request: AgentChatRequest): Promise<AgentChatResponse> {
