@@ -655,6 +655,12 @@ export class SQLiteProviderBase {
     // mirror the instance-level columns above but on the template itself.
     this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateKey', 'studioTemplateKey TEXT');
     this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
+    // Template/instance env is sealed at rest (EE sandbox services); the legacy
+    // plaintext `env` column stays for rows that predate sealing.
+    for (const table of ['sandbox_templates', 'sandbox_instances']) {
+      this.ensureTableColumn(db, table, 'envSealed', 'envSealed TEXT');
+      this.ensureTableColumn(db, table, 'envKeys', 'envKeys TEXT');
+    }
     this.ensureTableColumn(
       db,
       'sandbox_snapshots',
