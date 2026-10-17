@@ -83,7 +83,11 @@ describe('an input_file file_url that is fetched', () => {
   it('goes through the guarded fetch and keeps the declared type (the upload checks it against the agent)', async () => {
     hoisted.safeFetch.mockResolvedValue(new Response('a,b\n1,2\n', { headers: { 'content-type': 'text/csv; charset=utf-8' } }));
     await expect(storeFile('https://files.example.com/x/report.csv')).resolves.toEqual({ attachments: ['file-1'], named: [] });
-    expect(hoisted.safeFetch).toHaveBeenCalledWith('https://files.example.com/x/report.csv', { method: 'GET' });
+    expect(hoisted.safeFetch).toHaveBeenCalledWith(
+      'https://files.example.com/x/report.csv',
+      { method: 'GET', signal: expect.any(AbortSignal) },
+      expect.objectContaining({ keepAbortLinked: true }),
+    );
     expect(hoisted.uploadSessionFile).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report.csv', contentType: 'text/csv' }));
   });
 
@@ -96,5 +100,34 @@ describe('an input_file file_url that is fetched', () => {
   it('a file that cannot be fetched is a 400', async () => {
     hoisted.safeFetch.mockRejectedValue(new Error('Blocked address'));
     await expect(storeFile('http://10.0.0.1/a.pdf')).rejects.toMatchObject({ status: 400, code: 'attachment_unreachable' });
+  });
+
+  it('a malformed percent-escape in the path is kept as sent in the name, not a server error', async () => {
+    hoisted.safeFetch.mockResolvedValue(new Response('hello', { headers: { 'content-type': 'text/plain' } }));
+    await expect(storeFile('https://example.com/report%E0%A4%A.txt')).resolves.toEqual({ attachments: ['file-1'], named: [] });
+    expect(hoisted.uploadSessionFile).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report%E0%A4%A.txt' }));
+  });
+
+  it('a body that has not arrived when the deadline passes ends the download (400), headers alone do not hold it open', async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      // The headers answer at once; one byte arrives, then nothing more.
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new Uint8Array([1])); },
+        cancel,
+      });
+      hoisted.safeFetch.mockResolvedValue(new Response(body, { headers: { 'content-type': 'text/plain' } }));
+      const stored = storeFile('https://slow.example.com/a.txt').catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const refusal = await stored;
+      expect(refusal).toBeInstanceOf(AgentAttachmentError);
+      expect(refusal).toMatchObject({ status: 400, code: 'attachment_unreachable' });
+      expect((refusal as Error).message).toContain('did not arrive within 30 s');
+      expect(cancel).toHaveBeenCalled();
+      expect(hoisted.uploadSessionFile).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -21,6 +21,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { getConfig } from '@/lib/core/config';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IAgentConfig, IAgentConversation } from '@/lib/database';
 import { AgentAttachmentError } from './agentErrors';
@@ -159,12 +160,25 @@ function parseDataUrl(value: string): { mimeType?: string; data: string } {
     return match ? { ...(match[1] ? { mimeType: match[1] } : {}), data: match[2]! } : { data: value };
 }
 
+/** The last path segment as a file name (decoded; kept as sent when its escapes are malformed), else `fallback`. */
+function fileNameOf(url: string, fallback: string): string {
+    const segment = new URL(url).pathname.split('/').filter(Boolean).pop();
+    if (!segment || !segment.includes('.')) return fallback;
+    try {
+        return decodeURIComponent(segment);
+    } catch {
+        return segment;
+    }
+}
+
 /**
  * Downloads the file at `url` through the SSRF guard, refusing anything past
  * `maxBytes`. An image (`input_image`) must be declared `image/*` by the
  * server; a file (`input_file.file_url`) keeps the declared type (none = left
  * to the upload's guess from the name), checked against the agent's allowed
- * types when it is uploaded.
+ * types when it is uploaded. One deadline (the outbound HTTP timeout) covers the
+ * whole download, the body included: a server that answers and then sends its
+ * body slowly is cut off (400 `attachment_unreachable`).
  */
 async function fetchRemoteFile(
     url: string,
@@ -172,50 +186,77 @@ async function fetchRemoteFile(
     maxBytes: number,
     maxMb: number,
 ): Promise<{ data: Buffer; mimeType?: string; name: string }> {
-    const tooLarge = () => new AgentAttachmentError(413, 'file_too_large', `The file at ${new URL(url).host} exceeds the ${maxMb} MB limit of this agent.`);
-    let response: Response;
+    const host = new URL(url).host;
+    const tooLarge = () => new AgentAttachmentError(413, 'file_too_large', `The file at ${host} exceeds the ${maxMb} MB limit of this agent.`);
+    const deadlineMs = getConfig().outboundHttp.defaultTimeoutMs;
+    const timedOutError = () => new AgentAttachmentError(
+        400,
+        'attachment_unreachable',
+        `The file at ${host} could not be fetched: it did not arrive within ${Math.max(1, Math.round(deadlineMs / 1000))} s.`,
+    );
+    const controller = new AbortController();
+    let timedOut = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        void reader?.cancel().catch(() => undefined);
+    }, deadlineMs);
     try {
-        response = await safeFetch(url, { method: 'GET' });
-    } catch (error) {
-        throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched: ${error instanceof Error ? error.message : 'request failed'}`);
-    }
-    if (!response.ok) {
-        throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched (HTTP ${response.status}).`);
-    }
-    // Decided on the header, before a byte of the body is read.
-    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() || undefined;
-    if (kind === 'image' && (!mimeType || !mimeType.startsWith('image/'))) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new AgentAttachmentError(
-            415,
-            'unsupported_file_type',
-            `The URL at ${new URL(url).host} did not return an image (Content-Type: ${mimeType?.slice(0, 80) || 'missing'}).`,
-        );
-    }
-    const declared = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > maxBytes) {
-        await response.body?.cancel().catch(() => undefined);
-        throw tooLarge();
-    }
-    const chunks: Uint8Array[] = [];
-    let received = 0;
-    const reader = response.body?.getReader();
-    while (reader) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        received += value.length;
-        if (received > maxBytes) {
-            await reader.cancel().catch(() => undefined);
+        let response: Response;
+        try {
+            response = await safeFetch(url, { method: 'GET', signal: controller.signal }, { timeoutMs: deadlineMs, keepAbortLinked: true });
+        } catch (error) {
+            if (timedOut) throw timedOutError();
+            throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched: ${error instanceof Error ? error.message : 'request failed'}`);
+        }
+        if (!response.ok) {
+            throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched (HTTP ${response.status}).`);
+        }
+        // Decided on the header, before a byte of the body is read.
+        const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() || undefined;
+        if (kind === 'image' && (!mimeType || !mimeType.startsWith('image/'))) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new AgentAttachmentError(
+                415,
+                'unsupported_file_type',
+                `The URL at ${host} did not return an image (Content-Type: ${mimeType?.slice(0, 80) || 'missing'}).`,
+            );
+        }
+        const declared = Number(response.headers.get('content-length'));
+        if (Number.isFinite(declared) && declared > maxBytes) {
+            await response.body?.cancel().catch(() => undefined);
             throw tooLarge();
         }
-        chunks.push(value);
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        reader = response.body?.getReader();
+        while (reader) {
+            let chunk: ReadableStreamReadResult<Uint8Array>;
+            try {
+                chunk = await reader.read();
+            } catch (error) {
+                if (timedOut) throw timedOutError();
+                throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched: ${error instanceof Error ? error.message : 'the download failed'}`);
+            }
+            // A deadline that cancelled the read ends it as if the body were complete: it was not.
+            if (timedOut) throw timedOutError();
+            if (chunk.done) break;
+            received += chunk.value.length;
+            if (received > maxBytes) {
+                await reader.cancel().catch(() => undefined);
+                throw tooLarge();
+            }
+            chunks.push(chunk.value);
+        }
+        return {
+            data: Buffer.concat(chunks),
+            mimeType,
+            name: fileNameOf(url, kind),
+        };
+    } finally {
+        clearTimeout(timer);
     }
-    const pathName = new URL(url).pathname.split('/').filter(Boolean).pop();
-    return {
-        data: Buffer.concat(chunks),
-        mimeType,
-        name: pathName && pathName.includes('.') ? decodeURIComponent(pathName) : kind,
-    };
 }
 
 /**
