@@ -67,8 +67,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - `message/send` can answer without waiting (`blocking: false`), `message/stream` streams status and artifact updates,
   messages take file and data parts, and the agent card lists the accepted file types.
 - A `message/stream` client that disconnects no longer cancels the task. `tasks/resubscribe` (`{ "id": … }`) reattaches:
-  the current Task, then status and artifact updates until the task is final (a finished task answers the Task and its
-  final status at once). `tasks/cancel` is unchanged and works in any non-final state.
+  the current Task, then status and artifact updates until the task is final (a finished task, or one waiting on input,
+  answers the Task and its final status at once; one resubscribe stream follows a task for up to 60 minutes).
+  `tasks/cancel` is unchanged and works in any non-final state.
 
 ### Routines and webhook triggers
 
@@ -100,7 +101,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - An agent's sandbox secrets are kept out of tool output, out of files written back into the session and out of publish
   responses. A secret that can no longer be read (the key it was stored under changed) is marked
   `config.sandbox.secretsUnreadable: true`: saving the agent with a mix of masked and new values answers
-  `409 sandbox_secrets_unreadable` (enter every value again to replace them), its tools run without secrets and say so,
+  `409 sandbox_secrets_unreadable` (enter every value again to replace them; only masks keeps them), its tools run without secrets and say so,
   and Studio shows a warning.
 - Environment fields of sandbox templates and instances are write-only: stored sealed and shown masked (Enterprise).
 

@@ -140,7 +140,7 @@ paths:
         **Methods**
         - `message/send`: send a user message. Without `params.message.contextId` a new session starts. By default the call blocks until the turn ends and returns the Task (`completed`, or `input-required` when the turn paused for an approval or a question: the requests ride in `metadata.pendingActions`, same item shape as `required_action.actions` of the Responses API, answered with `POST /agents/sessions/{conversationId}/actions/{actionId}`, `contextId` being the session id). When the synchronous window (default 10 minutes) ends first, the Task is `working` and the run continues: poll with `tasks/get`. With `params.configuration.blocking: false` (this authenticated route only; the public route always blocks) the run is queued and the Task comes back `submitted` at once. Optional runtime headers go in `params.message.metadata.runtime_context`.
         - `message/stream`: the same turn answered as `text/event-stream` (see the response). The stream opens once the run has started; a refusal before that (a running turn on the session, a concurrency limit) is a plain JSON-RPC error with HTTP `200`. A client disconnect does not cancel the task: it keeps running and `tasks/resubscribe` reattaches. `tasks/cancel` stops it.
-        - `tasks/resubscribe` (`params: { id }`): reattaches to the task as an SSE stream: the current Task first, then status and artifact updates until the final status event. A task that already finished answers its Task and the final status event at once.
+        - `tasks/resubscribe` (`params: { id }`, the id forms `tasks/get` accepts, `-32001` for an unknown task): reattaches to the task as an SSE stream: the current Task first, then status and artifact updates until the final status event. A task that already finished, or waits on input (`input-required`), answers its Task and the final status event at once. One resubscribe stream follows a task for at most 60 minutes; if the task is still running then, the stream closes without a final event and the client resubscribes.
         - `tasks/get` (`params: { id }`): the Task as the run stands: `submitted` (queued or scheduled), `working`, `input-required`, `completed`, `failed` (the status message holds the error) or `canceled`.
         - `tasks/cancel` (`params: { id }`): cancels the run (the same cancel as `POST /agents/runs/{runId}/cancel`) and returns the Task as `canceled`; a running turn stops at its next checkpoint. A task that waits on a person is cancelled with its open requests. A task that already finished answers `-32004` (`The task cannot be canceled`).
 
@@ -2235,11 +2235,23 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: >-
-            `sandbox_secrets_unreadable`: the stored sandbox secrets cannot be decrypted (the server's encryption key changed; the agent reads as `config.sandbox.secretsUnreadable: true`) and the save mixes masked values with new ones, so they cannot be merged. Nothing is saved and the stored secrets are kept; send every secret value again, without masks, to replace them.
+            `sandbox_secrets_unreadable`: the stored sandbox secrets cannot be decrypted (the server's encryption key changed; the agent reads as `config.sandbox.secretsUnreadable: true`) and the save mixes masked values with new ones, so they cannot be merged. Nothing is saved and the stored secrets are kept; send every secret value again, without masks, to replace them (a save with only masks keeps them). Body: `{ error, type: sandbox_secrets_unreadable, code: sandbox_secrets_unreadable, field: config.sandbox.secrets }`.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                type: object
+                properties:
+                  error:
+                    type: string
+                  type:
+                    type: string
+                    enum: [sandbox_secrets_unreadable]
+                  code:
+                    type: string
+                    enum: [sandbox_secrets_unreadable]
+                  field:
+                    type: string
+                    enum: [config.sandbox.secrets]
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -28089,7 +28101,7 @@ components:
         outputs:
           type: object
           description: >-
-            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when `enabled` is true and a bucket is set; with uploads off they stay off until `enabled: true` here (and then need `bucketKey`). The read tools `session_files_list` / `session_files_read` are offered when uploads or outputs are on. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
+            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when uploads (`attachments.enabled`) are on and a bucket is set; with uploads off they stay off until `enabled: true` here, which also needs `bucketKey` (else `400` with `field: attachments.bucketKey`). An explicit `true` or `false` always wins. The read tools `session_files_list` / `session_files_read` are offered when uploads or outputs are on and the session holds a file; with uploads off they see only the session's own files. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
           properties:
             enabled:
               type: boolean
@@ -28111,7 +28123,7 @@ components:
       type: object
       additionalProperties: true
       description: >-
-        Sandbox access for the agent (Enterprise): an isolated machine it runs commands and code in. Only the secret handling is described here. `secrets` are environment variables for the sandbox, write-only: sealed (encrypted) at rest, never stored or returned in plaintext. On write, a name sent with the mask `••••••` keeps its stored value, a new value replaces it, a name left out is removed, and leaving `secrets` out altogether keeps them all. Every read (agent, publish response, version snapshot) returns the names with the mask as the value. If the stored secrets cannot be decrypted (the server's encryption key changed) a read carries `secretsUnreadable: true` and an empty `secrets`; the sandbox tools then run without the secrets and say so in their result, a save that mixes masked and new values is `409` `sandbox_secrets_unreadable`, and a save that enters every value again replaces them.
+        Sandbox access for the agent (Enterprise): an isolated machine it runs commands and code in. Only the secret handling is described here. `secrets` are environment variables for the sandbox, write-only: sealed (encrypted) at rest, never stored or returned in plaintext. On write, a name sent with the mask `••••••` keeps its stored value, a new value replaces it, a name left out is removed, and leaving `secrets` out altogether keeps them all. Every read (agent, publish response, version snapshot) returns the names with the mask as the value. If the stored secrets cannot be decrypted (the server's encryption key changed) a read carries `secretsUnreadable: true` and an empty `secrets`; the sandbox tools then run without the secrets and say so in their result, a save that mixes masked and new values is `409` `sandbox_secrets_unreadable`, a save that sends only masks keeps the stored ciphertext, and a save that enters every value again (no masks) replaces them. `secretsUnreadable` is read only and is dropped on save.
       properties:
         enabled:
           type: boolean

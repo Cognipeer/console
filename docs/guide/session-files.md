@@ -170,14 +170,14 @@ Two ways, and they can be used together: the agent writes a text file with a too
 
 ### Without a sandbox: `session_files_create` and `session_files_append`
 
-An agent that has an attachments bucket can write text files for the user. The *Let the agent create files* switch in **Configure → Files** turns it on and sets two limits. It is **on by default when the agent takes uploads and a bucket is chosen**. With uploads off, choose a bucket and switch it on yourself: outputs do not need uploads, and stay off until you do.
+An agent that has an attachments bucket can write text files for the user. The *Let the agent create files* switch in **Configure → Files** turns it on and sets two limits. It is **on by default when the agent takes uploads and a bucket is chosen**. With uploads off, choose a bucket and switch it on yourself: outputs do not need uploads, and stay off until you do. Switching outputs on without a bucket is refused (`400`, `field: attachments.bucketKey`).
 
 - **`session_files_create({ filename, content, mime_type? })`** creates a file and returns `{ file_id, filename, mime_type, size_bytes, download_url }`. Allowed types: `.md .csv .txt .json .html .xml .yaml .yml`; the MIME type is derived from the extension, and a `mime_type` that disagrees is refused. The name is sanitized (no directories, no odd characters) and a name already used in the session becomes `name-1.ext`.
 - **`session_files_append({ file_id, content })`** adds text to the end of a file this agent created in this session (so a long file can be built in parts). It refuses a file the person uploaded, a file of another session, and any file that is not one of the text types.
 - **Limits.** *Files per turn* (default 10, at most 20) and *Largest file* (default 2 MB, at most 10 MB), enforced on save and at run time. The files also go through the same checks an upload does: the project's file quota, total file count and storage limit. They do not count toward the *Max files per session* of the person's uploads.
 - **Approvals.** Both tools follow the agent's *per-tool* approval setting when one is set and are otherwise never asked about.
 - **Delivery.** A file created or appended to in a turn is attached to that turn's answer, and a file the agent wrote never rides along on the person's next message. The agent's prompt gets a short section naming the tools and the limits.
-- **Reading back.** `session_files_list` and `session_files_read` are offered when outputs are on too, so the agent can read a file it wrote earlier.
+- **Reading back.** `session_files_list` and `session_files_read` are offered when outputs are on too, so the agent can read a file it wrote earlier. They appear once the session holds a file (from the turn after the first file was written), and with uploads off they see only the session's own files.
 - **Discovery.** `GET /client/v1/agents/{key}` reports `attachments.outputs`: `{ enabled, max_files_per_turn, max_file_size_mb, types }`, true to the rule above (`enabled` is false while uploads are off and outputs were not turned on).
 
 ### With a sandbox: `/outputs/`
