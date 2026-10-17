@@ -298,3 +298,19 @@ describe('agent-run reconciler: scheduled, deferred and expired runs (§4.4–§
     expect((await db.createAgentRun(baseRecord('conv-expired-deferred')))._id).toBeTruthy();
   });
 });
+
+describe('agent-run reconciler: hourly retention (§4.5)', () => {
+  it('drops expired scheduler claims and keeps live ones', async () => {
+    await db.claimSchedulerSlot('routine:r1:2026-01-01T00:00:00.000Z', new Date(Date.now() - 60_000));
+    await db.claimSchedulerSlot('routine:r1:2099-01-01T00:00:00.000Z', new Date(Date.now() + 30 * 86_400_000));
+    // Retention runs at most hourly per process: move the clock past the interval so this tick runs it.
+    vi.useFakeTimers({ now: Date.now() + 2 * 3_600_000, toFake: ['Date'] });
+
+    const result = await triggerAgentRunReconcilerRun();
+
+    expect(result.retentionDeleted).toBeGreaterThanOrEqual(1);
+    // The expired key is free to claim again; the live one still holds.
+    expect(await db.claimSchedulerSlot('routine:r1:2026-01-01T00:00:00.000Z', new Date(Date.now() + 60_000))).toBe(true);
+    expect(await db.claimSchedulerSlot('routine:r1:2099-01-01T00:00:00.000Z', new Date(Date.now() + 60_000))).toBe(false);
+  });
+});

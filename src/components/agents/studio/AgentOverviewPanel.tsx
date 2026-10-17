@@ -6,7 +6,7 @@
  * Answers "is this agent healthy, how much is it used, and how do I call it"
  * in one screen. The numbers come from the agent's TRACES, not its dashboard
  * sessions: every run on every channel — API, OpenAI-compatible, A2A,
- * Assistants, schedules, the playground — writes a trace, whereas a session
+ * schedules, the playground — writes a trace, whereas a session
  * list only knows about conversations started from this page. Showing the
  * session list here made an agent serving thousands of API calls look idle.
  */

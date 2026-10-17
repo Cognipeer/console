@@ -129,7 +129,8 @@ function sweepDidWork(sweep: SweepResult): boolean {
  *    `onTimeout` (drop them, or deny and let the agent continue as a job);
  *  - webhook deliveries that are pending and due → enqueued again;
  *  - agent-run callbacks still pending / failed with attempts left → sent again;
- *  - hourly, retention.
+ *  - hourly, retention (runs, session events, webhook deliveries, session files,
+ *    expired scheduler claims).
  */
 async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean } = {}): Promise<SweepResult> {
   const mainDb = await getDatabase();
@@ -294,6 +295,14 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           // Files attached to sessions live as long as the agent's `attachments.retentionDays`
           // (stamped on each file as `expiresAt` when it was uploaded).
           retentionDeleted += await cleanupExpiredSessionFiles(tenantDb, tenant.dbName!, new Date(now));
+          // Exactly-once claims (routine fires, crawler slots) only matter until they expire.
+          retentionDeleted += await tenantDb.cleanupSchedulerClaims(new Date(now)).catch((error) => {
+            logger.warn('Scheduler claim cleanup failed', {
+              tenantDbName: tenant.dbName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return 0;
+          });
         }
       });
     } catch (error) {
