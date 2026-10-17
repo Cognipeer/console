@@ -1138,6 +1138,10 @@ export class SQLiteProviderBase {
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],
+      // The event the callback bookkeeping belongs to; what continues a paused turn and who
+      // answered; the principal a routine run counts against.
+      ['callbackEventId', 'TEXT'], ['resumeTrigger', 'TEXT'], ['resumeUserId', 'TEXT'], ['resumeApiTokenId', 'TEXT'],
+      ['accountableUserId', 'TEXT'], ['accountableTokenId', 'TEXT'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }

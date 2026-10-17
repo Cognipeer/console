@@ -2467,6 +2467,13 @@ export const TENANT_SCHEMA_SQL = `
     unattended INTEGER,
     externalContent INTEGER,
     background INTEGER,
+    -- Which event the callback bookkeeping is for; the continuation's trigger and answerer; the accountable principal.
+    callbackEventId TEXT,
+    resumeTrigger TEXT,
+    resumeUserId TEXT,
+    resumeApiTokenId TEXT,
+    accountableUserId TEXT,
+    accountableTokenId TEXT,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,

@@ -44,6 +44,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            userId, apiTokenId, actorType,
            runClass, notBefore, detachedAt, metadata, channel, routineId, runTrigger,
            responseFormat, inputs, queueGeneration, lastPublishedAt, unattended, externalContent, background,
+           callbackEventId, resumeTrigger, resumeUserId, resumeApiTokenId, accountableUserId, accountableTokenId,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
            @userMessage, @attachments, @version, @usePublished, @runtimeContext,
@@ -53,6 +54,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            @userId, @apiTokenId, @actorType,
            @runClass, @notBefore, @detachedAt, @metadata, @channel, @routineId, @runTrigger,
            @responseFormat, @inputs, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @background,
+           @callbackEventId, @resumeTrigger, @resumeUserId, @resumeApiTokenId, @accountableUserId, @accountableTokenId,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
           id,
@@ -99,6 +101,12 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           unattended: record.unattended ? 1 : null,
           externalContent: record.externalContent ? 1 : null,
           background: record.background ? 1 : null,
+          callbackEventId: record.callbackEventId ?? null,
+          resumeTrigger: record.resumeTrigger ?? null,
+          resumeUserId: record.resumeUserId ?? null,
+          resumeApiTokenId: record.resumeApiTokenId ?? null,
+          accountableUserId: record.accountableUserId ?? null,
+          accountableTokenId: record.accountableTokenId ?? null,
           createdAt: now,
           startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
           completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
@@ -193,6 +201,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       id: string,
       tenantId: string,
       resumeActionIds: string[],
+      continuation?: { trigger: 'resume' | 'timeout'; userId?: string | null; apiTokenId?: string | null },
     ): Promise<IAgentRun | null> {
       try {
         return await this.updateAgentRunIf(id, `
@@ -200,9 +209,18 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           SET status = 'queued', resumeActionIds = @resumeActionIds, stopReason = NULL, result = NULL,
               errorReason = NULL, errorMessage = NULL, workerId = NULL, cancelRequestedAt = NULL,
               completedAt = NULL, updatedAt = @updatedAt,
-              queueGeneration = COALESCE(queueGeneration, 1) + 1, notBefore = @updatedAt
+              queueGeneration = COALESCE(queueGeneration, 1) + 1, notBefore = @updatedAt,
+              resumeTrigger = @resumeTrigger, resumeUserId = @resumeUserId, resumeApiTokenId = @resumeApiTokenId
           WHERE id = @id AND tenantId = @tenantId AND status = 'requires_action'
-        `, { id, tenantId, resumeActionIds: this.toJson(resumeActionIds), updatedAt: this.now() });
+        `, {
+          id,
+          tenantId,
+          resumeActionIds: this.toJson(resumeActionIds),
+          updatedAt: this.now(),
+          resumeTrigger: continuation?.trigger ?? null,
+          resumeUserId: continuation?.userId ?? null,
+          resumeApiTokenId: continuation?.apiTokenId ?? null,
+        });
       } catch (error) {
         // The partial unique index: another run took the conversation's slot.
         if (isSqliteUniqueConstraintError(error)) {
@@ -216,18 +234,23 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
     async updateAgentRunCallback(
       id: string,
       tenantId: string,
-      data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
+      data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number; callbackEventId?: string | null },
+      options?: { onlyIfEventId?: string },
     ): Promise<IAgentRun | null> {
+      const setEvent = data.callbackEventId !== undefined ? ', callbackEventId = @callbackEventId' : '';
+      const eventGuard = options?.onlyIfEventId !== undefined ? ' AND (callbackEventId IS NULL OR callbackEventId = @onlyIfEventId)' : '';
       return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
-        SET callbackStatus = @callbackStatus, callbackAttempts = @callbackAttempts, updatedAt = @updatedAt
-        WHERE id = @id AND tenantId = @tenantId
+        SET callbackStatus = @callbackStatus, callbackAttempts = @callbackAttempts, updatedAt = @updatedAt${setEvent}
+        WHERE id = @id AND tenantId = @tenantId${eventGuard}
       `, {
         id,
         tenantId,
         callbackStatus: data.callbackStatus,
         callbackAttempts: data.callbackAttempts,
         updatedAt: this.now(),
+        ...(data.callbackEventId !== undefined ? { callbackEventId: data.callbackEventId ?? null } : {}),
+        ...(options?.onlyIfEventId !== undefined ? { onlyIfEventId: options.onlyIfEventId } : {}),
       });
     }
 
@@ -243,6 +266,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         'callbackUrl', 'callbackSecret', 'callbackStatus', 'projectId',
         'idempotencyKey', 'idempotencyRequestHash',
         'runClass', 'channel', 'routineId',
+        'callbackEventId', 'resumeTrigger', 'resumeUserId', 'resumeApiTokenId', 'accountableUserId', 'accountableTokenId',
       ];
       for (const f of scalarFields) {
         if ((data as Record<string, unknown>)[f] !== undefined) {
@@ -500,15 +524,15 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
-    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null> {
+    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string, expiresAt?: Date): Promise<IAgentRun | null> {
       // Leaving `queued` frees the partial unique index slot with the row update.
       const now = this.now();
       return this.updateAgentRunIf(runId, `
         UPDATE ${TABLES.agentRuns}
         SET status = 'failed', errorReason = 'expired', errorMessage = @errorMessage, stopReason = 'error',
-            completedAt = @now, updatedAt = @now
+            completedAt = @now, updatedAt = @now${expiresAt ? ', expiresAt = @expiresAt' : ''}
         WHERE id = @id AND tenantId = @tenantId AND status IN ('queued', 'scheduled')
-      `, { id: runId, tenantId, errorMessage, now });
+      `, { id: runId, tenantId, errorMessage, now, ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}) });
     }
 
     async markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null> {
@@ -638,6 +662,12 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         ...(Number(row.unattended) === 1 ? { unattended: true } : {}),
         ...(Number(row.externalContent) === 1 ? { externalContent: true } : {}),
         ...(Number(row.background) === 1 ? { background: true } : {}),
+        callbackEventId: (row.callbackEventId as string) ?? null,
+        resumeTrigger: (row.resumeTrigger as IAgentRun['resumeTrigger']) ?? null,
+        resumeUserId: (row.resumeUserId as string) ?? null,
+        resumeApiTokenId: (row.resumeApiTokenId as string) ?? null,
+        accountableUserId: (row.accountableUserId as string) ?? null,
+        accountableTokenId: (row.accountableTokenId as string) ?? null,
         createdAt: this.toDate(row.createdAt),
         startedAt: this.toDate(row.startedAt) ?? null,
         completedAt: this.toDate(row.completedAt) ?? null,

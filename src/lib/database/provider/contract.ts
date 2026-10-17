@@ -2134,11 +2134,14 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * active-run slot again. Null when the run is not paused any more; throws
    * `AgentRunConflictError` when another run holds the slot. Increments
    * `queueGeneration` (a resume is a new execution: its job dedup key differs).
+   * `continuation` records what continues the turn and who answered
+   * (`resumeTrigger`, `resumeUserId`, `resumeApiTokenId`).
    */
   requeueAgentRunForResume(
     id: string,
     tenantId: string,
     resumeActionIds: string[],
+    continuation?: { trigger: 'resume' | 'timeout'; userId?: string | null; apiTokenId?: string | null },
   ): Promise<IAgentRun | null>;
   /**
    * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
@@ -2148,11 +2151,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * terminal status. Reusing `finalizeAgentRun`'s CAS here would silently
    * no-op every callback bookkeeping write once the run is no longer
    * `running` — which is always, since finalize runs first.
+   *
+   * `data.callbackEventId` records which event the bookkeeping is for;
+   * `options.onlyIfEventId` applies the write only while the row's
+   * `callbackEventId` is that event (or unset), so the delivery of an older
+   * event never overwrites the bookkeeping of a newer one. Null when it did not apply.
    */
   updateAgentRunCallback(
     id: string,
     tenantId: string,
-    data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
+    data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number; callbackEventId?: string | null },
+    options?: { onlyIfEventId?: string },
   ): Promise<IAgentRun | null>;
   getAgentRunById(
     id: string,
@@ -2275,8 +2284,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * CAS `queued` / `scheduled` -> `failed` with `errorReason: 'expired'` (a
    * deferred or scheduled run that never started in time), freeing the
    * conversation slot a queued row holds. Null when the row has moved on.
+   * `expiresAt`, when given, is the row's new retention cutoff.
    */
-  expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null>;
+  expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string, expiresAt?: Date): Promise<IAgentRun | null>;
   /** CAS on `running`: stamps `detachedAt` (the caller of an inline run stopped waiting). */
   markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
   /** Stamps `lastPublishedAt` after a queue publish (no status guard). */

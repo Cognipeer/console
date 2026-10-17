@@ -155,7 +155,9 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
      * guarantees live here rather than in a partial unique index.
      *
      * A conversation lock whose run is already terminal (or never got
-     * inserted) is stale — reclaimed with a CAS on the old holder.
+     * inserted) is stale — reclaimed with a CAS on the old holder. An
+     * idempotency lock is reclaimed only when its run never got inserted (a
+     * crash between the two inserts): one bound to a run lives as long as it.
      */
     private async acquireAgentRunLock(lockId: string, kind: AgentRunLockDoc['kind'], expiresAt?: Date | null): Promise<boolean> {
       const locks = this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks);
@@ -166,13 +168,12 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       } catch (error) {
         if (!isDuplicateKey(error)) throw error;
       }
-      if (kind !== 'conversation') return false;
       const held = await locks.findOne({ _id: lockId });
       if (!held) return this.acquireAgentRunLock(lockId, kind, expiresAt);
       let stale = false;
       if (!held.runId) {
         stale = Date.now() - new Date(held.createdAt).getTime() > ORPHAN_LOCK_GRACE_MS;
-      } else {
+      } else if (kind === 'conversation') {
         let holder: IAgentRun | null = null;
         try {
           holder = await this.getTenantDb().collection<IAgentRun>(COLLECTIONS.agentRuns)
@@ -319,13 +320,26 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         { ...data, updatedAt: new Date() },
       );
       if (run && !ACTIVE_STATUSES.has(run.status)) await this.releaseConversationLock(run.conversationId, id);
+      if (run && data.expiresAt) await this.extendIdempotencyLock(run, data.expiresAt);
       return run;
+    }
+
+    /** The idempotency lock lives as long as its run row: a new retention cutoff moves both. */
+    private async extendIdempotencyLock(run: IAgentRun, expiresAt: Date): Promise<void> {
+      if (!run.idempotencyKey) return;
+      await this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
+        .updateOne(
+          { _id: idempotencyLockId(run.tenantId, run.projectId, run.idempotencyKey), runId: String(run._id) },
+          { $set: { expiresAt } },
+        )
+        .catch((error) => logger.warn('Could not move the agent run idempotency lock expiry', { runId: run._id, error }));
     }
 
     async requeueAgentRunForResume(
       id: string,
       tenantId: string,
       resumeActionIds: string[],
+      continuation?: { trigger: 'resume' | 'timeout'; userId?: string | null; apiTokenId?: string | null },
     ): Promise<IAgentRun | null> {
       const paused = await this.agentRunsCollection().findOne({ _id: objectId(id), tenantId, status: 'requires_action' });
       if (!paused) return null;
@@ -342,6 +356,9 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
           queueGeneration: (paused.queueGeneration ?? 1) + 1,
           notBefore: new Date(),
           resumeActionIds,
+          resumeTrigger: continuation?.trigger ?? null,
+          resumeUserId: continuation?.userId ?? null,
+          resumeApiTokenId: continuation?.apiTokenId ?? null,
           stopReason: null,
           result: null,
           errorReason: null,
@@ -364,12 +381,19 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     async updateAgentRunCallback(
       id: string,
       tenantId: string,
-      data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
+      data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number; callbackEventId?: string | null },
+      options?: { onlyIfEventId?: string },
     ): Promise<IAgentRun | null> {
-      return this.setAgentRun(
-        { _id: objectId(id), tenantId },
-        { callbackStatus: data.callbackStatus, callbackAttempts: data.callbackAttempts, updatedAt: new Date() },
-      );
+      const filter: Filter<IAgentRun> = { _id: objectId(id), tenantId };
+      if (options?.onlyIfEventId !== undefined) {
+        (filter as Record<string, unknown>).callbackEventId = { $in: [options.onlyIfEventId, null] };
+      }
+      return this.setAgentRun(filter, {
+        callbackStatus: data.callbackStatus,
+        callbackAttempts: data.callbackAttempts,
+        ...(data.callbackEventId !== undefined ? { callbackEventId: data.callbackEventId } : {}),
+        updatedAt: new Date(),
+      });
     }
 
     async getAgentRunById(
@@ -571,14 +595,18 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
-    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string): Promise<IAgentRun | null> {
+    async expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string, expiresAt?: Date): Promise<IAgentRun | null> {
       const now = new Date();
       const run = await this.setAgentRun(
         { _id: objectId(runId), tenantId, status: { $in: ['queued', 'scheduled'] } },
-        { status: 'failed', errorReason: 'expired', errorMessage, stopReason: 'error', completedAt: now, updatedAt: now },
+        {
+          status: 'failed', errorReason: 'expired', errorMessage, stopReason: 'error', completedAt: now, updatedAt: now,
+          ...(expiresAt ? { expiresAt } : {}),
+        },
       );
       // A queued row holds the conversation's slot; a scheduled one never took it (no-op).
       if (run) await this.releaseConversationLock(run.conversationId, runId);
+      if (run && expiresAt) await this.extendIdempotencyLock(run, expiresAt);
       return run;
     }
 
