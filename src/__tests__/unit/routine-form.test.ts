@@ -12,6 +12,7 @@ import {
   WEBHOOK_FILTER_OPS,
   WEBHOOK_PRESET_AUTH,
   WEBHOOK_PRESETS,
+  WEBHOOK_SAMPLES,
   WEBHOOK_TEMPLATE_VARIABLES,
   emptyRoutineForm,
   formFromRoutine,
@@ -23,7 +24,7 @@ import {
   type RoutineRow,
 } from '@/components/agents/studio/routineForm';
 import { DEFAULT_WEBHOOK_HEADER_NAME, WEBHOOK_PRESET_AUTH as SERVER_PRESET_AUTH, WEBHOOK_PRESETS as SERVER_PRESETS } from '@/lib/services/agents/routineWebhookAuth';
-import { WEBHOOK_CONTEXT_ROOTS, parseFilterRules } from '@/lib/services/agents/routineWebhookView';
+import { WEBHOOK_CONTEXT_ROOTS, boundedView, firstFilterMiss, parseFilterRules, renderWebhookTemplate } from '@/lib/services/agents/routineWebhookView';
 
 const now = new Date('2026-10-18T10:00:00Z');
 const base = () => ({ ...emptyRoutineForm('Europe/Istanbul', now), name: 'Digest', prompt: 'Summarise.' });
@@ -221,6 +222,41 @@ describe('strings', () => {
     for (const locale of ['en', 'tr'] as const) {
       expect(typeof at(messages[locale], 'common.confirm.nouns').agentRoutine).toBe('string');
       expect(typeof at(messages[locale], 'common.confirm.extras').agentRoutineStops).toBe('string');
+    }
+  });
+});
+
+describe('the Test tab samples and the variables offered', () => {
+  const view = (preset: keyof typeof WEBHOOK_SAMPLES) => boundedView({ payload: WEBHOOK_SAMPLES[preset].payload, headers: WEBHOOK_SAMPLES[preset].headers });
+
+  it('do not offer received_at as an example (a template may still use it)', () => {
+    expect([...WEBHOOK_TEMPLATE_VARIABLES]).not.toContain('received_at');
+    expect(WEBHOOK_CONTEXT_ROOTS).toContain('received_at');
+  });
+
+  it('a GitHub sample reads like a delivery: the number is in the pull request too, with the head commit, the link and the sender', () => {
+    const rendered = renderWebhookTemplate(
+      'PR {{payload.pull_request.number}} {{payload.number}} {{payload.pull_request.head.sha}} {{payload.pull_request.html_url}} {{payload.sender.login}}',
+      view('github'),
+    );
+    expect(rendered).toBe('PR 42 42 "3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1" "https://github.com/example/repo/pull/42" "octocat"');
+  });
+
+  it('the GitLab, Azure DevOps and generic samples carry what their prompts and filters name', () => {
+    expect(renderWebhookTemplate('{{payload.object_attributes.iid}} {{payload.object_attributes.url}} {{payload.object_attributes.last_commit.id}}', view('gitlab')))
+      .toContain('7 "https://gitlab.example.com/example/repo/-/merge_requests/7" "3b7c');
+    expect(renderWebhookTemplate('{{payload.resource.pullRequestId}} {{payload.resource.lastMergeSourceCommit.commitId}} {{payload.resource.createdBy.uniqueName}}', view('azure_devops')))
+      .toBe('12 "3b7c9e1a5d2f4086b1c3e5a7d9f0b2c4e6a8d0f1" "jane@example.com"');
+    expect(renderWebhookTemplate('{{payload.ticket.id}} {{payload.id}} {{payload.ticket.url}}', view('generic'))).toContain('"T-1001" "evt_sample_1"');
+  });
+
+  it('the first filter example of every preset matches its own sample', () => {
+    for (const preset of WEBHOOK_PRESETS) {
+      const example = WEBHOOK_FILTER_EXAMPLES[preset][0];
+      if (!example) continue;
+      const built = routineBodyFromForm({ ...base(), triggerType: 'webhook', webhookPreset: preset, webhookAuth: WEBHOOK_PRESET_AUTH[preset][0], webhookFilter: example.rows, webhookSecret: 'whsec_x'.padEnd(20, 'x') }, [], null, now);
+      const filter = built.ok ? (built.body.trigger as { filter?: Parameters<typeof firstFilterMiss>[1] }).filter : undefined;
+      expect(firstFilterMiss(view(preset), filter), preset).toBeNull();
     }
   });
 });

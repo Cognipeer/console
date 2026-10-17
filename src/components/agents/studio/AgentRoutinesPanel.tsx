@@ -16,6 +16,7 @@ import {
     ActionIcon,
     Alert,
     Badge,
+    Box,
     Button,
     Group,
     NumberInput,
@@ -25,7 +26,6 @@ import {
     Skeleton,
     Stack,
     Switch,
-    Table,
     Tabs,
     Text,
     Textarea,
@@ -36,12 +36,17 @@ import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
     IconCalendarTime,
+    IconClockPlay,
+    IconHandClick,
     IconHistory,
     IconPencil,
     IconPlayerPlay,
     IconPlus,
+    IconRepeat,
     IconTrash,
+    IconWebhook,
 } from '@tabler/icons-react';
+import type { ReactNode } from 'react';
 import EmptyState from '@/components/common/EmptyState';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useDeleteResource } from '@/components/common/confirm';
@@ -89,6 +94,13 @@ const TRIGGER_LABEL_KEY: Record<RoutineTriggerType, string> = {
     webhook: 'triggerWebhook',
 };
 
+const TRIGGER_ICON: Record<RoutineTriggerType, ReactNode> = {
+    schedule: <IconRepeat size={14} />,
+    once: <IconClockPlay size={14} />,
+    manual: <IconHandClick size={14} />,
+    webhook: <IconWebhook size={14} />,
+};
+
 const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';
 
 type StoredTrigger = { type: string; cron?: string; timezone?: string; run_at?: string; preset?: string; events?: string[] };
@@ -117,6 +129,7 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
     const locale = useLocale();
     const deleteResource = useDeleteResource();
     const [routines, setRoutines] = useState<RoutineRow[] | null>(null);
+    const [loadFailed, setLoadFailed] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
     const [editing, setEditing] = useState<{ routine: RoutineRow | null } | null>(null);
 
@@ -126,8 +139,10 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
             if (!res.ok) throw new Error(await errorMessage(res));
             const data = await res.json() as { data: RoutineRow[] };
             setRoutines(data.data ?? []);
+            setLoadFailed(false);
         } catch {
-            setRoutines((prev) => prev ?? []);
+            // A failed first load is not "no routines": the list stays unset and an error state with a retry shows.
+            setLoadFailed(true);
             notifications.show({ color: 'red', message: t('loadFailed') });
         }
     }, [agentId, t]);
@@ -202,93 +217,103 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                 </Button>
             </Group>
 
-            {routines === null ? (
+            {routines === null && !loadFailed ? (
                 <Stack gap="xs">{[0, 1].map((i) => <Skeleton key={i} h={36} />)}</Stack>
+            ) : routines === null ? (
+                <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />} role="alert">
+                    <Group justify="space-between" wrap="nowrap" gap="sm">
+                        <Text size="sm">{t('loadFailed')}</Text>
+                        <Button size="compact-xs" variant="light" color="red" onClick={() => { setLoadFailed(false); void load(); }}>{t('retry')}</Button>
+                    </Group>
+                </Alert>
             ) : routines.length === 0 ? (
                 <EmptyState title={t('emptyTitle')} description={t('emptyDescription')} minHeight={160} />
             ) : (
-                <Table highlightOnHover verticalSpacing={6}>
-                    <Table.Thead>
-                        <Table.Tr>
-                            <Table.Th>{t('colName')}</Table.Th>
-                            <Table.Th>{t('colTrigger')}</Table.Th>
-                            <Table.Th w={170}>{t('colNext')}</Table.Th>
-                            <Table.Th w={200}>{t('colLast')}</Table.Th>
-                            <Table.Th w={60}>{t('colEnabled')}</Table.Th>
-                            <Table.Th w={140} />
-                        </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                        {routines.map((routine) => {
-                            const next = fromEpoch(routine.next_fire_at);
-                            const last = fromEpoch(routine.last_fire_at);
-                            return (
-                                <Table.Tr key={routine.id}>
-                                    <Table.Td>
-                                        <Text size="sm" fw={500}>{routine.name}</Text>
-                                        {routine.description ? <Text size="xs" c="dimmed" lineClamp={1}>{routine.description}</Text> : null}
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Group gap={6} wrap="nowrap">
-                                            <Badge size="xs" variant="light">{t(TRIGGER_LABEL_KEY[routine.trigger.type as RoutineTriggerType] ?? 'triggerManual')}</Badge>
-                                            <Text size="xs" ff={routine.trigger.type === 'schedule' ? 'monospace' : undefined} c="dimmed">{triggerSummary(routine)}</Text>
-                                        </Group>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Text size="xs">{next ? formatInZone(next, locale) : t('none')}</Text>
-                                    </Table.Td>
-                                    <Table.Td>
-                                        {last ? (
-                                            <Group gap={6} wrap="nowrap">
-                                                <Text size="xs">{formatInZone(last, locale)}</Text>
-                                                {routine.last_status ? (
-                                                    <Tooltip label={routine.last_error ?? ''} disabled={!routine.last_error} withArrow multiline maw={360}>
-                                                        <Badge size="xs" variant="light" color={routine.last_status === 'failed' ? 'red' : 'teal'}>
-                                                            {t(routine.last_status === 'failed' ? 'statusFailed' : 'statusStarted')}
-                                                        </Badge>
-                                                    </Tooltip>
-                                                ) : null}
-                                            </Group>
-                                        ) : <Text size="xs" c="dimmed">{t('never')}</Text>}
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Switch
-                                            size="xs"
-                                            checked={routine.enabled}
-                                            disabled={busyId === routine.id}
-                                            aria-label={t('colEnabled')}
-                                            onChange={(event) => void toggle(routine, event.currentTarget.checked)}
-                                        />
-                                    </Table.Td>
-                                    <Table.Td>
-                                        <Group gap={2} justify="flex-end" wrap="nowrap">
-                                            <Tooltip label={t('runNow')} withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === routine.id} aria-label={t('runNow')} onClick={() => void runNow(routine)}>
-                                                    <IconPlayerPlay size={14} />
-                                                </ActionIcon>
+                <Stack gap={0} role="list" aria-label={t('sectionTitle')}>
+                    {routines.map((routine) => {
+                        const next = fromEpoch(routine.next_fire_at);
+                        const last = fromEpoch(routine.last_fire_at);
+                        const triggerType = (routine.trigger.type as RoutineTriggerType) in TRIGGER_LABEL_KEY ? routine.trigger.type as RoutineTriggerType : 'manual';
+                        const summary = triggerSummary(routine);
+                        return (
+                            <Group
+                                key={routine.id}
+                                role="listitem"
+                                gap="md"
+                                wrap="wrap"
+                                align="center"
+                                py={8}
+                                style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
+                            >
+                                <Stack gap={2} style={{ flex: '1 1 220px', minWidth: 0 }}>
+                                    <Text size="sm" fw={500} truncate title={routine.name}>{routine.name}</Text>
+                                    <Group gap={6} wrap="nowrap" c="dimmed" style={{ minWidth: 0 }}>
+                                        <Tooltip label={t(TRIGGER_LABEL_KEY[triggerType])} withArrow>
+                                            <Box component="span" role="img" aria-label={t(TRIGGER_LABEL_KEY[triggerType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                                                {TRIGGER_ICON[triggerType]}
+                                            </Box>
+                                        </Tooltip>
+                                        <Text size="xs" c="dimmed" ff={triggerType === 'schedule' ? 'monospace' : undefined} truncate title={summary}>{summary}</Text>
+                                    </Group>
+                                    {routine.description ? <Text size="xs" c="dimmed" lineClamp={1}>{routine.description}</Text> : null}
+                                </Stack>
+                                <Stack gap={2} style={{ flex: '0 0 200px' }}>
+                                    <Text size="xs" c="dimmed" truncate>{t('colNext')}: <Text span size="xs" c="var(--mantine-color-text)">{next ? formatInZone(next, locale) : t('none')}</Text></Text>
+                                    <Group gap={6} wrap="nowrap">
+                                        <Text size="xs" c="dimmed" truncate>
+                                            {t('colLast')}: <Text span size="xs" c="var(--mantine-color-text)">{last ? formatInZone(last, locale) : t('never')}</Text>
+                                        </Text>
+                                        {last && routine.last_status ? (
+                                            <Tooltip label={routine.last_error ?? ''} disabled={!routine.last_error} withArrow multiline maw={360}>
+                                                <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
+                                                    <Box
+                                                        w={8}
+                                                        h={8}
+                                                        style={{ borderRadius: '50%', background: routine.last_status === 'failed' ? 'var(--mantine-color-red-6)' : 'var(--mantine-color-teal-6)' }}
+                                                    />
+                                                    <Text size="xs" fw={500} c={routine.last_status === 'failed' ? 'var(--mantine-color-red-light-color)' : 'var(--mantine-color-teal-light-color)'}>
+                                                        {t(routine.last_status === 'failed' ? 'statusFailed' : 'statusStarted')}
+                                                    </Text>
+                                                </Group>
                                             </Tooltip>
-                                            <Tooltip label={t('history')} withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('history')} onClick={() => onShowRuns({ id: routine.id, name: routine.name })}>
-                                                    <IconHistory size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                            <Tooltip label={t('edit')} withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('edit')} onClick={() => setEditing({ routine })}>
-                                                    <IconPencil size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                            <Tooltip label={t('delete')} withArrow>
-                                                <ActionIcon size="sm" variant="subtle" color="red" aria-label={t('delete')} onClick={() => void remove(routine)}>
-                                                    <IconTrash size={14} />
-                                                </ActionIcon>
-                                            </Tooltip>
-                                        </Group>
-                                    </Table.Td>
-                                </Table.Tr>
-                            );
-                        })}
-                    </Table.Tbody>
-                </Table>
+                                        ) : null}
+                                    </Group>
+                                </Stack>
+                                <Group gap="xs" wrap="nowrap" style={{ flex: '0 0 auto' }}>
+                                    <Switch
+                                        size="xs"
+                                        checked={routine.enabled}
+                                        disabled={busyId === routine.id}
+                                        aria-label={`${t('colEnabled')}: ${routine.name}`}
+                                        onChange={(event) => void toggle(routine, event.currentTarget.checked)}
+                                    />
+                                    <Group gap={2} wrap="nowrap">
+                                        <Tooltip label={t('runNow')} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === routine.id} aria-label={t('runNow')} onClick={() => void runNow(routine)}>
+                                                <IconPlayerPlay size={14} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                        <Tooltip label={t('history')} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('history')} onClick={() => onShowRuns({ id: routine.id, name: routine.name })}>
+                                                <IconHistory size={14} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                        <Tooltip label={t('edit')} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('edit')} onClick={() => setEditing({ routine })}>
+                                                <IconPencil size={14} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                        <Tooltip label={t('delete')} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" color="red" aria-label={t('delete')} onClick={() => void remove(routine)}>
+                                                <IconTrash size={14} />
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    </Group>
+                                </Group>
+                            </Group>
+                        );
+                    })}
+                </Stack>
             )}
 
             {editing ? (
@@ -373,6 +398,8 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 setForm((prev) => ({ ...prev, webhookSecret: '' }));
             }
             onSaved(saved, keepOpen);
+        } catch (error) {
+            notifications.show({ color: 'red', message: t('saveFailed', { message: error instanceof Error ? error.message : String(error) }) });
         } finally {
             setSaving(false);
         }
@@ -419,7 +446,15 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                         <Group gap={6}>
                             <Text size="xs" c="dimmed">{t('presets')}</Text>
                             {CRON_PRESETS.map((preset) => (
-                                <Badge key={preset.cron} variant={form.cron === preset.cron ? 'filled' : 'light'} style={{ cursor: 'pointer' }} onClick={() => set('cron', preset.cron)}>
+                                <Badge
+                                    key={preset.cron}
+                                    component="button"
+                                    type="button"
+                                    aria-pressed={form.cron === preset.cron}
+                                    variant={form.cron === preset.cron ? 'filled' : 'light'}
+                                    style={{ cursor: 'pointer' }}
+                                    onClick={() => set('cron', preset.cron)}
+                                >
                                     {t(preset.key)}
                                 </Badge>
                             ))}

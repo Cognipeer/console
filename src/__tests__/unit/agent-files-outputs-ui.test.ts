@@ -102,6 +102,20 @@ describe('the files the agent writes, in the Files section', () => {
     expect(container!.textContent).not.toContain('Files per session');
   });
 
+  it('shows how long files are kept for an agent that only writes files, and stores what is typed', () => {
+    const { limit, seen } = mount({ bucketKey: 'docs', outputs: { enabled: true } });
+    expect(limit('Files per session')).toBeUndefined();
+    const retention = limit('Keep files for (days)');
+    expect(retention?.placeholder).toBe('30');
+    setValue(retention!, '7');
+    expect(seen.at(-1)).toEqual({ bucketKey: 'docs', outputs: { enabled: true }, retentionDays: 7 });
+  });
+
+  it('does not offer a retention to an agent that stores no files at all', () => {
+    const { limit } = mount(undefined);
+    expect(limit('Keep files for (days)')).toBeUndefined();
+  });
+
   it('switches off by storing `outputs.enabled: false`, and back on by storing `true`', () => {
     const { outputsSwitch, limit, seen } = mount({ enabled: true, bucketKey: 'docs', outputs: { maxFilesPerTurn: 5 } });
     act(() => outputsSwitch().click());

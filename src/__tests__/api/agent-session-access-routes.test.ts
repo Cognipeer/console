@@ -465,6 +465,22 @@ describe('the client API sessions', () => {
     // and asking for one session's runs is viewing that session
     expect((await dash('other', 'GET', `/agents/${agentId}/runs?conversationId=${idOf('starters')}`)).statusCode).toBe(403);
   });
+
+  it('the Studio runs list can be asked for the scheduled runs', async () => {
+    await db.createAgentRun({
+      tenantId, tenantDbName: dbName, projectId: p1, agentKey: 'support', conversationId: idOf('starters'), mode: 'background', userMessage: 'later',
+      status: 'scheduled', notBefore: new Date(Date.now() + 3_600_000), userId: String(users.starter._id),
+    } as never);
+    await db.createAgentRun({
+      tenantId, tenantDbName: dbName, projectId: p1, agentKey: 'support', conversationId: idOf('starters'), mode: 'background', userMessage: 'done',
+      status: 'succeeded', userId: String(users.starter._id),
+    } as never);
+    const scheduled = json(await dash('padmin', 'GET', `/agents/${agentId}/runs?status=scheduled`)).runs as Array<{ status: string }>;
+    expect(scheduled.length).toBeGreaterThan(0);
+    expect(scheduled.every((run) => run.status === 'scheduled')).toBe(true);
+    const all = json(await dash('padmin', 'GET', `/agents/${agentId}/runs`)).runs as Array<{ status: string }>;
+    expect(all.length).toBeGreaterThan(scheduled.length);
+  });
 });
 
 describe('continuing a session by its id, whichever service gate let the token in', () => {

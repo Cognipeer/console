@@ -45,7 +45,8 @@ const ERROR_LABELS: Record<string, string> = {
 };
 
 type Filter = 'all' | 'active' | 'failed';
-const ACTIVE = new Set(['queued', 'running']);
+// A scheduled run is not running yet but can still change (it is promoted when due) and can be canceled.
+export const ACTIVE_RUN_STATUSES = new Set(['scheduled', 'queued', 'running']);
 const POLL_MS = 5_000;
 
 export interface AgentRunsTableProps {
@@ -85,7 +86,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
 
     useEffect(() => { void load(); }, [load]);
 
-    const activeCount = useMemo(() => (runs ?? []).filter((run) => ACTIVE.has(run.status)).length, [runs]);
+    const activeCount = useMemo(() => (runs ?? []).filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length, [runs]);
     useEffect(() => { onActiveCountChange?.(activeCount); }, [activeCount, onActiveCountChange]);
 
     // Poll only while something can still change.
@@ -101,7 +102,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
             const res = await fetch(`/api/agents/${agentId}/runs/${run.id}/cancel`, { method: 'POST' });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
-            notifications.show({ color: 'teal', message: run.status === 'queued' ? 'Run canceled' : 'Cancel requested — the run stops at its next step' });
+            notifications.show({ color: 'teal', message: run.status === 'queued' || run.status === 'scheduled' ? 'Run canceled' : 'Cancel requested — the run stops at its next step' });
             await load();
         } catch (error) {
             notifications.show({ color: 'red', message: `Could not cancel: ${error instanceof Error ? error.message : String(error)}` });
@@ -111,7 +112,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
     };
 
     const rows = useMemo(() => (runs ?? []).filter((run) => {
-        if (filter === 'active') return ACTIVE.has(run.status);
+        if (filter === 'active') return ACTIVE_RUN_STATUSES.has(run.status);
         if (filter === 'failed') return run.status === 'failed';
         return true;
     }), [runs, filter]);
@@ -200,7 +201,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">
                                             <StatusBadge status={run.status} />
-                                            {run.cancel_requested_at && ACTIVE.has(run.status)
+                                            {run.cancel_requested_at && ACTIVE_RUN_STATUSES.has(run.status)
                                                 ? <Badge size="xs" color="orange" variant="light">canceling</Badge>
                                                 : null}
                                         </Group>
@@ -213,7 +214,9 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                     </Table.Td>
                                     <Table.Td>
                                         <Text size="xs" c="dimmed">
-                                            {run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
+                                            {run.status === 'scheduled' && run.scheduled_for
+                                                ? `Starts ${new Date(run.scheduled_for * 1000).toLocaleString()}`
+                                                : run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
                                         </Text>
                                     </Table.Td>
                                     <Table.Td ta="right">
@@ -243,7 +246,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                         ) : <Text size="xs" c="dimmed">—</Text>}
                                     </Table.Td>
                                     <Table.Td>
-                                        {ACTIVE.has(run.status) && !run.cancel_requested_at ? (
+                                        {ACTIVE_RUN_STATUSES.has(run.status) && !run.cancel_requested_at ? (
                                             <Tooltip label="Cancel run" withArrow>
                                                 <ActionIcon
                                                     size="sm"

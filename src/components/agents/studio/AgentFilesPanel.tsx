@@ -321,6 +321,17 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                             <Text size="xs" c="dimmed" ff="monospace">
                                 {t('folderPreview', { path: folderPreview(current.folder, agentKey) })}
                             </Text>
+                            {/* Retention applies to every stored file, an agent's own outputs included: it is not an uploads-only limit. */}
+                            <NumberInput
+                                label={t('cfgRetention')}
+                                description={t('cfgRetentionDescription')}
+                                placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
+                                min={1}
+                                allowDecimal={false}
+                                value={current.retentionDays ?? ''}
+                                onChange={(v) => set({ retentionDays: typeof v === 'number' ? v : undefined })}
+                                maw={480}
+                            />
                         </Stack>
                     </ConfigBlock>
 
@@ -328,7 +339,7 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                         <>
                             <ConfigBlock title={t('limitsTitle')}>
                                 <Stack gap="sm">
-                                    <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                                    <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
                                         <NumberInput
                                             label={t('cfgMaxFiles')}
                                             placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
@@ -345,16 +356,7 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                                             value={current.maxFileSizeMb ?? ''}
                                             onChange={(v) => set({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
                                         />
-                                        <NumberInput
-                                            label={t('cfgRetention')}
-                                            placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
-                                            min={1}
-                                            allowDecimal={false}
-                                            value={current.retentionDays ?? ''}
-                                            onChange={(v) => set({ retentionDays: typeof v === 'number' ? v : undefined })}
-                                        />
                                     </SimpleGrid>
-                                    <Text size="xs" c="dimmed">{t('cfgRetentionDescription')}</Text>
                                     <TagsInput
                                         label={t('cfgMimeTypes')}
                                         description={t('cfgMimeTypesDescription')}

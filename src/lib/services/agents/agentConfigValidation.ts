@@ -184,7 +184,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     }
 
     // Declared inputs: names, types, enums, defaults.
-    for (const issue of validateInputDeclaration(config.inputs)) issues.errors.push(issue);
+    for (const issue of validateInputDeclaration(config.inputs)) issues.errors.push({ field: issue.field, message: issue.message });
 
     const budget = config.budget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
     if (budget !== undefined && budget !== null) {
@@ -219,7 +219,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             && (callback.secret.length < 16 || callback.secret.length > 256)) {
             issues.errors.push({ field: 'callback.secret', message: 'must be 16–256 characters' });
         }
-        if (callback.secret && !callback.url) {
+        if (callback.secret && callback.secret !== AGENT_SANDBOX_SECRET_MASK && !callback.url) {
             issues.errors.push({ field: 'callback.secret', message: 'needs a callback URL' });
         }
     }

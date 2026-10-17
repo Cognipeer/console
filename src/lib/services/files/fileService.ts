@@ -389,7 +389,8 @@ function decodeData(payload: Buffer | string): Buffer {
 function deriveMarkdownKey(originalKey: string): string {
     if (originalKey.includes('.')) {
         const ext = path.extname(originalKey);
-        if (ext) {
+        // A markdown original must keep its own object: its text version lives beside it, never over it.
+        if (ext && ext.toLowerCase() !== '.md') {
             return `${originalKey.slice(0, originalKey.length - ext.length)}.md`;
         }
     }
@@ -899,7 +900,7 @@ export async function replaceFileContent(
     projectId: string,
     bucketKey: string,
     key: string,
-    input: { data: Buffer; updatedBy: string },
+    input: { data: Buffer; updatedBy: string; /** false = keep the bytes as the only version (no text copy). Default true. */ convertToMarkdown?: boolean },
 ): Promise<FileRecordView> {
     const { bucket, runtime, record } = await requireFileRecord(tenantDbName, tenantId, projectId, bucketKey, key);
     const request: UploadFileRequest = {
@@ -923,7 +924,9 @@ export async function replaceFileContent(
     );
 
     const db = await withTenantDb(tenantDbName);
-    const conversion = await applyMarkdownConversion(runtime, bucket, record, request, input.data);
+    const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
+        ? { markdownStatus: 'skipped' }
+        : await applyMarkdownConversion(runtime, bucket, record, request, input.data);
     const updated = await db.updateFileRecord(record.id, {
         size: upload.handle.size ?? input.data.length,
         checksum: upload.handle.checksum,

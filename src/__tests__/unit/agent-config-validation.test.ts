@@ -308,6 +308,10 @@ describe('validateAgentConfigShape — callback', () => {
         expect(shape({ url: 'https://h.example.com', secret: '••••••' }).errors).toEqual([]);
     });
 
+    it('a read-back mask without a URL is accepted (it means: drop the callback secret)', () => {
+        expect(shape({ secret: '••••••' }).errors).toEqual([]);
+    });
+
     it('ignores the removed execution settings a stored config may still carry', () => {
         const legacy = { modelKey: 'gpt-main', execution: { syncTimeoutSeconds: 1, defaultMode: 'later' } } as unknown as IAgentConfig;
         expect(validateAgentConfigShape(legacy).errors).toEqual([]);

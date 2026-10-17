@@ -466,7 +466,8 @@ export async function saveAgentOutputFile(input: {
         contentType: input.contentType,
         data: input.data,
         createdBy: input.actorId,
-        convertToMarkdown: !isImageMime(input.contentType),
+        // What the agent wrote is stored byte for byte, with no text copy: its own text is already text.
+        convertToMarkdown: false,
         keyHint: sessionFileObjectKey({
             folder: cfg.folder,
             agentKey: input.conversation.agentKey,
@@ -527,6 +528,7 @@ export async function appendAgentOutputFile(input: {
     const updated = await replaceFileContent(input.scope.tenantDbName, input.scope.tenantId, input.scope.projectId, record.bucketKey, record.key, {
         data: Buffer.concat([current.data, input.data]),
         updatedBy: input.actorId,
+        convertToMarkdown: false,
     });
     return { ...toMessageAttachment(updated), origin: 'agent_output' };
 }
@@ -840,7 +842,8 @@ async function readFileText(scope: SessionFileScope, record: IFileRecord): Promi
         const markdown = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, { variant: 'markdown' });
         return markdown.data.toString('utf8');
     }
-    if (isPlainTextMime(record.contentType)) {
+    // A file the agent wrote is text of a type it may write (yaml included) and has no converted copy: read the bytes.
+    if (isPlainTextMime(record.contentType) || record.origin === 'agent_output') {
         const original = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key);
         return original.data.toString('utf8');
     }

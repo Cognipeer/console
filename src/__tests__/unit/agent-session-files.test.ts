@@ -265,6 +265,17 @@ describe('inline or paged', () => {
     expect(pdf.attachments).toEqual([{ fileId: 'scan', name: 'scan.txt', mimeType: 'application/pdf', size: 10 }]);
   });
 
+  it('reads the bytes of a file the agent wrote, whatever its type (a yaml file has no text copy)', async () => {
+    hoisted.downloads.set('made', 'name: report\n');
+    const made = await assembleTurnAttachments({
+      scope,
+      records: [fileRecord('made', { origin: 'agent_output', contentType: 'application/yaml', markdownStatus: 'skipped', markdownKey: undefined })],
+      cfg: cfg(1000),
+      supportsVision: false,
+    });
+    expect(made.block).toContain('name: report');
+  });
+
   it('a file that cannot be downloaded is a warning, never a failure', async () => {
     const result = await assembleTurnAttachments({ scope, records: [fileRecord('gone')], cfg: cfg(1000), supportsVision: false });
     expect(result.warnings).toEqual(['File "gone.txt" could not be read.']);
@@ -810,6 +821,11 @@ describe('files the agent writes itself', () => {
     }));
   });
 
+  it('is stored byte for byte: no text copy is made of what the agent wrote (a markdown file included)', async () => {
+    await save({ contentType: 'text/markdown' }, Buffer.from('# r\n\nline 1\n'));
+    expect(hoisted.uploadFile).toHaveBeenCalledWith('tenant_x', 't1', 'p1', expect.objectContaining({ convertToMarkdown: false }));
+  });
+
   it('goes through the same quota checks an upload does, before anything is stored', async () => {
     await save({ tokenId: 'tok-1' });
     expect(hoisted.perRequest).toHaveBeenCalledWith(expect.objectContaining({ domain: 'file', resourceKey: 'docs', userId: 'u1', tokenId: 'tok-1' }), { fileSize: 5, filesPerRequest: 1 });
@@ -886,6 +902,8 @@ describe('files the agent writes itself', () => {
       const [, , , bucket, key, input] = hoisted.replaceFileContent.mock.calls[0]!;
       expect([bucket, key, input.data.toString()]).toEqual(['docs', 'obj/made.md', 'hello more']);
       expect(result).toMatchObject({ fileId: 'made', size: 10, origin: 'agent_output' });
+      // Rewritten as bytes: no converted copy of the grown file replaces what the agent wrote.
+      expect(input).toMatchObject({ convertToMarkdown: false });
     });
 
     it('is only for a file of this session that this agent wrote: an upload, another agent’s file or a missing one is refused', async () => {

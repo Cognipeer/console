@@ -1253,8 +1253,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { agent, projectId, session } = scoped;
       const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; routineId?: string; trigger?: string };
       const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
-      const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
-      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
+      const allowed = new Set(['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
       // this agent sees only the runs they queued, and a run of one session is the session's to read.
       const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });

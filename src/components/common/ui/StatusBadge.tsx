@@ -25,6 +25,8 @@ const STATUS_MAP: Record<string, { cls: string; label: string }> = {
   // Job/run lifecycle statuses (crawler, batch, evaluation, etc.)
   queued: { cls: 'ds-badge-info', label: 'Queued' },
   running: { cls: 'ds-badge-teal', label: 'Running' },
+  scheduled: { cls: 'ds-badge-info', label: 'Scheduled' },
+  requires_action: { cls: 'ds-badge-warn', label: 'Needs action' },
   // Tracing sessions: a run in flight, and one that went quiet without ever reporting an end.
   in_progress: { cls: 'ds-badge-teal', label: 'In progress' },
   abandoned: { cls: 'ds-badge-warn', label: 'Abandoned' },
