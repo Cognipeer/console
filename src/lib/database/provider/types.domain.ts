@@ -2994,38 +2994,50 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
+/** What starts a routine's runs. A webhook trigger is reserved for incoming webhooks (built separately). */
+export type AgentRoutineTrigger =
+  /** A 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
+  | { type: 'schedule'; cron: string; timezone: string }
+  /** One run at a fixed time. */
+  | { type: 'once'; runAt: Date }
+  /** Only started on request (Run now, `POST …/routines/{id}/run`). */
+  | { type: 'manual' };
+
 /**
- * A recurring run of an agent.
- *
- * Schedules live in `agent.metadata.schedules` rather than their own
- * collection: they are small, always read alongside the agent, and never
- * queried independently. A run's record is the conversation it creates —
- * stamped with the schedule id in its metadata — so history came for free
- * rather than needing a second write path.
- *
- * It extends `ICrawlerSchedule` so both features share `schedulePlanner`;
- * cron semantics that diverge between two schedulers in the same product is
- * a support ticket waiting to happen.
+ * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
+ * trigger. Every fire is an ordinary AgentRun (`channel: 'routine'`,
+ * `routineId`), so its history is the runs list filtered by routine.
  */
-export interface IAgentSchedule extends ICrawlerSchedule {
-  /** Stable id, generated on create. Stamped onto every run's conversation. */
-  id: string;
+export interface IAgentRoutine {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
   name: string;
-  /** The message sent to the agent on each fire. Supports prompt variables. */
-  message: string;
-  /**
-   * Per-run values merged into the prompt-variable context, exactly as a live
-   * caller's `runtimeContext.metadata` would be. A nightly digest and an hourly
-   * triage can therefore share one prompt and differ only here.
-   */
-  variables?: Record<string, string>;
-  /** Outcome of the most recent fire, for the schedule list. */
-  lastStatus?: 'ok' | 'error';
-  lastError?: string;
-  /** Conversation created by the most recent fire. */
-  lastConversationId?: string;
-  createdBy?: string;
+  description?: string | null;
+  enabled: boolean;
+  trigger: AgentRoutineTrigger;
+  /** The message each fire sends (≤ 32k chars). */
+  prompt: string;
+  inputs?: Record<string, unknown> | null;
+  /** A pinned published version; null/absent = the published one. */
+  version?: number | null;
+  runClass: AgentRunClass;
+  /** Copied onto each run. */
+  metadata?: Record<string, string> | null;
+  /** Where each run's result is POSTed; the secret is sealed and never serialized. */
+  callback?: { url: string; secretSealed?: string | null } | null;
+  responseFormat?: AgentResponseFormat | null;
+  /** The next due slot; null for manual triggers, a finished once, or a disabled routine. */
+  nextFireAt?: Date | null;
+  lastFireAt?: Date | null;
+  lastRunId?: string | null;
+  lastStatus?: 'started' | 'failed' | null;
+  lastError?: string | null;
+  createdBy: string;
+  updatedBy?: string | null;
   createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface IAgent {
@@ -4642,6 +4654,17 @@ export interface IAgentRun extends IUsageAttributionFields {
   channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'routine' | null;
   routineId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | null;
+  /**
+   * No interactive user on the run (a routine fire): a gated tool follows the
+   * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
+   */
+  unattended?: boolean;
+  /**
+   * The message / inputs came from an external payload: inputs never fill the
+   * system prompt's `{{input.*}}` and the Inputs block is closed (agentInputs.ts).
+   * Every continuation keeps it.
+   */
+  externalContent?: boolean;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
   /** Validated agent inputs (`IAgentConfig.inputs`). */

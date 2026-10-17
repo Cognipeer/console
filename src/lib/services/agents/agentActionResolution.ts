@@ -663,6 +663,11 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             // so the reviewer can retry instead of getting 409 not_pending.
             let invoking = false;
             let resumed: AgentResumeResult;
+            // A person answered, so the continuation runs attended — but inputs that came
+            // from an external payload stay out of the system prompt (§2.4a).
+            const [pausedRun] = await db.listAgentRuns({
+                tenantId, projectId, conversationId, status: ['requires_action'], mode: ['background', 'inline'], limit: 1,
+            }).catch(() => [] as IAgentRun[]);
             // A Stop on the conversation ends the continuation like any other turn.
             const watch = reservation
                 ? watchTurnCancellation({
@@ -684,6 +689,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.embedded ? { embedded: input.embedded } : {}),
                     ...(input.unattended ? { unattended: true } : {}),
                     ...(input.answersClientTools ? { answersClientTools: true } : {}),
+                    ...(pausedRun?.externalContent ? { inputsAsPromptVariables: false } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),

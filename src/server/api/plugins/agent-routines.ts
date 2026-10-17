@@ -1,0 +1,489 @@
+/**
+ * The routines API (§5.7): a routine is a saved way of starting an agent — a
+ * prompt (+ inputs) and a trigger (a cron schedule in a timezone, one time, or
+ * by hand). Every fire is an ordinary run (`channel: 'routine'`), so a routine's
+ * history is `GET /client/v1/agents/runs?routine_id=`.
+ *
+ * Two mounts of the same handlers: the client API (`/client/v1/agents/:agentKey/routines…`,
+ * API token) and the dashboard (`/agents/:agentId/routines…`, session). Both are
+ * the `agents` service (GET read, everything else write) through the route
+ * prefix map, and both answer in the client envelope `{ error: { type, message, code } }`.
+ *
+ * The callback secret is write-only: sealed on save, shown as `{ url, signed }`.
+ */
+
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { createLogger } from '@/lib/core/logger';
+import type { AgentRoutineTrigger, AgentRunClass, IAgent, IAgentRoutine } from '@/lib/database';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { getAgentByKey } from '@/lib/services/agents';
+import { AGENT_CALLBACK_SECRET_MASK, sealAgentCallbackConfig } from '@/lib/services/agents/agentCallbackConfig';
+import { resolveRunInputs, type InputIssue } from '@/lib/services/agents/agentInputs';
+import {
+  apiErrorBody,
+  idempotencyKeyConflictErrorBody,
+  invalidRequestErrorBody,
+  isAgentRunActive,
+  resolveAgentRunLimits,
+  serializeAgentRun,
+  validateCallbackRequest,
+  waitForAgentRun,
+} from '@/lib/services/agents/agentRunService';
+import {
+  createAgentRoutine,
+  deleteAgentRoutine,
+  fireRoutine,
+  getAgentRoutine,
+  listAgentRoutines,
+  resolveRoutineInputs,
+  routineAgentConfig,
+  serializeAgentRoutine,
+  updateAgentRoutine,
+  type RoutineScope,
+  type RoutineTenant,
+  type RoutineWrite,
+} from '@/lib/services/agents/agentRoutines';
+import { resolveAgentConfig } from '@/lib/services/agents/agentService';
+import { DEFAULT_ROUTINE_TIMEZONE, isValidRoutineTimezone, validateRoutineCron } from '@/lib/services/agents/routineSchedule';
+import { getHeaderValue, readJsonBody, withApiRequestContext, withClientApiRequestContext } from '../fastify-utils';
+import {
+  parseResponseFormat,
+  parseRunInputs,
+  parseRunMetadata,
+  readIdempotencyKey,
+  resolvePublishedAgentConfig,
+  sendRunAccepted,
+} from './agent-invocation';
+import { requireScopedAgent } from './agents';
+import { parsePreferHeader, parseTimestamp, parseWaitSeconds } from './client-agent-runs';
+
+const logger = createLogger('api:agent-routines');
+
+const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
+
+export const ROUTINE_NAME_MAX_LENGTH = 200;
+export const ROUTINE_DESCRIPTION_MAX_LENGTH = 2000;
+export const ROUTINE_PROMPT_MAX_LENGTH = 32_000;
+/** A `run_at` this far in the past still counts as "now" (the caller's clock, the request's time in flight). */
+const RUN_AT_PAST_TOLERANCE_MS = 60_000;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Who is asking, about which agent: the same for both mounts. */
+interface RoutineCaller {
+  scope: RoutineScope;
+  tenant: RoutineTenant;
+  agent: IAgent;
+  userId: string;
+  /** The client API takes an `Idempotency-Key` on Run now; the dashboard does not. */
+  dialect: 'client' | 'dashboard';
+  /** The longest Run now may wait (`wait` / `Prefer: wait=N`). */
+  syncWaitMs: () => Promise<number>;
+}
+
+// ── Request parsing ──────────────────────────────────────────────────────
+
+/**
+ * A routine trigger from a request. `once` takes `run_at` (ISO-8601 or unix
+ * seconds, not in the past) or `delay_seconds`. Another trigger type is added
+ * here and in `serializeAgentRoutine`.
+ */
+export function parseRoutineTrigger(value: unknown, now: Date): { ok: true; trigger: AgentRoutineTrigger } | { ok: false; issue: InputIssue } {
+  const issue = (field: string, message: string) => ({ ok: false as const, issue: { field, message } });
+  if (!isPlainObject(value)) return issue('trigger', 'trigger must be an object with a type');
+  switch (value.type) {
+    case 'schedule': {
+      const cronError = validateRoutineCron(value.cron);
+      if (cronError) return issue('trigger.cron', cronError);
+      const timezone = value.timezone === undefined || value.timezone === null || value.timezone === '' ? DEFAULT_ROUTINE_TIMEZONE : value.timezone;
+      if (!isValidRoutineTimezone(timezone)) return issue('trigger.timezone', 'timezone must be an IANA timezone name, like "Europe/Istanbul"');
+      return { ok: true, trigger: { type: 'schedule', cron: String(value.cron).trim().split(/\s+/).join(' '), timezone } };
+    }
+    case 'once': {
+      const hasRunAt = value.run_at !== undefined && value.run_at !== null;
+      const hasDelay = value.delay_seconds !== undefined && value.delay_seconds !== null;
+      if (hasRunAt === hasDelay) return issue('trigger.run_at', 'a once trigger needs run_at or delay_seconds (one of them)');
+      if (hasDelay) {
+        const delay = value.delay_seconds;
+        if (typeof delay !== 'number' || !Number.isInteger(delay) || delay < 0) {
+          return issue('trigger.delay_seconds', 'delay_seconds must be a whole number of seconds (0 or more)');
+        }
+        return { ok: true, trigger: { type: 'once', runAt: new Date(now.getTime() + delay * 1000) } };
+      }
+      const runAt = parseTimestamp(value.run_at);
+      if (!runAt) return issue('trigger.run_at', 'run_at must be an ISO-8601 date or unix seconds');
+      if (runAt.getTime() < now.getTime() - RUN_AT_PAST_TOLERANCE_MS) return issue('trigger.run_at', 'run_at is in the past');
+      return { ok: true, trigger: { type: 'once', runAt } };
+    }
+    case 'manual':
+      return { ok: true, trigger: { type: 'manual' } };
+    default:
+      return issue('trigger.type', 'trigger.type must be "schedule", "once" or "manual"');
+  }
+}
+
+/**
+ * Is `value` (a request's trigger) the stored trigger sent back unchanged — an
+ * editor saving the whole form? Then nothing about the timing changes, even for
+ * a once time that has passed since.
+ */
+function isStoredTrigger(value: unknown, stored: AgentRoutineTrigger): boolean {
+  if (!isPlainObject(value) || value.type !== stored.type) return false;
+  switch (stored.type) {
+    case 'schedule':
+      return typeof value.cron === 'string' && value.cron.trim().split(/\s+/).join(' ') === stored.cron
+        && (value.timezone ?? DEFAULT_ROUTINE_TIMEZONE) === stored.timezone;
+    case 'once': {
+      if (value.delay_seconds !== undefined && value.delay_seconds !== null) return false;
+      const runAt = parseTimestamp(value.run_at);
+      return Boolean(runAt) && runAt!.getTime() === new Date(stored.runAt).getTime();
+    }
+    default:
+      return Object.keys(value).length === 1;
+  }
+}
+
+/**
+ * A create (`existing` absent) or PATCH body → the fields to save. Absent =
+ * unchanged; `null` clears a nullable field. The prompt / inputs / version are
+ * checked together against the inputs the agent (that version of it) declares:
+ * the prompt may be empty only when the agent declares inputs and the routine
+ * gives some.
+ */
+export async function prepareRoutineWrite(input: {
+  body: Record<string, unknown>;
+  agent: IAgent;
+  scope: RoutineScope;
+  existing?: IAgentRoutine | null;
+  now?: Date;
+}): Promise<{ ok: true; write: RoutineWrite } | { ok: false; errors: InputIssue[] }> {
+  const { body, agent, scope, existing } = input;
+  const now = input.now ?? new Date();
+  const errors: InputIssue[] = [];
+  const write: RoutineWrite = {};
+  const given = (key: string) => body[key] !== undefined;
+
+  if (given('name') || !existing) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) errors.push({ field: 'name', message: 'name is required' });
+    else if (name.length > ROUTINE_NAME_MAX_LENGTH) errors.push({ field: 'name', message: `name can be at most ${ROUTINE_NAME_MAX_LENGTH} characters` });
+    else write.name = name;
+  }
+  if (given('description')) {
+    if (body.description === null || body.description === '') write.description = null;
+    else if (typeof body.description !== 'string' || body.description.length > ROUTINE_DESCRIPTION_MAX_LENGTH) {
+      errors.push({ field: 'description', message: `description must be a string of at most ${ROUTINE_DESCRIPTION_MAX_LENGTH} characters` });
+    } else write.description = body.description;
+  }
+  if (given('enabled')) {
+    if (typeof body.enabled !== 'boolean') errors.push({ field: 'enabled', message: 'enabled must be a boolean' });
+    else write.enabled = body.enabled;
+  }
+  if (!existing || (given('trigger') && !isStoredTrigger(body.trigger, existing.trigger))) {
+    // A new routine without a trigger is manual (Run now / the API).
+    const parsed = parseRoutineTrigger(existing ? body.trigger : body.trigger ?? { type: 'manual' }, now);
+    if (!parsed.ok) errors.push(parsed.issue);
+    else write.trigger = parsed.trigger;
+  }
+  if (given('prompt')) {
+    if (body.prompt !== null && typeof body.prompt !== 'string') errors.push({ field: 'prompt', message: 'prompt must be a string' });
+    else if (typeof body.prompt === 'string' && body.prompt.length > ROUTINE_PROMPT_MAX_LENGTH) {
+      errors.push({ field: 'prompt', message: `prompt can be at most ${ROUTINE_PROMPT_MAX_LENGTH} characters` });
+    } else write.prompt = typeof body.prompt === 'string' ? body.prompt : '';
+  }
+  if (given('version')) {
+    const value = body.version;
+    if (value === null) write.version = null;
+    else if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+      errors.push({ field: 'version', message: 'version must be a positive integer, or null for the published version' });
+    } else {
+      try {
+        await resolveAgentConfig(scope.tenantDbName, agent.key, scope.projectId, value);
+        write.version = value;
+      } catch {
+        errors.push({ field: 'version', message: `version ${value} of agent "${agent.key}" does not exist` });
+      }
+    }
+  }
+  if (given('class')) {
+    if (body.class !== 'default' && body.class !== 'deferred') errors.push({ field: 'class', message: 'class must be "default" or "deferred"' });
+    else write.runClass = body.class as AgentRunClass;
+  }
+  if (given('metadata')) {
+    const parsed = parseRunMetadata(body.metadata);
+    if (!parsed.ok) errors.push({ field: 'metadata', message: parsed.message });
+    else write.metadata = parsed.metadata;
+  }
+  if (given('response_format')) {
+    const parsed = parseResponseFormat(body.response_format);
+    if (!parsed.ok) errors.push({ field: 'response_format', message: parsed.message });
+    else write.responseFormat = parsed.format;
+  }
+  let shapedInputs: Record<string, unknown> | null | undefined;
+  if (given('inputs')) {
+    const parsed = parseRunInputs(body.inputs);
+    if (!parsed.ok) errors.push({ field: 'inputs', message: parsed.message });
+    else shapedInputs = write.inputs = parsed.inputs;
+  }
+  if (given('callback')) {
+    const callback = await prepareRoutineCallback(body.callback, existing?.callback ?? null);
+    if (!callback.ok) errors.push({ field: 'callback', message: callback.message });
+    else write.callback = callback.callback;
+  }
+
+  // Prompt + inputs against the declaration of the version that runs — on create, and whenever one of them changes.
+  if (errors.length === 0 && (!existing || given('prompt') || given('inputs') || given('version'))) {
+    const version = write.version !== undefined ? write.version : existing?.version ?? null;
+    const config = await resolvePublishedAgentConfig(scope.tenantDbName, agent, scope.projectId, version ?? undefined);
+    const inputs = shapedInputs !== undefined ? shapedInputs : existing?.inputs ?? null;
+    const resolved = resolveRunInputs(config.inputs, inputs);
+    if (!resolved.ok) errors.push(...resolved.errors.map((issue) => ({ field: `inputs.${issue.field}`, message: issue.message })));
+    const prompt = write.prompt !== undefined ? write.prompt : existing?.prompt ?? '';
+    const declaresInputs = (config.inputs?.length ?? 0) > 0;
+    if (prompt.trim() === '' && !(declaresInputs && inputs && Object.keys(inputs).length > 0)) {
+      errors.push({ field: 'prompt', message: 'prompt is required unless the routine gives the inputs the agent declares' });
+    }
+    if (!existing && write.prompt === undefined) write.prompt = prompt;
+  }
+
+  return errors.length > 0 ? { ok: false, errors } : { ok: true, write };
+}
+
+/**
+ * `callback: { url, secret? } | null`. The secret is write-only: absent (or the
+ * mask) keeps the stored one, `""` removes it, a new value replaces it.
+ */
+async function prepareRoutineCallback(
+  value: unknown,
+  current: IAgentRoutine['callback'],
+): Promise<{ ok: true; callback: IAgentRoutine['callback'] } | { ok: false; message: string }> {
+  if (value === null) return { ok: true, callback: null };
+  if (!isPlainObject(value)) return { ok: false, message: 'callback must be an object { url, secret? } or null' };
+  if (value.url === undefined || value.url === null || value.url === '') return { ok: true, callback: null };
+  const secret = value.secret;
+  if (secret !== undefined && secret !== null && typeof secret !== 'string') return { ok: false, message: 'callback.secret must be a string' };
+  const newSecret = typeof secret === 'string' && secret !== '' && secret !== AGENT_CALLBACK_SECRET_MASK ? secret : undefined;
+  const checked = await validateCallbackRequest(value.url, newSecret);
+  if (!checked.ok) return { ok: false, message: checked.message.replace('callback_url', 'callback.url').replace('callback_secret', 'callback.secret') };
+  const sealed = sealAgentCallbackConfig(
+    { url: checked.url, ...(typeof secret === 'string' ? { secret } : {}) },
+    current?.secretSealed ? { url: current.url, secretSealed: current.secretSealed } : undefined,
+  );
+  return { ok: true, callback: { url: checked.url!, secretSealed: sealed?.secretSealed ?? null } };
+}
+
+function invalidRoutineBody(errors: InputIssue[]) {
+  const summary = errors.slice(0, 5).map((issue) => `${issue.field}: ${issue.message}`).join('; ');
+  return apiErrorBody('invalid_request_error', `Invalid routine - ${summary}`, 'invalid_routine', { errors });
+}
+
+const routineNotFoundBody = () => apiErrorBody('not_found_error', 'Routine not found', 'routine_not_found');
+
+/** A body that may be empty (Run now), else the parsed JSON object. Null when it is not an object. */
+function readOptionalBody(request: FastifyRequest): Record<string, unknown> | null {
+  if (request.body === undefined || request.body === null || request.body === '') return {};
+  const body = readJsonBody<unknown>(request);
+  return isPlainObject(body) ? body : null;
+}
+
+// ── Handlers (shared by both mounts) ─────────────────────────────────────
+
+async function loadRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller): Promise<IAgentRoutine | null> {
+  const { routineId } = request.params as { routineId: string };
+  const routine = await getAgentRoutine(caller.scope, caller.agent.key, routineId);
+  if (!routine) void reply.code(404).send(routineNotFoundBody());
+  return routine;
+}
+
+async function listRoutines(reply: FastifyReply, caller: RoutineCaller) {
+  const routines = await listAgentRoutines(caller.scope, caller.agent.key);
+  return reply.code(200).send({ object: 'list', data: routines.map(serializeAgentRoutine), has_more: false });
+}
+
+async function createRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+  const body = readOptionalBody(request);
+  if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
+  const prepared = await prepareRoutineWrite({ body, agent: caller.agent, scope: caller.scope });
+  if (!prepared.ok) return reply.code(400).send(invalidRoutineBody(prepared.errors));
+  const { write } = prepared;
+  const routine = await createAgentRoutine(
+    caller.scope,
+    caller.agent.key,
+    { ...write, name: write.name!, trigger: write.trigger!, prompt: write.prompt ?? '' },
+    caller.userId,
+  );
+  return reply.code(201).send(serializeAgentRoutine(routine));
+}
+
+async function getRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+  const routine = await loadRoutine(request, reply, caller);
+  if (!routine) return reply;
+  return reply.code(200).send(serializeAgentRoutine(routine));
+}
+
+async function patchRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+  const existing = await loadRoutine(request, reply, caller);
+  if (!existing) return reply;
+  const body = readOptionalBody(request);
+  if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
+  const prepared = await prepareRoutineWrite({ body, agent: caller.agent, scope: caller.scope, existing });
+  if (!prepared.ok) return reply.code(400).send(invalidRoutineBody(prepared.errors));
+  const updated = await updateAgentRoutine(caller.scope, existing, prepared.write, caller.userId);
+  if (!updated) return reply.code(404).send(routineNotFoundBody());
+  return reply.code(200).send(serializeAgentRoutine(updated));
+}
+
+async function removeRoutine(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+  const routine = await loadRoutine(request, reply, caller);
+  if (!routine) return reply;
+  await deleteAgentRoutine(caller.scope, routine);
+  return reply.code(200).send({ id: String(routine._id), object: 'agent.routine.deleted', deleted: true });
+}
+
+/**
+ * Run now: one fire (trigger `manual`) with the routine's prompt; the body may
+ * override `inputs` (merged over the routine's) and `metadata`. Answers like the
+ * runs API create: 200 with a run that finished within `wait`, else 202.
+ */
+async function runRoutineNow(request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) {
+  const routine = await loadRoutine(request, reply, caller);
+  if (!routine) return reply;
+  const body = readOptionalBody(request);
+  if (!body) return reply.code(400).send(invalidRequestErrorBody('The body must be a JSON object', 'invalid_request'));
+  const bad = (message: string, code: string) => reply.code(400).send(invalidRequestErrorBody(message, code));
+
+  const overrides = parseRunInputs(body.inputs);
+  if (!overrides.ok) return bad(overrides.message, 'invalid_inputs');
+  const metadata = parseRunMetadata(body.metadata);
+  if (!metadata.ok) return bad(metadata.message, 'invalid_metadata');
+  const prefer = parsePreferHeader(getHeaderValue(request, 'prefer'));
+  const bodyWait = parseWaitSeconds(body.wait);
+  if (bodyWait === null) return bad('wait must be a number of seconds (0 or more)', 'invalid_wait');
+  const waitSeconds = bodyWait ?? (prefer.respondAsync ? 0 : prefer.wait ?? 0);
+  let idempotencyKey: string | undefined;
+  if (caller.dialect === 'client') {
+    const idempotency = readIdempotencyKey(request, reply, 'client');
+    if (!idempotency) return reply;
+    idempotencyKey = idempotency.key;
+  }
+
+  const config = await routineAgentConfig(caller.tenant.tenantDbName, routine);
+  const inputs = resolveRoutineInputs(config, routine, overrides.inputs);
+  if (!inputs.ok) {
+    return reply.code(400).send(apiErrorBody('invalid_request_error', `Invalid inputs - ${inputs.reason.replace(/^invalid inputs: /, '')}`, 'invalid_inputs', { errors: inputs.errors }));
+  }
+
+  const fired = await fireRoutine(routine, caller.tenant, {
+    trigger: 'manual',
+    message: routine.prompt,
+    inputs: inputs.inputs,
+    metadata: metadata.metadata,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  });
+  switch (fired.kind) {
+    case 'accepted':
+    case 'duplicate': {
+      if (!fired.run) return reply.code(409).send(idempotencyKeyConflictErrorBody());
+      const waitMs = Math.min(waitSeconds * 1000, await caller.syncWaitMs());
+      if (bodyWait === undefined && (prefer.respondAsync || prefer.wait !== undefined)) {
+        void reply.header('Preference-Applied', prefer.respondAsync ? 'respond-async' : `wait=${Math.round(waitMs / 1000)}`);
+      }
+      const run = waitMs > 0 && isAgentRunActive(fired.run)
+        ? (await waitForAgentRun({ ...caller.scope, runId: String(fired.run._id) }, waitMs)) ?? fired.run
+        : fired.run;
+      return isAgentRunActive(run) ? sendRunAccepted(reply, run) : reply.code(200).send(serializeAgentRun(run));
+    }
+    case 'concurrency_limit':
+    case 'spend_limit':
+    case 'quota_exceeded': {
+      const codes = { concurrency_limit: 'agent_run_concurrency_limit', spend_limit: 'spend_limit_exceeded', quota_exceeded: 'agent_quota_exceeded' } as const;
+      return reply
+        .code(429)
+        .header('Retry-After', String(fired.retryAfterSeconds))
+        .send(apiErrorBody('rate_limit_error', `The routine did not start a run: ${fired.reason}`, codes[fired.kind]));
+    }
+    default:
+      if (fired.reason === 'idempotency key in use') return reply.code(409).send(idempotencyKeyConflictErrorBody());
+      if (fired.reason === 'agent is not active') return bad('Agent is not active', 'agent_inactive');
+      if (fired.reason.startsWith('metadata')) return bad(fired.reason, 'invalid_metadata');
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+  }
+}
+
+type RoutineHandler = (request: FastifyRequest, reply: FastifyReply, caller: RoutineCaller) => Promise<unknown>;
+
+// ── Plugin ───────────────────────────────────────────────────────────────
+
+export const agentRoutinesApiPlugin: FastifyPluginAsync = async (app) => {
+  // Client API: the agent `:agentKey` names in the token's project.
+  const client = (handler: RoutineHandler, logMessage: string) => withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const { agentKey } = request.params as { agentKey: string };
+      const agent = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
+      if (!agent) return reply.code(404).send(apiErrorBody('not_found_error', `Agent "${agentKey}" not found`, 'agent_not_found'));
+      const quotaContext = {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        licenseType: ctx.tenant.licenseType as LicenseType,
+        userId: ctx.tokenRecord.userId,
+        tokenId: ctx.tokenRecord._id?.toString(),
+      };
+      return await handler(request, reply, {
+        scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        tenant: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, licenseType: ctx.tenant.licenseType },
+        agent,
+        userId: String(ctx.tokenRecord.userId ?? ''),
+        dialect: 'client',
+        syncWaitMs: async () => (await resolveAgentRunLimits({ quotaContext })).syncWaitMs,
+      });
+    } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send(invalidRequestErrorBody('The body is not valid JSON', 'invalid_json'));
+      logger.error(logMessage, { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  });
+
+  // Dashboard: the agent `:agentId` names in the session's project.
+  const dashboard = (handler: RoutineHandler, logMessage: string) => withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { session, projectId, agent } = scoped;
+      const quotaContext = {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        licenseType: session.licenseType as LicenseType,
+        userId: session.userId,
+      };
+      return await handler(request, reply, {
+        scope: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        tenant: { tenantDbName: session.tenantDbName, tenantId: session.tenantId, licenseType: session.licenseType },
+        agent,
+        userId: String(session.userId),
+        dialect: 'dashboard',
+        syncWaitMs: async () => (await resolveAgentRunLimits({ quotaContext })).syncWaitMs,
+      });
+    } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send(invalidRequestErrorBody('The body is not valid JSON', 'invalid_json'));
+      logger.error(logMessage, { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  });
+
+  app.get('/client/v1/agents/:agentKey/routines', client((_request, reply, caller) => listRoutines(reply, caller), 'List routines error'));
+  app.post('/client/v1/agents/:agentKey/routines', client(createRoutine, 'Create routine error'));
+  app.get('/client/v1/agents/:agentKey/routines/:routineId', client(getRoutine, 'Get routine error'));
+  app.patch('/client/v1/agents/:agentKey/routines/:routineId', client(patchRoutine, 'Update routine error'));
+  app.delete('/client/v1/agents/:agentKey/routines/:routineId', client(removeRoutine, 'Delete routine error'));
+  app.post('/client/v1/agents/:agentKey/routines/:routineId/run', client(runRoutineNow, 'Run routine error'));
+
+  app.get('/agents/:agentId/routines', dashboard((_request, reply, caller) => listRoutines(reply, caller), 'List routines error'));
+  app.post('/agents/:agentId/routines', dashboard(createRoutine, 'Create routine error'));
+  app.get('/agents/:agentId/routines/:routineId', dashboard(getRoutine, 'Get routine error'));
+  app.patch('/agents/:agentId/routines/:routineId', dashboard(patchRoutine, 'Update routine error'));
+  app.delete('/agents/:agentId/routines/:routineId', dashboard(removeRoutine, 'Delete routine error'));
+  app.post('/agents/:agentId/routines/:routineId/run', dashboard(runRoutineNow, 'Run routine error'));
+};

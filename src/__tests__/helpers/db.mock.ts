@@ -263,6 +263,19 @@ function buildPrimers(): Record<string, Mock> {
     markAgentRunDetached: vi.fn().mockResolvedValue(null),
     expireWaitingAgentRun: vi.fn().mockResolvedValue(null),
     markAgentRunPublished: vi.fn().mockResolvedValue(null),
+
+    // Agent routines: a real provider answers a miss with `null` / `false` / a count.
+    createAgentRoutine: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+      _id: `mock-routine-${Math.random().toString(36).slice(2, 10)}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...record,
+    })),
+    getAgentRoutine: vi.fn().mockResolvedValue(null),
+    updateAgentRoutine: vi.fn().mockResolvedValue(null),
+    deleteAgentRoutinesForAgent: vi.fn().mockResolvedValue(0),
+    advanceRoutineNextFire: vi.fn().mockResolvedValue(false),
+    setRoutineFireResult: vi.fn().mockResolvedValue(false),
   };
 }
 

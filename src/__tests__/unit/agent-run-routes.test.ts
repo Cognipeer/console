@@ -403,6 +403,16 @@ describe('POST /responses — Idempotency-Key on every mode (§4.6)', () => {
     expect(hoisted.createConversation).not.toHaveBeenCalled();
   });
 
+  it('a key with a reserved prefix (routine runs) is refused in the OpenAI envelope, before anything is looked up', async () => {
+    const res = await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'routine:r1:slot' });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { type: string; code: string; param: unknown } }>(res.body).error).toMatchObject({
+      type: 'invalid_request_error', code: 'idempotency_key_reserved', param: null,
+    });
+    expect(hoisted.lookupIdempotentAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
   it('a run still going is waited on like a new call, then 202 when it is still going', async () => {
     const running = run({ _id: 'run-5', status: 'running', result: null });
     hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'replay', run: running });

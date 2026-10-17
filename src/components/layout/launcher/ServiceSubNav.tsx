@@ -645,7 +645,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     },
     {
       // Project / tenant level (not per agent), about what agents do — sessions,
-      // approvals, budgets, runs, schedules. Used to sit under Settings.
+      // approvals, budgets, runs, routines. Used to sit under Settings.
       id: 'webhooks',
       label: 'Webhooks',
       labelKey: 'webhooks',

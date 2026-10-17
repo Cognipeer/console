@@ -69,6 +69,7 @@ export const TABLES = {
   alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
   schedulerClaims: 'scheduler_claims',
+  agentRoutines: 'agent_routines',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',
@@ -1132,6 +1133,8 @@ export class SQLiteProviderBase {
       ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
       ['channel', 'TEXT'], ['routineId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
       ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+      // Routine runs: unattended (no one to ask) and external content (inputs stay out of the system prompt).
+      ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
     ] as const) {
       this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
     }

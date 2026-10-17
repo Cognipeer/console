@@ -99,6 +99,11 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   scheduler_claims: [
     { key: { expiresAt: 1 }, options: { name: 'idx_scheduler_claims_expiresAt' } },
   ],
+  // Agent routines: the APIs list by agent; the scheduler reads due ones tenant-wide.
+  agent_routines: [
+    { key: { tenantId: 1, projectId: 1, agentKey: 1 }, options: { name: 'idx_tenant_project_agent' } },
+    { key: { enabled: 1, nextFireAt: 1 }, options: { name: 'idx_enabled_nextFireAt' } },
+  ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },
   ],

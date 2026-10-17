@@ -25,6 +25,7 @@ import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
+import { agentRoutinesApiPlugin } from './plugins/agent-routines';
 import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
 import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
 import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
@@ -525,6 +526,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(agentRoutinesApiPlugin);
   await app.register(clientWebhooksApiPlugin);
   await app.register(clientAgentSessionsApiPlugin);
   await app.register(agentSessionFilesApiPlugin);

@@ -62,14 +62,6 @@ import {
   type AgentCodegenTarget,
 } from '@/lib/services/agents/agentCodegen';
 import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
-import {
-  computeScheduleNextRun,
-  deleteAgentSchedule,
-  readSchedules,
-  runAgentSchedule,
-  upsertAgentSchedule,
-  type AgentScheduleInput,
-} from '@/lib/services/agents/agentScheduleService';
 import { getDatabase } from '@/lib/database';
 import {
   getAgentRunStatus,
@@ -403,7 +395,7 @@ const SESSION_BUSY_BODY = {
 };
 
 /**
- * Dashboard chat may only extend a console session. API / A2A / scheduled /
+ * Dashboard chat may only extend a console session. API / A2A / routine /
  * eval sessions are real traffic — the UI shows them read-only, and this keeps
  * a hand-crafted request from appending to them. Legacy sessions (no source)
  * stay writable, matching `isContinuableSession` on the client.
@@ -700,7 +692,7 @@ function summariseConversation(
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
-    // Whose it is: the person who started it (a name), or the kind of traffic that did (a schedule, a public A2A call...).
+    // Whose it is: the person who started it (a name), or the kind of traffic that did (a routine, a public A2A call...).
     createdBy: conversation.createdBy,
     ...(owner ? { owner } : {}),
     // The viewer started it (so the table can say "you" without knowing who the viewer is).
@@ -1115,103 +1107,6 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // ── Schedules ──────────────────────────────────────────────────────────
-
-  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent } = scoped;
-
-      const schedules = readSchedules(agent);
-      return reply.code(200).send({
-        schedules,
-        // Recomputed for display rather than trusted from storage: a stored
-        // nextRunAt goes stale the moment the cron is edited elsewhere.
-        nextRuns: Object.fromEntries(
-          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
-        ),
-        publishedVersion: agent.publishedVersion ?? null,
-      });
-    } catch (error) {
-      return sendRouteError(reply, error, 'List agent schedules error', 'Failed to list schedules');
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-
-      const body = await readJsonBody<AgentScheduleInput>(request);
-      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
-
-      const { schedule, schedules } = await upsertAgentSchedule(
-        session.tenantDbName,
-        agent,
-        body,
-        String(user._id),
-      );
-      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
-    } catch (error) {
-      // Validation failures here are the operator's cron, not a server fault.
-      const message = error instanceof Error ? error.message : String(error);
-      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
-        return reply.code(400).send({ error: message });
-      }
-      return sendRouteError(reply, error, 'Save agent schedule error', 'Failed to save schedule');
-    }
-  }));
-
-  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-      const { scheduleId } = request.params as { scheduleId: string };
-
-      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
-      return reply.code(200).send({ schedules });
-    } catch (error) {
-      return sendRouteError(reply, error, 'Delete agent schedule error', 'Failed to delete schedule');
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-      const { scheduleId } = request.params as { scheduleId: string };
-      if (!agent.publishedVersion) {
-        return reply.code(409).send({
-          error: 'Publish the agent first — a scheduled run always uses the published version',
-        });
-      }
-
-      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
-      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
-
-      // A manual run is awaited (the operator is watching) but must NOT advance
-      // `nextRunAt` — testing a schedule should not skip its next real fire.
-      const result = await runAgentSchedule({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId: agent.projectId,
-        agent,
-        schedule,
-        trigger: 'manual',
-        userId: String(user._id),
-      });
-
-      return reply.code(200).send(result);
-    } catch (error) {
-      return sendAgentGuardrailBlock(reply, error)
-        ?? sendRouteError(reply, error, 'Manual schedule run error', 'Failed to run schedule');
-    }
-  }));
-
   // ── Code export ────────────────────────────────────────────────────────
 
   app.post('/agents/:agentId/codegen', withApiRequestContext(async (request, reply) => {
@@ -1360,7 +1255,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; routineId?: string };
       const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
@@ -1384,6 +1279,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         excludeModes: ['sync'],
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        // A routine's history (Studio's Routines list links here).
+        ...(query.routineId ? { routineId: query.routineId } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });

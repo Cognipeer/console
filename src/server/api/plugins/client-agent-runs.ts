@@ -143,7 +143,7 @@ export function parseRunSchedule(body: Record<string, unknown>, now = Date.now()
 }
 
 /** Seconds to wait (body `wait`, query `?wait=`): a non-negative number; undefined when absent. */
-function parseWaitSeconds(value: unknown): number | undefined | null {
+export function parseWaitSeconds(value: unknown): number | undefined | null {
   if (value === undefined || value === null || value === '') return undefined;
   const n = typeof value === 'string' ? Number(value) : value;
   return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null;

@@ -1,6 +1,6 @@
 # Webhooks
 
-A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires, an alert fires or resolves. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
+A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a routine fires, an alert fires or resolves. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
 Manage them under **Agents → Webhooks** in the dashboard (`/dashboard/agents/webhooks`; the old `/dashboard/webhooks` address redirects there), or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
 
@@ -37,7 +37,8 @@ Agents → Webhooks shows only what the person may do: without Admin the page is
 | `budget.reached` | `sessionId`, `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd` |
 | `feedback.recorded` | `sessionId`, `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback)). The comment itself is never sent. |
 | `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey` |
-| `schedule.fired`, `schedule.failed` | `scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?` |
+| `routine.fired` | `routineId`, `agentKey`, `trigger`, `runId`, `event?` |
+| `routine.failed` | `routineId`, `agentKey`, `trigger`, `reason`, `event?` (at most one per routine and reason an hour) |
 | `alert.fired` | `ruleId`, `ruleName`, `metric`, `entityType`, `entityKey`, `value`, `threshold`, `baseline`, `severity`, `incidentId`, `firedAt`: an [alert rule](/guide/monitoring#alerts-incidents) fired for an entity |
 | `alert.resolved` | the same fields as `alert.fired`, plus `resolvedAt`: the alert recovered (two clean evaluation windows) |
 | `webhook.test` | none (sent by **Send test event**) |

@@ -49,6 +49,7 @@ import type {
   CrawlerStatus,
   IAgentRun,
   AgentRunClass,
+  IAgentRoutine,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1135,6 +1136,38 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   claimSchedulerSlot(key: string, expiresAt: Date): Promise<boolean>;
   /** Retention: removes claims whose expiresAt is before `olderThan`; returns the number removed. */
   cleanupSchedulerClaims(olderThan: Date): Promise<number>;
+
+  // ── Agent routines (tenant-specific) ──
+  createAgentRoutine(record: Omit<IAgentRoutine, '_id' | 'createdAt' | 'updatedAt'>): Promise<IAgentRoutine>;
+  /** Scoped by tenant AND project: an id of another project's routine is not found. */
+  getAgentRoutine(id: string, tenantId: string, projectId: string): Promise<IAgentRoutine | null>;
+  /** Oldest first. */
+  listAgentRoutines(filter: { tenantId: string; projectId: string; agentKey?: string }): Promise<IAgentRoutine[]>;
+  /** The updated routine, or null when it does not exist in that scope. */
+  updateAgentRoutine(
+    id: string,
+    tenantId: string,
+    projectId: string,
+    patch: Partial<Omit<IAgentRoutine, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>,
+  ): Promise<IAgentRoutine | null>;
+  deleteAgentRoutine(id: string, tenantId: string, projectId: string): Promise<boolean>;
+  /** Removes every routine of an agent (the agent was deleted); returns the number removed. */
+  deleteAgentRoutinesForAgent(tenantId: string, projectId: string, agentKey: string): Promise<number>;
+  /** Enabled routines whose `nextFireAt` is at or before `now`, the most overdue first. */
+  listDueRoutines(now: Date, limit: number): Promise<IAgentRoutine[]>;
+  /**
+   * Moves `nextFireAt` from `from` to `next` (CAS: false when it is no longer
+   * `from` — another scheduler advanced it, or an edit recomputed it).
+   */
+  advanceRoutineNextFire(id: string, from: Date, next: Date | null): Promise<boolean>;
+  /**
+   * Records the outcome of one fire (CAS on `lastFireAt`: an older fire landing
+   * late never overwrites a newer one). False when a newer fire is recorded.
+   */
+  setRoutineFireResult(
+    id: string,
+    result: { fireAt: Date; status: 'started' | 'failed'; runId?: string | null; error?: string | null },
+  ): Promise<boolean>;
 
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;

@@ -406,6 +406,15 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('idempotency_key_conflict');
   });
 
+  it.each(['routine:abc:2026-10-18T06:00:00.000Z', 'hook:wh_1:delivery'])('Idempotency-Key %s is reserved for routine runs: 400, nothing started', async (key) => {
+    const res = await create({ input: 'hello' }, { 'idempotency-key': key });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { type: string; code: string } }>(res.body).error).toMatchObject({ type: 'invalid_request_error', code: 'idempotency_key_reserved' });
+    expect(hoisted.lookupIdempotentAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+
   it('the class caps answer 429 with the class and scope', async () => {
     hoisted.startAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10_000, scope: 'tenant', runClass: 'deferred' });
     const res = await create({ input: 'hello', class: 'deferred' });

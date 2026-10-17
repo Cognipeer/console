@@ -166,7 +166,7 @@ beforeEach(async () => {
   } as never);
   sessions.starters = await conversation(String(users.starter._id));
   sessions.others = await conversation(String(users.other._id));
-  sessions.scheduled = await conversation('system:agent-scheduler', { metadata: { source: 'schedule' } as never });
+  sessions.scheduled = await conversation('system:routine:rt1', { metadata: { source: 'routine' } as never });
   sessions.waiting = await conversation(String(users.starter._id), { runtimeStatus: 'requires_action' });
   sessions.questioning = await conversation(String(users.starter._id), { runtimeStatus: 'requires_action' });
   await db.createAgentPendingActions([
@@ -211,7 +211,7 @@ describe('the Sessions list of an agent', () => {
     expect(Object.keys(byId)).toHaveLength(5);
     expect(byId[idOf('others')]).toMatchObject({ createdBy: String(users.other._id), ownSession: true, owner: { kind: 'user', name: 'Name of other' } });
     expect(byId[idOf('starters')]).toMatchObject({ ownSession: false, owner: { kind: 'user', name: 'Name of starter', email: 'starter@x.io' } });
-    expect(byId[idOf('scheduled')]).toMatchObject({ ownSession: false, owner: { kind: 'schedule' } });
+    expect(byId[idOf('scheduled')]).toMatchObject({ ownSession: false, owner: { kind: 'routine' } });
   });
 
   it('for someone a rule stops from viewing others\' sessions it holds only their own - cut before the page, whatever a teammate adds', async () => {

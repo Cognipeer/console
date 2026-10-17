@@ -6,7 +6,7 @@
  * Answers "is this agent healthy, how much is it used, and how do I call it"
  * in one screen. The numbers come from the agent's TRACES, not its dashboard
  * sessions: every run on every channel — API, OpenAI-compatible, A2A,
- * schedules, the playground — writes a trace, whereas a session
+ * routines, the playground — writes a trace, whereas a session
  * list only knows about conversations started from this page. Showing the
  * session list here made an agent serving thousands of API calls look idle.
  */
@@ -181,7 +181,7 @@ export default function AgentOverviewPanel({
         <Stack gap="lg">
             <Group justify="space-between">
                 <Text size="sm" c="dimmed">
-                    Every run on every channel — API, OpenAI-compatible, A2A, schedules and sessions.
+                    Every run on every channel — API, OpenAI-compatible, A2A, routines and sessions.
                 </Text>
                 <SegmentedControl
                     size="xs"

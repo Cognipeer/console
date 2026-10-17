@@ -345,8 +345,8 @@ async function runOnce(): Promise<SweepResult> {
   try {
     const cache = await getCache();
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
-    // Single coordinated task, not per-entity work (unlike agentScheduler's
-    // per-agent instance assignment) — only the node holding the global
+    // Single coordinated task, not per-entity work (unlike the routine
+    // scheduler's per-slot claims) — only the node holding the global
     // lock sweeps on a given tick, exactly like crawlerScheduler's
     // unassigned-bucket lock.
     if (!lockToken) {

@@ -215,7 +215,7 @@ See [Cluster](/guide/cluster) for the full topology / assignment model.
 
 ### Agent Runs
 
-Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS` and then answers `202` while the run keeps going; runs can also be queued (`background`), deferred (low priority) or scheduled. See [Agent background execution](/guide/agent-background-execution).
+Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS` and then answers `202` while the run keeps going; runs can also be queued (`background`), deferred (low priority) or scheduled, and an agent's routines start runs on a cron schedule (in a timezone), once at a set time, or on Run now. See [Agent background execution](/guide/agent-background-execution).
 
 | Variable | Description | Default |
 |----------|-------------|---------|

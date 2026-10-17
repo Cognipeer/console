@@ -1,5 +1,5 @@
 /**
- * The Agent Studio dashboard routes: export / import, schedules, code export,
+ * The Agent Studio dashboard routes: export / import, code export,
  * sessions and the skill library — over their real Fastify handlers.
  *
  * Each one is checked for the thing that would hurt if it regressed: an agent
@@ -62,11 +62,6 @@ vi.mock('@/lib/services/agents/agentManifest', async (importOriginal) => {
     return { ...actual, previewAgentImport: vi.fn(), applyAgentManifest: vi.fn() };
 });
 
-vi.mock('@/lib/services/agents/agentScheduleService', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('@/lib/services/agents/agentScheduleService')>();
-    return { ...actual, upsertAgentSchedule: vi.fn(), deleteAgentSchedule: vi.fn(), runAgentSchedule: vi.fn() };
-});
-
 vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
     return {
@@ -112,7 +107,6 @@ import {
     listConversations,
 } from '@/lib/services/agents';
 import { applyAgentManifest, previewAgentImport } from '@/lib/services/agents/agentManifest';
-import { deleteAgentSchedule, runAgentSchedule, upsertAgentSchedule } from '@/lib/services/agents/agentScheduleService';
 import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from '@/lib/services/agents/skillService';
 import { checkAgentModel } from '@/lib/services/agents/agentService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
@@ -149,7 +143,6 @@ const AGENT = {
     projectId: 'proj-1',
     publishedVersion: 2,
     config: { modelKey: 'gpt-5-terra', systemPrompt: 'You help on call.' },
-    metadata: { schedules: [{ id: 's1', name: 'Nightly', cron: '0 2 * * *', message: 'Summarise.', enabled: true }] },
 };
 
 /** An agent that belongs to a different project — must be invisible. */
@@ -208,54 +201,6 @@ describe('export / import', () => {
         expect(res.statusCode).toBe(200);
         expect(mockFn(previewAgentImport)).toHaveBeenCalled();
         expect(mockFn(applyAgentManifest)).not.toHaveBeenCalled();
-    });
-});
-
-describe('schedules', () => {
-    it('GET /agents/:agentId/schedules lists the agent\'s schedules', async () => {
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/schedules' });
-        expect(res.statusCode).toBe(200);
-        expect(parseJsonBody<{ schedules: Array<{ id: string }> }>(res.body).schedules.map((s) => s.id)).toEqual(['s1']);
-    });
-
-    it('POST /agents/:agentId/schedules creates one (201) and 404s across projects', async () => {
-        mockFn(upsertAgentSchedule).mockResolvedValue({ schedule: { id: 's2' }, schedules: [] });
-        const app = await agentsApp();
-        const created = await app.inject({
-            method: 'POST',
-            url: '/api/agents/agent-1/schedules',
-            payload: { name: 'Hourly', cron: '0 * * * *', message: 'Check.', enabled: true },
-        });
-        expect(created.statusCode).toBe(201);
-        const foreign = await app.inject({ method: 'POST', url: '/api/agents/agent-9/schedules', payload: { name: 'x' } });
-        expect(foreign.statusCode).toBe(404);
-        expect(mockFn(upsertAgentSchedule)).toHaveBeenCalledTimes(1);
-    });
-
-    it('DELETE /agents/:agentId/schedules/:scheduleId removes it', async () => {
-        mockFn(deleteAgentSchedule).mockResolvedValue([]);
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'DELETE', url: '/api/agents/agent-1/schedules/s1' });
-        expect(res.statusCode).toBe(200);
-        expect(mockFn(deleteAgentSchedule).mock.calls[0][2]).toBe('s1');
-    });
-
-    it('POST /agents/:agentId/schedules/:scheduleId/run refuses an unpublished agent', async () => {
-        mockFn(getAgentById).mockResolvedValue({ ...AGENT, publishedVersion: null });
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/schedules/s1/run' });
-        // A scheduled run always uses the published version — there is none.
-        expect(res.statusCode).toBe(409);
-        expect(mockFn(runAgentSchedule)).not.toHaveBeenCalled();
-    });
-
-    it('POST /agents/:agentId/schedules/:scheduleId/run runs a published agent\'s schedule', async () => {
-        mockFn(runAgentSchedule).mockResolvedValue({ conversationId: 'c1', status: 'success' });
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/schedules/s1/run' });
-        expect(res.statusCode).toBe(200);
-        expect(mockFn(runAgentSchedule)).toHaveBeenCalledTimes(1);
     });
 });
 
