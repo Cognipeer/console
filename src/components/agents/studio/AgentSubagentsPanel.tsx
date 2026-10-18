@@ -21,7 +21,6 @@ import {
     Checkbox,
     Group,
     Menu,
-    Modal,
     NumberInput,
     Select,
     Stack,
@@ -42,6 +41,7 @@ import {
     IconUsers,
 } from '@tabler/icons-react';
 
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
 import { SUBAGENT_POLICY_LIMITS } from '@/lib/services/agents/subagentConfigRules';
 import type {
@@ -350,14 +350,22 @@ export default function AgentSubagentsPanel({
                 </Card>
             ) : null}
 
-            <Modal
-                opened={editing !== null}
-                onClose={() => setEditing(null)}
-                title={editing?.index === -1 ? t('modalAdd') : t('modalEdit')}
-                size="lg"
-            >
-                {draft ? (
-                    <Stack gap="md">
+            {draft ? (
+                <FormShell
+                    open
+                    onClose={() => setEditing(null)}
+                    icon={<IconUsers size={16} />}
+                    title={editing?.index === -1 ? t('modalAdd') : t('modalEdit')}
+                    primaryAction={{
+                        label: editing?.index === -1 ? t('add') : t('save'),
+                        color: 'teal',
+                        disabled: draftInvalid,
+                        onClick: commitDraft,
+                    }}
+                    secondaryAction={{ label: t('cancel'), onClick: () => setEditing(null) }}
+                >
+                    <FormSection number={1} title={t('sectionBasics')}>
+                        <Stack gap="md">
                         {draft.kind === 'ref' ? (
                             <Select
                                 label={t('agentLabel')}
@@ -402,6 +410,11 @@ export default function AgentSubagentsPanel({
                             required
                         />
 
+                        </Stack>
+                    </FormSection>
+
+                    <FormSection number={2} title={t('sectionBehaviour')}>
+                        <Stack gap="md">
                         <Textarea
                             label={draft.kind === 'ref' ? t('promptRefLabel') : t('promptLabel')}
                             description={draft.kind === 'ref' ? t('promptRefDescription') : t('promptInlineDescription')}
@@ -426,6 +439,11 @@ export default function AgentSubagentsPanel({
                             </Alert>
                         ) : null}
 
+                        </Stack>
+                    </FormSection>
+
+                    <FormSection number={3} title={t('sectionLimits')}>
+                        <Stack gap="md">
                         <Select
                             label={t('contextOverrideLabel')}
                             description={t('contextOverrideDescription')}
@@ -455,16 +473,10 @@ export default function AgentSubagentsPanel({
                                 onChange={(next) => patchDraftLimits({ maxContextTokens: next === '' ? undefined : Number(next) })}
                             />
                         </Group>
-
-                        <Group justify="flex-end">
-                            <Button variant="default" onClick={() => setEditing(null)}>{t('cancel')}</Button>
-                            <Button onClick={commitDraft} disabled={draftInvalid}>
-                                {editing?.index === -1 ? t('add') : t('save')}
-                            </Button>
-                        </Group>
-                    </Stack>
-                ) : null}
-            </Modal>
+                        </Stack>
+                    </FormSection>
+                </FormShell>
+            ) : null}
         </Stack>
     );
 }
