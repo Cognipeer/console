@@ -63,3 +63,11 @@ describe('session events and transcript', () => {
     expect(toClientTranscriptMessage('c1', 0, { role: 'user', content: 'x', timestamp: new Date() }, 'm').attachments).toEqual([]);
   });
 });
+
+describe('transcript warnings', () => {
+  it('a message that had warnings lists them, one that had none omits the field', () => {
+    const warned = toClientTranscriptMessage('c1', 1, { role: 'assistant', content: 'x', timestamp: new Date(), warnings: ['Sub-agent "w" was skipped: agent "a" is not active (draft).'] }, 'm');
+    expect(warned.warnings).toEqual(['Sub-agent "w" was skipped: agent "a" is not active (draft).']);
+    expect('warnings' in toClientTranscriptMessage('c1', 1, { role: 'assistant', content: 'x', timestamp: new Date() }, 'm')).toBe(false);
+  });
+});

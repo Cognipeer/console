@@ -231,7 +231,7 @@ export function toClientMessageAttachments(
 export function toClientTranscriptMessage(
     conversationId: string,
     index: number,
-    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike> },
+    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike>; warnings?: string[] },
     id: string,
 ) {
     const files = toClientMessageAttachments(conversationId, message.attachments);
@@ -244,6 +244,7 @@ export function toClientTranscriptMessage(
         content: message.content,
         created_at: Number.isNaN(at.getTime()) ? null : at.toISOString(),
         attachments: files,
+        ...(message.warnings?.length ? { warnings: message.warnings } : {}),
         ...(files.some((f) => f.origin === 'agent_output') ? { output_files: files.filter((f) => f.origin === 'agent_output') } : {}),
     };
 }

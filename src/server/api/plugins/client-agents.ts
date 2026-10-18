@@ -2,6 +2,7 @@ import { agentShowsReasoning } from '@/lib/services/agents/agentReasoning';
 import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { AgentRunClass, AgentStatus, IAgentConfig, IAgentConversation, IAgentRun, IAgentSessionBudget } from '@/lib/database';
+import type { AgentConfigIssue } from '@/lib/services/agents/agentConfigValidation';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -561,7 +562,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(201).send({ agent: redactAgent(agent) });
+      return reply.code(201).send({ agent: redactAgent(agent), warnings: prepared.warnings });
     } catch (error) {
       // The engine could not decide who may name the bucket: 503, not a failure of ours.
       const refusal = authorizationRefusalOf(error);
@@ -586,6 +587,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const invalidStatus = invalidAgentStatusBody(body);
       if (invalidStatus) return reply.code(400).send(invalidStatus);
+
+      let warnings: AgentConfigIssue[] = [];
 
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
@@ -622,6 +625,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('conflict' in checked) return reply.code(409).send(checked.conflict);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
+          warnings = checked.warnings;
         }
       }
 
@@ -637,7 +641,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      return reply.code(200).send({ agent: redactAgent(agent) });
+      return reply.code(200).send({ agent: redactAgent(agent), warnings });
     } catch (error) {
       const refusal = authorizationRefusalOf(error);
       if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });

@@ -570,6 +570,8 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(offered(main)).not.toContain('- writer:');
       expect(modelsBuilt()).not.toContain('writer-model');
       expect(await warningsOf(id)).toEqual(['Sub-agent "writer" was skipped: agent "writer-agent" is not active (inactive).']);
+      // The response a run stores and the Responses API returns carries them too.
+      expect(response.warnings).toEqual(['Sub-agent "writer" was skipped: agent "writer-agent" is not active (inactive).']);
     });
 
     it('runs the agent as a child again once it is active', async () => {
