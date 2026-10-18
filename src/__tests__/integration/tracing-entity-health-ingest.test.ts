@@ -54,6 +54,7 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { createInternalTracingSink } from '@/lib/services/agents/agentService';
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import {
   __resetEntityMetricsRollupForTests,
   flushEntityMetricsRollup,
@@ -769,5 +770,20 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     expect(await session(`h-sinkfail-${sequence}`)).toMatchObject({ status: 'success' });
     // Only the finished run is booked.
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 0 });
+  });
+  it('hosted sink: a turn the caller stopped ends its session cancelled, not success', async () => {
+    const sink = await createInternalTracingSink(dbName, tenantId, projectId, undefined, 'agent-key-4');
+    const finished = {
+      agent: { name: agent }, startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+      durationMs: 500, summary: {}, errors: [], events: [aiCall()], status: 'success',
+    };
+    const controller = new AbortController();
+    controller.abort();
+    await runWithTurnSignal(controller.signal, () => onSession(sink, { ...finished, sessionId: `h-cancel-${sequence}` } as never));
+    await onSession(sink, { ...finished, sessionId: `h-ok-${sequence}` } as never);
+    await settle();
+
+    expect(await session(`h-cancel-${sequence}`)).toMatchObject({ status: 'cancelled', statusExplicit: true });
+    expect(await session(`h-ok-${sequence}`)).toMatchObject({ status: 'success' });
   });
 });

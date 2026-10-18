@@ -2519,6 +2519,12 @@ export async function createInternalTracingSink(
                     nonSinkErrors,
                     ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
                 });
+                // A turn the caller stopped ends its session as the SDK sees an ordinary end ("success");
+                // the sink runs inside the invoke, so the turn's own signal says it was cancelled. A run
+                // that failed keeps its error. What the aborted model call used is only known when the
+                // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
+                const cancelledByCaller = currentTurnSignal()?.aborted === true
+                    && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
 
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
@@ -2535,9 +2541,9 @@ export async function createInternalTracingSink(
                     config: session.config ?? {},
                     metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
                     summary: session.summary ?? {},
-                    status: sessionStatus,
+                    status: cancelledByCaller ? 'cancelled' : sessionStatus,
                     // An SDK-supplied status is never overridden by a late error event (only a derived one is).
-                    statusExplicit: isExplicitClientStatus(session.status),
+                    statusExplicit: cancelledByCaller || isExplicitClientStatus(session.status),
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
                     durationMs: session.durationMs ?? undefined,
