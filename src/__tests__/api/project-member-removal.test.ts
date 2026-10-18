@@ -55,6 +55,11 @@ const surfaces = [
   {
     label: 'dashboard',
     plugin: projectsApiPlugin,
+    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>) => app.inject({
+      method: 'DELETE',
+      url: `/api/projects/${PROJECT}/members`,
+      headers: { ...sessionHeaders, 'content-type': 'application/json' },
+    }),
     remove: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, userId: string) => app.inject({
       method: 'DELETE',
       url: `/api/projects/${PROJECT}/members`,
@@ -65,6 +70,11 @@ const surfaces = [
   {
     label: 'client API',
     plugin: clientProjectsApiPlugin,
+    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>) => app.inject({
+      method: 'DELETE',
+      url: `/api/client/v1/projects/${PROJECT}/members`,
+      headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+    }),
     remove: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, userId: string) => app.inject({
       method: 'DELETE',
       url: `/api/client/v1/projects/${PROJECT}/members`,
@@ -74,7 +84,7 @@ const surfaces = [
   },
 ];
 
-describe.each(surfaces)('DELETE project member: $label', ({ plugin, remove }) => {
+describe.each(surfaces)('DELETE project member: $label', ({ plugin, remove, removeWithoutBody }) => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
   let db: ReturnType<typeof createMockDb>;
 
@@ -130,5 +140,17 @@ describe.each(surfaces)('DELETE project member: $label', ({ plugin, remove }) =>
     const res = await remove(app, 'user-1');
     expect(res.statusCode).toBe(500);
     expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Failed to update membership');
+  });
+
+  it('answers 400 (not a 500 with an error log) when the JSON content type comes with no body', async () => {
+    // The production JSON parser hands an empty body to the handler as ''; the default test parser would refuse it first.
+    const rawApp = await createFastifyApiTestApp(plugin, { rawJsonBody: true });
+    try {
+      const res = await removeWithoutBody(rawApp);
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Request body must be valid JSON');
+    } finally {
+      await rawApp.close();
+    }
   });
 });

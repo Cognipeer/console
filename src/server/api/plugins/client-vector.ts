@@ -495,6 +495,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ success: true });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Delete client vector entries error', { error });
       if (isNotFoundError(error)) {
         return reply.code(404).send({ error: 'Not found' });

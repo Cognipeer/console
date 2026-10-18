@@ -251,6 +251,7 @@ export const clientCrawlerApiPlugin: FastifyPluginAsync = async (app) => {
       );
       return reply.code(200).send({ urls });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Client remove urls failed', { error });
       return sendError(reply, error, 'Failed to remove URLs');
     }

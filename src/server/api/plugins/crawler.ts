@@ -188,6 +188,7 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
       );
       return reply.code(200).send({ urls });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       if (sendProjectContextError(reply, error)) return;
       logger.error('Remove crawler urls failed', { error });
       return sendError(reply, error, 'Failed to remove URLs');
