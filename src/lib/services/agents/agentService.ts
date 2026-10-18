@@ -1894,7 +1894,6 @@ async function buildAgentSubagents(
             input.onWarning?.(message);
             continue;
         }
-        seen.add(entry.name);
 
         let systemPrompt: string | undefined;
         let toolBindings = entry.toolBindings;
@@ -1975,6 +1974,9 @@ async function buildAgentSubagents(
             }
         }
 
+        // Taken only now that the entry will be built: a reference that could not run must not
+        // make a later, working one of the same name look like the duplicate.
+        seen.add(entry.name);
         subagents.push({
             name: entry.name,
             ...(entry.title ? { title: entry.title } : {}),
