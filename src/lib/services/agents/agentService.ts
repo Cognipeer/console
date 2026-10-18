@@ -191,6 +191,7 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
+import { isSubagentEvent } from './subagentEvents';
 import {
     buildClientTools,
     checkEmbeddedClientTools,
@@ -1619,6 +1620,8 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
  * and a real model.
  */
 export const __testables = {
+    textStreamOptions,
+    noteTurnCompaction,
     guardrailDenial,
     guardrailBlockedError,
     buildAgentGuardrailPlugins,
@@ -4234,7 +4237,10 @@ function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, ag
     return {
         stream: true,
         onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-            if (chunk.isFinal || !chunk.text) return;
+            // The SDK passes a sub-agent's deltas up only when asked to (the console never asks), stamped
+            // with the sub-agent. They are its text, not this answer's: appended, they would read as the
+            // parent's words and end up in the partial answer of an aborted turn.
+            if (chunk.isFinal || !chunk.text || isSubagentEvent(chunk)) return;
             try {
                 onTextChunk(chunk.text);
             } catch (callbackError) {
@@ -4270,6 +4276,9 @@ export function createReasoningTap(
         listening: Boolean(onReasoningChunk) && enabled,
         onEvent: (event) => {
             if (!enabled) return;
+            // A sub-agent's thinking, tool calls and text reach this tap too, stamped with the sub-agent:
+            // none of it is this turn's thinking or a boundary between this turn's model steps.
+            if (isSubagentEvent(event)) return;
             if (event.type === 'tool_call' || event.type === 'stream') {
                 if (collected) boundary = true;
                 return;
@@ -4300,6 +4309,33 @@ function liveStreamOptions(
 ) {
     const text = textStreamOptions(onTextChunk, agentKey);
     return reasoningTap.listening ? { ...text, stream: true } : text;
+}
+
+/**
+ * Records a `summarization` event as a compaction of this turn: kept on the turn's
+ * record, announced on the session log and handed to the caller when it listens.
+ * A compaction a delegated child made of its OWN context is none of that: it did
+ * not touch this turn's messages, and counting it would show the parent's
+ * transcript as shortened (and name tool results as compacted) when it was not.
+ */
+function noteTurnCompaction(
+    event: Parameters<typeof compactionFromEvent>[0],
+    turn: {
+        compactions: IAgentTurnCompaction[];
+        turnEvents: Pick<SessionTurnEvents, 'onCompaction'> | undefined;
+        onCompaction?: (compaction: IAgentTurnCompaction) => void;
+        agentKey: string;
+    },
+): void {
+    if (isSubagentEvent(event)) return;
+    const compaction = compactionFromEvent(event);
+    turn.compactions.push(compaction);
+    turn.turnEvents?.onCompaction(compaction);
+    try {
+        turn.onCompaction?.(compaction);
+    } catch (callbackError) {
+        logger.warn('onCompaction callback failed', { agentKey: turn.agentKey, error: callbackError });
+    }
 }
 
 /** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
@@ -4854,9 +4890,7 @@ async function runAgentChatTurn(
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') {
-                    const compaction = compactionFromEvent(event);
-                    compactions.push(compaction);
-                    turnEvents.onCompaction(compaction);
+                    noteTurnCompaction(event, { compactions, turnEvents, agentKey });
                     return;
                 }
                 reasoningTap.onEvent(event);
@@ -5583,14 +5617,7 @@ async function runPlaygroundChatTurn(
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
                 // so a session shows the compaction as it happens.
-                const compaction = compactionFromEvent(event);
-                compactions.push(compaction);
-                turnEvents?.onCompaction(compaction);
-                try {
-                    onCompaction?.(compaction);
-                } catch (callbackError) {
-                    logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
-                }
+                noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
                 return;
             }
             if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
@@ -6293,14 +6320,7 @@ async function runAgentResumeTurn(
                 reasoningTap.onEvent(event);
                 turnEvents.onSdkEvent(event);
                 if (event.type === 'summarization') {
-                    const compaction = compactionFromEvent(event);
-                    compactions.push(compaction);
-                    turnEvents.onCompaction(compaction);
-                    try {
-                        request.onCompaction?.(compaction);
-                    } catch (callbackError) {
-                        logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
-                    }
+                    noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
                     return;
                 }
                 if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;

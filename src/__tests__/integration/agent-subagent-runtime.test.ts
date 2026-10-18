@@ -85,8 +85,8 @@ const modelRecord = (key: string) => ({
 });
 
 /** Registers what a model key says, and makes the "gateway" hand the run that script. */
-function script(key: string, replies: Script): ScriptedModel {
-  const model = new ScriptedModel(`${key}-id`, replies);
+function script(key: string, replies: Script, streamChunks?: (call: number) => unknown[] | undefined): ScriptedModel {
+  const model = new ScriptedModel(`${key}-id`, replies, streamChunks);
   models[key] = model;
   return model;
 }
@@ -283,6 +283,61 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
         turnCostUsd: expect.closeTo(price(ASK, MAIN_PRICING) + CHILD_COST, 8),
       });
       expect(logged.some((event) => event.type === 'budget.reached')).toBe(true);
+    });
+  });
+  describe('what a sub-agent streams while it works (CON-3)', () => {
+    const thought = (text: string) => ({ type: 'reasoning', reasoning_content: text });
+
+    /** A parent that thinks, delegates, thinks again and answers; a child that thinks and writes. All of it streams. */
+    function streamingRun() {
+      script(
+        'main',
+        (call) => (call === 0 ? delegateTo('d1', 'helper', 'do the legwork') : answer('')),
+        (call) => (call === 0 ? [thought('Parent plans.')] : [thought('Parent concludes.'), 'all ', 'done']),
+      );
+      script('worker', () => answer(''), () => [thought('Child thinks.'), 'child words']);
+    }
+
+    it('keeps the child\'s thinking out of the live reasoning and out of the reasoning the turn stores', async () => {
+      await createAgent({ subagents: [inlineHelper()] });
+      streamingRun();
+      const id = String((await newConversation())._id);
+      const live: string[] = [];
+
+      await chat(id, 'get it done', { onReasoningChunk: (text: string) => live.push(text) });
+
+      expect(live.join('')).toBe('Parent plans.\n\nParent concludes.');
+      expect((await stored(id)).messages.at(-1)!.reasoning).toBe('Parent plans.\n\nParent concludes.');
+    });
+
+    it('keeps the child\'s words out of the answer stream and out of the answer', async () => {
+      await createAgent({ subagents: [inlineHelper()] });
+      streamingRun();
+      const id = String((await newConversation())._id);
+      const text: string[] = [];
+
+      const response = await chat(id, 'get it done', { onTextChunk: (chunk: string) => text.push(chunk) });
+
+      expect(text.join('')).toBe('all done');
+      expect(JSON.stringify(response.output)).not.toContain('child words');
+      expect((await stored(id)).messages.at(-1)!.content).toBe('all done');
+    });
+
+    it('the playground stream is as clean as the live chat\'s', async () => {
+      await createAgent({ subagents: [inlineHelper()] });
+      streamingRun();
+      const id = String((await newConversation())._id);
+      const live: string[] = [];
+      const text: string[] = [];
+
+      const result = await playground(id, 'get it done', {
+        onReasoningChunk: (chunk: string) => live.push(chunk),
+        onTextChunk: (chunk: string) => text.push(chunk),
+      });
+
+      expect(live.join('')).toBe('Parent plans.\n\nParent concludes.');
+      expect(text.join('')).toBe('all done');
+      expect(result.reasoning).toBe('Parent plans.\n\nParent concludes.');
     });
   });
 });
