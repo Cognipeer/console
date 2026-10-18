@@ -100,4 +100,6 @@ export interface UpdateToolInput {
 export interface ExecuteToolActionResult {
   result: unknown;
   latencyMs: number;
+  /** The upstream MCP server answered `isError: true`: the call failed, and `result` is its error text. */
+  isError?: boolean;
 }
