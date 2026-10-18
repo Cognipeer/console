@@ -433,3 +433,11 @@ describe('skillPolicy and sub-agent name shape', () => {
     expect(result.warnings.map((w) => w.field)).toContain('subagents[0].name');
   });
 });
+
+describe('callback secret without a url', () => {
+  it('is refused instead of silently dropped', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', callback: { secret: 'a-long-enough-secret-value' } } as never);
+    expect(result.errors.map((e) => e.field)).toContain('callback.secret');
+    expect(validateAgentConfigShape({ modelKey: 'm', callback: { url: 'https://example.com/hook', secret: 'a-long-enough-secret-value' } } as never).errors).toEqual([]);
+  });
+});

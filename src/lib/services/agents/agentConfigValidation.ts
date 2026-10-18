@@ -219,6 +219,11 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             }
         }
         if (typeof callback.secret === 'string' && callback.secret !== '' && callback.secret !== AGENT_SANDBOX_SECRET_MASK
+            && (callback.url === undefined || callback.url === null || callback.url === '')) {
+            // Saved as-is, the secret would be dropped together with the URL-less callback and nothing would ever be signed.
+            issues.errors.push({ field: 'callback.secret', message: 'needs callback.url — a secret signs the calls to that URL' });
+        }
+        if (typeof callback.secret === 'string' && callback.secret !== '' && callback.secret !== AGENT_SANDBOX_SECRET_MASK
             && (callback.secret.length < 16 || callback.secret.length > 256)) {
             issues.errors.push({ field: 'callback.secret', message: 'must be 16–256 characters' });
         }
@@ -713,5 +718,9 @@ async function checkBindingReferences(
 export function invalidConfigBody(result: AgentConfigValidation) {
     const [first, ...rest] = result.errors;
     const summary = first ? `${first.field}: ${first.message}${rest.length > 0 ? ` (and ${rest.length} more)` : ''}` : '';
-    return { error: `Invalid agent config — ${summary}`, validation: result };
+    return {
+        error: `Invalid agent config — ${summary}`,
+        ...(first?.field.startsWith('callback') ? { type: 'invalid_callback', code: 'invalid_callback' } : {}),
+        validation: result,
+    };
 }
