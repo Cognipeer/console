@@ -17,6 +17,7 @@ import YAML from 'yaml';
 
 import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
+import { subagentConfigIssues } from './subagentConfigRules';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
 import { maskAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
@@ -259,6 +260,8 @@ export function validateAgentManifest(input: unknown): string[] {
             issues.push(`sub-agent "${subagent.name}" has an unknown kind "${String(subagent.kind)}"`);
         }
     }
+
+    for (const issue of subagentConfigIssues(spec)) issues.push(`spec.${issue.field} ${issue.message}`);
 
     if (spec.structuredOutput?.enabled && !spec.structuredOutput.schema) {
         issues.push('spec.structuredOutput.enabled is true but no schema is set');

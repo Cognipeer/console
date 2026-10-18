@@ -28,6 +28,7 @@ import {
 import { validateSeedFiles } from './agentSandboxSeedFiles';
 import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
 import { resolveSubagentTarget } from './subagentRoster';
+import { subagentConfigIssues } from './subagentConfigRules';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
@@ -372,6 +373,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         (entry.toolBindings ?? []).forEach((binding, bindingIndex) =>
             checkBindingShape(issues, `${field}.toolBindings[${bindingIndex}]`, binding));
     });
+    issues.errors.push(...subagentConfigIssues(config));
 
     return issues;
 }
