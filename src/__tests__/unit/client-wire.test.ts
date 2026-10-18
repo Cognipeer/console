@@ -103,3 +103,12 @@ describe('client wire spelling', () => {
     expect(toClientErrorBody({ message: 'm', type: 't' })).toEqual({ message: 'm', type: 't' });
   });
 });
+
+describe('compaction summary on the client wire', () => {
+  it('keeps the keys of directive_sources verbatim (they are the directives)', () => {
+    const wire = toSnakeCaseDeep<{ summary: { user_directives: string[]; directive_sources: Record<string, string> } }>({
+      summary: { userDirectives: ['Always reply in TR'], directiveSources: { 'Always reply in TR': 'Lütfen Türkçe', 'FooBar baz': 'x' } },
+    });
+    expect(wire.summary.directive_sources).toEqual({ 'Always reply in TR': 'Lütfen Türkçe', 'FooBar baz': 'x' });
+  });
+});

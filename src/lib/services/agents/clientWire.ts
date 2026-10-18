@@ -17,8 +17,11 @@ export function toSnakeKey(key: string): string {
     return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
 }
 
-/** Keys whose value is somebody else's data (tool arguments, free-form answers): never re-keyed. */
-const OPAQUE_KEYS = new Set(['args', 'answers']);
+/**
+ * Keys whose value is somebody else's data (tool arguments, free-form answers): never re-keyed.
+ * `directiveSources` is a record keyed by the text of a directive, so its keys are data too.
+ */
+const OPAQUE_KEYS = new Set(['args', 'answers', 'directiveSources', 'directive_sources']);
 
 /** Every object key snake_cased, depth first; values of {@link OPAQUE_KEYS} are left as they are. */
 export function toSnakeCaseDeep<T = unknown>(value: unknown): T {
