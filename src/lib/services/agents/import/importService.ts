@@ -330,7 +330,7 @@ export async function previewAgentDocumentImport(
         warnings.push({ code: 'websearch_unavailable', message: 'web_search is bound, but this project has no active Web Search provider yet — add one before running the agent.' });
     }
     if (plan.builtins.webFetch) {
-        warnings.push({ code: 'web_fetch', message: 'web_fetch is mapped to Browser Use, the closest console equivalent.' });
+        warnings.push({ code: 'web_fetch', message: 'web_fetch maps to Browser Use, which needs a browser picked on the agent. It will be imported without it; add Browser Use on the agent afterwards.' });
     }
     for (const skill of plan.skills) {
         if (skill.kind === 'anthropic') {
@@ -582,7 +582,14 @@ export async function applyAgentDocumentImport(
         const sandboxAvailability = plan.builtins.sandbox.length > 0 ? await resolveSandboxAvailability(ctx.tenantId) : null;
         const warnings = [...plan.unsupported];
         if (plan.builtins.webSearch) toolBindings.push({ source: 'system', sourceKey: 'web_search', toolNames: ['web_search'] });
-        if (plan.builtins.webFetch) toolBindings.push({ source: 'system', sourceKey: 'browser_use', toolNames: ['browser_use'] });
+        if (plan.builtins.webFetch) {
+            // Browser Use needs a browser chosen on the agent (`config.browserId`) and an import has no field to pick one,
+            // so the binding would make the whole config invalid. Skip it and say so; the user adds it on the agent.
+            warnings.push({
+                code: 'web_fetch_skipped',
+                message: 'web_fetch maps to Browser Use, which needs a browser picked on the agent — it was imported without it. Add the Browser Use tool on the agent after choosing a browser.',
+            });
+        }
 
         const config: IAgentConfig = {
             modelKey,
