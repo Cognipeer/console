@@ -47,7 +47,7 @@ The LLM-backed checks run against any LLM from the tenant's Model Hub (set `poli
 | Action | Behavior |
 |--------|----------|
 | `block` | Reject the request with a structured error |
-| `redact` | Mask the detected values (`[REDACTED:email]`) and continue — PII and word filter only |
+| `redact` | Mask the detected values (PII findings become `[REDACTED_EMAIL]`-style tags; word-filter and regex findings use `[REDACTED:category]`) and continue — PII and word filter only |
 | `warn` | Allow the request; findings are attached to the response and logged |
 | `flag` | Allow the request; findings are attached to the response and logged |
 
