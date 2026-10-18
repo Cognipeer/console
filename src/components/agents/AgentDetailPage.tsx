@@ -15,7 +15,6 @@ import {
   Divider,
   Badge,
   Code,
-  CopyButton,
   Tooltip,
   Modal,
   Table,
@@ -30,8 +29,6 @@ import {
   IconMessageCircle,
   IconCode,
   IconThumbUp,
-  IconCopy,
-  IconCheck,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -59,6 +56,8 @@ import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
 import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
+import AgentUsagePanel from './AgentUsagePanel';
+import CopyableCode from './CopyableCode';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
@@ -1733,255 +1732,19 @@ export default function AgentDetailPage() {
           {activeTab === 'feedback' ? <AgentFeedbackPanel agentId={agentId} /> : null}
         </Tabs.Panel>
 
+        {/* ── Usage ───────────────────────────────────────────── */}
         <Tabs.Panel value="usage">
-          <SectionCard p="md">
-            <Stack gap="md">
-              <Text size="lg" fw={600}>
-                {t('usage.title')}
-              </Text>
-              <Text size="sm" c="dimmed">
-                {t('usage.description', { name: agent.name })}
-              </Text>
-
-              <Divider />
-
-              {/* ── SDK Usage ─────────────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.sdkTitle')}
-              </Text>
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.installLabel')}
-              </Text>
-              <CopyableCode value="npm install @cognipeer/console-sdk" />
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.chatLabel')}
-              </Text>
-              <Code block>
-                {`import { ConsoleClient } from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_KEY',
-  baseURL: '${origin}',
-});
-
-// ── Single turn ──────────────────────────────────
-const response = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Hello, how can you help me?',
-});
-console.log(response.output[0].content[0].text);
-
-// ── Multi-turn conversation ──────────────────────
-// Pass previous_response_id to continue the conversation
-const followUp = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Tell me more about that',
-  previous_response_id: response.id,
-});
-console.log(followUp.output[0].content[0].text);
-
-// ── Use a specific published version ─────────────
-const res = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Summarize the key points',
-  version: ${agent.publishedVersion || 1},
-});`}
-              </Code>
-
-              <Divider />
-
-              {/* ── REST Usage ────────────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.restTitle')}
-              </Text>
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.restLabel')}
-              </Text>
-              <Code block>
-                {`# First message
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello, how can you help me?"
-  }'
-
-# Continue conversation (use the id from the previous response)
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Tell me more about that",
-    "previous_response_id": "resp_<conversation_id>"
-  }'
-
-# Use a specific published version
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello!",
-    "version": ${agent.publishedVersion || 1}
-  }'`}
-              </Code>
-
-              <Divider />
-
-              {/* ── Response Format ──────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.responseTitle')}
-              </Text>
-              <Code block>
-                {`{
-  "id": "resp_<conversation_id>",
-  "object": "response",
-  "model": "${agent.name}",
-  "output": [
-    {
-      "id": "msg_abc123",
-      "type": "message",
-      "role": "assistant",
-      "content": [
-        {
-          "type": "output_text",
-          "text": "Agent response text..."
-        }
-      ]
-    }
-  ],
-  "status": "completed",
-  "usage": {
-    "input_tokens": 50,
-    "output_tokens": 100,
-    "total_tokens": 150
-  },
-  "created_at": 1719500000,
-  "previous_response_id": null,
-  "version": ${agent.publishedVersion || 'null'}
-}`}
-              </Code>
-
-              <Divider />
-
-              {/* ── Background execution ─────────────────── */}
-              <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
-              <Text size="xs" c="dimmed">
-                For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
-                <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call — or send{' '}
-                <code>&quot;background&quot;: true</code> in the body, as an OpenAI SDK does. The header wins over the
-                body field, and either wins over the agent&apos;s default mode. Instead of
-                the completed answer, you immediately get back a run id to poll — the turn keeps executing
-                server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
-                request replays the same run instead of starting a second one, or <code>callback_url</code> to
-                get an HMAC-signed webhook when it finishes instead of polling.
-              </Text>
-              <Code block>
-{`# 1. Start it in the background — returns immediately with 202
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: ******" \\
-  -H "Content-Type: application/json" \\
-  -H "x-cognipeer-background: true" \\
-  -H "Idempotency-Key: <a-client-generated-uuid>" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Research this topic in depth and summarize the findings",
-    "callback_url": "https://your-server.com/webhooks/agent-run"
-  }'
-
-# → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
-
-# Same thing with the body field instead of the header (what an OpenAI SDK sends).
-# Precedence: x-cognipeer-background header > "background" body field > the agent's default mode.
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Research this topic in depth and summarize the findings",
-    "background": true,
-    "callback_url": "https://your-server.com/webhooks/agent-run"
-  }'
-
-# 2. Poll status until it leaves "queued"/"running"
-curl ${origin}/api/client/v1/agents/runs/run_<run_id> \\
-  -H "Authorization: ******"
-
-# → 200 { "id": "run_<run_id>", "object": "agent.run", "status": "succeeded",
-#         "result": { ...same shape as a synchronous response... }, "error": null,
-#         "created_at": ..., "started_at": ..., "completed_at": ... }
-# status is one of: queued | running | succeeded | failed | canceled
-
-# 3. (optional) Cancel it before it finishes
-curl -X POST ${origin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
-  -H "Authorization: ******"
-
-# Once succeeded, continue the conversation with a normal (synchronous) call —
-# the run's own "resp_" id inside "result.id" works as previous_response_id too:
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: ******" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Now write it up as a one-pager",
-    "previous_response_id": "run_<run_id>"
-  }'`}
-              </Code>
-              <Text size="xs" c="dimmed">
-                Only one background (or synchronous) run may be in flight per conversation at a time — a
-                second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
-                until the first one finishes.
-              </Text>
-
-              {/*
-                Every other surface the agent is reachable on. They were
-                built one at a time and only the Responses API was ever
-                documented here, so an integrator reading this tab would
-                not know an OpenAI client could call the agent at all.
-              */}
-              <Divider />
-              <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
-              <Text size="xs" c="dimmed">
-                Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
-                model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
-                set <code>stream: true</code> for token deltas.
-              </Text>
-              <Code block>
-{`from openai import OpenAI
-
-client = OpenAI(base_url="${origin}/api/client/v1", api_key="YOUR_API_TOKEN")
-
-stream = client.chat.completions.create(
-    model="${agent.key}",
-    messages=[{"role": "user", "content": "Hello"}],
-    stream=True,
-)
-for chunk in stream:
-    print(chunk.choices[0].delta.content or "", end="")`}
-              </Code>
-              <Code block>
-{`curl -N -X POST ${origin}/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
-              </Code>
-
-              <Divider />
-              <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
-              <Text size="xs" c="dimmed">
-                {a2aEnabled
-                  ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
-                  : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
-              </Text>
-              <Code block>{`GET ${a2aCardUrl}`}</Code>
-
-            </Stack>
-          </SectionCard>
+          {activeTab === 'usage' ? (
+            <AgentUsagePanel
+              agentName={agent.name}
+              agentKey={agent.key}
+              publishedVersion={agent.publishedVersion}
+              inputs={agent.config?.inputs}
+              origin={origin}
+              a2aEnabled={a2aEnabled}
+              a2aCardUrl={a2aCardUrl}
+            />
+          ) : null}
         </Tabs.Panel>
       </Tabs>
 
@@ -2067,24 +1830,6 @@ for chunk in stream:
         />
       ) : null}
     </PageContainer>
-  );
-}
-
-/** One-line code block with a copy button. */
-function CopyableCode({ value }: { value: string }) {
-  return (
-    <Group gap="xs" align="center">
-      <Code block className={classes.codeGrow}>{value}</Code>
-      <CopyButton value={value}>
-        {({ copied, copy }) => (
-          <Tooltip label={copied ? 'Copied' : 'Copy'}>
-            <ActionIcon variant="subtle" onClick={copy} color={copied ? 'teal' : 'gray'}>
-              {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-            </ActionIcon>
-          </Tooltip>
-        )}
-      </CopyButton>
-    </Group>
   );
 }
 
