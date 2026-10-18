@@ -184,11 +184,21 @@ export function serializeAgentManifest(manifest: AgentManifest, format: AgentMan
 
 export class AgentManifestError extends Error {
     readonly issues: string[];
-    constructor(message: string, issues: string[] = []) {
+    /** Set when the failure has its own HTTP meaning: `agent_key_conflict` (409), `agent_not_found` (404). */
+    readonly code?: 'agent_key_conflict' | 'agent_not_found';
+    constructor(message: string, issues: string[] = [], code?: 'agent_key_conflict' | 'agent_not_found') {
         super(message);
         this.name = 'AgentManifestError';
         this.issues = issues;
+        this.code = code;
     }
+}
+
+/** The HTTP status an import route answers for a manifest error: 409 key clash, 404 update of a missing key, else 400. */
+export function manifestErrorStatus(error: AgentManifestError): 400 | 404 | 409 {
+    if (error.code === 'agent_key_conflict') return 409;
+    if (error.code === 'agent_not_found') return 404;
+    return 400;
 }
 
 /**
@@ -417,7 +427,7 @@ export async function applyAgentManifest(
     const existing = await db.findAgentByKey(key, projectId);
 
     if (existing) {
-        if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`);
+        if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`, [], 'agent_key_conflict');
         const incoming = sanitizeConfig(manifest.spec);
         await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
         const updated = await db.updateAgent(String(existing._id), {
@@ -432,7 +442,7 @@ export async function applyAgentManifest(
         return { agent: updated, action: 'updated', missing: preview.missing };
     }
 
-    if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`);
+    if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`, [], 'agent_not_found');
 
     const incoming = sanitizeConfig(manifest.spec);
     await assertMayNameBucket(incoming, undefined, options.canNameBucket);

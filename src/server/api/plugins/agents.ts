@@ -48,6 +48,7 @@ import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from '@/lib
 import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 import {
   AgentManifestError,
+  manifestErrorStatus,
   applyAgentManifest,
   buildAgentManifest,
   parseAgentManifest,
@@ -1040,7 +1041,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send(bucketNamingForbiddenBody(error));
       }
       if (error instanceof AgentManifestError) {
-        return reply.code(400).send({ error: error.message, issues: error.issues });
+        return reply.code(manifestErrorStatus(error)).send({
+          error: error.message,
+          issues: error.issues,
+          ...(error.code ? { type: error.code, code: error.code } : {}),
+        });
       }
       return sendRouteError(reply, error, 'Import agent error', 'Failed to import agent');
     }
@@ -1056,7 +1061,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
-    if (error instanceof AgentManifestError) return reply.code(400).send({ error: error.message, issues: error.issues });
+    if (error instanceof AgentManifestError) return reply.code(manifestErrorStatus(error)).send({ error: error.message, issues: error.issues, ...(error.code ? { type: error.code, code: error.code } : {}) });
     return null;
   };
 
