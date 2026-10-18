@@ -233,7 +233,7 @@ describe('chips a keyboard can reach', () => {
     expect(markup).toMatch(/<button[^>]*type="button"[^>]*>(<span[^>]*>)*Opened \/ synchronize/);
   });
 
-  // One editor session for both checks: mounting the full-screen editor in jsdom takes seconds.
+  // One editor session for both checks.
   it('in the trigger editor: the cron presets are buttons that say which one is selected, and a save that fails on the network says so', async () => {
     fetchMock.mockImplementation((_url: string, init?: { method?: string }) => (init?.method === 'POST' ? Promise.reject(new Error('offline')) : json({ data: [] })));
     const rejections: unknown[] = [];
@@ -259,5 +259,5 @@ describe('chips a keyboard can reach', () => {
     window.removeEventListener('unhandledrejection', onRejection);
     expect(fetchMock.mock.calls.some((call) => (call[1] as { method?: string } | undefined)?.method === 'POST')).toBe(true);
     expect(rejections).toEqual([]);
-  }, 60_000);
+  });
 });
