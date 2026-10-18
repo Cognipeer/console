@@ -4799,11 +4799,18 @@ export interface IAgentRun extends IUsageAttributionFields {
    */
   unattended?: boolean;
   /**
-   * The message / variables came from an external payload: variables never fill the
+   * The message / variables came from an external payload: values taken from it never fill the
    * system prompt's `{{variables.*}}` and the Variables block is closed (agentVariables.ts).
    * Every continuation keeps it.
    */
   externalContent?: boolean;
+  /**
+   * With `externalContent`: the names of `variables` whose values did not come from the
+   * payload (a trigger's own fixed values, a Run now's overrides). Only these, besides the
+   * declared defaults, fill `{{variables.*}}` in the system prompt. Absent = none. Every
+   * continuation keeps it.
+   */
+  literalVariables?: string[] | null;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
   /** Validated agent variables (`IAgentConfig.variables`). */

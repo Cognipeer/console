@@ -52,6 +52,7 @@ import { followSessionEvents } from '@/lib/services/agents/sessionEvents';
  */
 
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { publicRunFailureMessage } from '@/lib/services/agents/agentErrors';
 import { toClientErrorBody, toClientOutputFiles, toClientPendingAction, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
@@ -290,11 +291,15 @@ function stateTask(id: string, contextId: string, state: string, text?: string):
   };
 }
 
-/** A run that failed after it started, as its task: `failed`, the error's message and what classifies it. */
-function failedTask(id: string, contextId: string, error: Record<string, unknown>): Record<string, unknown> {
-  const { message, type, code, ...extra } = error;
+/**
+ * A run that failed after it started, as its task: `failed`, the run's public message (what its row records and
+ * `tasks/get` reads back, never a provider's own text) and what classifies the error.
+ */
+function failedTask(id: string, contextId: string, error: Record<string, unknown>, message: string): Record<string, unknown> {
+  const { message: _classified, type, code, ...extra } = error;
+  void _classified;
   return {
-    ...stateTask(id, contextId, 'failed', typeof message === 'string' ? message : 'The run failed.'),
+    ...stateTask(id, contextId, 'failed', message),
     metadata: { errorType: type, ...(code ? { errorCode: code } : {}), ...extra },
   };
 }
@@ -792,7 +797,7 @@ async function streamA2aTurn(
     open.stream.status({
       state: 'failed',
       timestamp: new Date().toISOString(),
-      message: { kind: 'message', role: 'agent', messageId: `${taskId}_status`, parts: [{ kind: 'text', text: classified.error.message }] },
+      message: { kind: 'message', role: 'agent', messageId: `${taskId}_status`, parts: [{ kind: 'text', text: publicRunFailureMessage(error, classified) }] },
     }, true, { errorType: classified.error.type, ...(classified.error.code ? { errorCode: classified.error.code } : {}) });
   } finally {
     open.stream?.end();
@@ -925,7 +930,7 @@ export async function handleA2aRpc(
         // Before the run existed this is the call's error; after, the run failed: its task says so (as tasks/get does).
         if (!turn.run) throw error;
         const classified = logAgentRouteError(logger, 'A2A run failed', error);
-        return reply.code(200).send(jsonRpcOk(rpcId, failedTask(ids.taskId(turn.run), ids.contextId, toClientErrorBody(classified.error))));
+        return reply.code(200).send(jsonRpcOk(rpcId, failedTask(ids.taskId(turn.run), ids.contextId, toClientErrorBody(classified.error), publicRunFailureMessage(error, classified))));
       }
       const refusal = runRefusalRpc(rpcId, outcome);
       if (refusal) return reply.code(200).send(refusal);
@@ -1053,7 +1058,7 @@ export async function handleA2aRpc(
     // (`pending_action_ids` to answer, `spent_usd` / `max_cost_usd` of a spent budget).
     const { message: _message, type: _type, code: _code, ...extra } = toClientErrorBody(classified.error);
     void _message; void _type; void _code;
-    return reply.code(200).send(jsonRpcError(rpcId, -32603, classified.error.message, {
+    return reply.code(200).send(jsonRpcError(rpcId, -32603, publicRunFailureMessage(error, classified), {
       type: classified.error.type,
       ...(classified.error.code ? { code: classified.error.code } : {}),
       ...extra,

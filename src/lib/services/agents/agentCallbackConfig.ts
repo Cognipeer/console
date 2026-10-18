@@ -18,15 +18,20 @@ const logger = createLogger('agent:callback-config');
 /** Same mask the sandbox secrets use (one write-only convention on the agent form). */
 export const AGENT_CALLBACK_SECRET_MASK = '••••••';
 
-/** Seals an incoming callback config for storage, keeping the stored secret when the mask comes back. */
+/**
+ * Seals an incoming callback config for storage, keeping the stored secret when the mask comes back.
+ *
+ * A callback with no URL is no callback at all: there is nowhere to send a run's result and nothing
+ * to sign, so it answers `undefined` (an empty object, a cleared URL, the mask next to no URL) and the
+ * stored secret goes with it. The caller drops the field instead of storing what is left of it.
+ */
 export function sealAgentCallbackConfig(
   incoming: IAgentCallbackConfig | undefined,
   current: IAgentCallbackConfig | undefined,
 ): IAgentCallbackConfig | undefined {
-  if (!incoming) return incoming;
+  if (!incoming) return undefined;
   const { secret, secretSealed: _ignored, ...rest } = incoming;
-  // A callback with no URL has nothing to sign: the mask coming back without one drops the stored secret.
-  if (secret === AGENT_CALLBACK_SECRET_MASK && !rest.url) return rest;
+  if (!rest.url) return undefined;
   if (secret === undefined || secret === AGENT_CALLBACK_SECRET_MASK) {
     return current?.secretSealed ? { ...rest, secretSealed: current.secretSealed } : rest;
   }

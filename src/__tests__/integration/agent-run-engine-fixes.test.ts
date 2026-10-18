@@ -61,6 +61,7 @@ import { AgentRunInterruptedError } from '@/lib/services/agents/agentErrors';
 import {
   AGENT_RUN_CALLBACK_QUEUE,
   AGENT_RUN_QUEUE,
+  INTERRUPTED_RUN_MESSAGE,
   agentRunCallbackEventId,
   deliverAgentRunCallbackJob,
   drainLocalAgentRuns,
@@ -68,6 +69,8 @@ import {
   runAgentJobLocal,
   startAgentRun,
 } from '@/lib/services/agents/agentRunService';
+import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
+import { startSessionTurnEvents } from '@/lib/services/agents/sessionTurnEvents';
 import { reconcileOrphanedAgentRuns, triggerAgentRunReconcilerRun } from '@/lib/services/agents/agentRunReconciler';
 import { resetAgentRunDrainForTests } from '@/lib/services/agents/agentConsumer';
 import { drainAgentRunsBeforeHttpClose } from '@/server/httpShutdown';
@@ -299,6 +302,94 @@ describe('an inline turn whose row was ended elsewhere', () => {
     await delay(100);
     await drainLocalAgentRuns(50);
     await expect(outcome).rejects.toBeInstanceOf(AgentRunInterruptedError);
+  });
+});
+
+describe('the event log of a run the shutdown drain interrupted', () => {
+  const newSession = async () => String((await db.createAgentConversation({
+    tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, title: 'Drained', messages: [], createdBy: 'user-1',
+  }))._id);
+  const eventsOf = async (conversationId: string) => {
+    const [row] = await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId });
+    const events = await db.listAgentSessionEvents(conversationId, { runId: String(row._id) });
+    return { run: row, events };
+  };
+  const inline = (conversationId: string) => startAgentRun({
+    ...base(conversationId),
+    channel: 'responses',
+    execution: { kind: 'inline', waitMs: 0, stream: {}, cancelOnDisconnect: false },
+  });
+
+  it('ends with the terminal events of a failed turn, delivered before the drain returns, and leaves the session idle', async () => {
+    const conversationId = await newSession();
+    // A turn marks its session running when it starts; this one is hung inside a model call.
+    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running', runtimeTurnId: 'turn-1' });
+    hoisted.executeAgentChat.mockImplementation(() => new Promise(() => undefined));
+    const followed: Array<{ type: string; runId?: string }> = [];
+    const unsubscribe = sessionEventBus.subscribe(conversationId, (frame) => followed.push({ type: frame.type, runId: frame.runId }));
+    const outcome = inline(conversationId);
+    const settled = outcome.then(() => 'completed', (error: unknown) => error);
+    await delay(100);
+
+    await drainLocalAgentRuns(50);
+    unsubscribe();
+    expect(await settled).toBeInstanceOf(AgentRunInterruptedError);
+
+    const { run, events } = await eventsOf(conversationId);
+    expect(events.map((event) => event.type)).toEqual(['session.error', 'session.status_idle']);
+    expect(events[0].data).toEqual({ message: INTERRUPTED_RUN_MESSAGE, code: 'agent_run_interrupted' });
+    expect(events[1].data).toEqual({ stopReason: 'error', detail: INTERRUPTED_RUN_MESSAGE });
+    // The run's own log: the runs API reads it by the run id.
+    expect(events.every((event) => event.runId === String(run._id))).toBe(true);
+    // A follower on this node had both frames before its stream was ended.
+    expect(followed).toEqual([
+      { type: 'session.error', runId: String(run._id) },
+      { type: 'session.status_idle', runId: String(run._id) },
+    ]);
+    expect(await db.findAgentConversationById(conversationId)).toMatchObject({
+      runtimeStatus: 'idle', stopReason: 'error', lastEventSeq: events[1].seq,
+    });
+  });
+
+  it('the cut-off turn winding down afterwards adds no second ending', async () => {
+    const conversationId = await newSession();
+    // What the real turn does: record its events through the session recorder, and end as cancelled when it is cut off.
+    hoisted.executeAgentChat.mockImplementation(async (request: { runId: string; signal: AbortSignal }) => {
+      const turn = startSessionTurnEvents({
+        db, tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId, runId: request.runId,
+        userMessage: 'hello', trigger: 'message',
+      });
+      turn.emitInTurn('agent.tool_use', { toolCallId: 'call-1', name: 'web_search' });
+      await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }));
+      await turn.finish({ stopReason: 'cancelled', content: 'partial text', detail: 'The caller aborted the request' });
+      return fakeResponse('resp_partial');
+    });
+    const settled = inline(conversationId).then(() => 'completed', (error: unknown) => error);
+    await delay(150);
+
+    await drainLocalAgentRuns(50);
+    await settled;
+    await delay(200); // the turn's own tail lands
+
+    const { events } = await eventsOf(conversationId);
+    const types = events.map((event) => event.type);
+    expect(types).toEqual(['user.message', 'session.status_running', 'agent.tool_use', 'session.error', 'session.status_idle']);
+    expect(events.find((event) => event.type === 'session.status_idle')?.data).toMatchObject({ stopReason: 'error' });
+    expect(await db.findAgentConversationById(conversationId)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'error' });
+  });
+
+  it('leaves a session alone that does not read running any more (a pause, or a message that moved it on)', async () => {
+    const conversationId = await newSession();
+    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'requires_action', stopReason: 'requires_action', runtimeTurnId: 'turn-9' });
+    hoisted.executeAgentChat.mockImplementation(() => new Promise(() => undefined));
+    const settled = inline(conversationId).then(() => 'completed', (error: unknown) => error);
+    await delay(100);
+
+    await drainLocalAgentRuns(50);
+    await settled;
+
+    expect((await eventsOf(conversationId)).events).toEqual([]);
+    expect(await db.findAgentConversationById(conversationId)).toMatchObject({ runtimeStatus: 'requires_action', stopReason: 'requires_action' });
   });
 });
 

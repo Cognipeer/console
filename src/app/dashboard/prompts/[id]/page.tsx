@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import Mustache from 'mustache';
 import {
   ActionIcon,
   Badge,
@@ -51,6 +50,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { Playground } from '@/components/playground';
 import type { PromptView, PromptVersionView, PromptCommentView } from '@/lib/services/prompts';
+import { renderPromptText } from '@/lib/shared/promptText';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
 import PromptVersionHistoryModal from '@/components/prompts/PromptVersionHistoryModal';
 
@@ -174,7 +174,7 @@ export default function PromptDetailPage() {
     try {
       const data = previewData.trim().length > 0 ? JSON.parse(previewData) : {};
       return {
-        preview: Mustache.render(prompt.template, data),
+        preview: renderPromptText(prompt.template, data),
         error: null as string | null,
       };
     } catch (error) {

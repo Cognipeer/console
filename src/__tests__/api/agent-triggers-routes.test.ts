@@ -534,7 +534,7 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     expect(fired.statusCode).toBe(202);
     const input = hoisted.fireTrigger.mock.calls[0][2];
     expect(input).toMatchObject({
-      trigger: 'manual', externalContent: true, variables: { days: 8 }, metadata: { webhook_event: 'pull_request' },
+      trigger: 'manual', externalContent: true, variables: { days: 8 }, literalVariables: [], metadata: { webhook_event: 'pull_request' },
     });
     expect(input.message).toMatch(/^This run was started by an incoming webhook \(github · pull_request\)\./);
     expect(input.message).toContain('Webhook event (JSON):');
@@ -542,6 +542,28 @@ describe('webhook trigger (SPEC-webhooks W6)', () => {
     const plain = json<{ id: string }>(await client('POST', '', { name: 'Plain', ...SCHEDULE, prompt: 'x' }));
     const refused = await client('POST', `/${plain.id}/run`, { payload });
     expect(refused.statusCode).toBe(400);
+  });
+
+  it('Run now with a sample payload names the variables that are not event content (they fill the system prompt); the event\'s own stay in the message', async () => {
+    const created = await create(WEBHOOK, { variables: { days: '{{payload.number}}', region: 'eu' } });
+    const sample = { payload: { action: 'opened', number: 9 }, headers: { 'x-github-event': 'pull_request' } };
+    hoisted.fireTrigger.mockResolvedValue({ kind: 'accepted', run: run() });
+
+    // `region` is written in the trigger; `days` comes out of the event.
+    await client('POST', `/${created.id}/run`, sample);
+    expect(hoisted.fireTrigger.mock.calls[0][2]).toMatchObject({ externalContent: true, variables: { days: 9, region: 'eu' }, literalVariables: ['region'] });
+
+    // A value the person pressing Run now types is theirs, not the event's.
+    await client('POST', `/${created.id}/run`, { ...sample, variables: { days: 3 } });
+    const overridden = hoisted.fireTrigger.mock.calls[1][2];
+    expect(overridden).toMatchObject({ variables: { days: 3, region: 'eu' } });
+    expect([...overridden.literalVariables].sort()).toEqual(['days', 'region']);
+
+    // Without a payload this is a plain run of the trigger: no external content, nothing to separate.
+    await client('POST', `/${created.id}/run`, {});
+    const plain = hoisted.fireTrigger.mock.calls[2][2];
+    expect(plain).not.toHaveProperty('externalContent');
+    expect(plain).not.toHaveProperty('literalVariables');
   });
 
   it('lists the delivery log newest first with a cursor', async () => {

@@ -123,7 +123,7 @@ If a guardrail blocks the request:
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing `model` or `messages`, guardrail block |
+| 400 | A body that is not a JSON object (`invalid_json`: malformed, empty, an array or a string), missing `model` or `messages`, guardrail block |
 | 401 | Invalid API token |
 | 500 | Model not found |
 | 500 | Model is not configured for chat completions |

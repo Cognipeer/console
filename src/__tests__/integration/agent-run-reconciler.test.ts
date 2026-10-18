@@ -113,6 +113,58 @@ describe('agent-run crash-recovery reconciler (§7.1)', () => {
     expect(after?.errorReason).toBe('worker_lost');
   });
 
+  describe('the session event log of a run that is lost', () => {
+    const runningSession = async () => {
+      const conversation = await db.createAgentConversation({
+        tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, title: 'Lost', messages: [], createdBy: 'user-1',
+      });
+      const conversationId = String(conversation._id);
+      // What the turn did when it started, before its worker died.
+      await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running', runtimeTurnId: 'turn-1' });
+      return conversationId;
+    };
+
+    it('ends with the terminal events of a failed turn, so a follower is not left waiting, and the session is idle', async () => {
+      const conversationId = await runningSession();
+      const run = await db.createAgentRun(baseRecord(conversationId));
+      await db.claimAgentRun(String(run._id), tenantId, 'dead-worker', new Date(Date.now() - 120_000));
+
+      await triggerAgentRunReconcilerRun();
+
+      const events = await db.listAgentSessionEvents(conversationId, { runId: String(run._id) });
+      expect(events.map((event) => event.type)).toEqual(['session.error', 'session.status_idle']);
+      expect(events[0].data).toMatchObject({ code: 'agent_run_interrupted' });
+      expect(events[1].data).toMatchObject({ stopReason: 'error' });
+      expect(await db.findAgentConversationById(conversationId)).toMatchObject({
+        runtimeStatus: 'idle', stopReason: 'error', lastEventSeq: events[1].seq,
+      });
+    });
+
+    it('leaves the log and the session of a healthy (fresh-heartbeat) run alone', async () => {
+      const conversationId = await runningSession();
+      const run = await db.createAgentRun(baseRecord(conversationId));
+      await db.claimAgentRun(String(run._id), tenantId, 'healthy-worker', new Date());
+
+      await triggerAgentRunReconcilerRun();
+
+      expect(await db.listAgentSessionEvents(conversationId, { runId: String(run._id) })).toEqual([]);
+      expect(await db.findAgentConversationById(conversationId)).toMatchObject({ runtimeStatus: 'running' });
+    });
+
+    it('does not reset a session that moved on (it reads requires_action, not running)', async () => {
+      const conversationId = await runningSession();
+      await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'requires_action', stopReason: 'requires_action' });
+      const run = await db.createAgentRun(baseRecord(conversationId));
+      await db.claimAgentRun(String(run._id), tenantId, 'dead-worker', new Date(Date.now() - 120_000));
+
+      await triggerAgentRunReconcilerRun();
+
+      expect((await db.getAgentRunById(String(run._id), tenantId, PROJECT_ID))?.errorReason).toBe('worker_lost');
+      expect(await db.listAgentSessionEvents(conversationId, { runId: String(run._id) })).toEqual([]);
+      expect(await db.findAgentConversationById(conversationId)).toMatchObject({ runtimeStatus: 'requires_action' });
+    });
+  });
+
   it('deletes an ABANDONED sync reservation row (past its own ceiling + grace) rather than finalizing it', async () => {
     const conversationId = 'conv-stale-sync';
     const run = await db.createAgentRun(baseRecord(conversationId, 'sync'));

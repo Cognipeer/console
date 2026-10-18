@@ -490,6 +490,7 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
   let runVariables: Record<string, unknown> | null;
   let runMetadata = metadata.metadata;
   let externalContent = false;
+  let literalVariables: string[] = [];
   if (trigger.type === 'webhook') {
     const built = await manualWebhookTurn({
       trigger,
@@ -506,6 +507,7 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
     }
     message = built.turn.message;
     runVariables = built.turn.variables;
+    literalVariables = built.turn.literalVariables;
     runMetadata = built.metadata;
     externalContent = body.payload !== undefined;
   } else {
@@ -522,7 +524,7 @@ async function runTriggerNow(request: FastifyRequest, reply: FastifyReply, calle
     message,
     variables: runVariables,
     metadata: runMetadata,
-    ...(externalContent ? { externalContent: true } : {}),
+    ...(externalContent ? { externalContent: true, literalVariables } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     // Run now counts against the person (and token) who pressed it.
     principal: { userId: caller.userId, ...(caller.apiTokenId ? { apiTokenId: caller.apiTokenId } : {}) },

@@ -2691,11 +2691,12 @@ export async function updateAgentRecord(
     await db.switchToTenant(tenantDbName);
     // Old Advanced-tab reasoning moves next to the model on every save.
     if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.callback) {
+    if (data.config?.sandbox || data.config?.callback !== undefined) {
         // `config` replaces the stored one wholesale; masked secret values
         // must resolve against what is stored, not be saved as the mask —
         // and a plaintext secret (sandbox secrets, the callback secret) must
-        // be sealed before it is written.
+        // be sealed before it is written. A callback sent without a URL (or
+        // as `null`) is the way to remove it: the field is dropped here.
         const current = await db.findAgentById(agentId);
         data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
     } else if (data.config) {
@@ -3248,9 +3249,16 @@ export interface AgentChatRequest {
     /**
      * Whether `variables` also fill the `{{variables.<name>}}` prompt variables (default
      * true). Off for variables that came from outside the platform's own callers: they
-     * then reach the model only inside the user message, never the system prompt.
+     * then reach the model only inside the user message, never the system prompt. The
+     * prompt still reads the declared defaults and the values named in `literalVariables`.
      */
     variablesInPrompt?: boolean;
+    /**
+     * With `variablesInPrompt: false`: the names in `variables` whose value did not come
+     * from the external content (a trigger's own fixed values). Only these, besides the
+     * declared defaults, fill `{{variables.<name>}}` in the system prompt.
+     */
+    literalVariables?: string[];
     /**
      * The message / variables came from an external payload (a webhook): the Variables
      * block is closed with a line saying where the external data ends.
@@ -3770,6 +3778,8 @@ async function buildLocalAgentRun(input: {
     /** Validated agent variables of the turn, exposed as `{{variables.<name>}}` (see `variablesInPrompt`). */
     variables?: Record<string, unknown>;
     variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
+    literalVariables?: string[];
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
@@ -3820,6 +3830,7 @@ async function buildLocalAgentRun(input: {
         userId: input.userId,
         variables: input.variables,
         variablesInPrompt: input.variablesInPrompt,
+        literalVariables: input.literalVariables,
     });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
@@ -4465,13 +4476,14 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
 
 /** What a continuation must apply again: the turn's own structured output and variables. */
 function pausedTurnOptions(
-    request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt'>,
+    request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt' | 'literalVariables'>,
 ): PausedTurnOptions | undefined {
     if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
     return {
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.variablesInPrompt === false && request.literalVariables?.length ? { literalVariables: request.literalVariables } : {}),
     };
 }
 
@@ -4799,6 +4811,7 @@ async function runAgentChatTurn(
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5842,6 +5855,8 @@ export interface AgentResumeRequest {
     responseFormat?: AgentResponseFormat;
     variables?: Record<string, unknown>;
     variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (see `AgentChatRequest`). */
+    literalVariables?: string[];
     cancellationCell?: AgentRunCancellationCell;
     signal?: AbortSignal;
     onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -6125,6 +6140,7 @@ async function runAgentResumeTurn(
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
     };
     const startedAt = Date.now();
 
@@ -6169,6 +6185,7 @@ async function runAgentResumeTurn(
         ...(turnOptions.responseFormat ? { responseFormat: turnOptions.responseFormat } : {}),
         ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
     });
 
     try {

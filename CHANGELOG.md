@@ -65,6 +65,15 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Answering an approval inline continues the paused run: the response id is `resp_<runId>` of that run, its events cover
   the continuation (they no longer stop at the pause), and a timeout continuation (`onTimeout` deny or allow) is labelled
   `timeout` in the session events.
+- The answer to a pause is part of the paused run's events too: `action.resolved` (also when a timeout denies or ends the
+  request, then with the `session.status_idle` that closes the pause) and a client tool's `agent.tool_result` carry the
+  run's `run_id`, so `GET /agents/runs/{runId}/events` and its stream no longer skip them.
+- A run the server ends from outside its turn (the shutdown drain, `interrupted`; a worker that stopped sending heartbeats,
+  `worker_lost`) now closes its session events like a failed turn: `session.error` (`agent_run_interrupted`) and
+  `session.status_idle` with `stop_reason: error`, with the run's `run_id`. A client that follows the run or the session and
+  waits for the idle event is no longer left waiting (after a drain the log held nothing, or a `cancelled` idle that came
+  after the stream had been ended), a follower on the draining node gets both events before its stream ends, and the session
+  no longer stays `running`.
 - The agent-run quota counts a run only once it is admitted (a conflict or a concurrency refusal uses no unit), and a
   start refused before its run exists removes the session that the same request created. A queued run whose job fails
   before it claims its run is no longer lost: the reconciler republishes it.
@@ -72,10 +81,14 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   a limit the answer is a plain JSON `429` (`Retry-After` 30 s for the cap, 60 s for the quota), not an `error` event;
   non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a trigger's Run now) stop when the
   client disconnects.
-- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses` and `/agents/responses`; an
+- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses`, `/agents/responses`, chat
+  completions, embeddings and image generation (it carried no `error.code` on the last three); an
   `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
   has to arrive within the outbound timeout (`400 attachment_unreachable`), and a malformed percent-escape in its name no
   longer fails the call.
+- An A2A task that failed after the run started (`message/send`, `message/stream`) reads the run's own public message,
+  the one `tasks/get` and the runs API return, instead of the provider's error text, which can name its endpoint,
+  deployment or request ids; an error the caller can act on keeps its message.
 - Responses `usage` always carries `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`
   (`0` when not reported; `reasoning_tokens` is `0` for an agent run). `reasoning` is applied to runs that execute in the
   request only: a queued (`background`, `flex`, `POST …/runs` without `stream`) run uses the agent's own effort.
@@ -109,6 +122,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   default. Values belong to the request that carries them: a session does not remember them, the prompt is rendered
   again on every turn, and the block stays in the history of each turn that sent one. Studio explains this in
   Configure → Variables and warns next to a required variable that has no default.
+- Prompt templates insert a value as it is. An agent's instructions, the prompt library's render endpoint
+  (`POST /prompts/{key}/render`) and the Prompt Studio preview no longer turn `&`, `<`, `>` and quotes into HTML entities
+  (`Tom & Jerry` used to reach the model as `Tom &amp; Jerry`); `{{x}}`, `{{{x}}}` and `{{&x}}` give the same text.
 
 ### A2A
 
@@ -126,7 +142,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `run_<runId>.<nonce>` and `<sessionId>.<nonce>` and must be handed back whole; without the right nonce `tasks/get`,
   `tasks/cancel` and `tasks/resubscribe` answer `-32001` and a `contextId` answers `-32602` (`unknown contextId`).
   Public conversations created before this change can no longer be reached from the public route. The variables of a
-  public caller's `data` part are external content and never reach the system prompt.
+  public caller's `data` part are external content and never reach the system prompt (the declared defaults do).
 
 ### Triggers and incoming webhooks
 
@@ -143,7 +159,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
   event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
   with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
-  the message, marked as external data, never in the system prompt.
+  the message, marked as external data, never in the system prompt. The instructions still read the declared defaults and
+  the variables the trigger sets to a fixed value (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
   replicas.
 
@@ -169,7 +186,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   stored values answers `409 sandbox_env_unreadable` and keeps the ciphertext, and the template editor asks for every
   value or none. A row opened with Replace and saved without a value keeps the stored one.
 - Clearing an agent's callback URL removes the whole callback, and the stored secret with it (the masked secret read back
-  next to no URL is accepted and dropped).
+  next to no URL is accepted and dropped). The field is gone from the saved config: a callback sent as `{}`, with an
+  empty `url` or as `null` is no longer stored as an empty object (or as a secret with nothing to sign), and the agent
+  reads back without `callback`.
 
 ### Configuration
 

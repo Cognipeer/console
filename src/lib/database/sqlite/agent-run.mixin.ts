@@ -43,7 +43,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            runClass, notBefore, detachedAt, metadata, channel, triggerId, runTrigger,
-           responseFormat, variables, queueGeneration, lastPublishedAt, unattended, externalContent, background,
+           responseFormat, variables, queueGeneration, lastPublishedAt, unattended, externalContent, literalVariables, background,
            callbackEventId, resumeTrigger, resumeUserId, resumeApiTokenId, accountableUserId, accountableTokenId,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
@@ -53,7 +53,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
            @runClass, @notBefore, @detachedAt, @metadata, @channel, @triggerId, @runTrigger,
-           @responseFormat, @variables, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @background,
+           @responseFormat, @variables, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @literalVariables, @background,
            @callbackEventId, @resumeTrigger, @resumeUserId, @resumeApiTokenId, @accountableUserId, @accountableTokenId,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
@@ -100,6 +100,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           lastPublishedAt: record.lastPublishedAt ? new Date(record.lastPublishedAt).toISOString() : null,
           unattended: record.unattended ? 1 : null,
           externalContent: record.externalContent ? 1 : null,
+          literalVariables: record.literalVariables?.length ? this.toJson(record.literalVariables) : null,
           background: record.background ? 1 : null,
           callbackEventId: record.callbackEventId ?? null,
           resumeTrigger: record.resumeTrigger ?? null,
@@ -661,6 +662,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         lastPublishedAt: this.toDate(row.lastPublishedAt) ?? null,
         ...(Number(row.unattended) === 1 ? { unattended: true } : {}),
         ...(Number(row.externalContent) === 1 ? { externalContent: true } : {}),
+        ...(row.literalVariables ? { literalVariables: this.parseJson(row.literalVariables, [] as string[]) } : {}),
         ...(Number(row.background) === 1 ? { background: true } : {}),
         callbackEventId: (row.callbackEventId as string) ?? null,
         resumeTrigger: (row.resumeTrigger as IAgentRun['resumeTrigger']) ?? null,

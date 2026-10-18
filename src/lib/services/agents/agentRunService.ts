@@ -39,7 +39,7 @@ import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
-import { AgentRunInterruptedError, AgentRunTimeoutError, classifyAgentRunError } from './agentErrors';
+import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import {
@@ -523,10 +523,16 @@ export interface StartAgentRunInput {
    */
   unattended?: boolean;
   /**
-   * The message / variables came from an external payload: variables stay out of the
-   * system prompt and the Variables block is closed (agentVariables.ts). Kept on the row.
+   * The message / variables came from an external payload: values taken from it stay out
+   * of the system prompt and the Variables block is closed (agentVariables.ts). Kept on the row.
    */
   externalContent?: boolean;
+  /**
+   * With `externalContent`: the names in `variables` whose value did not come from the
+   * payload (a trigger's own fixed values). They fill the system prompt's
+   * `{{variables.*}}` next to the declared defaults. Kept on the row.
+   */
+  literalVariables?: string[];
   /** The request asked for `background: true`: kept on the row (a stream runs inline, yet reads back as background). */
   background?: boolean;
   /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
@@ -841,6 +847,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       variables: input.variables ?? null,
       ...(input.unattended ? { unattended: true } : {}),
       ...(input.externalContent ? { externalContent: true } : {}),
+      ...(input.externalContent && input.literalVariables?.length ? { literalVariables: input.literalVariables } : {}),
       ...(input.background ? { background: true } : {}),
       queueGeneration: 1,
     };
@@ -1184,7 +1191,7 @@ function executeInlineRun(
       return done ? { kind: 'response', run: done, response: raced.response } : await settleFromRow();
     } catch (error) {
       logger.error('Inline agent run failed unexpectedly', { runId, error: error instanceof Error ? error.message : String(error) });
-      const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_FAILURE_MESSAGE }, { errorReason: 'agent_error' });
+      const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_RUN_FAILURE_MESSAGE }, { errorReason: 'agent_error' });
       return { kind: 'error', run: finalized ?? run, error };
     } finally {
       clearInterval(heartbeatTimer);
@@ -1362,6 +1369,7 @@ export async function queueAgentRunResume(input: {
         ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
         ...(source?.unattended ? { unattended: true } : {}),
         ...(source?.externalContent ? { externalContent: true } : {}),
+        ...(source?.externalContent && source.literalVariables?.length ? { literalVariables: source.literalVariables } : {}),
         ...(source?.variables ? { variables: source.variables } : {}),
         ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
         queueGeneration: 1,
@@ -1547,6 +1555,62 @@ async function dropPausedConversation(db: DatabaseProvider, run: IAgentRun): Pro
   }
 }
 
+/**
+ * A run the platform ended from outside its turn: the shutdown drain (`interrupted`), or the reconciler
+ * for a worker that stopped sending heartbeats (`worker_lost`). The turn is gone, or is being cut off and
+ * would end its log as `cancelled`, which is not what happened to the run (it failed, and can be retried).
+ * So the session's event log is closed here, the way a failed turn closes it: `session.error`, then
+ * `session.status_idle` with `stop_reason: error`. The documented way to know a turn is over is that idle
+ * event, and a follower of the run or of the session (this node's are still attached when the drain calls
+ * this) is no longer left waiting for one that never comes; the session stops reading `running`, and the
+ * `session.idled` webhook fires.
+ *
+ * The session gets a new turn owner first, so the cut-off turn's own late end finds it has been overtaken
+ * and writes nothing (the same rule that keeps an old turn from overwriting a newer one). Only a session
+ * that still reads `running` is touched: one a pause or a newer message moved on is not this run's to
+ * reset. Best effort, like everything the log records: it never fails the drain or the sweep.
+ */
+export async function recordRunEndedInEvents(
+  db: DatabaseProvider,
+  run: Pick<IAgentRun, '_id' | 'tenantId' | 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId'>,
+  failure: { reason: string; message: string },
+): Promise<void> {
+  const runId = String(run._id);
+  try {
+    const conversation = await db.findAgentConversationById(run.conversationId);
+    if (!conversation || conversation.runtimeStatus !== 'running') return;
+
+    // The same client-safe wording and code the run's callers get (an inline caller, A2A, the runs API).
+    const ended = new AgentRunInterruptedError(failure.reason, failure.message);
+    // The status goes in BEFORE the idle frame is published, so a follower that reloads the session on
+    // it never reads 'running'.
+    await db.updateAgentConversationRuntime(run.conversationId, {
+      runtimeStatus: 'idle',
+      stopReason: 'error',
+      pendingActionIds: [],
+      runtimeTurnId: crypto.randomUUID(),
+    });
+    const writer = createSessionEventWriter({
+      db,
+      tenantDbName: run.tenantDbName,
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      agentKey: run.agentKey,
+      conversationId: run.conversationId,
+      runId,
+    });
+    writer.emit('session.error', { message: ended.message, code: ended.code });
+    writer.emit('session.status_idle', { stopReason: 'error', detail: ended.message });
+    await writer.close();
+    await db.updateAgentConversationRuntime(run.conversationId, { lastEventSeq: writer.lastSeq() });
+  } catch (error) {
+    logger.warn('Could not record the end of an interrupted run in its session events', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 // ── Status, listing, cancel ─────────────────────────────────────────────
 
 export async function getAgentRunStatus(
@@ -1630,12 +1694,19 @@ export async function requestAgentRunCancellation(
 /**
  * What a run's row says about how its turns run — the same for its first turn,
  * a resume and a continuation (§2.4a): nobody to ask (`unattended`), and for
- * external content, variables that never fill the system prompt.
+ * external content, variables whose values taken from outside never fill the
+ * system prompt (the declared defaults and `literalVariables` still do).
  */
-function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent'> {
+function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'literalVariables'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent' | 'literalVariables'> {
   return {
     ...(run.unattended === true ? { unattended: true } : {}),
-    ...(run.externalContent === true ? { variablesInPrompt: false, externalContent: true } : {}),
+    ...(run.externalContent === true
+      ? {
+        variablesInPrompt: false,
+        externalContent: true,
+        ...(run.literalVariables?.length ? { literalVariables: run.literalVariables } : {}),
+      }
+      : {}),
   };
 }
 
@@ -1681,19 +1752,14 @@ async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promis
   return null;
 }
 
-const GENERIC_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
 
 /** Run owners that are not user rows (triggers, timeouts, public A2A). */
 function isSyntheticRunActor(userId: string): boolean {
   return userId.startsWith('system:') || userId === 'a2a-public';
 }
 
-/** Client-facing text for a failed run: classified errors keep their message, anything else is generic. */
-function publicFailureMessage(error: unknown): string {
-  const classified = classifyAgentRunError(error);
-  const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
-  return internal ? GENERIC_FAILURE_MESSAGE : classified.error.message;
-}
+/** Client-facing text for a failed run: errors the caller can act on keep their message, anything else is generic. */
+const publicFailureMessage = (error: unknown): string => publicRunFailureMessage(error);
 
 /**
  * §7 steps 3-8: claim, race against the run's ceiling, heartbeat (liveness)
@@ -1952,6 +2018,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
             ...(request.variables ? { variables: request.variables } : {}),
             ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+            ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
             continuation: {
@@ -1976,6 +2043,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
             ...(request.variables ? { variables: request.variables } : {}),
             ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+            ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
           }).then((resumed) => resumed.response)
@@ -2067,7 +2135,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         runId,
         error: error instanceof Error ? error.message : String(error),
       });
-      await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_FAILURE_MESSAGE }, { errorReason: 'agent_error' })
+      await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_RUN_FAILURE_MESSAGE }, { errorReason: 'agent_error' })
         .catch(() => undefined);
     }
   });
@@ -2336,6 +2404,7 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   }
   const leftovers = [...activeLocalRuns.values()];
   let interrupted = 0;
+  const ended: Array<{ local: LocalRun; run: IAgentRun }> = [];
   for (const local of leftovers) {
     try {
       const completedAt = new Date();
@@ -2351,6 +2420,7 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
       if (finalized) {
         interrupted += 1;
         await fireAgentRunCallback(finalized, 'failed', { errorReason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }).catch(() => undefined);
+        ended.push({ local, run: finalized });
       }
     } catch (error) {
       logger.warn('Could not mark an interrupted agent run', {
@@ -2358,6 +2428,15 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  // The session event logs hear about it before any caller is answered and before the session event
+  // streams are ended: a follower reads the ending of its run, then its stream closes (it reconnects,
+  // and replays the same ending). Together, so the shutdown does not wait one run after another.
+  await Promise.all(ended.map(({ local, run }) => runWithTenantDb(
+    local.tenantDbName,
+    (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
+  ).catch(() => undefined)));
+  for (const local of leftovers) {
     // Abandoned: the row is final; whatever the turn still does must not land.
     // An inline run's caller is answered with the row at once (its stream ends).
     local.cell.cancelled = true;

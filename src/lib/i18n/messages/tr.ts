@@ -3347,7 +3347,7 @@ export const tr: typeof en = {
       webhookIncludePayloadHint: 'Olay JSON’unu (en çok 32 KiB) dış veri olarak işaretleyip mesaja ekler.',
       webhookVariables: 'Kullanabileceğiniz etiketler (değerler JSON olarak eklenir):',
       webhookPromptHint: 'Bir şablon: çift süslü parantez içindeki payload.number gibi etiketler her teslimattan doldurulur. İçerik ekleniyorsa ya da değişkenler eşleniyorsa isteğe bağlıdır.',
-      webhookVariablesHint: 'Çift süslü parantez içinde etiket olan bir değer teslimattan alınır; tek başına bir etiket türünü korur. Diğer her şey sabit değerdir. Dışarıdan geldikleri için bu değerler modele ajanın prompt’unda değil, mesajın içinde (bir Variables bloğu olarak) ulaşır.',
+      webhookVariablesHint: 'Çift süslü parantez içinde etiket olan bir değer teslimattan alınır; tek başına bir etiket türünü korur. Diğer her şey sabit değerdir. Dışarıdan geldikleri için teslimattan alınan değerler modele ajanın prompt’unda değil, mesajın içinde (bir Variables bloğu olarak) ulaşır; sabit değerler ve tanımlı varsayılanlar ise prompt’u da doldurur.',
       webhookClassHint: 'Yoğun GitLab / Azure DevOps kancaları için Ertelenmiş daha güvenlidir.',
       copy: 'Kopyala',
       copied: 'Kopyalandı',
