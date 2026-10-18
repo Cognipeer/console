@@ -119,7 +119,7 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
-import { normalizePlaygroundUsage } from './playgroundUsage';
+import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from './playgroundUsage';
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
@@ -6503,6 +6503,10 @@ async function runAgentResumeTurn(
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+        // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
+        // the SDK counts only the leg it just ran. The stored message keeps its own leg.
+        const earlierLegs = pausedRun ? pausedLegsUsage(conversation.messages ?? []) : undefined;
+        const turnUsage = earlierLegs ? (usage ? addPlaygroundUsage(earlierLegs, usage) : earlierLegs) : usage;
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
@@ -6583,7 +6587,7 @@ async function runAgentResumeTurn(
             ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
             content: outcome.content,
             messageIndex: messages.length - 1,
-            ...(usage ? { usage: { ...usage } } : {}),
+            ...(turnUsage ? { usage: { ...turnUsage } } : {}),
             ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
             ...(budget && !superseded ? { budget } : {}),
         });
@@ -6601,7 +6605,7 @@ async function runAgentResumeTurn(
                 messages,
                 reasoning: assistantReasoning,
                 outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
-                usage,
+                usage: turnUsage,
                 outputParsed: result.output,
                 outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
                 ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
