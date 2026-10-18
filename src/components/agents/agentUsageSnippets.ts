@@ -160,8 +160,8 @@ const CALLBACK_URL = 'https://example.com/hooks/agent-runs';
 const CALLBACK_SECRET = 'a-long-random-secret';
 /** One key per job: the same key on another request is `409 idempotency_key_conflict`, so it carries the agent's key. */
 const idempotencyKeyFor = (agentKey: string) => `${agentKey}-weekly-digest-2026-w42`;
-const FINISHED_RUN_ID = 'run_6710f3a2c1d4e5b8a9c0d1e2';
-const SAMPLE_RUN_ID = 'run_6710f3a2c1d4e5b8a9c0d1e3';
+const FINISHED_RUN_ID = 'run_0b7e5a1c-3f2d-4c8e-9a61-5d2f7c8e4b10';
+const SAMPLE_RUN_ID = 'run_0b7e5a1c-3f2d-4c8e-9a61-5d2f7c8e4b11';
 const STRUCTURED_MESSAGE = 'Triage this ticket: the checkout page returns a 500 error.';
 
 /** A JSON Schema the agent can enforce: an object with declared properties (see `resolveResponseFormatSchema`). */
@@ -409,8 +409,8 @@ export function buildAgentUsageSnippets(options: AgentUsageSnippetOptions): Agen
     class: 'default',
     agent: agentKey,
     version: null,
-    session_id: '6710f3a2c1d4e5b8a9c0d1e1',
-    conversation_id: '6710f3a2c1d4e5b8a9c0d1e1',
+    session_id: '7c3e9f20-5a1b-4d6e-8f42-1b9a0c6d2e51',
+    conversation_id: '7c3e9f20-5a1b-4d6e-8f42-1b9a0c6d2e51',
     channel: 'runs',
     trigger: 'request',
     trigger_id: null,
@@ -446,8 +446,8 @@ export function buildAgentUsageSnippets(options: AgentUsageSnippetOptions): Agen
     class: 'default',
     agent: agentKey,
     version: null,
-    session_id: '6710f3a2c1d4e5b8a9c0d1e4',
-    conversation_id: '6710f3a2c1d4e5b8a9c0d1e4',
+    session_id: '7c3e9f20-5a1b-4d6e-8f42-1b9a0c6d2e52',
+    conversation_id: '7c3e9f20-5a1b-4d6e-8f42-1b9a0c6d2e52',
     channel: 'runs',
     trigger: 'request',
     trigger_id: null,
@@ -508,7 +508,7 @@ export function buildAgentUsageSnippets(options: AgentUsageSnippetOptions): Agen
       '# The answer is a stream of Responses events (abridged; the first one names the run and the session):',
       sse('response.created', {
         type: 'response.created',
-        response: { cognipeer: { run_id: 'run_6710f3a2...', session_id: '6710f3a2...' } },
+        response: { cognipeer: { run_id: 'run_0b7e5a1c...', session_id: '7c3e9f20...' } },
       }),
       '#',
       sse('response.output_text.delta', { type: 'response.output_text.delta', delta: 'Hello' }),

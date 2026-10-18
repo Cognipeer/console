@@ -970,7 +970,7 @@ describe('following a run, one call at a time', () => {
       expect(restCalls(text), text).toHaveLength(1);
       // The id is a placeholder to replace, set once at the top of the block; the call reads it from there.
       expect(text).toContain('# Replace with the "id" of the run you started');
-      expect(text).toMatch(/^RUN_ID=run_[0-9a-f]{24}$/m);
+      expect(text).toMatch(/^RUN_ID=run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/m);
       expect(text).toContain('/agents/runs/$RUN_ID');
     }
     // The stream is the one that does not end, and its block says so.
@@ -1000,7 +1000,7 @@ describe('the answers the tab shows are the answers the API gives', () => {
         if (property.enum && run[name] !== null) expect(property.enum, `${name}: ${String(run[name])}`).toContain(run[name]);
       }
       expect(run.object).toBe('agent.run');
-      expect(String(run.id)).toMatch(/^run_[0-9a-f]{24}$/);
+      expect(String(run.id)).toMatch(/^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
       expect(run.agent).toBe('report-bot');
       // Not pinned, so the run names no version; started by a request, not by a trigger.
       expect(run.version).toBeNull();
