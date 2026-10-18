@@ -37,7 +37,7 @@ import { followSessionEvents } from '@/lib/services/agents/sessionEvents';
  * a client that goes away leaves the run going, and `tasks/resubscribe`
  * reattaches to it (or to any task the caller may read).
  * A message's parts are text, `file` (inline bytes or an http(s) uri, stored as
- * session files) and `data` (the agent's inputs, or JSON appended to the text). The task id is the run's id
+ * session files) and `data` (the agent's variables, or JSON appended to the text). The task id is the run's id
  * (`run_<runId>`), so `tasks/get` reads the run and `tasks/cancel` cancels it.
  * Ids from before (`task_<conversationId>_<messageIndex>`) still resolve
  * against the conversation's messages.
@@ -55,10 +55,10 @@ import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody, toClientOutputFiles, toClientPendingAction, type ClientOutputFile } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IAgent, IAgentInputField, IAgentRun } from '@/lib/database';
+import type { IAgent, IAgentVariable, IAgentRun } from '@/lib/database';
 import type { AgentChatResponse } from '@/lib/services/agents/agentService';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
-import { resolveRunInputs, stringifyInputsBlock } from '@/lib/services/agents/agentInputs';
+import { resolveRunVariables, stringifyVariablesBlock } from '@/lib/services/agents/agentVariables';
 import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
 import {
@@ -127,7 +127,7 @@ export interface A2aCallContext {
   limits?: AgentRunLimits;
   /**
    * An anonymous caller of the public route: its tasks and contexts are bound to it by a caller nonce, and
-   * what it sends is external content (its `data` inputs never fill the system prompt).
+   * what it sends is external content (its `data` variables never fill the system prompt).
    */
   publicCaller?: boolean;
 }
@@ -213,30 +213,30 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * The `data` parts of a message. A part whose keys are all inputs the agent
- * declares carries those inputs (validated like any request's); any other data
+ * The `data` parts of a message. A part whose keys are all variables the agent
+ * declares carries those variables (validated like any request's); any other data
  * is appended to the text as a JSON block, so the agent still reads it.
  */
 export function splitA2aDataParts(
   parts: A2aPart[] | undefined,
-  declared: ReadonlyArray<IAgentInputField> | undefined,
-): { inputs: Record<string, unknown>; other: Record<string, unknown>[] } {
+  declared: ReadonlyArray<IAgentVariable> | undefined,
+): { variables: Record<string, unknown>; other: Record<string, unknown>[] } {
   const names = new Set((declared ?? []).map((field) => field.name));
-  const inputs: Record<string, unknown> = {};
+  const variables: Record<string, unknown> = {};
   const other: Record<string, unknown>[] = [];
   for (const part of Array.isArray(parts) ? parts : []) {
     if (!part || part.kind !== 'data' || !isPlainObject(part.data)) continue;
     const keys = Object.keys(part.data);
-    if (keys.length > 0 && names.size > 0 && keys.every((key) => names.has(key))) Object.assign(inputs, part.data);
+    if (keys.length > 0 && names.size > 0 && keys.every((key) => names.has(key))) Object.assign(variables, part.data);
     else if (keys.length > 0) other.push(part.data);
   }
-  return { inputs, other };
+  return { variables, other };
 }
 
-/** Data that is not an input, as the block appended to the message text. */
+/** Data that is not a variable, as the block appended to the message text. */
 function appendA2aData(text: string, other: Record<string, unknown>[]): string {
   if (other.length === 0) return text;
-  const blocks = other.map((data) => `Data:\n\`\`\`json\n${stringifyInputsBlock(data)}\n\`\`\``);
+  const blocks = other.map((data) => `Data:\n\`\`\`json\n${stringifyVariablesBlock(data)}\n\`\`\``);
   return [text, ...blocks].filter((part) => part.length > 0).join('\n\n');
 }
 
@@ -436,7 +436,7 @@ export function buildAgentCard(
   options: { publicAccess?: boolean } = {},
 ): Record<string, unknown> {
   const toolTags = (agent.config.toolBindings ?? []).flatMap((b) => b.toolNames).slice(0, 20);
-  // Text, and JSON (a `data` part: the agent's inputs; a structured answer); files too once the agent takes attachments.
+  // Text, and JSON (a `data` part: the agent's variables; a structured answer); files too once the agent takes attachments.
   const attachments = attachmentsAvailability(agent.config);
   const fileTypes = attachments.available ? (attachments.cfg.allowedMimeTypes.length > 0 ? attachments.cfg.allowedMimeTypes : ['*/*']) : [];
   const inputModes = [...new Set(['text/plain', 'application/json', ...fileTypes])];
@@ -511,7 +511,7 @@ type A2aTurn =
 
 /**
  * Everything a `message/send` / `message/stream` needs before its run starts:
- * the declared inputs, the text, the files stored on the session, the session
+ * the declared variables, the text, the files stored on the session, the session
  * itself (contextId), the cancel_pending check, the runtime context. A failure
  * is the JSON-RPC error to answer with.
  */
@@ -526,12 +526,12 @@ async function prepareA2aTurn(
 ): Promise<A2aTurn> {
   const fail = (code: number, message: string, data?: Record<string, unknown>): A2aTurn => ({ failure: jsonRpcError(rpcId, code, message, data) });
   const message = (params?.message ?? {}) as A2aIncomingMessage;
-  // The config this call runs (published), for the agent's declared inputs and file limits.
+  // The config this call runs (published), for the agent's declared variables and file limits.
   const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
-  const data = splitA2aDataParts(message.parts, runConfig.inputs);
-  const resolvedInputs = resolveRunInputs(runConfig.inputs, Object.keys(data.inputs).length > 0 ? data.inputs : null);
-  if (!resolvedInputs.ok) {
-    return fail(-32602, 'Invalid params: invalid inputs', { type: 'invalid_request_error', code: 'invalid_inputs', errors: resolvedInputs.errors });
+  const data = splitA2aDataParts(message.parts, runConfig.variables);
+  const resolvedVariables = resolveRunVariables(runConfig.variables, Object.keys(data.variables).length > 0 ? data.variables : null);
+  if (!resolvedVariables.ok) {
+    return fail(-32602, 'Invalid params: invalid variables', { type: 'invalid_request_error', code: 'invalid_variables', errors: resolvedVariables.errors });
   }
   let files: ResponseInputFile[];
   try {
@@ -545,7 +545,7 @@ async function prepareA2aTurn(
     return fail(-32602, `Invalid params: ${attachmentsUnavailableMessage(availability.reason)}`, { type: 'invalid_request_error', code: 'attachments_disabled' });
   }
   const userMessage = appendA2aData(extractText(message.parts), data.other);
-  if (!userMessage.trim() && !resolvedInputs.inputs && files.length === 0) {
+  if (!userMessage.trim() && !resolvedVariables.variables && files.length === 0) {
     return fail(-32602, 'Invalid params: message.parts must contain text');
   }
 
@@ -653,9 +653,9 @@ async function prepareA2aTurn(
       ...(ctx.tokenId ? { apiTokenId: ctx.tokenId, actorType: 'api_token' as const } : {}),
       usePublished: true,
       runtimeContext,
-      ...(resolvedInputs.inputs ? { inputs: resolvedInputs.inputs } : {}),
-      // An anonymous caller's message and inputs are external content: inputs never fill the system prompt
-      // (as a webhook payload's); an authenticated caller's inputs stay prompt variables.
+      ...(resolvedVariables.variables ? { variables: resolvedVariables.variables } : {}),
+      // An anonymous caller's message and variables are external content: variables never fill the system prompt
+      // (as a webhook payload's); an authenticated caller's variables stay prompt variables.
       ...(ctx.publicCaller ? { externalContent: true } : {}),
       channel: 'a2a',
       trigger: 'request',

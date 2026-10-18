@@ -69,8 +69,8 @@ export const TABLES = {
   alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
   schedulerClaims: 'scheduler_claims',
-  agentRoutines: 'agent_routines',
-  agentRoutineDeliveries: 'agent_routine_deliveries',
+  agentTriggers: 'agent_triggers',
+  agentTriggerDeliveries: 'agent_trigger_deliveries',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',
@@ -1127,19 +1127,19 @@ export class SQLiteProviderBase {
     // Conversation files that ride the message of a (background) run.
     this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
     // Run engine: class (absent = default), scheduled start, detached inline runs,
-    // caller labels, origin surface, routine link, per-request structured output,
-    // validated inputs, queue generation (job dedup) and last publish time. All
+    // caller labels, origin surface, trigger link, per-request structured output,
+    // validated variables, queue generation (job dedup) and last publish time. All
     // nullable; old rows read back as absent. (`runTrigger` because TRIGGER is an SQL keyword.)
     for (const [column, type] of [
       ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
-      ['channel', 'TEXT'], ['routineId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
-      ['inputs', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
-      // Routine runs: unattended (no one to ask) and external content (inputs stay out of the system prompt).
+      ['channel', 'TEXT'], ['triggerId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
+      ['variables', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+      // Trigger runs: unattended (no one to ask) and external content (variables stay out of the system prompt).
       ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],
       // The event the callback bookkeeping belongs to; what continues a paused turn and who
-      // answered; the principal a routine run counts against.
+      // answered; the principal a trigger run counts against.
       ['callbackEventId', 'TEXT'], ['resumeTrigger', 'TEXT'], ['resumeUserId', 'TEXT'], ['resumeApiTokenId', 'TEXT'],
       ['accountableUserId', 'TEXT'], ['accountableTokenId', 'TEXT'],
     ] as const) {
@@ -1147,10 +1147,10 @@ export class SQLiteProviderBase {
     }
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status_class_created ON ${TABLES.agentRuns}(tenantId, status, runClass, createdAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_status_notBefore ON ${TABLES.agentRuns}(status, notBefore)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_routine_created ON ${TABLES.agentRuns}(tenantId, routineId, createdAt)`);
-    // An incoming webhook finds its routine by the URL's hook id (copied out of the trigger JSON).
-    this.ensureTableColumn(db, TABLES.agentRoutines, 'hookId', 'hookId TEXT');
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_routines_hook ON ${TABLES.agentRoutines}(hookId)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_trigger_created ON ${TABLES.agentRuns}(tenantId, triggerId, createdAt)`);
+    // An incoming webhook finds its trigger by the URL's hook id (copied out of the `webhook` JSON).
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'hookId', 'hookId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_hook ON ${TABLES.agentTriggers}(hookId)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.

@@ -48,8 +48,8 @@ describeForEachProvider('AgentRun — continuations and callback events', (getDb
   };
 
   it('stores the accountable principal and the callback event id', async () => {
-    const run = await getDb().createAgentRun(rec({ userId: 'system:routine:r1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' }));
-    expect(await read(run)).toMatchObject({ userId: 'system:routine:r1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' });
+    const run = await getDb().createAgentRun(rec({ userId: 'system:trigger:r1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' }));
+    expect(await read(run)).toMatchObject({ userId: 'system:trigger:r1', accountableUserId: 'user-2', accountableTokenId: 'tok-2' });
     const plain = await read(await getDb().createAgentRun(rec()));
     expect(plain.accountableUserId ?? null).toBeNull();
     expect(plain.callbackEventId ?? null).toBeNull();

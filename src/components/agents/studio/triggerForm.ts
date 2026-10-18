@@ -1,22 +1,24 @@
 /**
- * The routine editor's form state and its mapping to / from the routines API
- * (`/api/agents/:agentId/routines`). Pure, so it is tested without rendering.
+ * The trigger editor's form state and its mapping to / from the triggers API
+ * (`/api/agents/:agentId/triggers`): a trigger's `type` and the one settings
+ * object named after it (`schedule`, `once`, `webhook`). Pure, so it is tested
+ * without rendering.
  */
 
-import type { IAgentInputField } from '@/lib/database/provider/types.domain';
-import type { serializeAgentRoutine } from '@/lib/services/agents/agentRoutines';
-import { DEFAULT_ROUTINE_TIMEZONE, isValidRoutineTimezone, validateRoutineCron } from '@/lib/services/agents/routineSchedule';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import type { serializeAgentTrigger } from '@/lib/services/agents/agentTriggers';
+import { DEFAULT_TRIGGER_TIMEZONE, isValidTriggerTimezone, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 
-/** A routine as the API returns it. */
-export type RoutineRow = ReturnType<typeof serializeAgentRoutine>;
+/** A trigger as the API returns it. */
+export type TriggerRow = ReturnType<typeof serializeAgentTrigger>;
 
-/** The trigger types the editor offers, in order. A new type is added here and in the editor's switch. */
-export const ROUTINE_TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
-export type RoutineTriggerType = (typeof ROUTINE_TRIGGER_TYPES)[number];
+/** The types the editor offers, in order. A new type is added here and in the editor's switch. */
+export const TRIGGER_TYPES = ['schedule', 'once', 'manual', 'webhook'] as const;
+export type TriggerType = (typeof TRIGGER_TYPES)[number];
 
-// ── Webhook trigger ──────────────────────────────────────────────────────
-// The preset / auth lists mirror routineWebhookAuth.ts, which uses node:crypto
-// and cannot be imported here; routine-form.test.ts keeps the two equal.
+// ── Webhook ──────────────────────────────────────────────────────────────
+// The preset / auth lists mirror agentTriggerWebhookAuth.ts, which uses node:crypto
+// and cannot be imported here; trigger-form.test.ts keeps the two equal.
 
 export const WEBHOOK_PRESETS = ['github', 'gitlab', 'azure_devops', 'generic'] as const;
 export type WebhookPreset = (typeof WEBHOOK_PRESETS)[number];
@@ -43,11 +45,11 @@ export interface WebhookFilterRow {
 }
 
 /**
- * The variables the editor offers for a prompt template / input mapping. A subset of the roots the server accepts
- * (routineWebhookView WEBHOOK_CONTEXT_ROOTS): `received_at` is valid in a template but is not offered as an example.
+ * The template tags the editor offers for a prompt template / variable mapping. A subset of the roots the server accepts
+ * (agentTriggerWebhookView WEBHOOK_CONTEXT_ROOTS): `received_at` is valid in a template but is not offered as an example.
  */
 export const WEBHOOK_TEMPLATE_VARIABLES = [
-    'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'routine.id', 'routine.name', 'agent.key',
+    'payload.…', 'headers.…', 'event', 'delivery_id', 'preset', 'trigger.id', 'trigger.name', 'agent.key',
 ] as const;
 
 /** Event-name suggestions per preset (generic senders name their own). */
@@ -72,7 +74,7 @@ export const WEBHOOK_ACTION_SUGGESTIONS: Partial<Record<WebhookPreset, readonly 
     gitlab: ['open', 'update', 'reopen', 'approved', 'merge', 'close'],
 };
 
-/** One-click filter examples per preset (i18n key under agents.routines → rows they add). */
+/** One-click filter examples per preset (i18n key under agents.triggers → rows they add). */
 export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key: string; rows: WebhookFilterRow[] }>> = {
     github: [
         {
@@ -102,7 +104,7 @@ export const WEBHOOK_FILTER_EXAMPLES: Record<WebhookPreset, ReadonlyArray<{ key:
     generic: [],
 };
 
-/** A sample delivery per preset for the editor's Test tab: what the sender would post (trimmed to the fields a routine is likely to use). */
+/** A sample delivery per preset for the editor's Test tab: what the sender would post (trimmed to the fields a trigger is likely to use). */
 export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, string>; payload: Record<string, unknown> }> = {
     github: {
         headers: {
@@ -204,11 +206,11 @@ export const WEBHOOK_SAMPLES: Record<WebhookPreset, { headers: Record<string, st
 export type OnceMode = 'at' | 'in';
 export type DelayUnit = 'minutes' | 'hours';
 
-export interface RoutineForm {
+export interface TriggerForm {
     name: string;
     description: string;
     enabled: boolean;
-    triggerType: RoutineTriggerType;
+    type: TriggerType;
     cron: string;
     timezone: string;
     onceMode: OnceMode;
@@ -217,8 +219,8 @@ export interface RoutineForm {
     delayAmount: number;
     delayUnit: DelayUnit;
     prompt: string;
-    /** Declared input name → value; absent = not set (the default applies). */
-    inputs: Record<string, unknown>;
+    /** Declared variable name → value; absent = not set (the default applies). */
+    variables: Record<string, unknown>;
     /** null = the published version. */
     version: number | null;
     runClass: 'default' | 'deferred';
@@ -253,18 +255,18 @@ export const CRON_PRESETS = [
 export function browserTimezone(): string {
     try {
         const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        return isValidRoutineTimezone(zone) ? zone : DEFAULT_ROUTINE_TIMEZONE;
+        return isValidTriggerTimezone(zone) ? zone : DEFAULT_TRIGGER_TIMEZONE;
     } catch {
-        return DEFAULT_ROUTINE_TIMEZONE;
+        return DEFAULT_TRIGGER_TIMEZONE;
     }
 }
 
 /** Every timezone the select offers: UTC first, then the runtime's IANA list. */
 export function timezoneOptions(): string[] {
     try {
-        return [DEFAULT_ROUTINE_TIMEZONE, ...Intl.supportedValuesOf('timeZone').filter((zone) => zone !== DEFAULT_ROUTINE_TIMEZONE)];
+        return [DEFAULT_TRIGGER_TIMEZONE, ...Intl.supportedValuesOf('timeZone').filter((zone) => zone !== DEFAULT_TRIGGER_TIMEZONE)];
     } catch {
-        return [DEFAULT_ROUTINE_TIMEZONE];
+        return [DEFAULT_TRIGGER_TIMEZONE];
     }
 }
 
@@ -275,12 +277,12 @@ export function toLocalInputValue(date: Date): string {
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function emptyRoutineForm(timezone = browserTimezone(), now = new Date()): RoutineForm {
+export function emptyTriggerForm(timezone = browserTimezone(), now = new Date()): TriggerForm {
     return {
         name: '',
         description: '',
         enabled: true,
-        triggerType: 'schedule',
+        type: 'schedule',
         cron: '0 9 * * 1-5',
         timezone,
         onceMode: 'in',
@@ -288,7 +290,7 @@ export function emptyRoutineForm(timezone = browserTimezone(), now = new Date())
         delayAmount: 30,
         delayUnit: 'minutes',
         prompt: '',
-        inputs: {},
+        variables: {},
         version: null,
         runClass: 'default',
         metadataText: '',
@@ -307,8 +309,8 @@ export function emptyRoutineForm(timezone = browserTimezone(), now = new Date())
     };
 }
 
-/** A stored input value as the webhook mapping's text field shows it. */
-export function webhookInputText(value: unknown): string {
+/** A stored variable value as the webhook mapping's text field shows it. */
+export function webhookVariableText(value: unknown): string {
     if (value === undefined || value === null) return '';
     return typeof value === 'string' ? value : JSON.stringify(value);
 }
@@ -316,9 +318,9 @@ export function webhookInputText(value: unknown): string {
 /**
  * A webhook mapping field's text → the value to store: text with a `{{tag}}`
  * stays a template (the server renders it per delivery); anything else is a
- * literal brought to the declared type, as a request's inputs would be.
+ * literal brought to the declared type, as a request's variables would be.
  */
-export function webhookInputValue(field: IAgentInputField | undefined, text: string): unknown {
+export function webhookVariableValue(field: IAgentVariable | undefined, text: string): unknown {
     if (text.includes('{{')) return text;
     const trimmed = text.trim();
     switch (field?.type) {
@@ -353,8 +355,8 @@ function ruleFromRow(row: WebhookFilterRow): Record<string, unknown> | null {
     return row.value !== '' ? { path, op: row.op, value: row.value } : null;
 }
 
-interface StoredWebhookTrigger {
-    type: 'webhook';
+/** A stored trigger's `webhook` object as the API returns it. */
+interface StoredWebhook {
     url?: string;
     preset?: string;
     auth?: string;
@@ -364,11 +366,11 @@ interface StoredWebhookTrigger {
     include_payload?: boolean;
 }
 
-/** The webhook part of the form from a stored trigger: an action rule first in the filter becomes the Actions chips. */
-function webhookFormFromTrigger(trigger: StoredWebhookTrigger, base: RoutineForm): Partial<RoutineForm> {
-    const preset = (WEBHOOK_PRESETS as readonly string[]).includes(trigger.preset ?? '') ? trigger.preset as WebhookPreset : 'generic';
-    const auth = WEBHOOK_PRESET_AUTH[preset].includes(trigger.auth as WebhookAuth) ? trigger.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
-    const rules = [...(trigger.filter ?? [])];
+/** The webhook part of the form from a stored `webhook`: an action rule first in the filter becomes the Actions chips. */
+function webhookFormFields(webhook: StoredWebhook, base: TriggerForm): Partial<TriggerForm> {
+    const preset = (WEBHOOK_PRESETS as readonly string[]).includes(webhook.preset ?? '') ? webhook.preset as WebhookPreset : 'generic';
+    const auth = WEBHOOK_PRESET_AUTH[preset].includes(webhook.auth as WebhookAuth) ? webhook.auth as WebhookAuth : WEBHOOK_PRESET_AUTH[preset][0];
+    const rules = [...(webhook.filter ?? [])];
     const actionPath = WEBHOOK_ACTION_PATH[preset];
     let actions: string[] = [];
     const first = rules[0];
@@ -379,20 +381,20 @@ function webhookFormFromTrigger(trigger: StoredWebhookTrigger, base: RoutineForm
     return {
         webhookPreset: preset,
         webhookAuth: auth,
-        webhookHeaderName: trigger.header_name ?? base.webhookHeaderName,
-        webhookEvents: [...(trigger.events ?? [])],
+        webhookHeaderName: webhook.header_name ?? base.webhookHeaderName,
+        webhookEvents: [...(webhook.events ?? [])],
         webhookActions: actions,
         webhookFilter: rules.map((rule) => ({
             path: rule.path,
             op: (WEBHOOK_FILTER_OPS as readonly string[]).includes(rule.op) ? rule.op as WebhookFilterOp : 'eq',
             value: listText(rule.value),
         })),
-        webhookIncludePayload: trigger.include_payload !== false,
+        webhookIncludePayload: webhook.include_payload !== false,
     };
 }
 
 /** The filter rules a save sends: the Actions chips first, then the rows. */
-export function webhookFilterBody(form: RoutineForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
+export function webhookFilterBody(form: TriggerForm): { ok: true; rules: Array<Record<string, unknown>> } | { ok: false; index: number } {
     const rules: Array<Record<string, unknown>> = [];
     const actionPath = WEBHOOK_ACTION_PATH[form.webhookPreset];
     if (actionPath && form.webhookActions.length > 0) rules.push({ path: actionPath, op: 'in', value: [...form.webhookActions] });
@@ -406,11 +408,11 @@ export function webhookFilterBody(form: RoutineForm): { ok: true; rules: Array<R
 }
 
 /**
- * Whether the filter limits who can start the routine (an author / sender
+ * Whether the filter limits who can start the trigger (an author / sender
  * rule). On GitHub, GitLab and Azure DevOps anyone who can open a pull request
  * can otherwise start it; the editor shows a hint, never a prefill.
  */
-export function hasWebhookAuthorRule(form: RoutineForm): boolean {
+export function hasWebhookAuthorRule(form: TriggerForm): boolean {
     return form.webhookFilter.some((row) => /^payload\..*(author|sender|user|createdBy)/i.test(row.path.trim()));
 }
 
@@ -431,49 +433,48 @@ export function parseMetadataLines(text: string): Record<string, string> | null 
     return out;
 }
 
-/** The editor's state for a stored routine. */
-export function formFromRoutine(routine: RoutineRow, fallbackTimezone = browserTimezone()): RoutineForm {
-    const base = emptyRoutineForm(fallbackTimezone);
-    const trigger = routine.trigger as { type: string; cron?: string; timezone?: string; run_at?: string };
-    const triggerType = (ROUTINE_TRIGGER_TYPES as readonly string[]).includes(trigger.type) ? trigger.type as RoutineTriggerType : 'manual';
+/** The editor's state for a stored trigger. */
+export function formFromTrigger(trigger: TriggerRow, fallbackTimezone = browserTimezone()): TriggerForm {
+    const base = emptyTriggerForm(fallbackTimezone);
+    const type: TriggerType = (TRIGGER_TYPES as readonly string[]).includes(trigger.type) ? trigger.type : 'manual';
     return {
         ...base,
-        ...(triggerType === 'webhook' ? webhookFormFromTrigger(trigger as StoredWebhookTrigger, base) : {}),
-        name: routine.name,
-        description: routine.description ?? '',
-        enabled: routine.enabled,
-        triggerType,
-        ...(triggerType === 'schedule' ? { cron: trigger.cron ?? base.cron, timezone: trigger.timezone ?? base.timezone } : {}),
-        ...(triggerType === 'once' && trigger.run_at ? { onceMode: 'at' as const, runAtLocal: toLocalInputValue(new Date(trigger.run_at)) } : {}),
-        prompt: routine.prompt ?? '',
-        inputs: { ...(routine.inputs ?? {}) },
-        version: routine.version ?? null,
-        runClass: routine.class === 'deferred' ? 'deferred' : 'default',
-        metadataText: formatMetadataLines(routine.metadata),
-        callbackUrl: routine.callback?.url ?? '',
-        callbackSigned: Boolean(routine.callback?.signed),
-        responseFormatText: routine.response_format ? JSON.stringify(routine.response_format, null, 2) : '',
+        ...(trigger.type === 'webhook' ? webhookFormFields(trigger.webhook as StoredWebhook, base) : {}),
+        name: trigger.name,
+        description: trigger.description ?? '',
+        enabled: trigger.enabled,
+        type,
+        ...(trigger.type === 'schedule' ? { cron: trigger.schedule.cron ?? base.cron, timezone: trigger.schedule.timezone ?? base.timezone } : {}),
+        ...(trigger.type === 'once' && trigger.once.run_at ? { onceMode: 'at' as const, runAtLocal: toLocalInputValue(new Date(trigger.once.run_at)) } : {}),
+        prompt: trigger.prompt ?? '',
+        variables: { ...(trigger.variables ?? {}) },
+        version: trigger.version ?? null,
+        runClass: trigger.class === 'deferred' ? 'deferred' : 'default',
+        metadataText: formatMetadataLines(trigger.metadata),
+        callbackUrl: trigger.callback?.url ?? '',
+        callbackSigned: Boolean(trigger.callback?.signed),
+        responseFormatText: trigger.response_format ? JSON.stringify(trigger.response_format, null, 2) : '',
     };
 }
 
-export type RoutineFormProblem = { field: keyof RoutineForm | 'trigger'; key: string };
+export type TriggerFormProblem = { field: keyof TriggerForm; key: string };
 
-/** The trigger part of the request body, or why it cannot be sent. */
-export function triggerBodyFromForm(form: RoutineForm, now = new Date()): { ok: true; trigger: Record<string, unknown> } | { ok: false; problem: RoutineFormProblem } {
-    switch (form.triggerType) {
+/** The `type` and settings object of the request body, or why they cannot be sent. */
+export function typeBodyFromForm(form: TriggerForm, now = new Date()): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
+    switch (form.type) {
         case 'schedule':
-            if (validateRoutineCron(form.cron)) return { ok: false, problem: { field: 'cron', key: 'previewInvalid' } };
-            return { ok: true, trigger: { type: 'schedule', cron: form.cron.trim(), timezone: form.timezone } };
+            if (validateTriggerCron(form.cron)) return { ok: false, problem: { field: 'cron', key: 'previewInvalid' } };
+            return { ok: true, body: { type: 'schedule', schedule: { cron: form.cron.trim(), timezone: form.timezone } } };
         case 'once': {
             if (form.onceMode === 'in') {
                 if (!Number.isFinite(form.delayAmount) || form.delayAmount <= 0) return { ok: false, problem: { field: 'delayAmount', key: 'delayInvalid' } };
                 const seconds = Math.round(form.delayAmount * (form.delayUnit === 'hours' ? 3600 : 60));
-                return { ok: true, trigger: { type: 'once', delay_seconds: seconds } };
+                return { ok: true, body: { type: 'once', once: { delay_seconds: seconds } } };
             }
             const at = new Date(form.runAtLocal);
             if (Number.isNaN(at.getTime())) return { ok: false, problem: { field: 'runAtLocal', key: 'runAtInvalid' } };
             if (at.getTime() < now.getTime()) return { ok: false, problem: { field: 'runAtLocal', key: 'oncePast' } };
-            return { ok: true, trigger: { type: 'once', run_at: at.toISOString() } };
+            return { ok: true, body: { type: 'once', once: { run_at: at.toISOString() } } };
         }
         case 'webhook': {
             const filter = webhookFilterBody(form);
@@ -481,34 +482,36 @@ export function triggerBodyFromForm(form: RoutineForm, now = new Date()): { ok: 
             const secret = form.webhookAuth === 'standard_webhooks' ? form.webhookSecret.trim() : '';
             return {
                 ok: true,
-                trigger: {
+                body: {
                     type: 'webhook',
-                    preset: form.webhookPreset,
-                    auth: form.webhookAuth,
-                    ...(form.webhookAuth === 'header' ? { header_name: form.webhookHeaderName.trim() || DEFAULT_WEBHOOK_HEADER_NAME } : {}),
-                    ...(secret ? { secret } : {}),
-                    events: [...form.webhookEvents],
-                    filter: filter.rules,
-                    include_payload: form.webhookIncludePayload,
+                    webhook: {
+                        preset: form.webhookPreset,
+                        auth: form.webhookAuth,
+                        ...(form.webhookAuth === 'header' ? { header_name: form.webhookHeaderName.trim() || DEFAULT_WEBHOOK_HEADER_NAME } : {}),
+                        ...(secret ? { secret } : {}),
+                        events: [...form.webhookEvents],
+                        filter: filter.rules,
+                        include_payload: form.webhookIncludePayload,
+                    },
                 },
             };
         }
         default:
-            return { ok: true, trigger: { type: 'manual' } };
+            return { ok: true, body: { type: 'manual' } };
     }
 }
 
 /**
- * The create / PATCH body. `stored` (editing) leaves out the trigger when it
- * is unchanged — a once routine that already fired keeps its time — and the
- * callback secret unless one was typed.
+ * The create / PATCH body. `stored` (editing) leaves out the `type` and its
+ * settings when they are unchanged — a once trigger that already fired keeps
+ * its time — and the callback secret unless one was typed.
  */
-export function routineBodyFromForm(
-    form: RoutineForm,
-    declared: IAgentInputField[] | undefined,
-    stored?: RoutineRow | null,
+export function triggerBodyFromForm(
+    form: TriggerForm,
+    declared: IAgentVariable[] | undefined,
+    stored?: TriggerRow | null,
     now = new Date(),
-): { ok: true; body: Record<string, unknown> } | { ok: false; problem: RoutineFormProblem } {
+): { ok: true; body: Record<string, unknown> } | { ok: false; problem: TriggerFormProblem } {
     if (!form.name.trim()) return { ok: false, problem: { field: 'name', key: 'nameRequired' } };
     const metadata = parseMetadataLines(form.metadataText);
     if (!metadata) return { ok: false, problem: { field: 'metadataText', key: 'invalidMetadata' } };
@@ -521,10 +524,10 @@ export function routineBodyFromForm(
         }
     }
     const declaredNames = new Set((declared ?? []).map((field) => field.name));
-    const inputs = Object.fromEntries(Object.entries(form.inputs).filter(([name, value]) => declaredNames.has(name) && value !== undefined && value !== ''));
-    // Standard Webhooks: the sender generates the secret, so a routine that does not have one yet needs it pasted in.
-    const storedStandard = stored?.trigger.type === 'webhook' && (stored.trigger as { auth?: string }).auth === 'standard_webhooks';
-    if (form.triggerType === 'webhook' && form.webhookAuth === 'standard_webhooks' && !storedStandard && !form.webhookSecret.trim()) {
+    const variables = Object.fromEntries(Object.entries(form.variables).filter(([name, value]) => declaredNames.has(name) && value !== undefined && value !== ''));
+    // Standard Webhooks: the sender generates the secret, so a trigger that does not have one yet needs it pasted in.
+    const storedStandard = stored?.type === 'webhook' && (stored.webhook as { auth?: string }).auth === 'standard_webhooks';
+    if (form.type === 'webhook' && form.webhookAuth === 'standard_webhooks' && !storedStandard && !form.webhookSecret.trim()) {
         return { ok: false, problem: { field: 'webhookSecret', key: 'standardSecretRequired' } };
     }
 
@@ -533,7 +536,7 @@ export function routineBodyFromForm(
         description: form.description.trim() || null,
         enabled: form.enabled,
         prompt: form.prompt,
-        inputs: Object.keys(inputs).length > 0 ? inputs : null,
+        variables: Object.keys(variables).length > 0 ? variables : null,
         version: form.version,
         class: form.runClass,
         metadata: Object.keys(metadata).length > 0 ? metadata : null,
@@ -543,12 +546,12 @@ export function routineBodyFromForm(
             : null,
     };
 
-    const unchangedOnce = stored && stored.trigger.type === 'once' && form.triggerType === 'once' && form.onceMode === 'at'
-        && toLocalInputValue(new Date(String((stored.trigger as { run_at?: string }).run_at))) === form.runAtLocal;
+    const unchangedOnce = stored && stored.type === 'once' && form.type === 'once' && form.onceMode === 'at'
+        && toLocalInputValue(new Date(String(stored.once.run_at))) === form.runAtLocal;
     if (!unchangedOnce) {
-        const trigger = triggerBodyFromForm(form, now);
-        if (!trigger.ok) return trigger;
-        body.trigger = trigger.trigger;
+        const typeBody = typeBodyFromForm(form, now);
+        if (!typeBody.ok) return typeBody;
+        Object.assign(body, typeBody.body);
     }
     return { ok: true, body };
 }

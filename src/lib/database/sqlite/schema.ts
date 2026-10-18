@@ -750,9 +750,10 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_scheduler_claims_expires ON scheduler_claims(expires_at);
 
-  -- Agent routines (a saved prompt + trigger per agent). The trigger is JSON
-  -- (triggerSpec: TRIGGER is an SQL keyword); nextFireAt drives the scheduler.
-  CREATE TABLE IF NOT EXISTS agent_routines (
+  -- Agent triggers (a saved prompt + type per agent). The type is schedule, once,
+  -- manual or webhook; the settings of that type are JSON in the column named
+  -- after it (the others stay NULL). nextFireAt drives the scheduler.
+  CREATE TABLE IF NOT EXISTS agent_triggers (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
     projectId TEXT NOT NULL,
@@ -760,9 +761,12 @@ export const TENANT_SCHEMA_SQL = `
     name TEXT NOT NULL,
     description TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
-    triggerSpec TEXT NOT NULL,
+    type TEXT NOT NULL,
+    schedule TEXT,
+    once TEXT,
+    webhook TEXT,
     prompt TEXT NOT NULL,
-    inputs TEXT,
+    variables TEXT,
     version INTEGER,
     runClass TEXT NOT NULL DEFAULT 'default',
     metadata TEXT,
@@ -779,15 +783,15 @@ export const TENANT_SCHEMA_SQL = `
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_agent_routines_scope ON agent_routines(tenantId, projectId, agentKey);
-  CREATE INDEX IF NOT EXISTS idx_agent_routines_due ON agent_routines(enabled, nextFireAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_triggers_scope ON agent_triggers(tenantId, projectId, agentKey);
+  CREATE INDEX IF NOT EXISTS idx_agent_triggers_due ON agent_triggers(enabled, nextFireAt);
 
   -- A webhook trigger's delivery log: outcome and normalized ids only, never the payload.
-  CREATE TABLE IF NOT EXISTS agent_routine_deliveries (
+  CREATE TABLE IF NOT EXISTS agent_trigger_deliveries (
     id TEXT PRIMARY KEY,
     tenantId TEXT NOT NULL,
     projectId TEXT NOT NULL,
-    routineId TEXT NOT NULL,
+    triggerId TEXT NOT NULL,
     receivedAt TEXT NOT NULL,
     expiresAt TEXT NOT NULL,
     outcome TEXT NOT NULL,
@@ -798,8 +802,8 @@ export const TENANT_SCHEMA_SQL = `
     reason TEXT,
     bytes INTEGER NOT NULL DEFAULT 0
   );
-  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_routine ON agent_routine_deliveries(tenantId, routineId, receivedAt);
-  CREATE INDEX IF NOT EXISTS idx_agent_routine_deliveries_expires ON agent_routine_deliveries(expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_trigger_deliveries_trigger ON agent_trigger_deliveries(tenantId, triggerId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_trigger_deliveries_expires ON agent_trigger_deliveries(expiresAt);
 
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
@@ -2458,10 +2462,10 @@ export const TENANT_SCHEMA_SQL = `
     detachedAt TEXT,
     metadata TEXT,
     channel TEXT,
-    routineId TEXT,
+    triggerId TEXT,
     runTrigger TEXT,
     responseFormat TEXT,
-    inputs TEXT,
+    variables TEXT,
     queueGeneration INTEGER,
     lastPublishedAt TEXT,
     unattended INTEGER,

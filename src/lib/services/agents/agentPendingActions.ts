@@ -121,15 +121,15 @@ const RESUME_CTX_KEYS = [
 
 /**
  * What the turn was asked for beyond the agent's own config: the per-request
- * structured output and the validated inputs. They ride with the paused state
+ * structured output and the validated variables. They ride with the paused state
  * so the continuation rebuilds the SAME turn (same schema, same prompt values)
  * whoever answers the pause.
  */
 export interface PausedTurnOptions {
     responseFormat?: AgentResponseFormat;
-    inputs?: Record<string, unknown>;
-    /** False when the inputs were kept out of the system prompt (external content). */
-    inputsAsPromptVariables?: boolean;
+    variables?: Record<string, unknown>;
+    /** False when the variables were kept out of the system prompt (external content). */
+    variablesInPrompt?: boolean;
 }
 
 interface PausedEnvelope {
@@ -185,7 +185,7 @@ export function serializePausedState(
     }
     stored.ctx = resumeCtx;
 
-    const hasTurn = Boolean(turn && (turn.responseFormat || turn.inputs || turn.inputsAsPromptVariables === false));
+    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false));
     const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
     return text.length <= maxBytes ? text : null;
 }
@@ -272,7 +272,7 @@ export interface OpenPauseInput {
     /** The version the paused turn ran (null = the draft), so the continuation rebuilds the same agent. */
     agentVersion: number | null;
     usePublished: boolean;
-    /** The request-level structured output / inputs the continuation must apply again. */
+    /** The request-level structured output / variables the continuation must apply again. */
     turn?: PausedTurnOptions;
     /** Who started the turn. */
     createdBy: string;

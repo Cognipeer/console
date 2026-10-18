@@ -49,21 +49,21 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
       runClass: 'deferred',
       notBefore,
       metadata: { team: 'ops', 'a.b-c': 'x' },
-      channel: 'routine',
-      routineId: 'routine-1',
+      channel: 'trigger',
+      triggerId: 'trigger-1',
       trigger: 'schedule',
       responseFormat: { type: 'json_schema', name: 'out', schema: { type: 'object' }, strict: true },
-      inputs: { city: 'Paris', n: 2 },
+      variables: { city: 'Paris', n: 2 },
     }));
     const read = (await db.getAgentRunById(id(created), tenantId, projectId))!;
     expect(read.runClass).toBe('deferred');
     expect(new Date(read.notBefore!).getTime()).toBe(notBefore.getTime());
     expect(read.metadata).toEqual({ team: 'ops', 'a.b-c': 'x' });
-    expect(read.channel).toBe('routine');
-    expect(read.routineId).toBe('routine-1');
+    expect(read.channel).toBe('trigger');
+    expect(read.triggerId).toBe('trigger-1');
     expect(read.trigger).toBe('schedule');
     expect(read.responseFormat).toEqual({ type: 'json_schema', name: 'out', schema: { type: 'object' }, strict: true });
-    expect(read.inputs).toEqual({ city: 'Paris', n: 2 });
+    expect(read.variables).toEqual({ city: 'Paris', n: 2 });
     expect(read.queueGeneration).toBe(1);
     expect(read.detachedAt ?? null).toBeNull();
     expect(read.lastPublishedAt ?? null).toBeNull();
@@ -76,7 +76,7 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
     expect(plain.runClass ?? null).toBeNull();
     expect(plain.metadata ?? null).toBeNull();
     expect(plain.responseFormat ?? null).toBeNull();
-    expect(plain.inputs ?? null).toBeNull();
+    expect(plain.variables ?? null).toBeNull();
     expect(plain.channel ?? null).toBeNull();
     expect(plain.background ?? false).toBe(false);
   });
@@ -123,11 +123,11 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
   });
 
   describe('listAgentRuns', () => {
-    it('filters by mode (single / array / excluded), class, channel, routine, metadata pairs and created window', async () => {
+    it('filters by mode (single / array / excluded), class, channel, trigger, metadata pairs and created window', async () => {
       const db = getDb();
       const a = await db.createAgentRun(rec({ mode: 'inline', status: 'succeeded', channel: 'responses', metadata: { team: 'a', 'k.dot': '1' } }));
       const b = await db.createAgentRun(rec({ mode: 'background', status: 'succeeded', runClass: 'deferred', channel: 'runs', metadata: { team: 'b' } }));
-      const c = await db.createAgentRun(rec({ mode: 'sync', status: 'running', routineId: 'r-1', channel: 'routine' }));
+      const c = await db.createAgentRun(rec({ mode: 'sync', status: 'running', triggerId: 'r-1', channel: 'trigger' }));
       const ids = async (f: Record<string, unknown>) =>
         (await db.listAgentRuns({ tenantId, projectId, ...f } as never)).map(id).sort();
       expect(await ids({ mode: 'inline' })).toEqual([id(a)]);
@@ -135,8 +135,8 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
       expect(await ids({ excludeModes: ['sync'] })).toEqual([id(a), id(b)].sort());
       expect(await ids({ runClass: 'deferred' })).toEqual([id(b)]);
       expect(await ids({ runClass: 'default' })).toEqual([id(a), id(c)].sort());
-      expect(await ids({ channel: 'routine' })).toEqual([id(c)]);
-      expect(await ids({ routineId: 'r-1' })).toEqual([id(c)]);
+      expect(await ids({ channel: 'trigger' })).toEqual([id(c)]);
+      expect(await ids({ triggerId: 'r-1' })).toEqual([id(c)]);
       expect(await ids({ metadata: { team: 'a' } })).toEqual([id(a)]);
       expect(await ids({ metadata: { team: 'a', 'k.dot': '1' } })).toEqual([id(a)]);
       expect(await ids({ metadata: { 'k.dot': '1' } })).toEqual([id(a)]);
@@ -307,7 +307,7 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
 
   it('requeueAgentRunForResume increments queueGeneration and keeps the run class and labels', async () => {
     const db = getDb();
-    const run = await db.createAgentRun(rec({ runClass: 'deferred', metadata: { k: 'v' }, inputs: { a: 1 } }));
+    const run = await db.createAgentRun(rec({ runClass: 'deferred', metadata: { k: 'v' }, variables: { a: 1 } }));
     await db.claimAgentRun(id(run), tenantId, 'w1', new Date());
     await db.finalizeAgentRun(id(run), tenantId, { status: 'requires_action', stopReason: 'approval_required' } as never);
     const resumed = (await db.requeueAgentRunForResume(id(run), tenantId, ['act-1']))!;
@@ -315,7 +315,7 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
     expect(resumed.queueGeneration).toBe(2);
     expect(resumed.runClass).toBe('deferred');
     expect(resumed.metadata).toEqual({ k: 'v' });
-    expect(resumed.inputs).toEqual({ a: 1 });
+    expect(resumed.variables).toEqual({ a: 1 });
     // The resumed wait counts from now, not from the original creation.
     expect(resumed.notBefore).toBeTruthy();
   });

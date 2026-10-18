@@ -158,7 +158,7 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 ### Chat completions and A2A
 
 - **Chat completions.** On a call to an agent, `image_url` parts and `file` parts (`file_data`, `file_id`) of the last user message become files of the session, like the Responses parts above (`403` when the agent takes no attachments); a message of only an image is valid.
-- **A2A.** The `file` parts of a message (`bytes`, base64, or an `http(s)` `uri`, fetched with the same private-address protection) are stored as session files, on `message/send` and `message/stream`; a `uri` has to arrive within the outbound timeout (30 seconds by default, headers and body together), else `-32602` with `attachment_unreachable`; the agent's card lists the file types it accepts. A `data` part is read as the agent's [inputs](/api/agents#typed-inputs-and-structured-output).
+- **A2A.** The `file` parts of a message (`bytes`, base64, or an `http(s)` `uri`, fetched with the same private-address protection) are stored as session files, on `message/send` and `message/stream`; a `uri` has to arrive within the outbound timeout (30 seconds by default, headers and body together), else `-32602` with `attachment_unreachable`; the agent's card lists the file types it accepts. A `data` part carries the agent's [variables](/api/agents#variables) when every key is one the agent declares; any other data is appended to the text as a JSON block.
 
 ## Where you see them
 

@@ -129,7 +129,7 @@ describe('the managed approval rule', () => {
   });
 
   it('a session nobody started (a2a-public, a schedule) is somebody else\'s: only the agent\'s setting lets anyone in', async () => {
-    const owners = ['a2a-public', 'system:routine:rt1'];
+    const owners = ['a2a-public', 'system:trigger:trg1'];
     expect((await decide(person('starter'), session('owner', { owners }))).allowed).toBe(false);
     expect((await decide(person('padmin', { adminProjects: [P1] }), session('owner_or_admin', { owners }))).allowed).toBe(true);
     expect((await decide(person('other'), session('project_members', { owners }))).allowed).toBe(true);

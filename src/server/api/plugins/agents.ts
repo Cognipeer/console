@@ -390,7 +390,7 @@ const SESSION_BUSY_BODY = {
 };
 
 /**
- * Dashboard chat may only extend a console session. API / A2A / routine /
+ * Dashboard chat may only extend a console session. API / A2A / trigger /
  * eval sessions are real traffic — the UI shows them read-only, and this keeps
  * a hand-crafted request from appending to them. Legacy sessions (no source)
  * stay writable, matching `isContinuableSession` on the client.
@@ -687,7 +687,7 @@ function summariseConversation(
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
-    // Whose it is: the person who started it (a name), or the kind of traffic that did (a routine, a public A2A call...).
+    // Whose it is: the person who started it (a name), or the kind of traffic that did (a trigger, a public A2A call...).
     createdBy: conversation.createdBy,
     ...(owner ? { owner } : {}),
     // The viewer started it (so the table can say "you" without knowing who the viewer is).
@@ -1251,7 +1251,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; routineId?: string; trigger?: string };
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string };
       const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
       const allowed = new Set(['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
@@ -1276,8 +1276,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         excludeModes: ['sync'],
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
-        // A routine's history (Studio's Routines list links here).
-        ...(query.routineId ? { routineId: query.routineId } : {}),
+        // A trigger's history (Studio's Triggers list links here).
+        ...(query.triggerId ? { triggerId: query.triggerId } : {}),
         ...(trigger ? { trigger } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),

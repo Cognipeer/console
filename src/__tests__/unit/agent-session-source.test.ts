@@ -8,7 +8,7 @@ describe('agent session source', () => {
     });
 
     it('keeps real traffic read-only', () => {
-        for (const source of ['api', 'a2a', 'routine', 'evaluation', 'redteam', 'portal']) {
+        for (const source of ['api', 'a2a', 'trigger', 'evaluation', 'redteam', 'portal']) {
             expect(isContinuableSession(source)).toBe(false);
         }
     });

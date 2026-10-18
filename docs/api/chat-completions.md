@@ -88,7 +88,7 @@ data: [DONE]
 
 ## Agents
 
-`model` may also name an agent: `agent:<key>` (a bare agent key works when no model has that key). The call runs the agent's published version as a [run](/guide/agent-background-execution), takes `response_format` for [structured output](/api/agents#typed-inputs-and-structured-output), and answers `202` with a `Location` header when it is still running after the wait window. Details: [Calling an agent on chat completions](/guide/inference#calling-an-agent-on-chat-completions).
+`model` may also name an agent: `agent:<key>` (a bare agent key works when no model has that key). The call runs the agent's published version as a [run](/guide/agent-background-execution), takes `response_format` for [structured output](/api/agents#structured-output) and `variables` for the agent's declared [variables](/api/agents#variables) (chat clients cannot send them: give a variable that chat also needs a default), and answers `202` with a `Location` header when it is still running after the wait window. Details: [Calling an agent on chat completions](/guide/inference#calling-an-agent-on-chat-completions).
 
 ## Files the agent produced
 

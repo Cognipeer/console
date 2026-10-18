@@ -70,7 +70,7 @@ import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
-import AgentInputsEditor from './studio/AgentInputsEditor';
+import AgentVariablesEditor from './studio/AgentVariablesEditor';
 import AgentFilesPanel from './studio/AgentFilesPanel';
 import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
@@ -82,7 +82,7 @@ import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
-import AgentRoutinesPanel from './studio/AgentRoutinesPanel';
+import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
@@ -222,13 +222,13 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   feedback: { top: 'feedback' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
-  inputs: { top: 'configure', sub: 'inputs' },
+  variables: { top: 'configure', sub: 'variables' },
   deploy: { top: 'deploy' },
   versions: { top: 'deploy', sub: 'versions' },
   publish: { top: 'deploy', sub: 'publish' },
-  routines: { top: 'deploy', sub: 'routines' },
-  // The section routines replaced; old links land on it.
-  schedules: { top: 'deploy', sub: 'routines' },
+  triggers: { top: 'deploy', sub: 'triggers' },
+  // The section triggers replaced; old links land on it.
+  schedules: { top: 'deploy', sub: 'triggers' },
   export: { top: 'deploy', sub: 'export' },
   observe: { top: 'sessions' },
   traces: { top: 'sessions' },
@@ -294,7 +294,7 @@ export default function AgentDetailPage() {
   // config it had before these sections existed.
   const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
-  const [inputsConfig, setInputsConfig] = useState<IAgentConfig['inputs']>(undefined);
+  const [variablesConfig, setVariablesConfig] = useState<IAgentConfig['variables']>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
@@ -357,8 +357,8 @@ export default function AgentDetailPage() {
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
-  /** Background runs narrowed to one routine (its "Runs" link). */
-  const [runsRoutine, setRunsRoutine] = useState<{ id: string; name: string } | null>(null);
+  /** Background runs narrowed to one trigger (its "Runs" link). */
+  const [runsTrigger, setRunsTrigger] = useState<{ id: string; name: string } | null>(null);
   const [activeRunCount, setActiveRunCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
@@ -414,7 +414,7 @@ export default function AgentDetailPage() {
         setShowReasoning(migrated.showReasoning !== false);
         setRuntimeConfig(migrated.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
-        setInputsConfig(cfg.inputs);
+        setVariablesConfig(cfg.variables);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
         setSkills(cfg.skills ?? []);
@@ -671,7 +671,7 @@ export default function AgentDetailPage() {
     // and would start showing up in every manifest and diff for no reason.
     nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
-    nextConfig.inputs = inputsConfig && inputsConfig.length > 0 ? inputsConfig : undefined;
+    nextConfig.variables = variablesConfig && variablesConfig.length > 0 ? variablesConfig : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
     nextConfig.skills = skills.length > 0 ? skills : undefined;
@@ -1205,7 +1205,7 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
-            description="Every conversation with this agent — console tests, API, A2A and routine runs. Click one to inspect it; sessions started here can be continued."
+            description="Every conversation with this agent — console tests, API, A2A and trigger runs. Click one to inspect it; sessions started here can be continued."
           >
             <SegmentedControl
               mb="md"
@@ -1235,8 +1235,8 @@ export default function AgentDetailPage() {
             <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
               <AgentRunsTable
                 agentId={agentId}
-                routine={runsRoutine}
-                onClearRoutine={() => setRunsRoutine(null)}
+                trigger={runsTrigger}
+                onClearTrigger={() => setRunsTrigger(null)}
                 onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
                 onActiveCountChange={setActiveRunCount}
               />
@@ -1436,11 +1436,11 @@ export default function AgentDetailPage() {
               />,
             )}
             {buildSection(
-              'inputs',
-              t('inputs.sectionDescription'),
-              <AgentInputsEditor value={inputsConfig} onChange={setInputsConfig} />,
-              inputsConfig?.length ? (
-                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('inputs.badge', { count: inputsConfig.length })}</Badge>
+              'variables',
+              t('variables.sectionDescription'),
+              <AgentVariablesEditor value={variablesConfig} onChange={setVariablesConfig} />,
+              variablesConfig?.length ? (
+                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('variables.badge', { count: variablesConfig.length })}</Badge>
               ) : null,
             )}
             {buildSection(
@@ -1489,8 +1489,8 @@ export default function AgentDetailPage() {
 
         {/*
           Deploy — the lifecycle of a config that is already written:
-          freeze it (Versions), expose it (Publish), start it on a trigger
-          (Routines), or take it out of the console entirely (Export).
+          freeze it (Versions), expose it (Publish), start it on its own
+          (Triggers), or take it out of the console entirely (Export).
         */}
         <Tabs.Panel value="deploy">
           {/*
@@ -1688,17 +1688,17 @@ export default function AgentDetailPage() {
 
             {!isConnected ? (
               <ConfigSection
-                id="routines"
-                title={t('routines.sectionTitle')}
-                description={t('routines.sectionDescription')}
+                id="triggers"
+                title={t('triggers.sectionTitle')}
+                description={t('triggers.sectionDescription')}
               >
-                <AgentRoutinesPanel
+                <AgentTriggersPanel
                   agentId={agentId}
                   agentName={agent.name}
-                  declaredInputs={agent.config?.inputs}
+                  declaredVariables={agent.config?.variables}
                   versions={versions.map((version) => version.version)}
-                  onShowRuns={(routine) => {
-                    setRunsRoutine(routine);
+                  onShowRuns={(trigger) => {
+                    setRunsTrigger(trigger);
                     setSessionsView('runs');
                     setActiveTab('sessions');
                   }}

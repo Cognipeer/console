@@ -237,7 +237,7 @@ import {
     type PausedTurnOptions,
     type PublicPendingAction,
 } from './agentPendingActions';
-import { composeUserMessageWithInputs } from './agentInputs';
+import { composeUserMessageWithVariables } from './agentVariables';
 
 const logger = createLogger('agents');
 
@@ -2712,11 +2712,11 @@ export async function deleteAgentRecord(
     return runWithTenantScope(tenantDbName, async (db) => {
         const agent = await db.findAgentById(agentId);
         const deleted = await db.deleteAgent(agentId);
-        // Its routines (and their webhook delivery logs) go with it: nothing could fire them any more.
+        // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
         if (deleted && agent) {
-            const routines = await db.listAgentRoutines({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
-            for (const routine of routines) await db.deleteAgentRoutineDeliveries(String(routine._id));
-            await db.deleteAgentRoutinesForAgent(agent.tenantId, agent.projectId, agent.key);
+            const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
+            await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
         }
         return deleted;
     });
@@ -3001,7 +3001,7 @@ export async function checkAgentModel(
  * existed carry no source. `portal` is end-user traffic through an enterprise
  * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'routine' | 'evaluation' | 'redteam' | 'portal';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,
@@ -3188,7 +3188,7 @@ export interface AgentChatRequest {
     userId: string;
     /**
      * Whose spend limits the turn counts against when `userId` is a synthetic
-     * owner (a routine run): the routine's accountable person.
+     * owner (a trigger run): the trigger's accountable person.
      */
     accountableUserId?: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
@@ -3238,21 +3238,21 @@ export interface AgentChatRequest {
      */
     callerContext?: RoutingCallerContext;
     /**
-     * Per-request structured output and validated agent inputs. The run engine
+     * Per-request structured output and validated agent variables. The run engine
      * carries them on the run row (so a queued run and a resume see the same
      * values) and passes them here; how the turn applies them is §6 of the run
      * engine spec.
      */
     responseFormat?: AgentResponseFormat;
-    inputs?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
     /**
-     * Whether `inputs` also fill the `{{input.<name>}}` prompt variables (default
-     * true). Off for inputs that came from outside the platform's own callers: they
+     * Whether `variables` also fill the `{{variables.<name>}}` prompt variables (default
+     * true). Off for variables that came from outside the platform's own callers: they
      * then reach the model only inside the user message, never the system prompt.
      */
-    inputsAsPromptVariables?: boolean;
+    variablesInPrompt?: boolean;
     /**
-     * The message / inputs came from an external payload (a webhook): the Inputs
+     * The message / variables came from an external payload (a webhook): the Variables
      * block is closed with a line saying where the external data ends.
      */
     externalContent?: boolean;
@@ -3767,9 +3767,9 @@ async function buildLocalAgentRun(input: {
     spend?: AgentSpendScope;
     /** Per-request structured output: replaces `config.structuredOutput` for this turn. */
     responseFormat?: AgentResponseFormat;
-    /** Validated agent inputs of the turn, exposed as `{{input.<name>}}` (see `inputsAsPromptVariables`). */
-    inputs?: Record<string, unknown>;
-    inputsAsPromptVariables?: boolean;
+    /** Validated agent variables of the turn, exposed as `{{variables.<name>}}` (see `variablesInPrompt`). */
+    variables?: Record<string, unknown>;
+    variablesInPrompt?: boolean;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
@@ -3818,8 +3818,8 @@ async function buildLocalAgentRun(input: {
         version: input.version,
         runtimeContext,
         userId: input.userId,
-        inputs: input.inputs,
-        inputsAsPromptVariables: input.inputsAsPromptVariables,
+        variables: input.variables,
+        variablesInPrompt: input.variablesInPrompt,
     });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
@@ -4463,15 +4463,15 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
-/** What a continuation must apply again: the turn's own structured output and inputs. */
+/** What a continuation must apply again: the turn's own structured output and variables. */
 function pausedTurnOptions(
-    request: Pick<AgentChatRequest, 'responseFormat' | 'inputs' | 'inputsAsPromptVariables'>,
+    request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt'>,
 ): PausedTurnOptions | undefined {
-    if (!request.responseFormat && !request.inputs && request.inputsAsPromptVariables !== false) return undefined;
+    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
     return {
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
-        ...(request.inputs ? { inputs: request.inputs } : {}),
-        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
     };
 }
 
@@ -4589,11 +4589,11 @@ async function runAgentChatTurn(
     // The block that separates the person's words from what the turn adds for
     // attached files must not be something the person can type: the transcript
     // is cut at it (`persistedUserTurn`).
-    // The Inputs block (and, for external content, its closing line) belongs to the
+    // The Variables block (and, for external content, its closing line) belongs to the
     // user turn like the words themselves: it is what the model reads, what the
     // transcript stores and what a resume replays.
     const userMessage = neutralizeAttachmentMarker(
-        composeUserMessageWithInputs(request.userMessage, request.inputs, { externalContent: request.externalContent }),
+        composeUserMessageWithVariables(request.userMessage, request.variables, { externalContent: request.externalContent }),
     );
 
     // 1. Load agent config (use published version for API/SDK calls)
@@ -4797,8 +4797,8 @@ async function runAgentChatTurn(
         ...(modelChoice ? { modelChoice } : {}),
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
-        ...(request.inputs ? { inputs: request.inputs } : {}),
-        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5828,20 +5828,20 @@ export interface AgentResumeRequest {
     conversationId: string;
     /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
     userId: string;
-    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a routine run). */
+    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a trigger run). */
     accountableUserId?: string;
     trigger: 'resume' | 'timeout';
     /** The background run executing this continuation, when there is one. */
     runId?: string;
     runtimeContext?: AgentRuntimeContext;
     /**
-     * The turn's per-request structured output / inputs (the run row's, for a queued
+     * The turn's per-request structured output / variables (the run row's, for a queued
      * continuation). A paused turn carries its own with the paused state, which
      * wins when this is absent; a budget continuation has only these.
      */
     responseFormat?: AgentResponseFormat;
-    inputs?: Record<string, unknown>;
-    inputsAsPromptVariables?: boolean;
+    variables?: Record<string, unknown>;
+    variablesInPrompt?: boolean;
     cancellationCell?: AgentRunCancellationCell;
     signal?: AbortSignal;
     onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -6119,12 +6119,12 @@ async function runAgentResumeTurn(
     const questions = pausedRun?.questions ?? [];
     const bySdkId = pausedRun?.bySdkId ?? new Map<string, IAgentPendingAction>();
     const source: 'agent' | 'agent-playground' = paused?.source ?? request.continuation!.source;
-    // The turn's own structured output and inputs: the request's, else the ones the pause stored.
+    // The turn's own structured output and variables: the request's, else the ones the pause stored.
     const turnOptions: PausedTurnOptions = {
         ...(paused?.turn ?? {}),
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
-        ...(request.inputs ? { inputs: request.inputs } : {}),
-        ...(request.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
     };
     const startedAt = Date.now();
 
@@ -6167,8 +6167,8 @@ async function runAgentResumeTurn(
         threadId: conversationId,
         ...(spend ? { spend } : {}),
         ...(turnOptions.responseFormat ? { responseFormat: turnOptions.responseFormat } : {}),
-        ...(turnOptions.inputs ? { inputs: turnOptions.inputs } : {}),
-        ...(turnOptions.inputsAsPromptVariables === false ? { inputsAsPromptVariables: false } : {}),
+        ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
+        ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
     });
 
     try {

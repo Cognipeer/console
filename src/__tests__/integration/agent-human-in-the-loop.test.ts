@@ -1214,19 +1214,19 @@ describe('background runs', () => {
     expect((await storedConversation(id)).messages).toHaveLength(3);
   });
 
-  describe('a routine run with external content (§2.4a)', () => {
+  describe('a trigger run with external content (§2.4a)', () => {
     const SECRET = 'NORTHPOLE7';
     const systemTexts = (model: ScriptedModel) => model.seen.flatMap((messages) => messages.filter((m) => m.role === 'system').map((m) => String(m.content)));
-    const routineAgent = () => createAgent({
-      systemPrompt: 'Serve region {{input.region}}.',
-      inputs: [{ name: 'region', type: 'string' }],
+    const triggerAgent = () => createAgent({
+      systemPrompt: 'Serve region {{variables.region}}.',
+      variables: [{ name: 'region', type: 'string' }],
       humanInTheLoop: { ...HITL_ON, unattended: 'pause' },
     });
     const startPaused = async (id: string, external: boolean) => {
       const created = await queueAgentRun({
         tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
-        conversationId: id, userMessage: 'list files', userId: 'system:routine:rt1', actorType: 'system',
-        channel: 'routine', routineId: 'rt1', trigger: 'manual', unattended: true, inputs: { region: SECRET },
+        conversationId: id, userMessage: 'list files', userId: 'system:trigger:trg1', actorType: 'system',
+        channel: 'trigger', triggerId: 'trg1', trigger: 'manual', unattended: true, variables: { region: SECRET },
         ...(external ? { externalContent: true } : {}),
       });
       if (created.kind !== 'accepted') throw new Error(created.kind);
@@ -1236,7 +1236,7 @@ describe('background runs', () => {
     };
 
     it('answered from the dashboard (inline), the continuation keeps the input out of the system prompt', async () => {
-      await routineAgent();
+      await triggerAgent();
       const model = scriptModel(oneToolScript('ls'));
       const id = String((await newConversation())._id);
       const { actionId } = await startPaused(id, true);
@@ -1249,15 +1249,15 @@ describe('background runs', () => {
     });
 
     it('answered from the dashboard, the paused run\'s own external-content mark keeps the input out even when the paused state carries no flag', async () => {
-      await routineAgent();
+      await triggerAgent();
       const model = scriptModel(oneToolScript('ls'));
       const id = String((await newConversation())._id);
       const { runId, actionId } = await startPaused(id, true);
       // The stored paused state remembers the flag; take it out so only the run row's mark is left to carry it.
       const stored = (await db.findAgentConversationState(id))!;
       const envelope = JSON.parse(stored.pausedSnapshot!);
-      expect(envelope.turn.inputsAsPromptVariables).toBe(false);
-      delete envelope.turn.inputsAsPromptVariables;
+      expect(envelope.turn.variablesInPrompt).toBe(false);
+      delete envelope.turn.variablesInPrompt;
       await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
       expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.externalContent).toBe(true);
 
@@ -1268,7 +1268,7 @@ describe('background runs', () => {
     });
 
     it('answered in the background (worker resume), the same holds', async () => {
-      await routineAgent();
+      await triggerAgent();
       const model = scriptModel(oneToolScript('ls'));
       const id = String((await newConversation())._id);
       const { runId, actionId } = await startPaused(id, true);
@@ -1282,7 +1282,7 @@ describe('background runs', () => {
     });
 
     it('without external content the input is a prompt variable as usual (the check above is meaningful)', async () => {
-      await routineAgent();
+      await triggerAgent();
       const model = scriptModel(oneToolScript('ls'));
       const id = String((await newConversation())._id);
       const { actionId } = await startPaused(id, false);

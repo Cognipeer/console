@@ -1,5 +1,5 @@
 /**
- * The incoming webhook trigger's pure parts: every auth mode (header and body),
+ * The incoming webhook's pure parts: every auth mode (header and body),
  * the header allow-list, the event / delivery id normalization, the Azure
  * DevOps test notification, de-duplication material, the bounded view, filter
  * rules, the prompt template (save-time rules, JSON insertion, output budget)
@@ -19,22 +19,22 @@ import {
   standardSecretProblem,
   verifyBodyAuth,
   verifyHeaderAuth,
-} from '@/lib/services/agents/routineWebhookAuth';
+} from '@/lib/services/agents/agentTriggerWebhookAuth';
 import {
   boundedView,
   filterRuleMatches,
   firstFilterMiss,
   globMatch,
-  inputMappingProblems,
+  variableMappingProblems,
   jsonText,
-  mapWebhookInputs,
+  mapWebhookVariables,
   parseFilterRules,
   renderWebhookTemplate,
   templateProblem,
   WebhookTemplateError,
-} from '@/lib/services/agents/routineWebhookView';
-import { parseDeliveryJson } from '@/lib/services/agents/routineWebhookDelivery';
-import { parseWebhookTriggerWrite, rotateWebhookSecret } from '@/lib/services/agents/routineWebhookTrigger';
+} from '@/lib/services/agents/agentTriggerWebhookView';
+import { parseDeliveryJson } from '@/lib/services/agents/agentTriggerWebhookDelivery';
+import { parseWebhookWrite, rotateWebhookSecret } from '@/lib/services/agents/agentTriggerWebhookIntake';
 
 const SECRET = 'whsec_generated-secret-value-1234';
 const OLD = 'whsec_previous-secret-value-9876';
@@ -179,7 +179,7 @@ describe('de-duplication material', () => {
     expect(dedupMaterial('generic', 'signature', {}, body, {})).toBeNull();
   });
 
-  it('builds the attempt chain hook:<routine>:<40 hex>, :r2 … :r5', () => {
+  it('builds the attempt chain hook:<trigger>:<40 hex>, :r2 … :r5', () => {
     const base = deliveryKeyBase('r1', 'material');
     expect(base).toMatch(/^hook:r1:[0-9a-f]{40}$/);
     expect(deliveryAttemptKeys(base)).toEqual([base, `${base}:r2`, `${base}:r3`, `${base}:r4`, `${base}:r5`]);
@@ -339,31 +339,31 @@ describe('input mapping', () => {
   const view = boundedView({ payload: { number: 42, title: 'Fix', draft: 'false', labels: [{ name: 'bug' }], big: 'y'.repeat(8 * 1024) } });
 
   it('a single tag keeps the type; other strings are rendered; strings are coerced to the declared type', () => {
-    const mapped = mapWebhookInputs(declared, {
+    const mapped = mapWebhookVariables(declared, {
       number: '{{ payload.number }}', title: 'PR {{payload.title}}', draft: '{{payload.draft}}', labels: '{{payload.labels}}', region: 'eu',
     }, view);
-    expect(mapped).toEqual({ ok: true, inputs: { number: 42, title: 'PR "Fix"', draft: false, labels: [{ name: 'bug' }], region: 'eu' } });
-    expect(Object.getPrototypeOf((mapped as unknown as { inputs: { labels: object } }).inputs.labels)).toBe(Array.prototype);
+    expect(mapped).toEqual({ ok: true, variables: { number: 42, title: 'PR "Fix"', draft: false, labels: [{ name: 'bug' }], region: 'eu' } });
+    expect(Object.getPrototypeOf((mapped as unknown as { variables: { labels: object } }).variables.labels)).toBe(Array.prototype);
   });
 
   it('literal overrides go on top, unrendered', () => {
-    const mapped = mapWebhookInputs(declared, { number: '{{payload.number}}' }, view, { title: '{{payload.title}}' });
-    expect(mapped).toEqual({ ok: true, inputs: { number: 42, title: '{{payload.title}}' } });
+    const mapped = mapWebhookVariables(declared, { number: '{{payload.number}}' }, view, { title: '{{payload.title}}' });
+    expect(mapped).toEqual({ ok: true, variables: { number: 42, title: '{{payload.title}}' } });
   });
 
   it('reports a missing required value, a bad type and the size caps', () => {
-    expect(mapWebhookInputs(declared, { number: '{{payload.missing}}' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: number: Required' });
-    expect(mapWebhookInputs(declared, { number: '{{payload.title}}' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: number: Must be an integer' });
-    expect(mapWebhookInputs(declared, { number: '{{payload.number}}', title: 'x {{payload.big}}' }, view)).toMatchObject({ ok: false });
-    expect(mapWebhookInputs(declared, { number: '{{payload.number}}', labels: 'not {{payload.title}} json' }, view)).toMatchObject({ ok: false, reason: 'invalid inputs: labels: Must be JSON' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.missing}}' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: number: Required' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.title}}' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: number: Must be an integer' });
+    expect(mapWebhookVariables(declared, { number: '{{payload.number}}', title: 'x {{payload.big}}' }, view)).toMatchObject({ ok: false });
+    expect(mapWebhookVariables(declared, { number: '{{payload.number}}', labels: 'not {{payload.title}} json' }, view)).toMatchObject({ ok: false, reason: 'invalid variables: labels: Must be JSON' });
   });
 
   it('checks a mapping at save time', () => {
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', region: 'eu' })).toEqual([]);
-    expect(inputMappingProblems(declared, { region: 'eu' })).toEqual([{ field: 'number', message: 'Required' }]);
-    expect(inputMappingProblems(declared, { number: '{{payload.labels.*.name}}' })[0].message).toMatch(/only allowed in filter/);
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', region: 'asia' })[0].field).toBe('region');
-    expect(inputMappingProblems(declared, { number: '{{payload.number}}', other: 'x' })[0]).toEqual({ field: 'other', message: 'Not an input of this agent' });
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', region: 'eu' })).toEqual([]);
+    expect(variableMappingProblems(declared, { region: 'eu' })).toEqual([{ field: 'number', message: 'Required' }]);
+    expect(variableMappingProblems(declared, { number: '{{payload.labels.*.name}}' })[0].message).toMatch(/only allowed in filter/);
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', region: 'asia' })[0].field).toBe('region');
+    expect(variableMappingProblems(declared, { number: '{{payload.number}}', other: 'x' })[0]).toEqual({ field: 'other', message: 'Not a variable of this agent' });
   });
 });
 
@@ -380,44 +380,44 @@ describe('delivery JSON', () => {
   });
 });
 
-describe('trigger writes and rotation', () => {
-  it('generates the hook id and secret for a new trigger; Standard Webhooks needs the sender’s', () => {
-    const write = parseWebhookTriggerWrite({ type: 'webhook', preset: 'github' }, null);
-    expect(write.ok && write.trigger).toMatchObject({ type: 'webhook', preset: 'github', auth: 'github_signature', secretSource: 'generated', includePayload: true });
+describe('webhook writes and rotation', () => {
+  it('generates the hook id and secret for a new webhook; Standard Webhooks needs the sender’s', () => {
+    const write = parseWebhookWrite({ preset: 'github' }, null);
+    expect(write.ok && write.webhook).toMatchObject({ preset: 'github', auth: 'github_signature', secretSource: 'generated', includePayload: true });
     expect(write.ok && write.secret).toMatch(/^whsec_/);
-    expect(write.ok && write.trigger.hookId).toMatch(/^wh_[A-Za-z0-9_-]{24}$/);
-    expect(parseWebhookTriggerWrite({ type: 'webhook', preset: 'gitlab', auth: 'standard_webhooks' }, null)).toMatchObject({ ok: false, errors: [{ field: 'trigger.secret' }] });
-    const provided = parseWebhookTriggerWrite({ type: 'webhook', preset: 'gitlab', auth: 'standard_webhooks', secret: STANDARD }, null);
-    expect(provided.ok && provided.trigger.secretSource).toBe('provided');
+    expect(write.ok && write.webhook.hookId).toMatch(/^wh_[A-Za-z0-9_-]{24}$/);
+    expect(parseWebhookWrite({ preset: 'gitlab', auth: 'standard_webhooks' }, null)).toMatchObject({ ok: false, errors: [{ field: 'webhook.secret' }] });
+    const provided = parseWebhookWrite({ preset: 'gitlab', auth: 'standard_webhooks', secret: STANDARD }, null);
+    expect(provided.ok && provided.webhook.secretSource).toBe('provided');
     expect(provided.ok && provided.secret).toBeUndefined();
-    expect(parseWebhookTriggerWrite({ type: 'webhook', preset: 'github', auth: 'bearer' }, null).ok).toBe(false);
-    expect(parseWebhookTriggerWrite({ type: 'webhook', preset: 'generic', secret: 'mine' }, null).ok).toBe(false);
+    expect(parseWebhookWrite({ preset: 'github', auth: 'bearer' }, null).ok).toBe(false);
+    expect(parseWebhookWrite({ preset: 'generic', secret: 'mine' }, null).ok).toBe(false);
   });
 
   it('keeps the hook id and secret across edits; moving off Standard Webhooks generates a new secret', () => {
-    const first = parseWebhookTriggerWrite({ type: 'webhook', preset: 'generic' }, null);
+    const first = parseWebhookWrite({ preset: 'generic' }, null);
     if (!first.ok) throw new Error('setup');
-    const edited = parseWebhookTriggerWrite({ type: 'webhook', auth: 'header', header_name: 'X-Ado-Secret', events: ['deploy'] }, first.trigger);
-    expect(edited.ok && edited.trigger).toMatchObject({ hookId: first.trigger.hookId, secretSealed: first.trigger.secretSealed, auth: 'header', headerName: 'x-ado-secret', events: ['deploy'] });
+    const edited = parseWebhookWrite({ auth: 'header', header_name: 'X-Ado-Secret', events: ['deploy'] }, first.webhook);
+    expect(edited.ok && edited.webhook).toMatchObject({ hookId: first.webhook.hookId, secretSealed: first.webhook.secretSealed, auth: 'header', headerName: 'x-ado-secret', events: ['deploy'] });
     expect(edited.ok && edited.secret).toBeUndefined();
-    const toStandard = parseWebhookTriggerWrite({ type: 'webhook', auth: 'standard_webhooks', secret: STANDARD }, first.trigger);
+    const toStandard = parseWebhookWrite({ auth: 'standard_webhooks', secret: STANDARD }, first.webhook);
     if (!toStandard.ok) throw new Error('setup');
-    expect(toStandard.trigger.hookId).toBe(first.trigger.hookId);
-    const back = parseWebhookTriggerWrite({ type: 'webhook', auth: 'bearer' }, toStandard.trigger);
+    expect(toStandard.webhook.hookId).toBe(first.webhook.hookId);
+    const back = parseWebhookWrite({ auth: 'bearer' }, toStandard.webhook);
     expect(back.ok && back.secret).toMatch(/^whsec_/);
-    expect(back.ok && back.trigger.secretSource).toBe('generated');
+    expect(back.ok && back.webhook.secretSource).toBe('generated');
   });
 
   it('rotation: no grace drops the old secret; a grace keeps it until then', () => {
-    const first = parseWebhookTriggerWrite({ type: 'webhook', preset: 'generic' }, null);
+    const first = parseWebhookWrite({ preset: 'generic' }, null);
     if (!first.ok) throw new Error('setup');
     const at = new Date(now);
-    const graced = rotateWebhookSecret(first.trigger, { graceSeconds: 3600 }, at);
-    expect(graced.ok && graced.trigger.previousSecretSealed).toBe(first.trigger.secretSealed);
-    expect(graced.ok && graced.trigger.previousSecretExpiresAt?.getTime()).toBe(now + 3_600_000);
+    const graced = rotateWebhookSecret(first.webhook, { graceSeconds: 3600 }, at);
+    expect(graced.ok && graced.webhook.previousSecretSealed).toBe(first.webhook.secretSealed);
+    expect(graced.ok && graced.webhook.previousSecretExpiresAt?.getTime()).toBe(now + 3_600_000);
     if (!graced.ok) throw new Error('setup');
-    const instant = rotateWebhookSecret(graced.trigger, { graceSeconds: 0 }, at);
-    expect(instant.ok && instant.trigger.previousSecretSealed).toBeNull();
-    expect(rotateWebhookSecret(first.trigger, { graceSeconds: 0, secret: 'mine' }, at).ok).toBe(false);
+    const instant = rotateWebhookSecret(graced.webhook, { graceSeconds: 0 }, at);
+    expect(instant.ok && instant.webhook.previousSecretSealed).toBeNull();
+    expect(rotateWebhookSecret(first.webhook, { graceSeconds: 0, secret: 'mine' }, at).ok).toBe(false);
   });
 });

@@ -1,30 +1,36 @@
 'use client';
 
 /**
- * Inputs: the typed arguments of an agent (`config.inputs`).
+ * Variables: the typed values an agent takes next to the message (`config.variables`).
  *
- * Each row is one input: name, label, type, required, default, description and
- * (for text / number types) the allowed values. A caller sends them as `inputs`
- * on a run, a routine stores them with its prompt; the prompt reads them as
- * `{{input.<name>}}` and the model also gets them as an Inputs block. The same
- * rules the server applies on save (`validateInputDeclaration`) mark a row here
+ * Each row is one variable: name, label, type, required, default, description and
+ * (for text / number types) the allowed values. A caller sends them as `variables`
+ * on a run, a trigger stores them with its prompt; the instructions read them as
+ * `{{variables.<name>}}` and the model also gets them as a Variables block. The same
+ * rules the server applies on save (`validateVariableDeclaration`) mark a row here
  * as the person types, so a save is not the first they hear of a bad name.
+ *
+ * Above the rows, a short intro says what variables are, where they fit (runs a
+ * program starts) and where they do not (chat: chat clients never send them, so over
+ * the API a required variable without a default makes every chat message a 400; the
+ * playground and portals have no place to type them). A required variable without a
+ * default carries that warning on its own row.
  */
 
 import { Alert, Button, Group, NumberInput, Paper, Select, SimpleGrid, Stack, Switch, TagsInput, Text, TextInput, ActionIcon } from '@mantine/core';
 import { IconInfoCircle, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { IAgentInputField } from '@/lib/database/provider/types.domain';
-import { MAX_AGENT_INPUT_FIELDS, validateInputDeclaration, type InputIssue } from '@/lib/services/agents/agentInputs';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
+import { MAX_AGENT_VARIABLES, validateVariableDeclaration, type VariableIssue } from '@/lib/services/agents/agentVariables';
 
-export interface AgentInputsEditorProps {
-    value: IAgentInputField[] | undefined;
-    onChange: (next: IAgentInputField[] | undefined) => void;
+export interface AgentVariablesEditorProps {
+    value: IAgentVariable[] | undefined;
+    onChange: (next: IAgentVariable[] | undefined) => void;
 }
 
-type InputType = IAgentInputField['type'];
-const INPUT_TYPES: InputType[] = ['string', 'number', 'integer', 'boolean', 'json'];
-const TYPE_LABEL_KEY: Record<InputType, string> = {
+type VariableType = IAgentVariable['type'];
+const VARIABLE_TYPES: VariableType[] = ['string', 'number', 'integer', 'boolean', 'json'];
+const TYPE_LABEL_KEY: Record<VariableType, string> = {
     string: 'typeString',
     number: 'typeNumber',
     integer: 'typeInteger',
@@ -32,17 +38,17 @@ const TYPE_LABEL_KEY: Record<InputType, string> = {
     json: 'typeJson',
 };
 
-/** A new row: the first free `input_<n>` name, as optional text. */
-export function newInputField(existing: ReadonlyArray<IAgentInputField>): IAgentInputField {
+/** A new row: the first free `variable_<n>` name, as optional text. */
+export function newVariable(existing: ReadonlyArray<IAgentVariable>): IAgentVariable {
     const taken = new Set(existing.map((field) => field.name));
     let n = existing.length + 1;
-    while (taken.has(`input_${n}`)) n += 1;
-    return { name: `input_${n}`, type: 'string' };
+    while (taken.has(`variable_${n}`)) n += 1;
+    return { name: `variable_${n}`, type: 'string' };
 }
 
 /** Drops the keys a row left empty, so an untouched row saves only name and type. */
-export function compactInputField(field: IAgentInputField): IAgentInputField {
-    const out: IAgentInputField = { name: field.name, type: field.type };
+export function compactVariable(field: IAgentVariable): IAgentVariable {
+    const out: IAgentVariable = { name: field.name, type: field.type };
     if (field.label) out.label = field.label;
     if (field.description) out.description = field.description;
     if (field.enum && field.enum.length > 0 && (field.type === 'string' || field.type === 'number' || field.type === 'integer')) out.enum = field.enum;
@@ -51,57 +57,72 @@ export function compactInputField(field: IAgentInputField): IAgentInputField {
     return out;
 }
 
-/** The rows as stored: compacted, and `undefined` when there are none (an untouched agent saves no `inputs`). */
-export function inputsForSave(fields: ReadonlyArray<IAgentInputField>): IAgentInputField[] | undefined {
-    return fields.length > 0 ? fields.map(compactInputField) : undefined;
+/** The rows as stored: compacted, and `undefined` when there are none (an untouched agent saves no `variables`). */
+export function variablesForSave(fields: ReadonlyArray<IAgentVariable>): IAgentVariable[] | undefined {
+    return fields.length > 0 ? fields.map(compactVariable) : undefined;
 }
 
 /** Changing a row's type keeps what still makes sense: the default and the allowed values depend on it. */
-export function retypeInputField(field: IAgentInputField, type: InputType): IAgentInputField {
-    const next: IAgentInputField = { ...field, type };
+export function retypeVariable(field: IAgentVariable, type: VariableType): IAgentVariable {
+    const next: IAgentVariable = { ...field, type };
     delete next.default;
     if (type !== 'string' && type !== 'number' && type !== 'integer') delete next.enum;
     else if (field.type !== type) delete next.enum;
     return next;
 }
 
-const INPUT_TYPE_LABEL_KEY: Record<string, string> = {
+/**
+ * A required variable with no default: a chat client cannot send it, so every chat
+ * message that reaches this agent through the API is refused (400 `invalid_variables`).
+ * The server counts a `null` default as none, like an absent one.
+ */
+export function isRequiredWithoutDefault(field: IAgentVariable): boolean {
+    return field.required === true && (field.default === undefined || field.default === null);
+}
+
+const VARIABLE_TYPE_LABEL_KEY: Record<string, string> = {
     string: 'typeString', number: 'typeNumber', integer: 'typeInteger', boolean: 'typeBoolean', json: 'typeJson',
 };
 
-export default function AgentInputsEditor({ value, onChange }: AgentInputsEditorProps) {
-    const t = useTranslations('agents.inputs');
+export default function AgentVariablesEditor({ value, onChange }: AgentVariablesEditorProps) {
+    const t = useTranslations('agents.variables');
     const fields = value ?? [];
-    const issues = validateInputDeclaration(fields);
-    const wording = (issue: InputIssue): string | undefined => {
+    const issues = validateVariableDeclaration(fields);
+    const wording = (issue: VariableIssue): string | undefined => {
         if (!issue.code) return issue.message;
         const params: Record<string, string | number> = { ...issue.params };
         let key = `issue_${issue.code}`;
         if (issue.code === 'enum_invalid') key = `issue_enum_invalid_${String(params.kind)}`;
         if ((issue.code === 'default_type' || issue.code === 'enum_unsupported') && typeof params.type === 'string') {
-            params.type = t(INPUT_TYPE_LABEL_KEY[params.type] ?? 'typeString');
+            params.type = t(VARIABLE_TYPE_LABEL_KEY[params.type] ?? 'typeString');
         }
         if (issue.code === 'text_expected') params.key = t(params.key === 'label' ? 'label' : 'description');
         return t(key, params);
     };
     const problem = (index: number, key: string) => {
-        const issue = issues.find((entry) => entry.field === `inputs[${index}].${key}`);
+        const issue = issues.find((entry) => entry.field === `variables[${index}].${key}`);
         return issue ? wording(issue) : undefined;
     };
 
-    const update = (index: number, patch: Partial<IAgentInputField>) =>
-        onChange(inputsForSave(fields.map((field, i) => (i === index ? { ...field, ...patch } : field))));
-    const replace = (index: number, next: IAgentInputField) =>
-        onChange(inputsForSave(fields.map((field, i) => (i === index ? next : field))));
+    const update = (index: number, patch: Partial<IAgentVariable>) =>
+        onChange(variablesForSave(fields.map((field, i) => (i === index ? { ...field, ...patch } : field))));
+    const replace = (index: number, next: IAgentVariable) =>
+        onChange(variablesForSave(fields.map((field, i) => (i === index ? next : field))));
 
     return (
         <Stack gap="md">
+            <Stack gap={6} data-testid="agent-variables-intro">
+                <Text size="sm">{t('intro')}</Text>
+                <Text size="sm" c="dimmed">{t('introWhen')}</Text>
+                <Text size="sm" c="dimmed">{t('introChat')}</Text>
+            </Stack>
+
             {fields.length === 0 ? (
                 <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>{t('empty')}</Alert>
             ) : null}
 
             {fields.map((field, index) => (
-                <Paper key={index} withBorder p="md" radius="md" data-testid="agent-input-row">
+                <Paper key={index} withBorder p="md" radius="md" data-testid="agent-variable-row">
                     <Stack gap="sm">
                         <Group justify="space-between" align="flex-start" wrap="nowrap">
                             <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm" style={{ flex: 1 }}>
@@ -121,8 +142,8 @@ export default function AgentInputsEditor({ value, onChange }: AgentInputsEditor
                                     label={t('type')}
                                     allowDeselect={false}
                                     value={field.type}
-                                    data={INPUT_TYPES.map((type) => ({ value: type, label: t(TYPE_LABEL_KEY[type]) }))}
-                                    onChange={(type) => type && replace(index, retypeInputField(field, type as InputType))}
+                                    data={VARIABLE_TYPES.map((type) => ({ value: type, label: t(TYPE_LABEL_KEY[type]) }))}
+                                    onChange={(type) => type && replace(index, retypeVariable(field, type as VariableType))}
                                 />
                             </SimpleGrid>
                             <ActionIcon
@@ -130,7 +151,7 @@ export default function AgentInputsEditor({ value, onChange }: AgentInputsEditor
                                 color="red"
                                 mt={24}
                                 aria-label={t('remove')}
-                                onClick={() => onChange(inputsForSave(fields.filter((_, i) => i !== index)))}
+                                onClick={() => onChange(variablesForSave(fields.filter((_, i) => i !== index)))}
                             >
                                 <IconTrash size={16} />
                             </ActionIcon>
@@ -193,9 +214,12 @@ export default function AgentInputsEditor({ value, onChange }: AgentInputsEditor
                             ) : null}
                         </SimpleGrid>
 
-                        <Group justify="space-between">
+                        <Group justify="space-between" align="flex-start">
                             <Switch
                                 label={t('required')}
+                                description={isRequiredWithoutDefault(field)
+                                    ? <Text span size="xs" c="orange" data-testid="agent-variable-chat-hint">{t('requiredNoDefaultHint')}</Text>
+                                    : undefined}
                                 checked={field.required === true}
                                 onChange={(event) => update(index, { required: event.currentTarget.checked || undefined })}
                             />
@@ -210,17 +234,17 @@ export default function AgentInputsEditor({ value, onChange }: AgentInputsEditor
                     size="xs"
                     variant="default"
                     leftSection={<IconPlus size={14} />}
-                    disabled={fields.length >= MAX_AGENT_INPUT_FIELDS}
-                    onClick={() => onChange(inputsForSave([...fields, newInputField(fields)]))}
+                    disabled={fields.length >= MAX_AGENT_VARIABLES}
+                    onClick={() => onChange(variablesForSave([...fields, newVariable(fields)]))}
                 >
                     {t('add')}
                 </Button>
-                {fields.length >= MAX_AGENT_INPUT_FIELDS ? (
-                    <Text size="xs" c="dimmed">{t('limit', { max: MAX_AGENT_INPUT_FIELDS })}</Text>
+                {fields.length >= MAX_AGENT_VARIABLES ? (
+                    <Text size="xs" c="dimmed">{t('limit', { max: MAX_AGENT_VARIABLES })}</Text>
                 ) : null}
             </Group>
-            {issues.some((issue) => issue.field === 'inputs') ? (
-                <Alert color="red" variant="light">{wording(issues.find((issue) => issue.field === 'inputs')!)}</Alert>
+            {issues.some((issue) => issue.field === 'variables') ? (
+                <Alert color="red" variant="light">{wording(issues.find((issue) => issue.field === 'variables')!)}</Alert>
             ) : null}
         </Stack>
     );

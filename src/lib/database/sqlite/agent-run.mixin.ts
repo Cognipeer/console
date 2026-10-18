@@ -42,8 +42,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            result, errorMessage, cancelRequestedAt, workerId, heartbeatAt,
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
-           runClass, notBefore, detachedAt, metadata, channel, routineId, runTrigger,
-           responseFormat, inputs, queueGeneration, lastPublishedAt, unattended, externalContent, background,
+           runClass, notBefore, detachedAt, metadata, channel, triggerId, runTrigger,
+           responseFormat, variables, queueGeneration, lastPublishedAt, unattended, externalContent, background,
            callbackEventId, resumeTrigger, resumeUserId, resumeApiTokenId, accountableUserId, accountableTokenId,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
@@ -52,8 +52,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            @result, @errorMessage, @cancelRequestedAt, @workerId, @heartbeatAt,
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
-           @runClass, @notBefore, @detachedAt, @metadata, @channel, @routineId, @runTrigger,
-           @responseFormat, @inputs, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @background,
+           @runClass, @notBefore, @detachedAt, @metadata, @channel, @triggerId, @runTrigger,
+           @responseFormat, @variables, @queueGeneration, @lastPublishedAt, @unattended, @externalContent, @background,
            @callbackEventId, @resumeTrigger, @resumeUserId, @resumeApiTokenId, @accountableUserId, @accountableTokenId,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
@@ -92,10 +92,10 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           detachedAt: record.detachedAt ? new Date(record.detachedAt).toISOString() : null,
           metadata: record.metadata ? this.toJson(record.metadata) : null,
           channel: record.channel ?? null,
-          routineId: record.routineId ?? null,
+          triggerId: record.triggerId ?? null,
           runTrigger: record.trigger ?? null,
           responseFormat: record.responseFormat ? this.toJson(record.responseFormat) : null,
-          inputs: record.inputs ? this.toJson(record.inputs) : null,
+          variables: record.variables ? this.toJson(record.variables) : null,
           queueGeneration: record.queueGeneration ?? 1,
           lastPublishedAt: record.lastPublishedAt ? new Date(record.lastPublishedAt).toISOString() : null,
           unattended: record.unattended ? 1 : null,
@@ -265,7 +265,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         'status', 'errorReason', 'stopReason', 'errorMessage', 'workerId',
         'callbackUrl', 'callbackSecret', 'callbackStatus', 'projectId',
         'idempotencyKey', 'idempotencyRequestHash',
-        'runClass', 'channel', 'routineId',
+        'runClass', 'channel', 'triggerId',
         'callbackEventId', 'resumeTrigger', 'resumeUserId', 'resumeApiTokenId', 'accountableUserId', 'accountableTokenId',
       ];
       for (const f of scalarFields) {
@@ -299,7 +299,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         sets.push('runTrigger = @runTrigger');
         params.runTrigger = data.trigger ?? null;
       }
-      for (const f of ['metadata', 'responseFormat', 'inputs'] as const) {
+      for (const f of ['metadata', 'responseFormat', 'variables'] as const) {
         if (data[f] !== undefined) {
           sets.push(`${f} = @${f}`);
           params[f] = data[f] === null ? null : this.toJson(data[f]);
@@ -413,7 +413,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       mode?: IAgentRun['mode'] | IAgentRun['mode'][];
       excludeModes?: IAgentRun['mode'][];
       runClass?: AgentRunClass;
-      routineId?: string;
+      triggerId?: string;
       channel?: NonNullable<IAgentRun['channel']>;
       trigger?: NonNullable<IAgentRun['trigger']>;
       metadata?: Record<string, string>;
@@ -428,7 +428,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const params: Record<string, unknown> = { tenantId: filter.tenantId, projectId: filter.projectId };
       if (filter.agentKey) { conds.push('agentKey = @agentKey'); params.agentKey = filter.agentKey; }
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
-      if (filter.routineId) { conds.push('routineId = @routineId'); params.routineId = filter.routineId; }
+      if (filter.triggerId) { conds.push('triggerId = @triggerId'); params.triggerId = filter.triggerId; }
       if (filter.channel) { conds.push('channel = @channel'); params.channel = filter.channel; }
       if (filter.trigger) { conds.push('runTrigger = @runTrigger'); params.runTrigger = filter.trigger; }
       if (filter.userId) { conds.push('userId = @userId'); params.userId = filter.userId; }
@@ -653,10 +653,10 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         detachedAt: this.toDate(row.detachedAt) ?? null,
         metadata: row.metadata ? this.parseJson(row.metadata, null as Record<string, string> | null) : null,
         channel: (row.channel as IAgentRun['channel']) ?? null,
-        routineId: (row.routineId as string) ?? null,
+        triggerId: (row.triggerId as string) ?? null,
         trigger: (row.runTrigger as IAgentRun['trigger']) ?? null,
         responseFormat: row.responseFormat ? this.parseJson(row.responseFormat, null as IAgentRun['responseFormat']) : null,
-        inputs: row.inputs ? this.parseJson(row.inputs, null as Record<string, unknown> | null) : null,
+        variables: row.variables ? this.parseJson(row.variables, null as Record<string, unknown> | null) : null,
         queueGeneration: row.queueGeneration === null || row.queueGeneration === undefined ? undefined : Number(row.queueGeneration),
         lastPublishedAt: this.toDate(row.lastPublishedAt) ?? null,
         ...(Number(row.unattended) === 1 ? { unattended: true } : {}),

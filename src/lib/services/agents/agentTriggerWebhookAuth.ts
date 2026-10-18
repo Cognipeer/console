@@ -1,5 +1,5 @@
 /**
- * How a routine's webhook trigger checks and reads one delivery, per sender
+ * How a trigger's webhook checks and reads one delivery, per sender
  * preset: the auth check (header modes before the body is read, signature
  * modes over the raw body), the event name and delivery id (normalized before
  * anything shows or stores them), the headers a filter or template may read
@@ -11,22 +11,22 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import type { AgentRoutineWebhookAuth, AgentRoutineWebhookPreset } from '@/lib/database';
+import type { AgentTriggerWebhookAuth, AgentTriggerWebhookPreset } from '@/lib/database';
 
-export const WEBHOOK_PRESETS: readonly AgentRoutineWebhookPreset[] = ['github', 'gitlab', 'azure_devops', 'generic'];
+export const WEBHOOK_PRESETS: readonly AgentTriggerWebhookPreset[] = ['github', 'gitlab', 'azure_devops', 'generic'];
 
 /** The auth modes each preset offers; the first is its default. */
-export const WEBHOOK_PRESET_AUTH: Record<AgentRoutineWebhookPreset, readonly AgentRoutineWebhookAuth[]> = {
+export const WEBHOOK_PRESET_AUTH: Record<AgentTriggerWebhookPreset, readonly AgentTriggerWebhookAuth[]> = {
   github: ['github_signature'],
   gitlab: ['gitlab_token', 'standard_webhooks'],
   azure_devops: ['basic', 'header'],
   generic: ['bearer', 'signature', 'header', 'standard_webhooks'],
 };
 
-const HEADER_AUTH: ReadonlySet<AgentRoutineWebhookAuth> = new Set(['gitlab_token', 'bearer', 'basic', 'header']);
+const HEADER_AUTH: ReadonlySet<AgentTriggerWebhookAuth> = new Set(['gitlab_token', 'bearer', 'basic', 'header']);
 
 /** Checked from the headers alone, before the body is read. */
-export function isHeaderAuth(auth: AgentRoutineWebhookAuth): boolean {
+export function isHeaderAuth(auth: AgentTriggerWebhookAuth): boolean {
   return HEADER_AUTH.has(auth);
 }
 
@@ -81,7 +81,7 @@ export function headerValue(headers: HeaderBag, name: string): string | undefine
   return Array.isArray(value) ? value.join(', ') : value;
 }
 
-const HEADER_ALLOW_LIST: Record<AgentRoutineWebhookPreset, readonly string[]> = {
+const HEADER_ALLOW_LIST: Record<AgentTriggerWebhookPreset, readonly string[]> = {
   github: [
     'x-github-event', 'x-github-delivery', 'x-github-hook-id', 'x-github-hook-installation-target-type',
     'x-github-hook-installation-target-id', 'user-agent',
@@ -93,10 +93,10 @@ const HEADER_ALLOW_LIST: Record<AgentRoutineWebhookPreset, readonly string[]> = 
 
 /**
  * The headers a filter or template may read: the preset's allow-list only,
- * lower-cased; a header whose value contains one of the routine's secrets is
+ * lower-cased; a header whose value contains one of the trigger's secrets is
  * left out as well. A null-prototype object.
  */
-export function allowedHeaders(preset: AgentRoutineWebhookPreset, headers: HeaderBag, secrets: readonly string[]): Record<string, string> {
+export function allowedHeaders(preset: AgentTriggerWebhookPreset, headers: HeaderBag, secrets: readonly string[]): Record<string, string> {
   const out = Object.create(null) as Record<string, string>;
   const lower = Object.create(null) as HeaderBag;
   for (const [name, value] of Object.entries(headers)) lower[name.toLowerCase()] = value;
@@ -121,7 +121,7 @@ const SIGNATURE_MISMATCH: AuthCheck = { ok: false, reason: 'signature mismatch' 
 const OUTSIDE_WINDOW: AuthCheck = { ok: false, reason: 'timestamp outside the 5 minute window' };
 
 /** The token a header mode carries, or null when the header is absent or malformed. */
-function presentedToken(auth: AgentRoutineWebhookAuth, headers: HeaderBag, headerName: string | null | undefined): string | null {
+function presentedToken(auth: AgentTriggerWebhookAuth, headers: HeaderBag, headerName: string | null | undefined): string | null {
   switch (auth) {
     case 'gitlab_token':
       return headerValue(headers, 'x-gitlab-token') ?? null;
@@ -146,7 +146,7 @@ function presentedToken(auth: AgentRoutineWebhookAuth, headers: HeaderBag, heade
 
 /** A header mode (`gitlab_token`, `bearer`, `basic`, `header`): the secret in a header, against each accepted secret. */
 export function verifyHeaderAuth(
-  auth: AgentRoutineWebhookAuth,
+  auth: AgentTriggerWebhookAuth,
   headers: HeaderBag,
   headerName: string | null | undefined,
   secrets: readonly string[],
@@ -169,7 +169,7 @@ const withinWindow = (seconds: number, nowMs: number) => Math.abs(nowMs / 1000 -
 
 /** A body mode (`github_signature`, `signature`, `standard_webhooks`) over the exact bytes received. */
 export function verifyBodyAuth(
-  auth: AgentRoutineWebhookAuth,
+  auth: AgentTriggerWebhookAuth,
   headers: HeaderBag,
   body: Buffer,
   secrets: readonly string[],
@@ -256,7 +256,7 @@ export interface DeliveryIdentity {
 }
 
 /** The event name and delivery id of a delivery, per preset (SPEC W3). */
-export function deliveryIdentity(preset: AgentRoutineWebhookPreset, headers: HeaderBag, payload: unknown): DeliveryIdentity {
+export function deliveryIdentity(preset: AgentTriggerWebhookPreset, headers: HeaderBag, payload: unknown): DeliveryIdentity {
   let event: string | undefined;
   let deliveryHeader: string | undefined;
   let deliveryValue: string | undefined;
@@ -309,8 +309,8 @@ export function isAzureDevOpsTest(payload: unknown): boolean {
  * sender without a delivery id: no de-duplication).
  */
 export function dedupMaterial(
-  preset: AgentRoutineWebhookPreset,
-  auth: AgentRoutineWebhookAuth,
+  preset: AgentTriggerWebhookPreset,
+  auth: AgentTriggerWebhookAuth,
   headers: HeaderBag,
   body: Buffer,
   payload: unknown,
@@ -335,9 +335,9 @@ export function dedupMaterial(
   }
 }
 
-/** The idempotency key of a delivery's first attempt: `hook:<routineId>:<40 hex>`. */
-export function deliveryKeyBase(routineId: string, material: string): string {
-  return `hook:${routineId}:${sha256Hex(material).slice(0, 40)}`;
+/** The idempotency key of a delivery's first attempt: `hook:<triggerId>:<40 hex>`. */
+export function deliveryKeyBase(triggerId: string, material: string): string {
+  return `hook:${triggerId}:${sha256Hex(material).slice(0, 40)}`;
 }
 
 /** First attempt, then `:r2` … `:r5`: a redelivery of a failed delivery runs again, at most five times. */

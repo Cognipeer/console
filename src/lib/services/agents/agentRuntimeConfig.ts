@@ -171,7 +171,7 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
 
     // `runtime.askUser` is deliberately NOT mapped to `humanInTheLoop`. The SDK
     // would add an `ask_user_question` tool and PAUSE the run on it — but no
-    // console channel (sessions, the client API, A2A, routines) can show the
+    // console channel (sessions, the client API, A2A, triggers) can show the
     // question or resume with an answer, so the conversation stopped with an
     // empty reply and stayed stuck. Until a channel can answer, the agent is
     // never offered a question it cannot get answered.

@@ -1,13 +1,13 @@
 'use client';
 
 /**
- * Routines of one agent: saved ways of starting it — a prompt (+ inputs) and a
- * trigger (a schedule, one time, by hand, or an incoming webhook). Each fire is
- * a background run; "Runs" opens Sessions → Background runs filtered to the
- * routine.
+ * Triggers of one agent: saved ways of starting it — a prompt (+ variables) and a
+ * type (a schedule, one time, by hand, or an incoming webhook) with that type's
+ * settings. Each fire is a background run; "Runs" opens Sessions → Background
+ * runs filtered to the trigger.
  *
  * The editor is a full-screen FormShell; deleting asks through the shared
- * confirm dialog. A saved webhook routine's editor stays open with its Connect
+ * confirm dialog. A saved webhook trigger's editor stays open with its Connect
  * card (the secret is shown there once) and the Test / Deliveries tabs.
  */
 
@@ -50,51 +50,51 @@ import type { ReactNode } from 'react';
 import EmptyState from '@/components/common/EmptyState';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useDeleteResource } from '@/components/common/confirm';
-import type { IAgentInputField } from '@/lib/database/provider/types.domain';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { upcomingCronFires, validateRoutineCron } from '@/lib/services/agents/routineSchedule';
+import { upcomingCronFires, validateTriggerCron } from '@/lib/services/agents/agentTriggerSchedule';
 import {
     CRON_PRESETS,
-    ROUTINE_TRIGGER_TYPES,
-    emptyRoutineForm,
-    formFromRoutine,
-    routineBodyFromForm,
+    TRIGGER_TYPES,
+    emptyTriggerForm,
+    formFromTrigger,
+    triggerBodyFromForm,
     timezoneOptions,
-    webhookInputText,
-    webhookInputValue,
-    type RoutineForm,
-    type RoutineFormProblem,
-    type RoutineRow,
-    type RoutineTriggerType,
-} from './routineForm';
+    webhookVariableText,
+    webhookVariableValue,
+    type TriggerForm,
+    type TriggerFormProblem,
+    type TriggerRow,
+    type TriggerType,
+} from './triggerForm';
 import {
     WEBHOOK_PRESET_LABEL_KEY,
     WebhookConnectCard,
     WebhookDeliveriesPanel,
     WebhookTemplateVariables,
     WebhookTestPanel,
-    WebhookTriggerFields,
-} from './RoutineWebhookParts';
+    WebhookFields,
+} from './TriggerWebhookParts';
 
-export interface AgentRoutinesPanelProps {
+export interface AgentTriggersPanelProps {
     agentId: string;
     agentName: string;
-    /** The inputs the agent declares (its draft; the server checks the version that runs). */
-    declaredInputs?: IAgentInputField[];
+    /** The variables the agent declares (its draft; the server checks the version that runs). */
+    declaredVariables?: IAgentVariable[];
     /** Saved versions, newest first, for the version select. */
     versions: number[];
-    /** Open the runs this routine started. */
-    onShowRuns: (routine: { id: string; name: string }) => void;
+    /** Open the runs this trigger started. */
+    onShowRuns: (trigger: { id: string; name: string }) => void;
 }
 
-const TRIGGER_LABEL_KEY: Record<RoutineTriggerType, string> = {
-    schedule: 'triggerSchedule',
-    once: 'triggerOnce',
-    manual: 'triggerManual',
-    webhook: 'triggerWebhook',
+const TYPE_LABEL_KEY: Record<TriggerType, string> = {
+    schedule: 'typeSchedule',
+    once: 'typeOnce',
+    manual: 'typeManual',
+    webhook: 'typeWebhook',
 };
 
-const TRIGGER_ICON: Record<RoutineTriggerType, ReactNode> = {
+const TYPE_ICON: Record<TriggerType, ReactNode> = {
     schedule: <IconRepeat size={14} />,
     once: <IconClockPlay size={14} />,
     manual: <IconHandClick size={14} />,
@@ -103,7 +103,8 @@ const TRIGGER_ICON: Record<RoutineTriggerType, ReactNode> = {
 
 const WEBHOOK_PROMPT_PLACEHOLDER = 'Review pull request #{{payload.number}}: {{payload.pull_request.title}}';
 
-type StoredTrigger = { type: string; cron?: string; timezone?: string; run_at?: string; preset?: string; events?: string[] };
+/** The `webhook` settings object of a stored trigger, as far as the list summary reads it. */
+type StoredWebhookSummary = { preset?: string; events?: string[] };
 
 /** The message of an API error body (`{ error: { message } }`), else the status. */
 async function errorMessage(res: Response): Promise<string> {
@@ -123,25 +124,25 @@ function formatInZone(date: Date, locale: string, timeZone?: string): string {
 
 const fromEpoch = (seconds: number | null | undefined) => (seconds ? new Date(seconds * 1000) : null);
 
-export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs, versions, onShowRuns }: AgentRoutinesPanelProps) {
-    const t = useTranslations('agents.routines');
+export default function AgentTriggersPanel({ agentId, agentName, declaredVariables, versions, onShowRuns }: AgentTriggersPanelProps) {
+    const t = useTranslations('agents.triggers');
     const tConfirm = useTranslations('common.confirm');
     const locale = useLocale();
     const deleteResource = useDeleteResource();
-    const [routines, setRoutines] = useState<RoutineRow[] | null>(null);
+    const [triggers, setTriggers] = useState<TriggerRow[] | null>(null);
     const [loadFailed, setLoadFailed] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
-    const [editing, setEditing] = useState<{ routine: RoutineRow | null } | null>(null);
+    const [editing, setEditing] = useState<{ trigger: TriggerRow | null } | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const res = await fetch(`/api/agents/${agentId}/routines`, { cache: 'no-store' });
+            const res = await fetch(`/api/agents/${agentId}/triggers`, { cache: 'no-store' });
             if (!res.ok) throw new Error(await errorMessage(res));
-            const data = await res.json() as { data: RoutineRow[] };
-            setRoutines(data.data ?? []);
+            const data = await res.json() as { data: TriggerRow[] };
+            setTriggers(data.data ?? []);
             setLoadFailed(false);
         } catch {
-            // A failed first load is not "no routines": the list stays unset and an error state with a retry shows.
+            // A failed first load is not "no triggers": the list stays unset and an error state with a retry shows.
             setLoadFailed(true);
             notifications.show({ color: 'red', message: t('loadFailed') });
         }
@@ -149,21 +150,21 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
 
     useEffect(() => { void load(); }, [load]);
 
-    const triggerSummary = (routine: RoutineRow): string => {
-        const trigger = routine.trigger as StoredTrigger;
+    const typeSummary = (trigger: TriggerRow): string => {
         if (trigger.type === 'webhook') {
-            const preset = t(WEBHOOK_PRESET_LABEL_KEY[trigger.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
-            return trigger.events && trigger.events.length > 0 ? `${preset} · ${trigger.events.join(', ')}` : t('summaryWebhookAny', { preset });
+            const webhook = trigger.webhook as StoredWebhookSummary;
+            const preset = t(WEBHOOK_PRESET_LABEL_KEY[webhook.preset as keyof typeof WEBHOOK_PRESET_LABEL_KEY] ?? 'presetGeneric');
+            return webhook.events && webhook.events.length > 0 ? `${preset} · ${webhook.events.join(', ')}` : t('summaryWebhookAny', { preset });
         }
-        if (trigger.type === 'schedule') return t('summarySchedule', { cron: trigger.cron ?? '', timezone: trigger.timezone ?? '' });
-        if (trigger.type === 'once' && trigger.run_at) return t('summaryOnce', { time: formatInZone(new Date(trigger.run_at), locale) });
+        if (trigger.type === 'schedule') return t('summarySchedule', { cron: trigger.schedule.cron ?? '', timezone: trigger.schedule.timezone ?? '' });
+        if (trigger.type === 'once' && trigger.once.run_at) return t('summaryOnce', { time: formatInZone(new Date(trigger.once.run_at), locale) });
         return t('summaryManual');
     };
 
-    const toggle = async (routine: RoutineRow, enabled: boolean) => {
-        setBusyId(routine.id);
+    const toggle = async (trigger: TriggerRow, enabled: boolean) => {
+        setBusyId(trigger.id);
         try {
-            const res = await fetch(`/api/agents/${agentId}/routines/${routine.id}`, {
+            const res = await fetch(`/api/agents/${agentId}/triggers/${trigger.id}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled }),
@@ -177,10 +178,10 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
         }
     };
 
-    const runNow = async (routine: RoutineRow) => {
-        setBusyId(routine.id);
+    const runNow = async (trigger: TriggerRow) => {
+        setBusyId(trigger.id);
         try {
-            const res = await fetch(`/api/agents/${agentId}/routines/${routine.id}/run`, {
+            const res = await fetch(`/api/agents/${agentId}/triggers/${trigger.id}/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: '{}',
@@ -196,13 +197,13 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
         }
     };
 
-    const remove = async (routine: RoutineRow) => {
+    const remove = async (trigger: TriggerRow) => {
         await deleteResource({
-            noun: tConfirm('nouns.agentRoutine'),
-            name: routine.name,
-            extraWarning: tConfirm('extras.agentRoutineStops'),
+            noun: tConfirm('nouns.agentTrigger'),
+            name: trigger.name,
+            extraWarning: tConfirm('extras.agentTriggerStops'),
             action: async () => {
-                const res = await fetch(`/api/agents/${agentId}/routines/${routine.id}`, { method: 'DELETE' });
+                const res = await fetch(`/api/agents/${agentId}/triggers/${trigger.id}`, { method: 'DELETE' });
                 if (!res.ok) throw new Error(await errorMessage(res));
                 await load();
             },
@@ -212,32 +213,32 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
     return (
         <Stack gap="sm">
             <Group justify="flex-end">
-                <Button size="xs" leftSection={<IconPlus size={14} />} onClick={() => setEditing({ routine: null })}>
+                <Button size="xs" leftSection={<IconPlus size={14} />} onClick={() => setEditing({ trigger: null })}>
                     {t('add')}
                 </Button>
             </Group>
 
-            {routines === null && !loadFailed ? (
+            {triggers === null && !loadFailed ? (
                 <Stack gap="xs">{[0, 1].map((i) => <Skeleton key={i} h={36} />)}</Stack>
-            ) : routines === null ? (
+            ) : triggers === null ? (
                 <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />} role="alert">
                     <Group justify="space-between" wrap="nowrap" gap="sm">
                         <Text size="sm">{t('loadFailed')}</Text>
                         <Button size="compact-xs" variant="light" color="red" onClick={() => { setLoadFailed(false); void load(); }}>{t('retry')}</Button>
                     </Group>
                 </Alert>
-            ) : routines.length === 0 ? (
+            ) : triggers.length === 0 ? (
                 <EmptyState title={t('emptyTitle')} description={t('emptyDescription')} minHeight={160} />
             ) : (
                 <Stack gap={0} role="list" aria-label={t('sectionTitle')}>
-                    {routines.map((routine) => {
-                        const next = fromEpoch(routine.next_fire_at);
-                        const last = fromEpoch(routine.last_fire_at);
-                        const triggerType = (routine.trigger.type as RoutineTriggerType) in TRIGGER_LABEL_KEY ? routine.trigger.type as RoutineTriggerType : 'manual';
-                        const summary = triggerSummary(routine);
+                    {triggers.map((trigger) => {
+                        const next = fromEpoch(trigger.next_fire_at);
+                        const last = fromEpoch(trigger.last_fire_at);
+                        const triggerType: TriggerType = trigger.type in TYPE_LABEL_KEY ? trigger.type : 'manual';
+                        const summary = typeSummary(trigger);
                         return (
                             <Group
-                                key={routine.id}
+                                key={trigger.id}
                                 role="listitem"
                                 gap="md"
                                 wrap="wrap"
@@ -246,16 +247,16 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                                 style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
                             >
                                 <Stack gap={2} style={{ flex: '1 1 220px', minWidth: 0 }}>
-                                    <Text size="sm" fw={500} truncate title={routine.name}>{routine.name}</Text>
+                                    <Text size="sm" fw={500} truncate title={trigger.name}>{trigger.name}</Text>
                                     <Group gap={6} wrap="nowrap" c="dimmed" style={{ minWidth: 0 }}>
-                                        <Tooltip label={t(TRIGGER_LABEL_KEY[triggerType])} withArrow>
-                                            <Box component="span" role="img" aria-label={t(TRIGGER_LABEL_KEY[triggerType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
-                                                {TRIGGER_ICON[triggerType]}
+                                        <Tooltip label={t(TYPE_LABEL_KEY[triggerType])} withArrow>
+                                            <Box component="span" role="img" aria-label={t(TYPE_LABEL_KEY[triggerType])} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                                                {TYPE_ICON[triggerType]}
                                             </Box>
                                         </Tooltip>
                                         <Text size="xs" c="dimmed" ff={triggerType === 'schedule' ? 'monospace' : undefined} truncate title={summary}>{summary}</Text>
                                     </Group>
-                                    {routine.description ? <Text size="xs" c="dimmed" lineClamp={1}>{routine.description}</Text> : null}
+                                    {trigger.description ? <Text size="xs" c="dimmed" lineClamp={1}>{trigger.description}</Text> : null}
                                 </Stack>
                                 <Stack gap={2} style={{ flex: '0 0 200px' }}>
                                     <Text size="xs" c="dimmed" truncate>{t('colNext')}: <Text span size="xs" c="var(--mantine-color-text)">{next ? formatInZone(next, locale) : t('none')}</Text></Text>
@@ -263,16 +264,16 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                                         <Text size="xs" c="dimmed" truncate>
                                             {t('colLast')}: <Text span size="xs" c="var(--mantine-color-text)">{last ? formatInZone(last, locale) : t('never')}</Text>
                                         </Text>
-                                        {last && routine.last_status ? (
-                                            <Tooltip label={routine.last_error ?? ''} disabled={!routine.last_error} withArrow multiline maw={360}>
+                                        {last && trigger.last_status ? (
+                                            <Tooltip label={trigger.last_error ?? ''} disabled={!trigger.last_error} withArrow multiline maw={360}>
                                                 <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
                                                     <Box
                                                         w={8}
                                                         h={8}
-                                                        style={{ borderRadius: '50%', background: routine.last_status === 'failed' ? 'var(--mantine-color-red-6)' : 'var(--mantine-color-teal-6)' }}
+                                                        style={{ borderRadius: '50%', background: trigger.last_status === 'failed' ? 'var(--mantine-color-red-6)' : 'var(--mantine-color-teal-6)' }}
                                                     />
-                                                    <Text size="xs" fw={500} c={routine.last_status === 'failed' ? 'var(--mantine-color-red-light-color)' : 'var(--mantine-color-teal-light-color)'}>
-                                                        {t(routine.last_status === 'failed' ? 'statusFailed' : 'statusStarted')}
+                                                    <Text size="xs" fw={500} c={trigger.last_status === 'failed' ? 'var(--mantine-color-red-light-color)' : 'var(--mantine-color-teal-light-color)'}>
+                                                        {t(trigger.last_status === 'failed' ? 'statusFailed' : 'statusStarted')}
                                                     </Text>
                                                 </Group>
                                             </Tooltip>
@@ -282,29 +283,29 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
                                 <Group gap="xs" wrap="nowrap" style={{ flex: '0 0 auto' }}>
                                     <Switch
                                         size="xs"
-                                        checked={routine.enabled}
-                                        disabled={busyId === routine.id}
-                                        aria-label={`${t('colEnabled')}: ${routine.name}`}
-                                        onChange={(event) => void toggle(routine, event.currentTarget.checked)}
+                                        checked={trigger.enabled}
+                                        disabled={busyId === trigger.id}
+                                        aria-label={`${t('colEnabled')}: ${trigger.name}`}
+                                        onChange={(event) => void toggle(trigger, event.currentTarget.checked)}
                                     />
                                     <Group gap={2} wrap="nowrap">
                                         <Tooltip label={t('runNow')} withArrow>
-                                            <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === routine.id} aria-label={t('runNow')} onClick={() => void runNow(routine)}>
+                                            <ActionIcon size="sm" variant="subtle" color="teal" loading={busyId === trigger.id} aria-label={t('runNow')} onClick={() => void runNow(trigger)}>
                                                 <IconPlayerPlay size={14} />
                                             </ActionIcon>
                                         </Tooltip>
                                         <Tooltip label={t('history')} withArrow>
-                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('history')} onClick={() => onShowRuns({ id: routine.id, name: routine.name })}>
+                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('history')} onClick={() => onShowRuns({ id: trigger.id, name: trigger.name })}>
                                                 <IconHistory size={14} />
                                             </ActionIcon>
                                         </Tooltip>
                                         <Tooltip label={t('edit')} withArrow>
-                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('edit')} onClick={() => setEditing({ routine })}>
+                                            <ActionIcon size="sm" variant="subtle" color="gray" aria-label={t('edit')} onClick={() => setEditing({ trigger })}>
                                                 <IconPencil size={14} />
                                             </ActionIcon>
                                         </Tooltip>
                                         <Tooltip label={t('delete')} withArrow>
-                                            <ActionIcon size="sm" variant="subtle" color="red" aria-label={t('delete')} onClick={() => void remove(routine)}>
+                                            <ActionIcon size="sm" variant="subtle" color="red" aria-label={t('delete')} onClick={() => void remove(trigger)}>
                                                 <IconTrash size={14} />
                                             </ActionIcon>
                                         </Tooltip>
@@ -317,16 +318,16 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
             )}
 
             {editing ? (
-                <RoutineEditor
+                <TriggerEditor
                     agentId={agentId}
                     agentName={agentName}
-                    routine={editing.routine}
-                    declaredInputs={declaredInputs}
+                    trigger={editing.trigger}
+                    declaredVariables={declaredVariables}
                     versions={versions}
                     onClose={() => setEditing(null)}
                     onSaved={(saved, keepOpen) => {
-                        // A webhook routine stays open on the saved row: its Connect card holds the URL and the secret.
-                        setEditing(keepOpen ? { routine: saved } : null);
+                        // A webhook trigger stays open on the saved row: its Connect card holds the URL and the secret.
+                        setEditing(keepOpen ? { trigger: saved } : null);
                         notifications.show({ color: 'teal', message: t('saved') });
                         void load();
                     }}
@@ -339,51 +340,51 @@ export default function AgentRoutinesPanel({ agentId, agentName, declaredInputs,
 
 // ── Editor ───────────────────────────────────────────────────────────────
 
-interface RoutineEditorProps {
+interface TriggerEditorProps {
     agentId: string;
     agentName: string;
-    routine: RoutineRow | null;
-    declaredInputs?: IAgentInputField[];
+    trigger: TriggerRow | null;
+    declaredVariables?: IAgentVariable[];
     versions: number[];
     onClose: () => void;
-    onSaved: (routine: RoutineRow, keepOpen: boolean) => void;
-    onShowRuns: (routine: { id: string; name: string }) => void;
+    onSaved: (trigger: TriggerRow, keepOpen: boolean) => void;
+    onShowRuns: (trigger: { id: string; name: string }) => void;
 }
 
 type EditorTab = 'settings' | 'test' | 'deliveries';
 
-function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, onClose, onSaved, onShowRuns }: RoutineEditorProps) {
-    const t = useTranslations('agents.routines');
+function TriggerEditor({ agentId, agentName, trigger, declaredVariables, versions, onClose, onSaved, onShowRuns }: TriggerEditorProps) {
+    const t = useTranslations('agents.triggers');
     const locale = useLocale();
-    const [form, setForm] = useState<RoutineForm>(() => (routine ? formFromRoutine(routine) : emptyRoutineForm()));
-    const [problem, setProblem] = useState<RoutineFormProblem | null>(null);
+    const [form, setForm] = useState<TriggerForm>(() => (trigger ? formFromTrigger(trigger) : emptyTriggerForm()));
+    const [problem, setProblem] = useState<TriggerFormProblem | null>(null);
     const [saving, setSaving] = useState(false);
     const [tab, setTab] = useState<EditorTab>('settings');
     /** The webhook secret from the last save / rotation: shown once, never read back. */
     const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
-    const storedWebhook = routine?.trigger.type === 'webhook' ? routine.trigger as Parameters<typeof WebhookConnectCard>[0]['trigger'] : null;
+    const storedWebhook = trigger?.type === 'webhook' ? trigger.webhook as Parameters<typeof WebhookConnectCard>[0]['webhook'] : null;
     const zones = useMemo(() => timezoneOptions(), []);
-    const set = <K extends keyof RoutineForm>(key: K, value: RoutineForm[K]) => {
+    const set = <K extends keyof TriggerForm>(key: K, value: TriggerForm[K]) => {
         setForm((prev) => ({ ...prev, [key]: value }));
         setProblem(null);
     };
-    const errorOf = (field: RoutineFormProblem['field']) => (problem?.field === field ? t(problem.key) : undefined);
+    const errorOf = (field: TriggerFormProblem['field']) => (problem?.field === field ? t(problem.key) : undefined);
 
     const preview = useMemo(() => {
-        if (form.triggerType !== 'schedule' || validateRoutineCron(form.cron)) return null;
+        if (form.type !== 'schedule' || validateTriggerCron(form.cron)) return null;
         return upcomingCronFires(form.cron, form.timezone, new Date(), 3);
-    }, [form.triggerType, form.cron, form.timezone]);
+    }, [form.type, form.cron, form.timezone]);
 
     const save = async () => {
-        const built = routineBodyFromForm(form, declaredInputs, routine);
+        const built = triggerBodyFromForm(form, declaredVariables, trigger);
         if (!built.ok) {
             setProblem(built.problem);
             return;
         }
         setSaving(true);
         try {
-            const res = await fetch(routine ? `/api/agents/${agentId}/routines/${routine.id}` : `/api/agents/${agentId}/routines`, {
-                method: routine ? 'PATCH' : 'POST',
+            const res = await fetch(trigger ? `/api/agents/${agentId}/triggers/${trigger.id}` : `/api/agents/${agentId}/triggers`, {
+                method: trigger ? 'PATCH' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(built.body),
             });
@@ -391,10 +392,12 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 notifications.show({ color: 'red', message: t('saveFailed', { message: await errorMessage(res) }) });
                 return;
             }
-            const saved = await res.json() as RoutineRow & { webhook?: { url: string; secret?: string } };
-            const keepOpen = saved.trigger.type === 'webhook';
-            if (keepOpen) {
-                if (saved.webhook?.secret) setRevealedSecret(saved.webhook.secret);
+            const saved = await res.json() as TriggerRow;
+            const keepOpen = saved.type === 'webhook';
+            if (saved.type === 'webhook') {
+                // The answer that created or replaced a generated secret carries it in `webhook.secret` — shown once.
+                const secret = (saved.webhook as { secret?: string }).secret;
+                if (secret) setRevealedSecret(secret);
                 setForm((prev) => ({ ...prev, webhookSecret: '' }));
             }
             onSaved(saved, keepOpen);
@@ -405,15 +408,15 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
         }
     };
 
-    const triggerSummary = form.triggerType === 'schedule'
+    const typeSummary = form.type === 'schedule'
         ? `${form.cron} (${form.timezone})`
-        : form.triggerType === 'once'
+        : form.type === 'once'
             ? (form.onceMode === 'in' ? `+${form.delayAmount} ${t(form.delayUnit)}` : form.runAtLocal.replace('T', ' '))
-            : form.triggerType === 'webhook'
+            : form.type === 'webhook'
                 ? [t(WEBHOOK_PRESET_LABEL_KEY[form.webhookPreset]), ...form.webhookEvents].join(' · ')
-                : t('triggerManual');
-    const webhook = form.triggerType === 'webhook';
-    const declared = declaredInputs ?? [];
+                : t('typeManual');
+    const webhook = form.type === 'webhook';
+    const declared = declaredVariables ?? [];
 
     const settings = (
         <>
@@ -427,13 +430,13 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 <Switch label={t('enabled')} description={t('enabledHint')} checked={form.enabled} onChange={(event) => set('enabled', event.currentTarget.checked)} />
             </FormSection>
 
-            <FormSection number={2} title={t('sectionTrigger')} description={t('sectionTriggerDescription')}>
+            <FormSection number={2} title={t('sectionType')} description={t('sectionTypeDescription')}>
                 <SegmentedControl
-                    value={form.triggerType}
-                    onChange={(value) => set('triggerType', value as RoutineTriggerType)}
-                    data={ROUTINE_TRIGGER_TYPES.map((type) => ({ value: type, label: t(TRIGGER_LABEL_KEY[type]) }))}
+                    value={form.type}
+                    onChange={(value) => set('type', value as TriggerType)}
+                    data={TRIGGER_TYPES.map((type) => ({ value: type, label: t(TYPE_LABEL_KEY[type]) }))}
                 />
-                {form.triggerType === 'schedule' ? (
+                {form.type === 'schedule' ? (
                     <Stack gap="sm">
                         <FormRow>
                             <FormField label={t('cron')} hint={t('cronHint')} required>
@@ -473,13 +476,13 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                         )}
                     </Stack>
                 ) : null}
-                {form.triggerType === 'once' ? (
+                {form.type === 'once' ? (
                     <Stack gap="sm">
                         <SegmentedControl
                             size="xs"
                             w="fit-content"
                             value={form.onceMode}
-                            onChange={(value) => set('onceMode', value as RoutineForm['onceMode'])}
+                            onChange={(value) => set('onceMode', value as TriggerForm['onceMode'])}
                             data={[{ value: 'in', label: t('onceIn') }, { value: 'at', label: t('onceAt') }]}
                         />
                         {form.onceMode === 'at' ? (
@@ -496,16 +499,16 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                                         allowDeselect={false}
                                         value={form.delayUnit}
                                         data={[{ value: 'minutes', label: t('minutes') }, { value: 'hours', label: t('hours') }]}
-                                        onChange={(value) => value && set('delayUnit', value as RoutineForm['delayUnit'])}
+                                        onChange={(value) => value && set('delayUnit', value as TriggerForm['delayUnit'])}
                                     />
                                 </FormField>
                             </FormRow>
                         )}
                     </Stack>
                 ) : null}
-                {form.triggerType === 'manual' ? <Text size="sm" c="dimmed">{t('manualHint')}</Text> : null}
+                {form.type === 'manual' ? <Text size="sm" c="dimmed">{t('manualHint')}</Text> : null}
                 {webhook ? (
-                    <WebhookTriggerFields
+                    <WebhookFields
                         form={form}
                         set={set}
                         storedStandardSecret={(storedWebhook as { auth?: string } | null)?.auth === 'standard_webhooks'}
@@ -529,8 +532,8 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 {webhook ? <WebhookTemplateVariables /> : null}
                 {declared.length > 0 && webhook ? (
                     <Stack gap="sm">
-                        <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
-                        <Text size="xs" c="dimmed">{t('webhookInputsHint')}</Text>
+                        <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
+                        <Text size="xs" c="dimmed">{t('webhookVariablesHint')}</Text>
                         {declared.map((field) => (
                             <TextInput
                                 key={field.name}
@@ -538,11 +541,11 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                                 description={field.description}
                                 required={field.required}
                                 ff="monospace"
-                                placeholder={t('inputUnset')}
-                                value={webhookInputText(form.inputs[field.name])}
+                                placeholder={t('variableUnset')}
+                                value={webhookVariableText(form.variables[field.name])}
                                 onChange={(event) => {
                                     const text = event.currentTarget.value;
-                                    set('inputs', { ...form.inputs, [field.name]: text === '' ? undefined : webhookInputValue(field, text) });
+                                    set('variables', { ...form.variables, [field.name]: text === '' ? undefined : webhookVariableValue(field, text) });
                                 }}
                             />
                         ))}
@@ -550,20 +553,21 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                 ) : null}
                 {declared.length > 0 && !webhook ? (
                     <Stack gap="sm">
-                        <Text size="sm" fw={500}>{t('inputsTitle')}</Text>
+                        <Text size="sm" fw={500}>{t('variablesTitle')}</Text>
+                        <Text size="xs" c="dimmed">{t('variablesHint')}</Text>
                         {declared.map((field) => (
-                            <InputValueField
+                            <VariableValueField
                                 key={field.name}
                                 field={field}
-                                value={form.inputs[field.name]}
-                                onChange={(value) => set('inputs', { ...form.inputs, [field.name]: value })}
+                                value={form.variables[field.name]}
+                                onChange={(value) => set('variables', { ...form.variables, [field.name]: value })}
                             />
                         ))}
                     </Stack>
                 ) : null}
             </FormSection>
 
-            <FormSection number={4} title={t('sectionRun')} description={t('sectionRunDescription')} collapsible defaultOpen={Boolean(routine)}>
+            <FormSection number={4} title={t('sectionRun')} description={t('sectionRunDescription')} collapsible defaultOpen={Boolean(trigger)}>
                 <FormRow>
                     <FormField label={t('version')}>
                         <Select
@@ -576,7 +580,7 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                     <FormField label={t('class')} hint={t(webhook ? 'webhookClassHint' : 'classHint')}>
                         <SegmentedControl
                             value={form.runClass}
-                            onChange={(value) => set('runClass', value as RoutineForm['runClass'])}
+                            onChange={(value) => set('runClass', value as TriggerForm['runClass'])}
                             data={[{ value: 'default', label: t('classDefault') }, { value: 'deferred', label: t('classDeferred') }]}
                         />
                     </FormField>
@@ -608,20 +612,20 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
             open
             onClose={onClose}
             icon={<IconCalendarTime size={16} />}
-            title={routine ? t('titleEdit') : t('titleNew')}
+            title={trigger ? t('titleEdit') : t('titleNew')}
             subtitle={t('subtitle', { agent: agentName })}
             primaryAction={{ label: t('save'), color: 'teal', loading: saving, onClick: () => void save() }}
             secondaryAction={{ label: t('cancel'), onClick: onClose }}
             summary={(
                 <SummaryGroup title={t('summaryTitle')}>
-                    <SummaryKV label={t('summaryTrigger')} value={triggerSummary} mono={form.triggerType === 'schedule'} />
+                    <SummaryKV label={t('summaryType')} value={typeSummary} mono={form.type === 'schedule'} />
                     {preview && preview[0] ? <SummaryKV label={t('summaryNext')} value={formatInZone(preview[0], locale)} /> : null}
                     <SummaryKV label={t('summaryVersion')} value={form.version === null ? t('versionPublished') : t('versionN', { n: form.version })} />
                     <SummaryKV label={t('summaryClass')} value={t(form.runClass === 'deferred' ? 'classDeferred' : 'classDefault')} />
                 </SummaryGroup>
             )}
         >
-            {storedWebhook && routine ? (
+            {storedWebhook && trigger ? (
                 <Tabs value={tab} onChange={(value) => setTab((value as EditorTab | null) ?? 'settings')} keepMounted={false}>
                     <Tabs.List mb="md">
                         <Tabs.Tab value="settings">{t('tabSettings')}</Tabs.Tab>
@@ -632,8 +636,8 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                         <Stack gap="md">
                             <WebhookConnectCard
                                 agentId={agentId}
-                                routineId={routine.id}
-                                trigger={storedWebhook}
+                                triggerId={trigger.id}
+                                webhook={storedWebhook}
                                 revealedSecret={revealedSecret}
                                 onSecret={setRevealedSecret}
                             />
@@ -641,10 +645,10 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
                         </Stack>
                     </Tabs.Panel>
                     <Tabs.Panel value="test">
-                        <WebhookTestPanel agentId={agentId} routineId={routine.id} preset={form.webhookPreset} />
+                        <WebhookTestPanel agentId={agentId} triggerId={trigger.id} preset={form.webhookPreset} />
                     </Tabs.Panel>
                     <Tabs.Panel value="deliveries">
-                        <WebhookDeliveriesPanel agentId={agentId} routineId={routine.id} onShowRuns={() => onShowRuns({ id: routine.id, name: routine.name })} />
+                        <WebhookDeliveriesPanel agentId={agentId} triggerId={trigger.id} onShowRuns={() => onShowRuns({ id: trigger.id, name: trigger.name })} />
                     </Tabs.Panel>
                 </Tabs>
             ) : settings}
@@ -652,9 +656,9 @@ function RoutineEditor({ agentId, agentName, routine, declaredInputs, versions, 
     );
 }
 
-/** One declared input's value: a field for its type; empty = not set (the default applies). */
-function InputValueField({ field, value, onChange }: { field: IAgentInputField; value: unknown; onChange: (value: unknown) => void }) {
-    const t = useTranslations('agents.routines');
+/** One declared variable's value: a field for its type; empty = not set (the default applies). */
+function VariableValueField({ field, value, onChange }: { field: IAgentVariable; value: unknown; onChange: (value: unknown) => void }) {
+    const t = useTranslations('agents.triggers');
     const label = field.label || field.name;
     const common = { label, description: field.description, required: field.required };
     if (field.enum && field.enum.length > 0) {
@@ -662,7 +666,7 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
             <Select
                 {...common}
                 clearable
-                placeholder={t('inputUnset')}
+                placeholder={t('variableUnset')}
                 value={value === undefined || value === null ? null : String(value)}
                 data={field.enum.map(String)}
                 onChange={(next) => onChange(next === null ? undefined : field.type === 'string' ? next : Number(next))}
@@ -676,7 +680,7 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
                 <NumberInput
                     {...common}
                     allowDecimal={field.type === 'number'}
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={typeof value === 'number' ? value : ''}
                     onChange={(next) => onChange(next === '' ? undefined : Number(next))}
                 />
@@ -686,19 +690,19 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
                 <Select
                     {...common}
                     clearable
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={value === true ? 'true' : value === false ? 'false' : null}
-                    data={[{ value: 'true', label: t('inputYes') }, { value: 'false', label: t('inputNo') }]}
+                    data={[{ value: 'true', label: t('variableYes') }, { value: 'false', label: t('variableNo') }]}
                     onChange={(next) => onChange(next === null ? undefined : next === 'true')}
                 />
             );
         case 'json':
-            return <JsonInputValue field={field} value={value} onChange={onChange} />;
+            return <JsonVariableValue field={field} value={value} onChange={onChange} />;
         default:
             return (
                 <TextInput
                     {...common}
-                    placeholder={t('inputUnset')}
+                    placeholder={t('variableUnset')}
                     value={typeof value === 'string' ? value : ''}
                     onChange={(event) => onChange(event.currentTarget.value === '' ? undefined : event.currentTarget.value)}
                 />
@@ -706,8 +710,8 @@ function InputValueField({ field, value, onChange }: { field: IAgentInputField; 
     }
 }
 
-function JsonInputValue({ field, value, onChange }: { field: IAgentInputField; value: unknown; onChange: (value: unknown) => void }) {
-    const t = useTranslations('agents.routines');
+function JsonVariableValue({ field, value, onChange }: { field: IAgentVariable; value: unknown; onChange: (value: unknown) => void }) {
+    const t = useTranslations('agents.triggers');
     const [text, setText] = useState(() => (value === undefined ? '' : JSON.stringify(value, null, 2)));
     const [invalid, setInvalid] = useState(false);
     return (
@@ -718,7 +722,7 @@ function JsonInputValue({ field, value, onChange }: { field: IAgentInputField; v
             ff="monospace"
             autosize
             minRows={2}
-            placeholder={t('inputUnset')}
+            placeholder={t('variableUnset')}
             value={text}
             error={invalid ? t('invalidJson') : undefined}
             onChange={(event) => {

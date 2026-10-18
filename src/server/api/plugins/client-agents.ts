@@ -69,7 +69,7 @@ import {
   resolveInvocationAgent,
   resolveInvocationCallback,
   resolveInvocationConfig,
-  resolveInvocationInputs,
+  resolveInvocationVariables,
   resolveInvocationLimits,
   resolveInvocationModel,
   resolveInvocationTarget,
@@ -82,7 +82,7 @@ import {
 import { sendAgentResponseObject } from './agent-response-object';
 import { streamAgentRunAsResponses, streamRunSnapshot } from './agent-responses-stream';
 import { sendModelResponse } from './model-responses';
-import { inputsToJsonSchema } from '@/lib/services/agents/agentInputs';
+import { variablesToJsonSchema } from '@/lib/services/agents/agentVariables';
 
 const logger = createLogger('api:client-agents');
 
@@ -175,7 +175,7 @@ function createResponsesHandler(agentsOnly: boolean) {
       if (ignored.length > 0) void reply.header('X-Cognipeer-Ignored-Params', ignored.join(','));
 
       // The text, and the files (`input_file` / `input_image`) of the last user message.
-      const input = parseInvocationInput(reply, 'openai', agent, body.input, { allowEmpty: body.inputs !== undefined && body.inputs !== null });
+      const input = parseInvocationInput(reply, 'openai', agent, body.input, { allowEmpty: body.variables !== undefined && body.variables !== null });
       if (!input) return reply;
       const { userInput, userMessage } = input;
 
@@ -187,8 +187,8 @@ function createResponsesHandler(agentsOnly: boolean) {
       const responseFormat = parseInvocationResponseFormat(reply, 'openai', textFormat, 'text.format');
       if (!responseFormat) return reply;
       const runConfig = await resolveInvocationConfig(ctx, target);
-      const inputs = resolveInvocationInputs(reply, 'openai', runConfig, body.inputs);
-      if (!inputs) return reply;
+      const variables = resolveInvocationVariables(reply, 'openai', runConfig, body.variables);
+      if (!variables) return reply;
       // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class. Anything else runs as default.
       const runClass: AgentRunClass = body.service_tier === 'flex' ? 'deferred' : 'default';
       const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
@@ -339,7 +339,7 @@ function createResponsesHandler(agentsOnly: boolean) {
         usePublished: target.usePublished,
         runtimeContext: invocationRuntimeContext(request, ctx, body.runtime_context),
         responseFormat: responseFormat.format,
-        inputs: inputs.inputs,
+        variables: variables.variables,
         runClass,
         channel: 'responses' as const,
         trigger: 'request' as const,
@@ -489,8 +489,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
-          // The agent as a typed function: what `inputs` it takes and the shape of its structured answer (null = none).
-          input_schema: inputsToJsonSchema(runConfig.inputs),
+          // The agent as a typed function: what `variables` it takes and the shape of its structured answer (null = none).
+          variables_schema: variablesToJsonSchema(runConfig.variables),
           output_schema: runConfig.structuredOutput?.enabled && runConfig.structuredOutput.schema ? runConfig.structuredOutput.schema : null,
           ...(models ? { models } : {}),
           ...(attachments ? {

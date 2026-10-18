@@ -31,8 +31,8 @@ describe('agent run engine config', () => {
       deferredMaxWaitMs: 86_400_000,
       runCallbackConcurrency: 4,
       runDrainTimeoutMs: 10_000,
-      routineTickMs: 30_000,
-      routineMisfireGraceMs: 3_600_000,
+      triggerTickMs: 30_000,
+      triggerMisfireGraceMs: 3_600_000,
       chatConcurrency: 4,
     });
   });
@@ -46,8 +46,8 @@ describe('agent run engine config', () => {
       AGENT_DEFERRED_CONCURRENCY: '3',
       AGENT_DEFERRED_MAX_WAIT_MS: '7200000',
       AGENT_RUN_CALLBACK_CONCURRENCY: '9',
-      AGENT_ROUTINE_TICK_MS: '10000',
-      AGENT_ROUTINE_MISFIRE_GRACE_MS: '60000',
+      AGENT_TRIGGER_TICK_MS: '10000',
+      AGENT_TRIGGER_MISFIRE_GRACE_MS: '60000',
       AGENT_CHAT_CONCURRENCY: '12',
     });
     expect(a).toMatchObject({
@@ -58,8 +58,8 @@ describe('agent run engine config', () => {
       deferredConcurrency: 3,
       deferredMaxWaitMs: 7_200_000,
       runCallbackConcurrency: 9,
-      routineTickMs: 10_000,
-      routineMisfireGraceMs: 60_000,
+      triggerTickMs: 10_000,
+      triggerMisfireGraceMs: 60_000,
       chatConcurrency: 12,
     });
   });
@@ -78,7 +78,7 @@ describe('agent run engine config', () => {
       AGENT_DEFERRED_CONCURRENCY: '0',
       AGENT_DEFERRED_MAX_WAIT_MS: '5',
       AGENT_RUN_CALLBACK_CONCURRENCY: '0',
-      AGENT_ROUTINE_TICK_MS: '10',
+      AGENT_TRIGGER_TICK_MS: '10',
       AGENT_CHAT_CONCURRENCY: '0',
       AGENT_SYNC_TIMEOUT_MS: '1',
     });
@@ -89,7 +89,7 @@ describe('agent run engine config', () => {
       deferredConcurrency: 1,
       deferredMaxWaitMs: 60_000,
       runCallbackConcurrency: 1,
-      routineTickMs: 5_000,
+      triggerTickMs: 5_000,
       chatConcurrency: 1,
       syncTimeoutMs: 5_000,
     });

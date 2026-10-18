@@ -3,7 +3,7 @@
  * `response_format` / `text.format` into a contract (or refuses it), the
  * precedence over `config.structuredOutput` for that turn, and the turn
  * options that ride with a paused state so a continuation applies the same
- * schema and inputs.
+ * schema and variables.
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -115,19 +115,19 @@ describe('the paused state carries the turn options', () => {
         ctx: { __awaitingApproval: true },
     } as never;
 
-    it('round-trips responseFormat and inputs, so a resume rebuilds the same turn', () => {
+    it('round-trips responseFormat and variables, so a resume rebuilds the same turn', () => {
         const text = serializePausedState(state, 'agent', undefined, {
             responseFormat: TRIAGE,
-            inputs: { customer_id: 'c-1' },
+            variables: { customer_id: 'c-1' },
         })!;
         const parsed = parsePausedState(text)!;
-        expect(parsed.turn).toEqual({ responseFormat: TRIAGE, inputs: { customer_id: 'c-1' } });
+        expect(parsed.turn).toEqual({ responseFormat: TRIAGE, variables: { customer_id: 'c-1' } });
         expect(parsed.state.pendingApprovals).toHaveLength(1);
     });
 
-    it('keeps "inputs stay out of the prompt" with the pause', () => {
-        const text = serializePausedState(state, 'agent', undefined, { inputs: { a: 1 }, inputsAsPromptVariables: false })!;
-        expect(parsePausedState(text)!.turn).toEqual({ inputs: { a: 1 }, inputsAsPromptVariables: false });
+    it('keeps "variables stay out of the prompt" with the pause', () => {
+        const text = serializePausedState(state, 'agent', undefined, { variables: { a: 1 }, variablesInPrompt: false })!;
+        expect(parsePausedState(text)!.turn).toEqual({ variables: { a: 1 }, variablesInPrompt: false });
     });
 
     it('a turn without options stores none, and an old state without them parses', () => {

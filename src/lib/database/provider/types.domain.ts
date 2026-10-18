@@ -2601,8 +2601,8 @@ export interface AgentResponseFormat {
   strict?: boolean;
 }
 
-/** One declared input of an agent (`IAgentConfig.inputs`). */
-export interface IAgentInputField {
+/** One declared variable of an agent (`IAgentConfig.variables`). */
+export interface IAgentVariable {
   /** `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, unique within the agent. */
   name: string;
   label?: string;
@@ -2784,7 +2784,7 @@ export interface IAgentConfig {
   sandbox?: IAgentSandboxConfig;
   /**
    * Callback for runs started without their own `callback_url` (every dialect,
-   * routines included). The secret is write-only: plaintext in, masked out;
+   * triggers included). The secret is write-only: plaintext in, masked out;
    * only the sealed form is stored.
    */
   callback?: IAgentCallbackConfig;
@@ -2802,10 +2802,10 @@ export interface IAgentConfig {
     allowClientOverride?: boolean;
   };
   /**
-   * Declared inputs of the agent (a form for a human, a validated object for an
-   * API / routine caller). Absent = the agent takes free text only. At most 32.
+   * Declared variables of the agent (a form for a human, a validated object for an
+   * API / trigger caller). Absent = the agent takes free text only. At most 32.
    */
-  inputs?: IAgentInputField[];
+  variables?: IAgentVariable[];
   /**
    * Human in the loop: tool approvals and questions to the user. Absent (every
    * agent created before this existed) = nothing ever pauses.
@@ -2996,15 +2996,15 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
-/** The sender an incoming webhook trigger is set up for (its event / delivery id headers and auth choices). */
-export type AgentRoutineWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+/** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
+export type AgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
 
 /**
- * How a delivery proves it knows the routine's secret. The first three sign
+ * How a delivery proves it knows the trigger's secret. The first three sign
  * the raw body (checked once the body is read); the rest carry the secret in a
  * header (checked before the body is read).
  */
-export type AgentRoutineWebhookAuth =
+export type AgentTriggerWebhookAuth =
   /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
   | 'github_signature'
   /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
@@ -3021,20 +3021,22 @@ export type AgentRoutineWebhookAuth =
   | 'header';
 
 /** One filter rule over the delivery (all rules must match). */
-export interface AgentRoutineWebhookFilterRule {
+export interface AgentTriggerWebhookFilterRule {
   /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
   path: string;
   op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
   value?: string | number | boolean | Array<string | number | boolean>;
 }
 
-/** An incoming webhook: each authenticated, matching delivery to its URL fires the routine. */
-export interface AgentRoutineWebhookTrigger {
-  type: 'webhook';
-  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook; never reused. */
+/**
+ * The settings of a `webhook` trigger: each authenticated, matching delivery to
+ * its URL fires the trigger. Stored in the trigger's `webhook` object.
+ */
+export interface AgentTriggerWebhook {
+  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
   hookId: string;
-  preset: AgentRoutineWebhookPreset;
-  auth: AgentRoutineWebhookAuth;
+  preset: AgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth;
   /** Auth `header` only; lower-case. */
   headerName?: string | null;
   /** `encryptObject(secret)`; never serialized. */
@@ -3049,37 +3051,53 @@ export interface AgentRoutineWebhookTrigger {
   /** Normalized event names to accept; empty / absent = every event. */
   events?: string[] | null;
   /** All must match (≤ 20). */
-  filter?: AgentRoutineWebhookFilterRule[] | null;
+  filter?: AgentTriggerWebhookFilterRule[] | null;
   /** Append the event payload (JSON) to the message. */
   includePayload: boolean;
 }
 
-/** What starts a routine's runs. */
-export type AgentRoutineTrigger =
-  /** A 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
-  | { type: 'schedule'; cron: string; timezone: string }
-  /** One run at a fixed time. */
-  | { type: 'once'; runAt: Date }
-  /** Only started on request (Run now, `POST …/routines/{id}/run`). */
-  | { type: 'manual' }
-  | AgentRoutineWebhookTrigger;
+/** The settings of a `schedule` trigger: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
+export interface AgentTriggerSchedule {
+  cron: string;
+  timezone: string;
+}
 
-export type AgentRoutineDeliveryOutcome =
+/** The settings of a `once` trigger: one run at a fixed time. */
+export interface AgentTriggerOnce {
+  runAt: Date;
+}
+
+/** What starts a trigger's runs. */
+export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook';
+
+/**
+ * A trigger's type and the ONE settings object named after it (`manual` has
+ * none): a union on `type`, the same shape the API shows and both stores keep.
+ * The other types' objects are absent.
+ */
+export type AgentTriggerTypeSettings =
+  | { type: 'schedule'; schedule: AgentTriggerSchedule }
+  | { type: 'once'; once: AgentTriggerOnce }
+  /** Only started on request (Run now, `POST …/triggers/{id}/run`). */
+  | { type: 'manual' }
+  | { type: 'webhook'; webhook: AgentTriggerWebhook };
+
+export type AgentTriggerDeliveryOutcome =
   'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
 
 /**
- * One request to a routine's webhook URL, as its delivery log keeps it: the
+ * One request to a trigger's webhook URL, as its delivery log keeps it: the
  * outcome and normalized ids only — never the payload, headers or a secret.
  */
-export interface IAgentRoutineDelivery {
+export interface IAgentTriggerDelivery {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
-  routineId: string;
+  triggerId: string;
   receivedAt: Date;
   /** `receivedAt` + 7 days; the reconciler's retention removes it after. */
   expiresAt: Date;
-  outcome: AgentRoutineDeliveryOutcome;
+  outcome: AgentTriggerDeliveryOutcome;
   httpStatus: number;
   event?: string | null;
   deliveryId?: string | null;
@@ -3089,12 +3107,8 @@ export interface IAgentRoutineDelivery {
   bytes: number;
 }
 
-/**
- * A routine: a saved way of starting an agent — a prompt (+ inputs) and a
- * trigger. Every fire is an ordinary AgentRun (`channel: 'routine'`,
- * `routineId`), so its history is the runs list filtered by routine.
- */
-export interface IAgentRoutine {
+/** The fields every trigger has, whatever starts it (see `IAgentTrigger`). */
+export interface IAgentTriggerBase {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
@@ -3102,10 +3116,9 @@ export interface IAgentRoutine {
   name: string;
   description?: string | null;
   enabled: boolean;
-  trigger: AgentRoutineTrigger;
   /** The message each fire sends (≤ 32k chars). */
   prompt: string;
-  inputs?: Record<string, unknown> | null;
+  variables?: Record<string, unknown> | null;
   /** A pinned published version; null/absent = the published one. */
   version?: number | null;
   runClass: AgentRunClass;
@@ -3114,7 +3127,7 @@ export interface IAgentRoutine {
   /** Where each run's result is POSTed; the secret is sealed and never serialized. */
   callback?: { url: string; secretSealed?: string | null } | null;
   responseFormat?: AgentResponseFormat | null;
-  /** The next due slot; null for manual triggers, a finished once, or a disabled routine. */
+  /** The next due slot; null for manual and webhook triggers, a finished once, or a disabled trigger. */
   nextFireAt?: Date | null;
   lastFireAt?: Date | null;
   lastRunId?: string | null;
@@ -3125,6 +3138,25 @@ export interface IAgentRoutine {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/**
+ * A trigger: a saved way of starting an agent — a prompt (+ variables) and a
+ * `type` (`schedule`, `once`, `manual`, `webhook`) with that type's settings
+ * object. Every fire is an ordinary AgentRun (`channel: 'trigger'`,
+ * `triggerId`), so its history is the runs list filtered by trigger.
+ */
+export type IAgentTrigger = IAgentTriggerBase & AgentTriggerTypeSettings;
+
+/** The trigger of one type (`AgentTriggerOfType<'webhook'>` has `webhook`). */
+export type AgentTriggerOfType<T extends AgentTriggerType> = Extract<IAgentTrigger, { type: T }>;
+
+/** A trigger as `createAgentTrigger` takes it. */
+export type NewAgentTrigger = Omit<IAgentTriggerBase, '_id' | 'createdAt' | 'updatedAt'> & AgentTriggerTypeSettings;
+
+/** What `updateAgentTrigger` changes: a new `type` always comes with its settings object (the others are dropped). */
+export type AgentTriggerPatch =
+  & Partial<Omit<IAgentTriggerBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
+  & (AgentTriggerTypeSettings | { type?: undefined });
 
 export interface IAgent {
   _id?: ObjectId | string;
@@ -4749,24 +4781,24 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */
-  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'routine' | null;
-  routineId?: string | null;
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | null;
+  triggerId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**
-   * No interactive user on the run (a routine fire): a gated tool follows the
+   * No interactive user on the run (a trigger fire): a gated tool follows the
    * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
    */
   unattended?: boolean;
   /**
-   * The message / inputs came from an external payload: inputs never fill the
-   * system prompt's `{{input.*}}` and the Inputs block is closed (agentInputs.ts).
+   * The message / variables came from an external payload: variables never fill the
+   * system prompt's `{{variables.*}}` and the Variables block is closed (agentVariables.ts).
    * Every continuation keeps it.
    */
   externalContent?: boolean;
   /** Per-request structured output; the worker and a resume re-apply it. */
   responseFormat?: AgentResponseFormat | null;
-  /** Validated agent inputs (`IAgentConfig.inputs`). */
-  inputs?: Record<string, unknown> | null;
+  /** Validated agent variables (`IAgentConfig.variables`). */
+  variables?: Record<string, unknown> | null;
   /**
    * Bumped on every (re)queue for a NEW execution (create = 1, resume/continue
    * +1). The job dedup key is `ar_${runId}_${queueGeneration}`, so a reconciler
@@ -4793,7 +4825,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   resumeApiTokenId?: string | null;
   /**
    * The principal whose spend and quota policies the run counts against when
-   * its owner is a synthetic actor (a routine fire): the routine's last
+   * its owner is a synthetic actor (a trigger fire): the trigger's last
    * updater (or creator), or the person and token that pressed Run now.
    */
   accountableUserId?: string | null;
