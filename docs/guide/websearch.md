@@ -145,7 +145,7 @@ the instance key; with multiple instances the request must name one (via the
 `provider` field or the `/:key/search` path).
 
 See the [Web Search API reference](/api/websearch) and the
-[Console SDK](https://cognipeer.github.io/console-sdk/api/web-search)
+[Console SDK](https://docs.cognipeer.com/console-sdk/api/web-search)
 (`client.webSearch.search(...)`, `client.webSearch.searchWith(key, ...)`).
 
 ## Access control

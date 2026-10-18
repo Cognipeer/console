@@ -229,6 +229,41 @@ describe('OTel GenAI / OpenLLMetry >= 0.55 spans', () => {
   });
 });
 
+describe('execute_tool arguments and span status', () => {
+  const toolSpan = (extra: OtlpKeyValue[]): OtlpKeyValue[] => [
+    str('gen_ai.operation.name', 'execute_tool'),
+    str('gen_ai.tool.name', 'search_flights'),
+    ...extra,
+  ];
+
+  it('reads gen_ai.tool.call.arguments given as a string', () => {
+    const { event } = mapChild(toolSpan([str('gen_ai.tool.call.arguments', '{"city":"Rome"}')]));
+    expect(sectionsOfKind(event.sections, 'tool_call')[0]).toMatchObject({ content: '{"city":"Rome"}' });
+  });
+
+  it('reads gen_ai.tool.call.arguments given as a structured value', () => {
+    const { event } = mapChild(toolSpan([
+      {
+        key: 'gen_ai.tool.call.arguments',
+        value: {
+          kvlistValue: { values: [{ key: 'city', value: { stringValue: 'Rome' } }, { key: 'n', value: { intValue: '2' } }] },
+        },
+      } as unknown as OtlpKeyValue,
+    ]));
+    expect(JSON.parse(String(sectionsOfKind(event.sections, 'tool_call')[0].content))).toEqual({ city: 'Rome', n: 2 });
+  });
+
+  it('puts the span status message on the event error', () => {
+    const req = request(toolSpan([]));
+    const child = req.resourceSpans[0].scopeSpans[0].spans[1] as Record<string, unknown>;
+    child.status = { code: 2, message: 'tool crashed' };
+    const result = mapOtlpToInternalModels(req, 'tenant-1', 'project-1');
+    expect(result.events[0].status).toBe('error');
+    expect(result.events[0].error).toMatchObject({ message: 'tool crashed' });
+    expect(result.sessions[0].errors?.[0]).toMatchObject({ message: 'tool crashed' });
+  });
+});
+
 describe('convention edge cases', () => {
   it('survives an attribute truncated mid-JSON without losing the span', () => {
     // OTel caps attribute value length, so a long conversation arrives cut off.

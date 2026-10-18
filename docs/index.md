@@ -42,7 +42,7 @@ If you are evaluating or onboarding Cognipeer Console, this is the shortest usef
 If you already know the basics, jump directly to the part that matches your work:
 
 - Building against the gateway surface? Start with [API Overview](/api/overview) and [Authentication](/guide/authentication).
-- Writing application code against Cognipeer Console? Start with the [Console SDK documentation](https://cognipeer.github.io/console-sdk/) and use this site for platform and endpoint semantics.
+- Writing application code against Cognipeer Console? Start with the [Console SDK documentation](https://docs.cognipeer.com/console-sdk/) and use this site for platform and endpoint semantics.
 - Extending platform internals? Start with [Core Modules](/guide/core-overview) and [Providers](/guide/providers).
 - Operating agent workflows? Start with [Tracing](/guide/tracing), [Guardrails](/guide/guardrails), and [Knowledge Engine](/guide/rag).
 - Planning a public or commercial rollout? Start with [Licensing](/guide/licensing) and [Security](/guide/security).
@@ -54,7 +54,7 @@ If you already know the basics, jump directly to the part that matches your work
 | Guide | Teams onboarding the platform for the first time | Local setup, architecture, core module docs, and operational guidance |
 | API Reference | SDK authors and integrators | Endpoint behavior, request and response models, and OpenAI-compatible surface details |
 | Core Modules | Platform engineers extending the runtime | The shared infrastructure primitives that shape behavior across every domain service |
-| [Console SDK Docs](https://cognipeer.github.io/console-sdk/) | Application developers integrating from TypeScript or JavaScript | Client initialization, resource methods, examples, and framework integrations |
+| [Console SDK Docs](https://docs.cognipeer.com/console-sdk/) | Application developers integrating from TypeScript or JavaScript | Client initialization, resource methods, examples, and framework integrations |
 
 ## Quick Start
 

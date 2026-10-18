@@ -51,6 +51,7 @@ A sub-agent's tools are gated like the parent's own:
 
 - an **inline** child follows this agent's [approval settings](/guide/agent-approvals);
 - a **referenced** child follows this agent's settings **and** the referenced agent's own: a tool that either side asks about is asked about;
+- whether a referenced child may **ask the user a question** is decided by the delegating agent's `askUser` setting only; the referenced agent's own `humanInTheLoop.askUser` is not consulted when it runs as a sub-agent (approvals are different: there either side can gate a tool);
 - on a run nobody can answer, the **unattended** setting applies to the child's tools too (denied, paused or allowed as that setting says).
 
 When a child's tool call needs approval, the run pauses like any other. The pending request names the sub-agent (`subagent`, in the pending action, in the `action.required` event and on the approval card), and answering it resumes the child where it stopped. The approver rules (who may answer, the timeout) are the delegating agent's.
