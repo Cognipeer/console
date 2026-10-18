@@ -127,6 +127,7 @@ import {
   applyConfigGuardrailBindings,
   bucketNamingForbiddenBody,
   connectedConfigForUpdate,
+  invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
   prepareNewAgentConfig,
@@ -726,6 +727,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session, user } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
 
       if (typeof body.name !== 'string') {
         return reply.code(400).send({ error: 'Agent name is required' });
@@ -787,6 +790,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent: existing, agentId, projectId, session, user } = scoped;
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
       let warnings: AgentConfigIssue[] = [];
 
       if (body.config && typeof body.config === 'object') {

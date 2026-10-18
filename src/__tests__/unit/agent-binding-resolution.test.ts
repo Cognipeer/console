@@ -58,3 +58,13 @@ describe('pickAgentUpdateFields', () => {
     expect(Object.keys(picked).sort()).toEqual(['config', 'description', 'metadata', 'name', 'status']);
   });
 });
+
+describe('invalidAgentStatusBody', () => {
+  it('accepts the agent statuses and an absent status, refuses anything else', async () => {
+    const { invalidAgentStatusBody } = await import('@/server/api/plugins/agent-config-write');
+    expect(invalidAgentStatusBody({})).toBeNull();
+    for (const status of ['active', 'inactive', 'draft']) expect(invalidAgentStatusBody({ status })).toBeNull();
+    expect(invalidAgentStatusBody({ status: 'bogus' })).toMatchObject({ code: 'invalid_status', field: 'status' });
+    expect(invalidAgentStatusBody({ status: 3 })).not.toBeNull();
+  });
+});
