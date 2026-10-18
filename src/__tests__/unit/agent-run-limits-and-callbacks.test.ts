@@ -321,6 +321,16 @@ describe('ids and serialization', () => {
     });
   });
 
+  it('serializeAgentRun has no top-level usage: the figures are result.usage (the schema documents none)', () => {
+    const usage = { input_tokens: 5, output_tokens: 2, total_tokens: 7 };
+    const run = {
+      _id: 'r3', mode: 'inline', agentKey: 'a', conversationId: 'c', status: 'succeeded', result: { id: 'resp_r3', output: [], usage },
+    } as unknown as IAgentRun;
+    const body = serializeAgentRun(run);
+    expect('usage' in body).toBe(false);
+    expect((body.result as { usage: unknown }).usage).toEqual(usage);
+  });
+
   it('isAbandonedSyncReservation: only sync rows past the env ceiling + grace', () => {
     const now = Date.now();
     const sync = (ageMs: number) => ({ mode: 'sync', startedAt: new Date(now - ageMs) }) as unknown as IAgentRun;
