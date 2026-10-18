@@ -26,7 +26,8 @@ import {
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
 import { validateSeedFiles } from './agentSandboxSeedFiles';
-import { validateVariableDeclaration } from './agentVariables';
+import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
+import { resolveSubagentTarget } from './subagentRoster';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
@@ -594,6 +595,19 @@ export async function validateAgentConfig(input: {
                 issues.errors.push({ field: `${field}.agentKey`, message: `Agent "${entry.agentKey}" has no published version to delegate to` });
             } else if (input.agentKey && (target.config?.subagents ?? []).some((child) => child.kind === 'ref' && child.agentKey === input.agentKey)) {
                 issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" already delegates back to this agent (a cycle)` });
+            } else {
+                // A sub-agent is handed free text, never a set of values: a variable the referenced agent
+                // requires can only come from a variable of the same name here. Read from the version a run
+                // loads (the published one), not the draft being edited.
+                const loaded = await resolveSubagentTarget(input.tenantDbName, projectId, entry);
+                const missing = loaded.ok ? unsuppliableRequiredVariables(loaded.config.variables, config.variables) : [];
+                if (missing.length > 0) {
+                    const names = missing.map((name) => `"${name}"`).join(', ');
+                    issues.warnings.push({
+                        field: `${field}.agentKey`,
+                        message: `Agent "${entry.agentKey}" requires the variable${missing.length > 1 ? 's' : ''} ${names}, which this agent does not declare: ${missing.length > 1 ? 'they stay' : 'it stays'} empty when it runs as a sub-agent`,
+                    });
+                }
             }
         }
         if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);

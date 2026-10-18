@@ -16,6 +16,7 @@ const db = {
     findToolByKey: vi.fn(),
     findMcpServerByKey: vi.fn(),
     findAgentByKey: vi.fn(),
+    findAgentVersion: vi.fn(),
     findFileBucketByKey: vi.fn(),
     findProviderByKey: vi.fn(),
 };
@@ -180,6 +181,43 @@ describe('validateAgentConfig', () => {
         expect(messages).toContain('"nobody" does not exist');
         expect(messages).toContain('Duplicate sub-agent name "dup"');
         expect(fields(result.errors)).toContain('subagents[4].header');
+    });
+
+    describe('a sub-agent that is another agent, and the variables it requires', () => {
+        const target = { _id: 'a-support', key: 'tenant-support', publishedVersion: 3, config: { modelKey: 'gpt-main', variables: [] } };
+        const published = (variables: unknown[]) => db.findAgentVersion.mockResolvedValue({ version: 3, snapshot: { config: { modelKey: 'gpt-main', variables } } });
+        const ref = { kind: 'ref' as const, name: 'support', header: 'Answers customers', agentKey: 'tenant-support' };
+        const warned = (result: { warnings: Array<{ field: string; message: string }> }) => result.warnings.filter((w) => w.field === 'subagents[0].agentKey').map((w) => w.message);
+
+        beforeEach(() => {
+            db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? target : null));
+        });
+
+        it('warns about a variable it requires and this agent does not declare, from the published version', async () => {
+            published([
+                { name: 'customer_id', type: 'string', required: true },
+                { name: 'region', type: 'string', required: true },
+                { name: 'tier', type: 'string', required: true, default: 'standard' },
+                { name: 'note', type: 'string' },
+            ]);
+            const result = await validate({ modelKey: 'gpt-main', variables: [{ name: 'region', type: 'string' }], subagents: [ref] });
+            expect(result.errors).toEqual([]);
+            // `region` is declared here, `tier` has a default, `note` is optional: only `customer_id` cannot be filled.
+            expect(warned(result)).toEqual([expect.stringContaining('requires the variable "customer_id"')]);
+            expect(warned(result)[0]).toContain('stays empty');
+        });
+
+        it('names every one when several are missing', async () => {
+            published([{ name: 'a', type: 'string', required: true }, { name: 'b', type: 'integer', required: true }]);
+            const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+            expect(warned(result)).toEqual([expect.stringContaining('requires the variables "a", "b"')]);
+        });
+
+        it('says nothing when everything it requires can be supplied or defaulted', async () => {
+            published([{ name: 'region', type: 'string', required: true }]);
+            const result = await validate({ modelKey: 'gpt-main', variables: [{ name: 'region', type: 'string' }], subagents: [ref] });
+            expect(warned(result)).toEqual([]);
+        });
     });
 
     it('rejects a structured-output schema the provider cannot use', () => {

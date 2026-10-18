@@ -225,6 +225,44 @@ export function variablePromptValues(
 }
 
 /**
+ * The values a referenced agent's declared variables take from the run that
+ * delegates to it: the delegating run's value of the same name, for each name
+ * the referenced agent declares. A value of another type, or outside the
+ * declared list, is left out (the declared default then applies), and so is a
+ * name the delegating run does not carry. Null when nothing is left, so the
+ * result goes straight in as `variables` of `buildPromptVariables`.
+ */
+export function delegatedVariableValues(
+    declared: ReadonlyArray<IAgentVariable> | undefined,
+    parentValues: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+    const out: Record<string, unknown> = {};
+    for (const field of declared ?? []) {
+        const value = parentValues?.[field.name];
+        if (value === undefined || value === null || !matchesType(field.type, value)) continue;
+        if (field.enum && field.enum.length > 0 && !field.enum.includes(value as string | number)) continue;
+        out[field.name] = value;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Names of the variables a referenced agent requires (and gives no default)
+ * that the agent delegating to it does not declare. A sub-agent is handed free
+ * text, never a set of values, so these can only come from a variable of the
+ * same name on the parent: without one, they stay empty in the child's prompt.
+ */
+export function unsuppliableRequiredVariables(
+    referenced: ReadonlyArray<IAgentVariable> | undefined,
+    parent: ReadonlyArray<IAgentVariable> | undefined,
+): string[] {
+    const parentNames = new Set((parent ?? []).map((field) => field.name));
+    return (referenced ?? [])
+        .filter((field) => field.required && (field.default === undefined || field.default === null) && !parentNames.has(field.name))
+        .map((field) => field.name);
+}
+
+/**
  * JSON for the Variables block. The line separators JavaScript tolerates inside
  * strings (U+2028, U+2029, U+0085) and the backtick are written as escapes, so
  * a value cannot break out of the fenced block or fake a new line; the parsed

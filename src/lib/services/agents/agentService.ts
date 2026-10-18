@@ -36,6 +36,7 @@ import {
     renderPromptTemplate,
     shouldRenderInlinePrompt,
     type RenderedPrompt,
+    type ResolvedPromptVariables,
 } from './promptVariables';
 import type { IAgentKnowledgeBinding } from '@/lib/database/provider/types.domain';
 import {
@@ -240,7 +241,7 @@ import {
     type PausedTurnOptions,
     type PublicPendingAction,
 } from './agentPendingActions';
-import { composeUserMessageWithVariables } from './agentVariables';
+import { composeUserMessageWithVariables, delegatedVariableValues } from './agentVariables';
 
 const logger = createLogger('agents');
 
@@ -1759,6 +1760,40 @@ function reportPromptVariables(
     }
 }
 
+/**
+ * The system prompt an agent runs with: its own text (or the one the caller
+ * hands in), else the Prompts-module template its `promptKey` names, rendered
+ * with the run's prompt variables. An inline prompt is rendered only when the
+ * agent opted in or the text references a built-in (`shouldRenderInlinePrompt`),
+ * so a literal `{{` in an existing prompt is left alone. Used for the agent's own
+ * run and, with the referenced agent's own config, for a sub-agent that is
+ * another agent: the same text it would run with on its own.
+ */
+async function resolveAgentPrompt(input: {
+    db: Pick<Awaited<ReturnType<typeof getDatabase>>, 'findPromptByKey'>;
+    projectId: string;
+    agentKey: string;
+    config: IAgentConfig;
+    systemPrompt: string | undefined;
+    variables: ResolvedPromptVariables;
+}): Promise<string | undefined> {
+    const { config, agentKey } = input;
+    let systemPrompt = input.systemPrompt;
+    if (!systemPrompt && config.promptKey) {
+        const prompt = await input.db.findPromptByKey(config.promptKey, input.projectId);
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, input.variables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
+        const rendered = renderPromptTemplate(systemPrompt, input.variables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
+    }
+    return systemPrompt;
+}
+
 // ── Sub-agent registry ──────────────────────────────────────────────
 
 /** Who a model call is made for: rides on its usage row and its Dynamic LLM caller conditions. */
@@ -1770,6 +1805,7 @@ export interface AgentModelCaller {
 }
 
 type BuildSubagentsInput = {
+    db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
     tenantId: string;
     projectId: string;
@@ -1790,6 +1826,17 @@ type BuildSubagentsInput = {
      * model (when it is one the parent picked), then Model Hub, then the request.
      */
     reasoning?: { config: IAgentConfig; request?: NormalizedReasoning };
+    /** What a child's system prompt is rendered from. */
+    prompt: {
+        /** The parent's config and prompt variables: a prompt written in its config (an inline child's) renders as the parent's own does. */
+        parent: { config: IAgentConfig; variables: ResolvedPromptVariables };
+        /** The parent run's validated agent variables: a referenced agent's variables of the same name take their values. */
+        variables?: Record<string, unknown>;
+        variablesInPrompt?: boolean;
+        userId?: string;
+    };
+    /** Reports, once, a child that was skipped or runs short of what its author set up. */
+    onWarning?: (message: string) => void;
 };
 
 /**
@@ -1824,7 +1871,7 @@ async function buildAgentSubagents(
         }
         seen.add(entry.name);
 
-        let systemPrompt = entry.systemPrompt;
+        let systemPrompt: string | undefined;
         let toolBindings = entry.toolBindings;
         let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
@@ -1835,7 +1882,7 @@ async function buildAgentSubagents(
                 logger.warn(target.message, { name: entry.name, agentKey: entry.agentKey, reason: target.reason });
                 continue;
             }
-            systemPrompt = entry.systemPrompt ?? target.config.systemPrompt;
+            systemPrompt = await resolveChildPrompt(input, entry, target);
             toolBindings = target.config.toolBindings;
             knowledgeSource = {
                 knowledgeEngineKey: target.config.knowledgeEngineKey,
@@ -1843,6 +1890,17 @@ async function buildAgentSubagents(
                 knowledgeToolMode: target.config.knowledgeToolMode,
             };
             modelKey = entry.modelKey ?? target.config.modelKey;
+        }
+
+        if (entry.kind !== 'ref') systemPrompt = await resolveChildPrompt(input, entry);
+
+        // A child nobody gave instructions runs as its name and header say, which is what the SDK
+        // would make of it too (older SDKs left it the generic base prompt), and the owner is told.
+        if (!systemPrompt?.trim()) {
+            systemPrompt = `You are ${entry.title || entry.name}. ${entry.header || entry.title || entry.name}`;
+            input.onWarning?.(`Sub-agent "${entry.name}" has no instructions of its own${
+                entry.kind === 'ref' ? ` ("${entry.agentKey}" has no system prompt, or its prompt could not be found)` : ''
+            }, so it runs on its name and header alone.`);
         }
 
         const childTools: AgentSdkToolInterface[] = [];
@@ -1884,7 +1942,7 @@ async function buildAgentSubagents(
             name: entry.name,
             ...(entry.title ? { title: entry.title } : {}),
             header: entry.header || entry.title || entry.name,
-            ...(systemPrompt ? { systemPrompt } : {}),
+            systemPrompt,
             ...(childTools.length > 0 ? { tools: childTools } : {}),
             ...(childModel ? { model: childModel } : {}),
             ...(entry.limits ? { limits: entry.limits } : {}),
@@ -1897,6 +1955,49 @@ async function buildAgentSubagents(
     }
 
     return { subagents, cleanupTasks, models };
+}
+
+/**
+ * The system prompt a sub-agent runs with, resolved the way its own agent's run
+ * would resolve it. A `ref` entry that sets no prompt of its own runs the prompt
+ * of the agent it points at: that agent's `promptKey` template, or its inline
+ * text, rendered with ITS prompt variables (identity, defaults, and the delegating
+ * run's values for the variables it declares). A prompt written in the delegating
+ * agent's own config — an inline child's, or a `ref` entry's override — renders the
+ * way that agent's own prompt does. Undefined when there is none.
+ */
+async function resolveChildPrompt(
+    input: BuildSubagentsInput,
+    entry: IAgentSubagent,
+    target?: Extract<Awaited<ReturnType<typeof resolveSubagentTarget>>, { ok: true }>,
+): Promise<string | undefined> {
+    const { parent } = input.prompt;
+    const authored = entry.systemPrompt?.trim() ? entry.systemPrompt : undefined;
+    if (authored || !target) {
+        if (!authored) return undefined;
+        if (!shouldRenderInlinePrompt(parent.config, authored)) return authored;
+        const rendered = renderPromptTemplate(authored, parent.variables);
+        reportPromptVariables(rendered, { agentKey: input.caller?.agentKey ?? '' });
+        return rendered.text;
+    }
+    const agentKey = entry.agentKey ?? '';
+    return resolveAgentPrompt({
+        db: input.db,
+        projectId: input.projectId,
+        agentKey,
+        config: target.config,
+        systemPrompt: target.config.systemPrompt,
+        variables: buildPromptVariables({
+            config: target.config,
+            agentKey,
+            agentName: target.agent.name,
+            version: target.resolvedVersion,
+            runtimeContext: input.runtimeContext,
+            userId: input.prompt.userId,
+            variables: delegatedVariableValues(target.config.variables, input.prompt.variables),
+            variablesInPrompt: input.prompt.variablesInPrompt,
+        }),
+    });
 }
 
 /** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
@@ -3781,7 +3882,6 @@ async function buildLocalAgentRun(input: {
     });
 
     // System prompt
-    let systemPrompt = config.systemPrompt;
     const promptVariables = buildPromptVariables({
         config,
         agentKey,
@@ -3792,18 +3892,7 @@ async function buildLocalAgentRun(input: {
         variables: input.variables,
         variablesInPrompt: input.variablesInPrompt,
     });
-    if (!systemPrompt && config.promptKey) {
-        const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) {
-            const rendered = renderPromptTemplate(prompt.template, promptVariables);
-            systemPrompt = rendered.text;
-            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
-        }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
-        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
-        systemPrompt = rendered.text;
-        reportPromptVariables(rendered, { agentKey });
-    }
+    let systemPrompt = await resolveAgentPrompt({ db, projectId, agentKey, config, systemPrompt: config.systemPrompt, variables: promptVariables });
 
     // Guardrails. One guard for the whole run — resolving the bindings once
     // keeps every tool this agent gets under the same policy, and a legacy
@@ -4077,6 +4166,7 @@ async function buildLocalAgentRun(input: {
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions, agentKey);
 
     const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
+        db,
         tenantDbName,
         tenantId,
         projectId,
@@ -4093,6 +4183,13 @@ async function buildLocalAgentRun(input: {
             ...(input.userId ? { userId: input.userId } : {}),
         },
         reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
+        prompt: {
+            parent: { config, variables: promptVariables },
+            ...(input.variables ? { variables: input.variables } : {}),
+            ...(input.variablesInPrompt !== undefined ? { variablesInPrompt: input.variablesInPrompt } : {}),
+            ...(input.userId ? { userId: input.userId } : {}),
+        },
+        onWarning: (message) => warnings.add(message),
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
