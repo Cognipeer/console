@@ -351,6 +351,27 @@ describe('the event log of a run the shutdown drain interrupted', () => {
     });
   });
 
+  it('does not wait for session events a stuck database never writes', async () => {
+    const conversationId = await newSession();
+    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running', runtimeTurnId: 'turn-stuck' });
+    hoisted.executeAgentChat.mockImplementation(() => new Promise(() => undefined));
+    const settled = inline(conversationId).then(() => 'completed', (error: unknown) => error);
+    await delay(100);
+
+    const original = db.findAgentConversationById.bind(db);
+    const stuck = vi.spyOn(db, 'findAgentConversationById').mockImplementation(((id: string) => (
+      id === conversationId ? new Promise(() => undefined) : original(id)
+    )) as never);
+    const startedAt = Date.now();
+    try {
+      await drainLocalAgentRuns(300);
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      stuck.mockRestore();
+    }
+    expect(await settled).toBeInstanceOf(AgentRunInterruptedError);
+  });
+
   it('the cut-off turn winding down afterwards adds no second ending', async () => {
     const conversationId = await newSession();
     // What the real turn does: record its events through the session recorder, and end as cancelled when it is cut off.

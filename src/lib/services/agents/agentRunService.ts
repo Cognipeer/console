@@ -2395,6 +2395,9 @@ export async function publishAgentRunJob(run: IAgentRun, options: { republish?: 
 
 export const INTERRUPTED_RUN_MESSAGE = 'The server restarted while this run was in progress. It was not completed; retry it.';
 
+/** Longest the shutdown drain waits for the interrupted runs' session events to be written. */
+const DRAIN_EVENTS_MAX_WAIT_MS = 5_000;
+
 /**
  * Shutdown drain for the runs executing in this process (inline turns and
  * queue workers): waits up to `timeoutMs` for them to settle, then fails the
@@ -2443,10 +2446,20 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   // The session event logs hear about it before any caller is answered and before the session event
   // streams are ended: a follower reads the ending of its run, then its stream closes (it reconnects,
   // and replays the same ending). Together, so the shutdown does not wait one run after another.
-  await Promise.all(ended.map(({ local, run }) => runWithTenantDb(
-    local.tenantDbName,
-    (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
-  ).catch(() => undefined)));
+  // Bounded: a database that stopped answering must not hold the shutdown (the run rows are final already,
+  // the next boot's reconciler republishes what did not land).
+  const eventsTimer = delaySentinel(Math.min(timeoutMs, DRAIN_EVENTS_MAX_WAIT_MS), TIMEOUT_SENTINEL);
+  try {
+    await Promise.race([
+      Promise.all(ended.map(({ local, run }) => runWithTenantDb(
+        local.tenantDbName,
+        (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
+      ).catch(() => undefined))),
+      eventsTimer.promise,
+    ]);
+  } finally {
+    eventsTimer.clear();
+  }
   for (const local of leftovers) {
     // Abandoned: the row is final; whatever the turn still does must not land.
     // An inline run's caller is answered with the row at once (its stream ends).
