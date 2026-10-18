@@ -67,3 +67,32 @@ export function delegationFailure(toolName: string | undefined, output: unknown)
     const why = [first.error, first.note, first.status].find((v) => typeof v === 'string' && v) as string | undefined;
     return results.length > 1 ? `All ${results.length} sub-agent tasks failed: ${why ?? 'failed'}` : why ?? 'The sub-agent failed.';
 }
+
+/**
+ * Names the sub-agent on a trace step that records a tool approval or a question
+ * of its child ("Approval requested · get_weather" alone reads as the parent's
+ * own tool). `approvalSubagents` maps the SDK's approval / question id to the
+ * child it came from, learned from the child's forwarded events. Returns the
+ * label and metadata to store; the step itself is otherwise left as the SDK wrote it.
+ */
+export function nameSubagentOnApprovalStep(
+    step: { type?: string; label?: string; sequence?: number; metadata?: Record<string, unknown>; sections?: unknown },
+    approvalSubagents: ReadonlyMap<string, string>,
+): { label?: string; metadata: Record<string, unknown> } {
+    const metadata = { ...(step.metadata ?? {}) };
+    if ((step.type !== 'tool_approval' && step.type !== 'user_question') || approvalSubagents.size === 0) return { label: step.label, metadata };
+    const sections = Array.isArray(step.sections) ? (step.sections as Array<{ data?: Record<string, unknown> }>) : [];
+    for (const section of sections) {
+        const data = section?.data;
+        const id = data && (typeof data.approvalId === 'string' ? data.approvalId : typeof data.questionId === 'string' ? data.questionId : undefined);
+        const subagent = id ? approvalSubagents.get(id) : undefined;
+        if (!subagent) continue;
+        metadata.subagent = subagent;
+        const suffix = typeof step.sequence === 'number' ? ` #${step.sequence}` : '';
+        const label = step.label && suffix && step.label.endsWith(suffix)
+            ? `${step.label.slice(0, -suffix.length)} (sub-agent ${subagent})${suffix}`
+            : step.label ? `${step.label} (sub-agent ${subagent})` : step.label;
+        return { label, metadata };
+    }
+    return { label: step.label, metadata };
+}
