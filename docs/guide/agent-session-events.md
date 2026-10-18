@@ -62,6 +62,12 @@ Each event:
 | `session.work_done` | none; right after an idle with `stop_reason: end_turn` |
 | `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback)) |
 
+`agent.message` carries the usage of the whole turn: when a turn paused for an approval, a question or a client tool and was resumed, the resumed turn's `usage` adds up every leg. The keys of `directive_sources` inside an `agent.compaction` summary are the directives' own text and are not re-cased.
+
+### Context compaction and agents without tools
+
+Context summarization compresses **tool results**. An agent that has no tools (no tool bindings, knowledge, sub-agents, skills, memory, sandbox or client tools) never summarizes, so no `agent.compaction` event is emitted for it. With the default `hybrid` context policy such an agent keeps only the last `lastTurnsToKeep` turns once the context grows, and older turns are dropped without a summary: facts from them are lost. Saving an agent configured this way returns a warning. Give the agent a tool, raise `lastTurnsToKeep`, or use the `raw` policy if older turns must stay.
+
 A turn is bracketed by `session.status_running` and `session.status_idle`. A new event type can appear in a future version: ignore the ones you do not know.
 
 ## Following a turn live
