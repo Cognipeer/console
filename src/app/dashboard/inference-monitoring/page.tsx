@@ -8,7 +8,6 @@ import {
   Center,
   Group,
   Loader,
-  Modal,
   NumberInput,
   Paper,
   Progress,
@@ -36,6 +35,7 @@ import {
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import FormShell, { FormField, FormSection } from '@/components/common/ui/FormShell';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
 import {
@@ -533,59 +533,57 @@ export default function InferenceMonitoringPage() {
         </SimpleGrid>
       )}
 
-      {/* Add Server Modal */}
-      <Modal
-        opened={addOpened}
+      {/* Add Server */}
+      <FormShell
+        open={addOpened}
         onClose={addHandlers.close}
         title={t('addServer')}
-        size="md"
+        icon={<IconServerBolt size={18} />}
+        primaryAction={{
+          label: t('addServer'),
+          loading: creating,
+          disabled: creating,
+          onClick: () => { void form.onSubmit(handleCreate)(); },
+        }}
+        secondaryAction={{ label: 'Cancel', onClick: addHandlers.close }}
       >
-        <form onSubmit={form.onSubmit(handleCreate)}>
-          <Stack gap="md">
+        <FormSection number={1} title={t('serverDetail.title')}>
+          <FormField label={t('serverName')} required>
             <TextInput
-              label={t('serverName')}
               placeholder={t('form.namePlaceholder')}
-              required
               {...form.getInputProps('name')}
             />
+          </FormField>
+          <FormField label={t('serverType')} required>
             <Select
-              label={t('serverType')}
               data={[
                 { value: 'vllm', label: 'vLLM' },
                 { value: 'llamacpp', label: 'llama.cpp' },
               ]}
-              required
               {...form.getInputProps('type')}
             />
+          </FormField>
+          <FormField label={t('baseUrl')} required>
             <TextInput
-              label={t('baseUrl')}
               placeholder={t('form.urlPlaceholder')}
-              required
               {...form.getInputProps('baseUrl')}
             />
+          </FormField>
+          <FormField label={t('apiKey')} optional>
             <TextInput
-              label={t('apiKey')}
               placeholder={t('form.apiKeyPlaceholder')}
               {...form.getInputProps('apiKey')}
             />
+          </FormField>
+          <FormField label={t('pollInterval')} hint={t('form.pollIntervalHelp')}>
             <NumberInput
-              label={t('pollInterval')}
-              description={t('form.pollIntervalHelp')}
               min={10}
               max={3600}
               {...form.getInputProps('pollIntervalSeconds')}
             />
-            <Group justify="flex-end" mt="md">
-              <Button variant="light" onClick={addHandlers.close}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={creating}>
-                {t('addServer')}
-              </Button>
-            </Group>
-          </Stack>
-        </form>
-      </Modal>
+          </FormField>
+        </FormSection>
+      </FormShell>
     </PageContainer>
   );
 }

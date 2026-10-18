@@ -461,7 +461,8 @@ export default function DataGrid<T>({
         )}
         {showSkeleton ? <VisuallyHidden>{tFeedback('loadingContent')}</VisuallyHidden> : null}
 
-        {(footerLeft || footerRight || pagination) && (hasRecords || showSkeleton) ? (
+        {(footerLeft || footerRight || pagination) &&
+        (hasRecords || showSkeleton || (pagination && pagination.page > 1)) ? (
           <div
             className="ds-row-between"
             style={{

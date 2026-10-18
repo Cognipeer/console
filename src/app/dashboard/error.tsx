@@ -37,6 +37,8 @@ export default function DashboardError({ error, reset }: DashboardErrorProps) {
           digest: error.digest,
         },
       });
+    } catch {
+      // The support handoff is best-effort; a failure must not surface as an unhandled rejection.
     } finally {
       setReporting(false);
     }

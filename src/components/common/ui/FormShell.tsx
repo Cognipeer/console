@@ -3,6 +3,7 @@
 import {
   ReactNode,
   useEffect,
+  useId,
   useRef,
   useState,
   Children,
@@ -87,6 +88,7 @@ export default function FormShell({
   // always visible via CSS — this state only affects the stacked layout.
   const [summaryOpen, setSummaryOpen] = useState(false);
   const t = useTranslations('formShell');
+  const titleId = useId();
 
   useEffect(() => {
     if (!open || disableEscape) return;
@@ -95,6 +97,11 @@ export default function FormShell({
       // Escape closes an open dropdown (a Select's list, a menu) before it closes the form: Mantine marks
       // the control while its list is open, which is what its own modals look at too.
       if (e.target instanceof Element && e.target.closest('[data-mantine-stop-propagation="true"]')) return;
+      // A dialog stacked on top of the form (a ConfirmModal, a picker) takes the Escape; the form stays.
+      if (e.target instanceof Element) {
+        const dialog = e.target.closest('[role="dialog"]');
+        if (dialog && !dialog.classList.contains('form-overlay')) return;
+      }
       onClose();
     };
     // Capture phase: the dropdown's own handler runs later and closes the list, which drops the mark.
@@ -120,7 +127,7 @@ export default function FormShell({
   if (!open || !mounted) return null;
 
   return createPortal(
-    <div className="form-overlay" role="dialog" aria-modal="true">
+    <div className="form-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="form-header">
         <ActionIcon
           variant="subtle"
@@ -134,7 +141,7 @@ export default function FormShell({
         <div className="form-header-main">
           {icon ? <div className="form-header-icon">{icon}</div> : null}
           <div className="form-header-text">
-            <div className="form-header-title">{title}</div>
+            <div className="form-header-title" id={titleId} role="heading" aria-level={2}>{title}</div>
             {subtitle ? <div className="form-header-sub">{subtitle}</div> : null}
           </div>
         </div>

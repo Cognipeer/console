@@ -10,7 +10,7 @@
  * it. Polls while anything is still queued or running.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActionIcon,
     Badge,
@@ -69,9 +69,11 @@ function durationOf(run: AgentRunRow): number | null {
 
 export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, trigger, onClearTrigger }: AgentRunsTableProps) {
     const tTriggers = useTranslations('agents.triggers');
+    const tFeedback = useTranslations('navigationFeedback');
     const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
+    const loadedRef = useRef(false);
 
     const load = useCallback(async () => {
         try {
@@ -80,10 +82,13 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json() as { runs: AgentRunRow[] };
             setRuns(data.runs ?? []);
+            loadedRef.current = true;
         } catch {
+            // The first load failing would read as "no runs yet": say so. A failed poll keeps the last list quietly.
+            if (!loadedRef.current) notifications.show({ color: 'red', message: tFeedback('loadFailed') });
             setRuns((prev) => prev ?? []);
         }
-    }, [agentId, trigger]);
+    }, [agentId, trigger, tFeedback]);
 
     useEffect(() => { void load(); }, [load]);
 

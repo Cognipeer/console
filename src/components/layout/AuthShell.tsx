@@ -17,7 +17,7 @@ const DEFAULT_BRAND = (
     <Image
       src="/images/cognipeer-logo-d.png"
       alt="Cognipeer"
-      width={148}
+      width={143}
       height={32}
       className="auth-brand-wordmark"
       priority

@@ -63,6 +63,11 @@ const SEGMENT_KEYS: Record<string, string> = {
   sso: 'sso',
   ldap: 'ldap',
   files: 'files',
+  resources: 'resources',
+  cluster: 'cluster',
+  nodes: 'nodes',
+  instances: 'instances',
+  cost: 'cost',
   docs: 'docs',
   migrations: 'migrations',
   edit: 'edit',
@@ -104,6 +109,12 @@ function isMongoObjectId(value: string) {
  */
 const PATH_LABEL_OVERRIDES: Record<string, string> = {
   'gpu-fleet/models': 'Model Marketplace',
+  // Product names whose nav label differs from Title-Cased folder name.
+  'gpu-fleet': 'GPU Fleet',
+  'ai-app-gateway': 'AI App Gateway',
+  'ocr-jobs': 'OCR Jobs',
+  redteam: 'Red Team',
+  websearch: 'Web Search',
 };
 
 function pathOverrideLabel(

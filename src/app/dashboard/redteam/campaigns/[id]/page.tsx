@@ -127,7 +127,7 @@ export default function RedTeamCampaignDetailPage() {
       backHref="/dashboard/redteam"
       backLabel="Back to campaigns"
       icon={<div className="detail-icon-badge"><IconShield size={18} stroke={1.7} /></div>}
-      title={<h1 style={{ margin: 0, fontSize: 20 }}>{campaign.name}</h1>}
+      title={<h1 className="ds-h2" style={{ margin: 0 }}>{campaign.name}</h1>}
       meta={
         <span>
           <span className="ds-mono">{campaign.key}</span> · {campaign.targetKind}{' '}

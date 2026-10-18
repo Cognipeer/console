@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
@@ -38,26 +38,28 @@ export default function ToolsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
+  const tFeedback = useTranslations('navigationFeedback');
   const deleteResource = useDeleteResource();
 
-  const loadTools = async () => {
+  const loadTools = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/tools', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setTools(data.tools ?? []);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTools(data.tools ?? []);
     } catch (err) {
       console.error('Failed to load tools', err);
+      // An empty list would read as "none yet"; say the load failed instead.
+      notifications.show({ color: 'red', message: tFeedback('loadFailed') });
     } finally {
       setLoading(false);
     }
-  };
+  }, [tFeedback]);
 
   useEffect(() => {
     void loadTools();
-  }, []);
+  }, [loadTools]);
 
   const handleToggleStatus = async (t: ToolView) => {
     try {

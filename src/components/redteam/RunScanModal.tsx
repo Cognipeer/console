@@ -7,8 +7,9 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Button, Group, Modal, NumberInput, Select, Stack, Text } from '@mantine/core';
+import { Group, NumberInput, Select, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import ProbePicker from './ProbePicker';
 import type { ProbeCatalogView, RedTeamCampaignView, SelectOption } from './types';
 
@@ -66,62 +67,71 @@ export default function RunScanModal({ opened, campaign, probes, models, onClose
   };
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Start scan" centered size="lg">
+    <FormShell
+      open={opened}
+      onClose={onClose}
+      title="Start scan"
+      primaryAction={{
+        label: 'Start scan',
+        loading: starting,
+        disabled: !campaign,
+        onClick: () => {
+          void start();
+        },
+      }}
+    >
       {campaign ? (
-        <Stack gap="md">
-          <Text size="sm" c="dimmed">
-            Attacking <strong>{campaign.targetKind === 'agent' ? campaign.agentKey : campaign.modelKey}</strong>{' '}
-            ({campaign.targetKind}). The scan runs in the background.
-          </Text>
+        <FormSection title="Scan settings">
+          <Stack gap="md">
+            <Text size="sm" c="dimmed">
+              Attacking <strong>{campaign.targetKind === 'agent' ? campaign.agentKey : campaign.modelKey}</strong>{' '}
+              ({campaign.targetKind}). The scan runs in the background.
+            </Text>
 
-          <Group grow align="flex-start">
-            <NumberInput
-              label="Max turns per attempt"
-              description="Adaptive attack length: the attacker model escalates over this many turns. Requires a judge model (below); without one, attacks are single-shot."
-              min={1}
-              max={10}
-              value={maxTurns}
-              onChange={(v) => setMaxTurns(typeof v === 'number' ? v : '')}
-              placeholder="default 4"
+            <Group grow align="flex-start">
+              <NumberInput
+                label="Max turns per attempt"
+                description="Adaptive attack length: the attacker model escalates over this many turns. Requires a judge model (below); without one, attacks are single-shot."
+                min={1}
+                max={10}
+                value={maxTurns}
+                onChange={(v) => setMaxTurns(typeof v === 'number' ? v : '')}
+                placeholder="default 4"
+              />
+              <NumberInput
+                label="Concurrency"
+                description="Parallel attempts."
+                min={1}
+                max={16}
+                value={concurrency}
+                onChange={(v) => setConcurrency(typeof v === 'number' ? v : '')}
+              />
+            </Group>
+
+            <div>
+              <Text size="sm" fw={500}>Probes</Text>
+              <Text size="xs" c="dimmed" mb={6}>Which probes to run this scan. Clear all to use the campaign&apos;s default selection.</Text>
+              <ProbePicker
+                probes={probes}
+                value={probeKeys}
+                onChange={setProbeKeys}
+                emptyHint="No probes selected — the campaign's default selection will run."
+              />
+            </div>
+
+            <Select
+              label="Judge / attacker model"
+              description="Powers the LLM-judge detectors AND drives the adaptive multi-turn attacker. Strongly recommended — without it attacks are single-shot and many verdicts stay 'needs review'."
+              searchable
+              clearable
+              data={models}
+              value={judgeModelKey}
+              onChange={setJudgeModelKey}
+              placeholder="Select a judge model"
             />
-            <NumberInput
-              label="Concurrency"
-              description="Parallel attempts."
-              min={1}
-              max={16}
-              value={concurrency}
-              onChange={(v) => setConcurrency(typeof v === 'number' ? v : '')}
-            />
-          </Group>
-
-          <div>
-            <Text size="sm" fw={500}>Probes</Text>
-            <Text size="xs" c="dimmed" mb={6}>Which probes to run this scan. Clear all to use the campaign&apos;s default selection.</Text>
-            <ProbePicker
-              probes={probes}
-              value={probeKeys}
-              onChange={setProbeKeys}
-              emptyHint="No probes selected — the campaign's default selection will run."
-            />
-          </div>
-
-          <Select
-            label="Judge / attacker model"
-            description="Powers the LLM-judge detectors AND drives the adaptive multi-turn attacker. Strongly recommended — without it attacks are single-shot and many verdicts stay 'needs review'."
-            searchable
-            clearable
-            data={models}
-            value={judgeModelKey}
-            onChange={setJudgeModelKey}
-            placeholder="Select a judge model"
-          />
-
-          <Group justify="flex-end" mt="sm">
-            <Button variant="default" onClick={onClose}>Cancel</Button>
-            <Button color="teal" loading={starting} onClick={start}>Start scan</Button>
-          </Group>
-        </Stack>
+          </Stack>
+        </FormSection>
       ) : null}
-    </Modal>
+    </FormShell>
   );
 }

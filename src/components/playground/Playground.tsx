@@ -236,6 +236,7 @@ export function Playground({
       let fullContent = '';
       let fullReasoning = '';
       let reasoningTokens = 0;
+      let sseBuffer = '';
       partial.content = '';
       partial.reasoning = '';
 
@@ -243,8 +244,10 @@ export function Playground({
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        // A frame can straddle two reads: keep the unfinished tail for the next one.
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() ?? '';
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {

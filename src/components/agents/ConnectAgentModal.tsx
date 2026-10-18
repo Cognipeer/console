@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActionIcon,
   Button,
@@ -82,6 +82,7 @@ export default function ConnectAgentModal({
   editAgent,
 }: ConnectAgentModalProps) {
   const t = useTranslations('agents');
+  const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(editAgent);
   const hasExistingKey = Boolean(editAgent?.config?.connection?.hasApiKey);
 
@@ -142,7 +143,8 @@ export default function ConnectAgentModal({
 
   const submit = async () => {
     const validation = form.validate();
-    if (validation.hasErrors) return;
+    if (validation.hasErrors || submitting) return;
+    setSubmitting(true);
     const v = form.values;
 
     const headers = v.headers
@@ -197,6 +199,8 @@ export default function ConnectAgentModal({
         message: error instanceof Error ? error.message : 'Error',
         color: 'red',
       });
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -222,7 +226,7 @@ export default function ConnectAgentModal({
       primaryAction={{
         label: isEdit ? t('connectModal.save') : t('connectModal.connect'),
         icon: <IconPlugConnected size={13} />,
-        loading: form.submitting,
+        loading: submitting,
         disabled: !canSubmit,
         onClick: submit,
       }}

@@ -20,7 +20,6 @@ import {
   Center,
   Code,
   Group,
-  Modal,
   Paper,
   SegmentedControl,
   Stack,
@@ -33,6 +32,7 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import FormShell from '@/components/common/ui/FormShell';
 import { IconAdjustments, IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
 import type { IMcpToolAnnotations, McpSourceType } from '@/lib/database';
 import {
@@ -575,11 +575,28 @@ export default function McpToolsPanel({
         );
       })}
 
-      <Modal
-        opened={!!editingTool}
-        onClose={() => setEditingTool(null)}
+      <FormShell
+        open={!!editingTool}
+        onClose={() => { if (!savingAnn) setEditingTool(null); }}
         title={`Tool settings · ${editingTool?.name ?? ''}`}
-        size="lg"
+        icon={<IconAdjustments size={18} />}
+        primaryAction={{
+          label: 'Save',
+          loading: savingAnn,
+          disabled: savingAnn || !nameDraftValid,
+          onClick: () => { void handleSaveAnnotations(); },
+        }}
+        secondaryAction={{ label: 'Cancel', disabled: savingAnn, onClick: () => setEditingTool(null) }}
+        footerLeft={(
+          <Button
+            variant="subtle"
+            color="red"
+            disabled={savingAnn || (!Object.keys(annDraft).length && !descDraft.trim() && !nameDraft.trim())}
+            onClick={() => { setAnnDraft({}); setDescDraft(''); setNameDraft(''); }}
+          >
+            Reset to discovered
+          </Button>
+        )}
       >
         {editingTool ? (
           <Stack gap="md">
@@ -667,28 +684,9 @@ export default function McpToolsPanel({
                 )}
               </Code>
             </Paper>
-
-            <Group justify="space-between">
-              <Button
-                variant="subtle"
-                color="red"
-                disabled={savingAnn || (!Object.keys(annDraft).length && !descDraft.trim() && !nameDraft.trim())}
-                onClick={() => { setAnnDraft({}); setDescDraft(''); setNameDraft(''); }}
-              >
-                Reset to discovered
-              </Button>
-              <Group gap="xs">
-                <Button variant="default" disabled={savingAnn} onClick={() => setEditingTool(null)}>
-                  Cancel
-                </Button>
-                <Button loading={savingAnn} disabled={!nameDraftValid} onClick={() => void handleSaveAnnotations()}>
-                  Save
-                </Button>
-              </Group>
-            </Group>
           </Stack>
         ) : null}
-      </Modal>
+      </FormShell>
     </Stack>
   );
 }

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -30,6 +31,7 @@ export default function CreateAgentModal({
   onCreated,
 }: CreateAgentModalProps) {
   const t = useTranslations('agents');
+  const [submitting, setSubmitting] = useState(false);
   const form = useForm({
     initialValues: { name: '', description: '', modelKey: '' },
     validate: {
@@ -45,7 +47,8 @@ export default function CreateAgentModal({
 
   const submit = async () => {
     const validation = form.validate();
-    if (validation.hasErrors) return;
+    if (validation.hasErrors || submitting) return;
+    setSubmitting(true);
     const values = form.values;
     try {
       const res = await fetch('/api/agents', {
@@ -75,6 +78,8 @@ export default function CreateAgentModal({
         message: error instanceof Error ? error.message : 'Error',
         color: 'red',
       });
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -90,7 +95,7 @@ export default function CreateAgentModal({
       primaryAction={{
         label: t('createModal.create'),
         icon: <IconPlus size={13} />,
-        loading: form.submitting,
+        loading: submitting,
         disabled: !canSubmit,
         onClick: submit,
       }}
