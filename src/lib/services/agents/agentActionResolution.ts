@@ -700,6 +700,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.unattended ? { unattended: true } : {}),
                     ...(input.answersClientTools ? { answersClientTools: true } : {}),
                     ...(pausedRun?.externalContent ? { variablesInPrompt: false } : {}),
+                    ...(pausedRun?.externalContent && pausedRun.literalVariables?.length ? { literalVariables: pausedRun.literalVariables } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),

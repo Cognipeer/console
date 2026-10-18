@@ -1134,8 +1134,9 @@ export class SQLiteProviderBase {
       ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
       ['channel', 'TEXT'], ['triggerId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
       ['variables', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
-      // Trigger runs: unattended (no one to ask) and external content (variables stay out of the system prompt).
-      ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'],
+      // Trigger runs: unattended (no one to ask), external content (event values stay out of the system
+      // prompt) and the variable names whose values did not come from the event (JSON list).
+      ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'], ['literalVariables', 'TEXT'],
       // The request's `background: true` on a run that streams inline.
       ['background', 'INTEGER'],
       // The event the callback bookkeeping belongs to; what continues a paused turn and who

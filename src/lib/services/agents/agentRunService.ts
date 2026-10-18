@@ -523,10 +523,16 @@ export interface StartAgentRunInput {
    */
   unattended?: boolean;
   /**
-   * The message / variables came from an external payload: variables stay out of the
-   * system prompt and the Variables block is closed (agentVariables.ts). Kept on the row.
+   * The message / variables came from an external payload: values taken from it stay out
+   * of the system prompt and the Variables block is closed (agentVariables.ts). Kept on the row.
    */
   externalContent?: boolean;
+  /**
+   * With `externalContent`: the names in `variables` whose value did not come from the
+   * payload (a trigger's own fixed values). They fill the system prompt's
+   * `{{variables.*}}` next to the declared defaults. Kept on the row.
+   */
+  literalVariables?: string[];
   /** The request asked for `background: true`: kept on the row (a stream runs inline, yet reads back as background). */
   background?: boolean;
   /** Inline only: the caller runs the agent's client tools (chat completions `tool_calls`). */
@@ -841,6 +847,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       variables: input.variables ?? null,
       ...(input.unattended ? { unattended: true } : {}),
       ...(input.externalContent ? { externalContent: true } : {}),
+      ...(input.externalContent && input.literalVariables?.length ? { literalVariables: input.literalVariables } : {}),
       ...(input.background ? { background: true } : {}),
       queueGeneration: 1,
     };
@@ -1362,6 +1369,7 @@ export async function queueAgentRunResume(input: {
         ...(source?.triggerId ? { triggerId: source.triggerId, channel: source.channel ?? null } : {}),
         ...(source?.unattended ? { unattended: true } : {}),
         ...(source?.externalContent ? { externalContent: true } : {}),
+        ...(source?.externalContent && source.literalVariables?.length ? { literalVariables: source.literalVariables } : {}),
         ...(source?.variables ? { variables: source.variables } : {}),
         ...(source?.responseFormat ? { responseFormat: source.responseFormat } : {}),
         queueGeneration: 1,
@@ -1630,12 +1638,19 @@ export async function requestAgentRunCancellation(
 /**
  * What a run's row says about how its turns run — the same for its first turn,
  * a resume and a continuation (§2.4a): nobody to ask (`unattended`), and for
- * external content, variables that never fill the system prompt.
+ * external content, variables whose values taken from outside never fill the
+ * system prompt (the declared defaults and `literalVariables` still do).
  */
-function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent'> {
+function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'literalVariables'>): Pick<AgentChatRequest, 'unattended' | 'variablesInPrompt' | 'externalContent' | 'literalVariables'> {
   return {
     ...(run.unattended === true ? { unattended: true } : {}),
-    ...(run.externalContent === true ? { variablesInPrompt: false, externalContent: true } : {}),
+    ...(run.externalContent === true
+      ? {
+        variablesInPrompt: false,
+        externalContent: true,
+        ...(run.literalVariables?.length ? { literalVariables: run.literalVariables } : {}),
+      }
+      : {}),
   };
 }
 
@@ -1952,6 +1967,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
             ...(request.variables ? { variables: request.variables } : {}),
             ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+            ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
             continuation: {
@@ -1976,6 +1992,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
             ...(request.variables ? { variables: request.variables } : {}),
             ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+            ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
             ...(request.unattended ? { unattended: true } : {}),
             cancellationCell,
           }).then((resumed) => resumed.response)

@@ -22,6 +22,14 @@
  * That is the boundary that keeps this from being an open prompt-injection
  * surface — it is still caller text entering the system prompt, which is why
  * every resolved variable is reported back for tracing.
+ *
+ * External content (a webhook delivery, a public A2A caller) is the exception to
+ * "the agent's variables fill the prompt": a value taken from outside must not
+ * reach the system prompt, where it would read as the author's own words. What
+ * `{{variables.<name>}}` still reads there is what the platform itself supplied —
+ * the declared defaults and the values the fire marked as literal
+ * (`literalVariables`: a trigger's fixed values, not the ones rendered from the
+ * event). Everything taken from the content stays in the user message's Variables block.
  */
 
 import Mustache from 'mustache';
@@ -46,11 +54,18 @@ export interface PromptVariableInput {
     /** Validated agent variables of this turn, exposed as `{{variables.<name>}}`. */
     variables?: Record<string, unknown> | null;
     /**
-     * False keeps the variables out of the prompt template (they came from outside
-     * the platform's own callers and are delivered only in the user message).
-     * Default true.
+     * False keeps the turn's variables out of the prompt template (they came from
+     * outside the platform's own callers and are delivered in the user message).
+     * The prompt then reads only the declared defaults and the values named in
+     * `literalVariables`. Default true.
      */
     variablesInPrompt?: boolean;
+    /**
+     * With `variablesInPrompt: false`: the names of `variables` whose values did not
+     * come from the external content (see `IAgentRun.literalVariables`). Ignored
+     * otherwise.
+     */
+    literalVariables?: ReadonlyArray<string> | null;
 }
 
 export interface ResolvedPromptVariables {
@@ -86,6 +101,19 @@ export function collectTemplateVariables(template: string): string[] {
     return [...names];
 }
 
+/** The entries of `source` named in `names`, or null when there are none. */
+function pickNames(
+    source: Record<string, unknown> | null | undefined,
+    names: ReadonlyArray<string> | null | undefined,
+): Record<string, unknown> | null {
+    if (!source || !names || names.length === 0) return null;
+    const picked: Record<string, unknown> = {};
+    for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(source, name)) picked[name] = source[name];
+    }
+    return Object.keys(picked).length > 0 ? picked : null;
+}
+
 export function buildPromptVariables(input: PromptVariableInput): ResolvedPromptVariables {
     const defaults = input.config.promptVariables ?? {};
     const metadata = input.runtimeContext?.metadata ?? {};
@@ -100,13 +128,17 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
     }
 
     // `variables` is the agent's own declared namespace: a caller's metadata key of
-    // the same name does not get to shape it for external content, which never
-    // fills the prompt (it reaches the model in the user message only). Defaults come
-    // from the declaration, so a turn that supplied nothing still renders them. A
-    // metadata object of the same name (a realtime session forwards its variables
-    // that way) stays readable next to them; the agent's own values win, name by name.
+    // the same name does not get to shape it for external content, whose values never
+    // fill the prompt (they reach the model in the user message only). What the prompt
+    // of such a turn does read is what did not come from outside: the declared defaults
+    // and the values the fire marked as literal. Defaults come from the declaration, so
+    // a turn that supplied nothing still renders them. For any other turn a metadata
+    // object of the same name (a realtime session forwards its variables that way)
+    // stays readable next to them; the agent's own values win, name by name.
     if (input.variablesInPrompt === false) {
-        delete values.variables;
+        const own = variablePromptValues(input.config.variables, pickNames(input.variables, input.literalVariables));
+        if (own) values.variables = own;
+        else delete values.variables;
     } else {
         const variableValues = variablePromptValues(input.config.variables, input.variables);
         if (variableValues) {

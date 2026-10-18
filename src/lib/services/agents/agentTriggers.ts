@@ -56,8 +56,15 @@ export interface FireTriggerInput {
   message: string;
   /** Already validated against the agent's declared variables. */
   variables?: Record<string, unknown> | null;
-  /** The message / variables came from an external payload: variables stay out of the system prompt. */
+  /** The message / variables came from an external payload: values taken from it stay out of the system prompt. */
   externalContent?: boolean;
+  /**
+   * With `externalContent`: the names in `variables` whose value did not come from
+   * the payload (the trigger's own fixed values). They may fill the system prompt's
+   * `{{variables.*}}` next to the declared defaults; the others reach the model only
+   * in the message.
+   */
+  literalVariables?: string[];
   /** Merged over the trigger's metadata (≤ 16 keys together). */
   metadata?: Record<string, string> | null;
   idempotencyKey?: string;
@@ -213,6 +220,7 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
             trigger: input.trigger,
             unattended: true,
             ...(input.externalContent ? { externalContent: true } : {}),
+            ...(input.externalContent && input.literalVariables?.length ? { literalVariables: input.literalVariables } : {}),
             ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
             idempotencyConversationScope: null,
             callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,

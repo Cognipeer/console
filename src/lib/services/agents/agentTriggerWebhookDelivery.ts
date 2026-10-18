@@ -216,7 +216,8 @@ function payloadBlock(payload: unknown): string {
 }
 
 export type WebhookTurn =
-  | { ok: true; message: string; variables: Record<string, unknown> | null }
+  /** `literalVariables`: the names in `variables` whose value did not come from the event (see `mapWebhookVariables`). */
+  | { ok: true; message: string; variables: Record<string, unknown> | null; literalVariables: string[] }
   | { ok: false; code: 'template_error' | 'invalid_variables'; reason: string; errors: VariableIssue[] };
 
 /**
@@ -252,11 +253,11 @@ export function buildWebhookTurn(input: {
   }
   if (!variables.ok) return { ok: false, code: 'invalid_variables', reason: variables.reason, errors: variables.errors };
 
-  if (input.payload === undefined) return { ok: true, message: rendered, variables: variables.variables };
+  if (input.payload === undefined) return { ok: true, message: rendered, variables: variables.variables, literalVariables: variables.literal };
   const parts = [preface(input.webhook, input.identity)];
   if (rendered.trim().length > 0) parts.push(rendered);
   const message = parts.join('\n\n') + (input.webhook.includePayload ? payloadBlock(input.payload) : '');
-  return { ok: true, message, variables: variables.variables };
+  return { ok: true, message, variables: variables.variables, literalVariables: variables.literal };
 }
 
 /** `webhook_event` / `webhook_delivery` labels, each only while the run's metadata stays within 16 keys. */
@@ -460,6 +461,7 @@ export async function processWebhookDelivery(db: DatabaseProvider, input: Webhoo
       message: turn.message,
       variables: turn.variables,
       externalContent: true,
+      literalVariables: turn.literalVariables,
       metadata: webhookMetadata(trigger, identity),
       ...(dedup.key ? { idempotencyKey: dedup.key } : {}),
       fireAt: receivedAt,

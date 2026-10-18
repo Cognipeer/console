@@ -189,6 +189,24 @@ describeForEachProvider('Agent triggers', (getDb) => {
     expect(requeued).toMatchObject({ status: 'queued', unattended: true, externalContent: true });
   });
 
+  it('keeps the variable names a fire marked as literal, also through a resume requeue; a plain run has none', async () => {
+    const db = getDb();
+    const base = {
+      mode: 'background' as const, tenantId, tenantDbName: dbName, projectId, agentKey: 'report-bot', userMessage: 'hi',
+    };
+    const withNames = await db.createAgentRun({
+      ...base, conversationId: 'conv-a', status: 'requires_action', externalContent: true, literalVariables: ['region', 'customer_id'],
+    });
+    const empty = await db.createAgentRun({ ...base, conversationId: 'conv-b', status: 'requires_action', externalContent: true, literalVariables: [] });
+    const plain = await db.createAgentRun({ ...base, conversationId: 'conv-c', status: 'queued' });
+    expect((await db.getAgentRunById(String(withNames._id), tenantId, projectId))?.literalVariables).toEqual(['region', 'customer_id']);
+    expect((await db.getAgentRunById(String(empty._id), tenantId, projectId))?.literalVariables ?? []).toEqual([]);
+    expect((await db.getAgentRunById(String(plain._id), tenantId, projectId))?.literalVariables ?? null).toBeNull();
+
+    const requeued = await db.requeueAgentRunForResume(String(withNames._id), tenantId, ['action-1']);
+    expect(requeued?.literalVariables).toEqual(['region', 'customer_id']);
+  });
+
   const webhookSettings = (overrides: Partial<AgentTriggerWebhook> = {}): AgentTriggerWebhook => ({
     hookId: 'wh_abcdefghijklmnopqrstuvwx',
     preset: 'github',

@@ -457,7 +457,7 @@ paths:
       description: |-
         The A2A endpoint of an agent whose A2A exposure is set to `public`: no API token. The URL carries the tenant id and the agent's random endpoint slug (shown in the agent's A2A settings); treat it like a webhook URL, anyone who holds it can talk to the agent. An agent that is inactive, not exposed, or exposed with token access answers `404` here whatever the slug.
 
-        The protocol is the one of `POST /a2a/{agentKey}` (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`; text, file and data parts; `run_<runId>` task ids), with these differences: `configuration.blocking: false` is ignored, the call always blocks (a `working` Task when the window ends first); every public caller shares one anonymous identity, so a task or session is bound to the caller that started it by a caller nonce instead (see below); there is no per-token attribution or authorization decision (`-32010` does not occur). The variables of a `data` part are external content: they reach the run as part of the message and are never substituted into the agent's system prompt (an authenticated caller's declared variables are).
+        The protocol is the one of `POST /a2a/{agentKey}` (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`; text, file and data parts; `run_<runId>` task ids), with these differences: `configuration.blocking: false` is ignored, the call always blocks (a `working` Task when the window ends first); every public caller shares one anonymous identity, so a task or session is bound to the caller that started it by a caller nonce instead (see below); there is no per-token attribution or authorization decision (`-32010` does not occur). The variables of a `data` part are external content: they reach the run as part of the message and are never substituted into the agent's system prompt, which still reads the declared defaults (an authenticated caller's variables are substituted).
 
         **Caller-bound ids.** The first message of a new conversation draws a random caller nonce; the Task it answers carries `id: run_<runId>.<nonce>` and `contextId: <sessionId>.<nonce>`. Hand these back whole: `tasks/get`, `tasks/cancel` and `tasks/resubscribe` need the full task id, and a `message/send` that continues a session needs the full `contextId`. A task id without the nonce, with a wrong one, or of the earlier `task_<sessionId>_<messageIndex>` form answers `-32001` (`Task not found`); a `contextId` without the right nonce answers `-32602` (`Invalid params: unknown contextId`). A public conversation that was started before the nonce existed has none and can no longer be reached from the public route. Protocol-level failures are HTTP `200` JSON-RPC errors; an unexpected failure is `-32603`.
       parameters:
@@ -15463,8 +15463,9 @@ paths:
         (all rules must match), de-duplication, the per-trigger run rate, the turn (the prompt template rendered
         over the event, the variables mapping, the payload block when `include_payload`) and the run. The run's
         `trigger` is `webhook`; its metadata gets `webhook_event` and `webhook_delivery` while it stays within 16
-        keys. Everything taken from the event is external data: the message says so, and mapped variables stay out of
-        the agent's system prompt.
+        keys. Everything taken from the event is external data: the message says so, and variables taken from the event
+        stay out of the agent's system prompt (the declared defaults and the variables the trigger sets to a fixed
+        value still fill it).
 
         **De-duplication.** Repeated deliveries start one run: GitHub keys on a hash of the body, Standard Webhooks
         and GitLab on `webhook-id` / `Idempotency-Key` (else the body hash), Azure DevOps on the payload `id` (else

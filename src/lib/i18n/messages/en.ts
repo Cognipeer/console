@@ -4765,7 +4765,7 @@ export const en = {
       webhookIncludePayloadHint: 'Appends the event JSON (up to 32 KiB) to the message, marked as external data.',
       webhookVariables: 'Tags you can use (values are inserted as JSON):',
       webhookPromptHint: 'A template: tags such as payload.number in double braces are filled from each delivery. Optional when the payload is included or variables are mapped.',
-      webhookVariablesHint: 'A value with a tag in double braces is taken from the delivery; a tag alone keeps its type. Anything else is a fixed value. Because they come from outside, these values reach the model in the message (as a Variables block), not in the agent’s prompt.',
+      webhookVariablesHint: 'A value with a tag in double braces is taken from the delivery; a tag alone keeps its type. Anything else is a fixed value. Because they come from outside, values taken from the delivery reach the model in the message (as a Variables block), not in the agent’s prompt; fixed values and the declared defaults fill the prompt as well.',
       webhookClassHint: 'Deferred is safer for busy GitLab / Azure DevOps hooks.',
       copy: 'Copy',
       copied: 'Copied',

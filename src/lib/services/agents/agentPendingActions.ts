@@ -128,8 +128,10 @@ const RESUME_CTX_KEYS = [
 export interface PausedTurnOptions {
     responseFormat?: AgentResponseFormat;
     variables?: Record<string, unknown>;
-    /** False when the variables were kept out of the system prompt (external content). */
+    /** False when the variables taken from outside were kept out of the system prompt (external content). */
     variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that still fill the system prompt. */
+    literalVariables?: string[];
 }
 
 interface PausedEnvelope {

@@ -129,7 +129,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `run_<runId>.<nonce>` and `<sessionId>.<nonce>` and must be handed back whole; without the right nonce `tasks/get`,
   `tasks/cancel` and `tasks/resubscribe` answer `-32001` and a `contextId` answers `-32602` (`unknown contextId`).
   Public conversations created before this change can no longer be reached from the public route. The variables of a
-  public caller's `data` part are external content and never reach the system prompt.
+  public caller's `data` part are external content and never reach the system prompt (the declared defaults do).
 
 ### Triggers and incoming webhooks
 
@@ -146,7 +146,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
   event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
   with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
-  the message, marked as external data, never in the system prompt.
+  the message, marked as external data, never in the system prompt. The instructions still read the declared defaults and
+  the variables the trigger sets to a fixed value (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
 - Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
   replicas.
 

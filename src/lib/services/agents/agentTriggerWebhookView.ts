@@ -485,18 +485,26 @@ function coerce(type: IAgentVariable['type'] | undefined, value: unknown): { ok:
  * strings are brought to the declared type, `overrides` (a Run now's literal
  * values, never rendered) go on top, and the result is checked like a
  * request's variables. Throws `WebhookTemplateError` for a render that fails.
+ *
+ * `literal` names the variables whose value did not come from the event: the
+ * trigger's fixed values, a Run now's overrides and the declared defaults. A
+ * value read from the event or rendered over it is left out, so the run can
+ * keep it out of the system prompt (`IAgentRun.literalVariables`).
  */
 export function mapWebhookVariables(
   declared: ReadonlyArray<IAgentVariable> | undefined,
   mapping: Record<string, unknown> | null | undefined,
   view: unknown,
   overrides?: Record<string, unknown> | null,
-): { ok: true; variables: Record<string, unknown> | null } | { ok: false; errors: VariableIssue[]; reason: string } {
+): { ok: true; variables: Record<string, unknown> | null; literal: string[] } | { ok: false; errors: VariableIssue[]; reason: string } {
   const byName = new Map((declared ?? []).map((field) => [field.name, field]));
   const values: Record<string, unknown> = {};
+  /** Names whose value was read from the event or rendered over it. */
+  const fromEvent = new Set<string>();
   const errors: VariableIssue[] = [];
   for (const [name, spec] of Object.entries(mapping ?? {})) {
     let value: unknown;
+    let derived = true;
     const path = exactTagPath(spec);
     if (path) {
       const found = lookupPath(view, path.split('.'));
@@ -505,15 +513,24 @@ export function mapWebhookVariables(
       value = renderWebhookTemplate(spec, view);
     } else {
       value = spec;
+      derived = false;
     }
     if (value === undefined || value === null) continue;
     const coerced = coerce(byName.get(name)?.type, value);
-    if (!coerced.ok) errors.push({ field: name, message: coerced.message });
-    else values[name] = coerced.value;
+    if (!coerced.ok) {
+      errors.push({ field: name, message: coerced.message });
+      continue;
+    }
+    values[name] = coerced.value;
+    if (derived) fromEvent.add(name);
   }
   if (errors.length === 0) {
-    const resolved = resolveRunVariables(declared, { ...values, ...(overrides ?? {}) });
-    if (resolved.ok) return { ok: true, variables: resolved.variables };
+    const given = overrides ?? {};
+    const resolved = resolveRunVariables(declared, { ...values, ...given });
+    if (resolved.ok) {
+      const literal = Object.keys(resolved.variables ?? {}).filter((name) => Object.prototype.hasOwnProperty.call(given, name) || !fromEvent.has(name));
+      return { ok: true, variables: resolved.variables, literal };
+    }
     errors.push(...resolved.errors);
   }
   return { ok: false, errors, reason: `invalid variables: ${errors[0].field}: ${errors[0].message}` };

@@ -1222,12 +1222,13 @@ describe('background runs', () => {
       variables: [{ name: 'region', type: 'string' }],
       humanInTheLoop: { ...HITL_ON, unattended: 'pause' },
     });
-    const startPaused = async (id: string, external: boolean) => {
+    const startPaused = async (id: string, external: boolean, extra: { variables?: Record<string, unknown>; literalVariables?: string[] } = {}) => {
       const created = await queueAgentRun({
         tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
         conversationId: id, userMessage: 'list files', userId: 'system:trigger:trg1', actorType: 'system',
-        channel: 'trigger', triggerId: 'trg1', trigger: 'manual', unattended: true, variables: { region: SECRET },
+        channel: 'trigger', triggerId: 'trg1', trigger: 'manual', unattended: true, variables: extra.variables ?? { region: SECRET },
         ...(external ? { externalContent: true } : {}),
+        ...(extra.literalVariables ? { literalVariables: extra.literalVariables } : {}),
       });
       if (created.kind !== 'accepted') throw new Error(created.kind);
       await runAgentJobLocal({ runId: String(created.run._id), tenantId, tenantDbName: DB_NAME });
@@ -1288,6 +1289,86 @@ describe('background runs', () => {
       const { actionId } = await startPaused(id, false);
       await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
       expect(systemTexts(model).every((text) => text.includes(SECRET))).toBe(true);
+    });
+
+    describe('what the trigger fixed itself still fills the prompt: the declared defaults and its literal values, never the event\'s', () => {
+      const EVENT_MODE = 'EVENTMODE9';
+      const RENDERED = 'Serve region  for platform in careful mode.';
+      const mixedAgent = () => createAgent({
+        systemPrompt: 'Serve region {{variables.region}} for {{variables.team}} in {{variables.mode}} mode.',
+        variables: [
+          { name: 'region', type: 'string' },
+          { name: 'team', type: 'string' },
+          { name: 'mode', type: 'string', default: 'careful' },
+        ],
+        humanInTheLoop: { ...HITL_ON, unattended: 'pause' },
+      });
+      // region and mode came from the event; team is a fixed value of the trigger.
+      const startMixed = (id: string) => startPaused(id, true, {
+        variables: { region: SECRET, team: 'platform', mode: EVENT_MODE },
+        literalVariables: ['team'],
+      });
+      const expectOnlyOwnValues = (model: ScriptedModel, turns: number) => {
+        expect(model.seen).toHaveLength(turns);
+        const texts = systemTexts(model);
+        expect(texts).toHaveLength(turns);
+        for (const text of texts) {
+          expect(text).toContain(RENDERED);
+          expect(text).not.toContain(SECRET);
+          expect(text).not.toContain(EVENT_MODE);
+        }
+      };
+
+      it('on the first turn and after an inline answer', async () => {
+        await mixedAgent();
+        const model = scriptModel(oneToolScript('ls'));
+        const id = String((await newConversation())._id);
+        const { actionId } = await startMixed(id);
+        expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync')).kind).toBe('resumed');
+        expectOnlyOwnValues(model, 2);
+      });
+
+      it('the paused state keeps the literal names; the run row carries them when the stored state does not', async () => {
+        await mixedAgent();
+        const model = scriptModel(oneToolScript('ls'));
+        const id = String((await newConversation())._id);
+        const { runId, actionId } = await startMixed(id);
+        const stored = (await db.findAgentConversationState(id))!;
+        const envelope = JSON.parse(stored.pausedSnapshot!);
+        expect(envelope.turn).toMatchObject({ variablesInPrompt: false, literalVariables: ['team'] });
+        delete envelope.turn.literalVariables;
+        await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+        expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.literalVariables).toEqual(['team']);
+
+        expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync')).kind).toBe('resumed');
+        expectOnlyOwnValues(model, 2);
+      });
+
+      it('after a background answer (worker resume)', async () => {
+        await mixedAgent();
+        const model = scriptModel(oneToolScript('ls'));
+        const id = String((await newConversation())._id);
+        const { runId, actionId } = await startMixed(id);
+        expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'background')).kind).toBe('queued');
+        await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+        expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('succeeded');
+        expectOnlyOwnValues(model, 2);
+      });
+
+      it('a run that fixed nothing reads only the declared defaults', async () => {
+        await mixedAgent();
+        const model = scriptModel(oneToolScript('ls'));
+        const id = String((await newConversation())._id);
+        const { actionId } = await startPaused(id, true, { variables: { region: SECRET, team: 'from-event', mode: EVENT_MODE } });
+        await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
+        const texts = systemTexts(model);
+        expect(texts).toHaveLength(2);
+        for (const text of texts) {
+          expect(text).toContain('Serve region  for  in careful mode.');
+          expect(text).not.toContain('from-event');
+          expect(text).not.toContain(SECRET);
+        }
+      });
     });
   });
 
