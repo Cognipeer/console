@@ -230,6 +230,13 @@ Some runs have nobody to answer: [triggers](/guide/agent-triggers), evaluations 
 
 A stateless call with no session has nowhere to keep a paused turn, so the same rule applies to it.
 
+### What a chat-completions client sees
+
+On `POST /chat/completions` with `model: "agent:<key>"` (streamed or not):
+
+- **Deny** (the default): the call returns the agent's normal answer. The model was told the tool is not available and says so, or works around it.
+- **Pause:** the call returns `200` with `finish_reason: "stop"` and a short message in `content` (and, on a stream, in the text delta) that says what is waiting (the tool, the sub-agent whose tool it is, or the question) and where to answer it: in the Console session, or with the [actions endpoint](#over-the-api). The body also carries `stop_reason: "requires_action"`, the `conversation_id` and `required_action` (the same `actions` list the Responses API returns; on a stream these ride on the closing chunk). Answer the action, then read the continuation from the session or the run. A chat-completions request cannot answer an approval itself.
+
 ## Timeouts and audit
 
 Open requests are checked about every 30 seconds. Past the time you set, the agent's *When time runs out* setting applies, and the answer is recorded as given by `system:timeout`: that is the system, not a person, so it is outside the permission engine and the audit log records it with the actor type `system` (`agent.tool_approval.timeout`). Every answer a person gives is written to the audit log (who, what, the decision, and whether the arguments were edited), and appears in the [session events](/guide/agent-session-events) as `action.resolved`.

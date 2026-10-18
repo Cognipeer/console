@@ -442,6 +442,22 @@ describe('session turn recorder', () => {
     expect(last[1]).toMatchObject({ runtimeStatus: 'requires_action', pendingActionIds: ['act_1'] });
   });
 
+  it('a resumed leg does not repeat the tool_use the paused leg wrote, and keeps the later tool_result', async () => {
+    const db = fakeDb();
+    const first = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    first.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    await first.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
+    const second = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    second.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'get_weather', id: 'w1', subagentName: 'worker' } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'success', name: 'get_weather', id: 'w1', subagentName: 'worker' } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'success', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    await second.finish({ stopReason: 'end_turn', content: 'ok' });
+    const uses = db.rows.filter((r) => r.type === 'agent.tool_use').map((r) => r.data.toolCallId);
+    expect(uses).toEqual(['d1', 'w1']);
+    expect(db.rows.filter((r) => r.type === 'agent.tool_result').map((r) => r.data.toolCallId)).toEqual(['w1', 'd1']);
+  });
+
   it('a resumed turn starts without a user message', async () => {
     const db = fakeDb();
     const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });

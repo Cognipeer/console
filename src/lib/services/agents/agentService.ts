@@ -192,7 +192,7 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { delegatedSubagentName, delegationFailure, isSubagentEvent } from './subagentEvents';
+import { delegatedSubagentName, delegationFailure, isSubagentEvent, nameSubagentOnApprovalStep } from './subagentEvents';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -2451,6 +2451,41 @@ async function runBoundToolCleanup(
 // ── Internal Tracing Sink ────────────────────────────────────────────
 
 /**
+ * Raises a trace session's token totals to the turn's usage. The SDK sums the
+ * trace's own model-call events, which leave out the calls a sub-agent made
+ * (they sit in the turn's usage ledger, tagged `subagent`, but add no trace
+ * steps), so a turn that delegated would otherwise show less than it used.
+ * Totals only grow here: a session already at or above the turn's usage is kept.
+ */
+export async function reconcileTraceTotals(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string | undefined,
+    usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } | undefined,
+): Promise<void> {
+    if (!sessionId || !usage) return;
+    try {
+        const db = await getDatabase();
+        await db.switchToTenant(tenantDbName);
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) return;
+        const patch: Partial<IAgentTracingSession> = {};
+        const fields = [
+            ['totalInputTokens', usage.inputTokens],
+            ['totalOutputTokens', usage.outputTokens],
+            ['totalCachedInputTokens', usage.cachedInputTokens],
+        ] as const;
+        for (const [field, value] of fields) {
+            if (typeof value === 'number' && Number.isFinite(value) && value > (session[field] ?? 0)) patch[field] = Math.ceil(value);
+        }
+        if (Object.keys(patch).length === 0) return;
+        await db.updateAgentTracingSession(sessionId, patch, projectId);
+    } catch (error) {
+        logger.warn('Could not reconcile the trace totals with the turn usage', { sessionId, error: String(error) });
+    }
+}
+
+/**
  * Creates a customSink that saves trace sessions directly to the database,
  * bypassing the HTTP tracing endpoint and its API-token authentication.
  * This is used for internal agent executions (dashboard playground & client API chat).
@@ -2470,6 +2505,10 @@ export async function createInternalTracingSink(
     toolDefinitions?: TraceToolDefinition[],
     /** Stable key of the hosted agent, stamped into the session `metadata.agentKey` (the session's `agentName` is the display name). */
     agentKey?: string,
+    /** Told the id of each session the sink saves, so the turn can reconcile its totals afterwards. */
+    onSessionSaved?: (sessionId: string) => void,
+    /** SDK approval / question id → the sub-agent it came from, learned from the child's forwarded events. */
+    approvalSubagents: ReadonlyMap<string, string> = new Map(),
 ) {
     const { customSink } = await import('@cognipeer/agent-sdk');
     const toolDefinitionsSection = toolDefinitions && toolDefinitions.length > 0
@@ -2588,6 +2627,7 @@ export async function createInternalTracingSink(
                     });
                 }
 
+                onSessionSaved?.(session.sessionId);
                 // Upsert session
                 if (existing) {
                     await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
@@ -2664,6 +2704,10 @@ export async function createInternalTracingSink(
                         delete restMetadata.stop_reason;
                         delete restMetadata.reasoningTokens;
 
+                    const named = nameSubagentOnApprovalStep(
+                        { type: event.type, label: event.label, sequence: event.sequence, metadata: restMetadata, sections },
+                        approvalSubagents,
+                    );
                     const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
                         sessionId: session.sessionId,
                         traceId: event.traceId ?? undefined,
@@ -2673,7 +2717,7 @@ export async function createInternalTracingSink(
                         projectId,
                         id: event.id ?? undefined,
                         type: event.type ?? undefined,
-                        label: event.label ?? undefined,
+                        label: named.label ?? undefined,
                         sequence: event.sequence ?? 0,
                         timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
                         status: event.status ?? undefined,
@@ -2685,7 +2729,7 @@ export async function createInternalTracingSink(
                         // the console would be the only source missing them,
                         // which is the worst place for a gap: it is the path we
                         // control end to end.
-                        metadata: restMetadata,
+                        metadata: named.metadata,
                         sections,
                         modelNames: event.modelNames ?? [],
                         model: event.model ?? undefined,
@@ -4237,7 +4281,11 @@ async function buildLocalAgentRun(input: {
     // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
     // own rules are the gateway's business, not this layer's.
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions, agentKey);
+    let traceSessionId: string | undefined;
+    const approvalSubagents = new Map<string, string>();
+    const tracingSink = await createInternalTracingSink(
+        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; }, approvalSubagents,
+    );
 
     const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
         db,
@@ -4334,6 +4382,15 @@ async function buildLocalAgentRun(input: {
         collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
+        /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
+        /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
+        noteSdkEvent: (event: AgentSdkEvent) => {
+            const e = event as { type?: string; id?: unknown; subagentName?: unknown };
+            if ((e.type === 'tool_approval' || e.type === 'user_question') && typeof e.id === 'string' && typeof e.subagentName === 'string') {
+                approvalSubagents.set(e.id, e.subagentName);
+            }
+        },
+        reconcileTrace: (usage: Parameters<typeof reconcileTraceTotals>[3]) => reconcileTraceTotals(tenantDbName, projectId, traceSessionId, usage),
     };
 }
 
@@ -4950,7 +5007,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5015,6 +5072,7 @@ async function runAgentChatTurn(
                     return;
                 }
                 reasoningTap.onEvent(event);
+                noteSdkEvent(event);
                 turnEvents.onSdkEvent(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
@@ -5092,6 +5150,7 @@ async function runAgentChatTurn(
         // outcome carries why, and the last text the agent did write.
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        await reconcileTrace(usage);
         // What the turn cost: kept on the message (the session's running total
         // is the sum of these) and, with a session budget, checked against it.
         const turnCostUsd = usage
@@ -5683,7 +5742,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5741,6 +5800,7 @@ async function runPlaygroundChatTurn(
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
             reasoningTap.onEvent(event);
+            noteSdkEvent(event);
             turnEvents?.onSdkEvent(event);
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
@@ -5836,6 +5896,7 @@ async function runPlaygroundChatTurn(
         const outputFiles = sessionConversation ? await collectOutputs() : { attachments: [], warnings: [] };
         for (const warning of outputFiles.warnings) warnings.add(warning);
 
+        await reconcileTrace(normalizePlaygroundUsage(result.metadata?.usage)?.usage);
         const playgroundResult: AgentPlaygroundChatResult = {
             content: outcome.content,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
@@ -6335,7 +6396,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6450,6 +6511,7 @@ async function runAgentResumeTurn(
         const invokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 reasoningTap.onEvent(event);
+                noteSdkEvent(event);
                 turnEvents.onSdkEvent(event);
                 if (event.type === 'summarization') {
                     noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
@@ -6520,6 +6582,7 @@ async function runAgentResumeTurn(
         const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        await reconcileTrace(usage);
         const compactedTools = compactions.length > 0
             ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
             : [];

@@ -27,7 +27,13 @@ const logger = createLogger('agents:session-turn-events');
 type TurnDb = Pick<
   DatabaseProvider,
   'appendAgentSessionEvents' | 'getAgentSessionMaxSeq' | 'updateAgentConversationRuntime'
->;
+> & {
+  /** Present on a resuming leg's database: the earlier legs' tool events, to avoid writing them twice. */
+  listAgentSessionEvents?: (
+    conversationId: string,
+    options?: { types?: string[] },
+  ) => Promise<Array<{ type: string; data?: unknown }>>;
+};
 
 export interface SessionTurnEventsOptions {
   db: TurnDb;
@@ -165,6 +171,33 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
       logger.warn('Could not mark the session running', { conversationId, error: String(error) });
     });
 
+  // One `agent.tool_use` / `agent.tool_result` per tool call id: the SDK re-enters a
+  // delegation (and a tool that paused) when a pause is resumed, with the same call id.
+  // A resumed leg reads the ids the earlier legs already wrote before it writes its own.
+  const usedIds = new Set<string>();
+  const resultIds = new Set<string>();
+  let seeded: Promise<void> = Promise.resolve();
+  let seedPending = false;
+  const deferred: Array<() => void> = [];
+  if (options.trigger === 'resume' && db.listAgentSessionEvents) {
+    seedPending = true;
+    seeded = (async () => {
+      try {
+        const prior = await db.listAgentSessionEvents!(conversationId, { types: ['agent.tool_use', 'agent.tool_result'] });
+        for (const e of prior) {
+          const id = (e.data as { toolCallId?: unknown } | undefined)?.toolCallId;
+          if (typeof id !== 'string') continue;
+          (e.type === 'agent.tool_use' ? usedIds : resultIds).add(id);
+        }
+      } catch (error) {
+        logger.warn('Could not read the earlier tool events of the session', { conversationId, error: String(error) });
+      }
+    })().finally(() => {
+      seedPending = false;
+      for (const run of deferred.splice(0)) run();
+    });
+  }
+
   let finished = false;
   /**
    * Records the turn's end: the status first, then the closing events, then the
@@ -180,6 +213,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     budget?: SessionBudgetSettlement,
   ) => {
     await marked;
+    await seeded;
     let current = true;
     try {
       const applied = await db.updateAgentConversationRuntime(
@@ -238,23 +272,36 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         // A forwarded child event names its child; a delegation call names the one it handed the task to.
         const subagent = (event as { subagentName?: string }).subagentName
           ?? delegatedSubagentName(event.name, event.args, (event as { result?: unknown }).result);
-        if (event.phase === 'start') {
-          writer.emit('agent.tool_use', {
-            toolCallId: event.id,
-            name: event.name,
-            ...(event.args !== undefined ? { args: event.args } : {}),
-            ...(subagent ? { subagent } : {}),
-          });
-        } else if (event.phase === 'success' || event.phase === 'error') {
-          writer.emit('agent.tool_result', {
-            toolCallId: event.id,
-            name: event.name,
-            ok: event.phase === 'success',
-            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-            ...(event.error?.message ? { error: event.error.message } : {}),
-            ...(subagent ? { subagent } : {}),
-          });
-        }
+        const write = () => {
+          const id = typeof event.id === 'string' ? event.id : undefined;
+          if (event.phase === 'start') {
+            if (id) {
+              if (usedIds.has(id)) return;
+              usedIds.add(id);
+            }
+            writer.emit('agent.tool_use', {
+              toolCallId: event.id,
+              name: event.name,
+              ...(event.args !== undefined ? { args: event.args } : {}),
+              ...(subagent ? { subagent } : {}),
+            });
+          } else if (event.phase === 'success' || event.phase === 'error') {
+            if (id) {
+              if (resultIds.has(id)) return;
+              resultIds.add(id);
+            }
+            writer.emit('agent.tool_result', {
+              toolCallId: event.id,
+              name: event.name,
+              ok: event.phase === 'success',
+              ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+              ...(event.error?.message ? { error: event.error.message } : {}),
+              ...(subagent ? { subagent } : {}),
+            });
+          }
+        };
+        if (seedPending || deferred.length) deferred.push(write);
+        else write();
       });
     },
 
