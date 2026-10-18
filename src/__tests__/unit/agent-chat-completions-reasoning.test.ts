@@ -10,6 +10,7 @@ const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   resolveAgentModel: vi.fn(),
   runAgentCompletion: vi.fn(),
+  prepareSession: vi.fn(),
   getModelByKey: vi.fn(),
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -39,6 +40,12 @@ vi.mock('@/server/api/plugins/agent-openai-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/server/api/plugins/agent-openai-bridge')>()),
   resolveAgentModel: hoisted.resolveAgentModel,
   runAgentCompletion: hoisted.runAgentCompletion,
+}));
+
+vi.mock('@/server/api/plugins/agent-invocation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/server/api/plugins/agent-invocation')>()),
+  // The session of a new turn is created here; the run itself is what these tests look at.
+  prepareInvocationSession: hoisted.prepareSession,
 }));
 
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -73,6 +80,7 @@ beforeEach(async () => {
   hoisted.requireApiTokenFromHeader.mockResolvedValue(AUTH_CTX);
   hoisted.resolveAgentModel.mockResolvedValue(AGENT);
   hoisted.getModelByKey.mockResolvedValue(null);
+  hoisted.prepareSession.mockResolvedValue({ conversationId: 'conv-1', conversation: { _id: 'conv-1' }, attachments: [], namedAttachments: [] });
   hoisted.runAgentCompletion.mockResolvedValue({ content: 'hello', conversationId: 'conv-1' });
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientInferenceApiPlugin);
@@ -158,6 +166,8 @@ describe('agent chat completions: the thinking text', () => {
     const deltas = res.body.split('\n\n')
       .filter((block) => block.startsWith('data: {'))
       .map((block) => JSON.parse(block.slice(6)).choices?.[0]?.delta ?? {});
-    expect(deltas[0]).toEqual({ reasoning_content: 'late thought' });
+    // The stream opens with the role, then the thinking comes out ahead of the answer.
+    expect(deltas[0]).toEqual({ role: 'assistant', content: '' });
+    expect(deltas[1]).toEqual({ reasoning_content: 'late thought' });
   });
 });

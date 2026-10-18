@@ -345,7 +345,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
         fetchPage: async (position, size) => {
           latest = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
-            agent: query.agent,
+            // `agentName` is accepted as the spelling the session rows use.
+            agent: query.agent ?? query.agentName,
             from: query.from,
             limit: String(size),
             query: query.query,

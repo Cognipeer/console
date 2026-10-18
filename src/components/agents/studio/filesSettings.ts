@@ -11,6 +11,9 @@
 import type { IAgentAttachmentsConfig } from '@/lib/database/provider/types.domain';
 import {
     normalizeAttachmentsFolder,
+    resolveOutputsConfig,
+    SESSION_FILE_OUTPUTS_DEFAULTS,
+    SESSION_FILE_OUTPUTS_LIMITS,
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_FOLDER_MAX_LENGTH,
 } from '@/lib/services/agents/sessionFilesConfig';
@@ -60,6 +63,32 @@ export function patchAttachments(
     patch: Partial<AttachmentsSettings>,
 ): AttachmentsSettings | undefined {
     return compactAttachments({ ...(current ?? {}), ...patch });
+}
+
+/** The agent's own files (`session_files_create`) are on: as the author set it, else on with uploads once a bucket is chosen. */
+export function outputsEnabled(value: AttachmentsSettings | undefined): boolean {
+    return resolveOutputsConfig(value).enabled;
+}
+
+/** Something stores files: uploads or the agent's own files. Only then a bucket and a folder matter. */
+export function filesNeedBucket(value: AttachmentsSettings | undefined): boolean {
+    return filesEnabled(value) || outputsEnabled(value);
+}
+
+/** What the outputs section shows beside each limit: the default and the most the server accepts. */
+export const OUTPUTS_LIMITS = {
+    maxFilesPerTurn: { default: SESSION_FILE_OUTPUTS_DEFAULTS.maxFilesPerTurn, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn },
+    maxFileSizeMb: { default: SESSION_FILE_OUTPUTS_DEFAULTS.maxFileSizeMb, max: SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb },
+} as const;
+
+/** Merges an edit into `outputs`. The switch is stored as chosen: its default follows the uploads switch, so a value left out would change with it. */
+export function patchOutputs(
+    current: AttachmentsSettings | undefined,
+    patch: Partial<NonNullable<AttachmentsSettings['outputs']>>,
+): AttachmentsSettings | undefined {
+    const merged: Record<string, unknown> = { ...(current?.outputs ?? {}), ...patch };
+    for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
+    return patchAttachments(current, { outputs: Object.keys(merged).length > 0 ? merged : undefined });
 }
 
 export type FolderIssue = 'invalid_chars' | 'dot_dot' | 'too_long';
@@ -186,7 +215,7 @@ export function bucketProblem(
     value: AttachmentsSettings | undefined,
     buckets: AttachmentBucketOption[] | null,
 ): BucketProblem | null {
-    if (!filesEnabled(value)) return null;
+    if (!filesNeedBucket(value)) return null;
     const key = value?.bucketKey?.trim();
     if (!key) return 'required';
     if (!buckets) return null;
@@ -202,7 +231,7 @@ export interface FilesSaveError {
 }
 
 /**
- * What stops the draft from being saved: files switched on need a bucket, and
+ * What stops the draft from being saved: files switched on (uploads or the agent's own) need a bucket, and
  * the folder has to be one the server accepts. The other bucket problems (gone,
  * disabled) are the server's to report — it knows the provider's state — and
  * come back as errors next to the Save button.
@@ -210,7 +239,7 @@ export interface FilesSaveError {
 export function filesSaveErrors(value: AttachmentsSettings | undefined): FilesSaveError[] {
     const errors: FilesSaveError[] = [];
     if (bucketProblem(value, null) === 'required') errors.push({ field: 'attachments.bucketKey', code: 'bucket_required' });
-    const issue = filesEnabled(value) ? folderIssue(value?.folder) : null;
+    const issue = filesNeedBucket(value) ? folderIssue(value?.folder) : null;
     if (issue) errors.push({ field: 'attachments.folder', code: issue });
     return errors;
 }

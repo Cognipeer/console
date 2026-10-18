@@ -13,12 +13,11 @@ const hoisted = vi.hoisted(() => ({
   getAgentByKey: vi.fn(),
   getConversationById: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
+  startAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
-  resolveAgentExecutionLimits: vi.fn(),
+  resolveAgentRunLimits: vi.fn(),
   resolveAction: vi.fn(),
   blocking: vi.fn(),
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -78,10 +77,9 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
   return {
     ...actual,
-    runSyncAgentTurn: hoisted.runSyncAgentTurn,
-    createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
+    startAgentRun: hoisted.startAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
-    resolveAgentExecutionLimits: hoisted.resolveAgentExecutionLimits,
+    resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
   };
 });
 
@@ -107,17 +105,19 @@ const AUTH_CTX = {
 // An agent whose admin set a session budget and did not let API clients change it.
 const BOUND_AGENT = {
   _id: 'agent-1', tenantId: 'tenant-1', projectId: 'proj-1', key: 'support-agent', name: 'Support', status: 'active',
-  config: { modelKey: 'gpt-4o', execution: { sessionBudget: { maxCostUsd: 2, onReach: 'pause' } } },
+  config: { modelKey: 'gpt-4o', budget: { maxCostUsd: 2, onReach: 'pause' } },
 };
 const EXISTING_SESSION = { _id: 'conv-1', tenantId: 'tenant-1', projectId: 'proj-1', agentKey: 'support-agent', messages: [], createdBy: 'user-1' };
 
-const LIMITS = { syncTimeoutMs: 60_000, backgroundEnabled: true, backgroundMaxDurationMs: 1_800_000, defaultMode: 'sync' as const };
+const LIMITS = { syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 };
 const responses = (payload: Record<string, unknown>, extraHeaders: Record<string, string> = {}) => ({
   method: 'POST' as const,
   url: '/api/client/v1/agents/responses',
   headers: { ...headers, ...extraHeaders },
   payload,
 });
+
+const RUN = { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'support-agent' };
 
 let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 
@@ -129,9 +129,9 @@ beforeEach(async () => {
   hoisted.getConversationById.mockResolvedValue(EXISTING_SESSION);
   hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
   hoisted.getAgentRunStatus.mockResolvedValue(null);
-  hoisted.resolveAgentExecutionLimits.mockResolvedValue(LIMITS);
+  hoisted.resolveAgentRunLimits.mockResolvedValue(LIMITS);
   hoisted.blocking.mockResolvedValue(null);
-  hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-1', status: 'completed' } });
+  hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: { id: 'resp_run-1', status: 'completed' } });
   app = await createFastifyApiTestApp(async (instance) => {
     await instance.register(clientAgentSessionsApiPlugin);
     await instance.register(clientAgentsApiPlugin);
@@ -143,7 +143,7 @@ afterEach(async () => {
 });
 
 
-const lastSyncRequest = () => (hoisted.runSyncAgentTurn.mock.calls.at(-1)![0] as { request: Record<string, unknown> }).request;
+const lastSyncRequest = () => hoisted.startAgentRun.mock.calls.at(-1)![0] as Record<string, unknown>;
 
 describe('reasoning_effort on /client/v1/agents/responses', () => {
   it('hands a valid effort to the run as the request value', async () => {
@@ -174,7 +174,7 @@ describe('reasoning_effort on /client/v1/agents/responses', () => {
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi', ...extra }));
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: { code: string; message: string } }>(res.body).error).toMatchObject({ code: 'invalid_reasoning' });
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 });
 
@@ -188,14 +188,14 @@ describe('include_reasoning: false', () => {
   };
 
   it('leaves the reasoning item out of this response', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: withReasoning });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: withReasoning });
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi', include_reasoning: false }));
     const output = parseJsonBody<{ output: Array<{ type: string }> }>(res.body).output;
     expect(output.map((item) => item.type)).toEqual(['message']);
   });
 
   it('keeps it otherwise', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: withReasoning });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: RUN, response: withReasoning });
     const res = await app.inject(responses({ model: 'support-agent', input: 'hi' }));
     expect(parseJsonBody<{ output: Array<{ type: string }> }>(res.body).output.map((item) => item.type)).toEqual(['reasoning', 'message']);
   });

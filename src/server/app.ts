@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
+import { drainAgentRunsBeforeHttpClose } from './httpShutdown';
 import { createLogger } from '@/lib/core/logger';
 import cookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -119,6 +120,16 @@ export async function registerNextHandoff(
     scope.addContentTypeParser('*', (_request, _payload, done) => done(null));
 
     scope.all('/*', async (request, reply) => {
+      // Next serves pages and assets only: it has no API routes, so a path under /api that no Fastify route
+      // claimed (or claimed for another method) would come back as an HTML 404 page. Answer it as JSON.
+      const path = request.raw.url?.split('?')[0] ?? '';
+      if (path === '/api' || path.startsWith('/api/')) {
+        return reply.code(404).send({
+          error: `No route ${request.method} ${path}`,
+          type: 'not_found',
+          code: 'route_not_found',
+        });
+      }
       await handle(request.raw, reply.raw);
       reply.hijack();
     });
@@ -196,6 +207,9 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
       }
     });
   }
+
+  // Agent runs are drained before the server waits for open streams (see httpShutdown.ts).
+  drainAgentRunsBeforeHttpClose(app);
 
   registerShutdownHandler('http-server', async () => {
     logger.info('Closing Fastify server');

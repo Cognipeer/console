@@ -3,6 +3,7 @@ import {
   authorizeServiceRequest,
   getEffectiveServicePermissionWithGroups,
   getPermissionServiceForPath,
+  getRequiredPermissionLevel,
   mergeServicePermissions,
   normalizeServicePermissions,
 } from '@/lib/security/rbac';
@@ -12,6 +13,25 @@ describe('RBAC service routing', () => {
     expect(getPermissionServiceForPath('/api/models')).toBe('models');
     expect(getPermissionServiceForPath('/api/client/v1/vector/indexes')).toBe('vector');
     expect(getPermissionServiceForPath('/api/users/permissions/services')).toBe('members');
+  });
+
+  it('checks the agents permission on the runs API and the session cancel: read to look, write to act', () => {
+    const paths = [
+      ['POST', '/api/client/v1/agents/support/runs'],
+      ['GET', '/api/client/v1/agents/runs'],
+      ['GET', '/api/client/v1/agents/runs/queue'],
+      ['GET', '/api/client/v1/agents/runs/run_1'],
+      ['POST', '/api/client/v1/agents/runs/run_1/cancel'],
+      ['GET', '/api/client/v1/agents/runs/run_1/events'],
+      ['GET', '/api/client/v1/agents/runs/run_1/events/stream'],
+      ['POST', '/api/client/v1/agents/runs/run_1/actions/act_1'],
+      ['POST', '/api/client/v1/agents/sessions/conv_1/cancel'],
+      ['POST', '/api/client/v1/agents/conversations/conv_1/cancel'],
+    ] as const;
+    for (const [method, path] of paths) {
+      expect(getPermissionServiceForPath(path)).toBe('agents');
+      expect(getRequiredPermissionLevel(method, 'agents')).toBe(method === 'GET' ? 'read' : 'write');
+    }
   });
 });
 

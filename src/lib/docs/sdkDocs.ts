@@ -23,7 +23,7 @@ export type ModuleDocTarget =
   | 'settings'
   | 'tenant-settings';
 
-const SDK_DOCS_BASE_URL = 'https://cognipeer.github.io/console-sdk';
+const SDK_DOCS_BASE_URL = 'https://docs.cognipeer.com/console-sdk';
 
 const DOCS: Record<SdkDocId, { title: string; url: string }> = {
   'getting-started': {
@@ -64,11 +64,11 @@ const DOCS: Record<SdkDocId, { title: string; url: string }> = {
   },
   'examples-embeddings': {
     title: 'Embeddings Examples',
-    url: `${SDK_DOCS_BASE_URL}/examples/embeddings.html`,
+    url: `${SDK_DOCS_BASE_URL}/examples/index.html`,
   },
   'examples-files': {
     title: 'Files Examples',
-    url: `${SDK_DOCS_BASE_URL}/examples/files.html`,
+    url: `${SDK_DOCS_BASE_URL}/examples/index.html`,
   },
   'examples-tracing': {
     title: 'Tracing Examples',
@@ -76,7 +76,7 @@ const DOCS: Record<SdkDocId, { title: string; url: string }> = {
   },
   'examples-rag': {
     title: 'RAG Example',
-    url: `${SDK_DOCS_BASE_URL}/examples/rag.html`,
+    url: `${SDK_DOCS_BASE_URL}/examples/index.html`,
   },
 };
 

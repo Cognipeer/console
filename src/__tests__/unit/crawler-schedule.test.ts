@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeNextRun,
+  dueSlot,
   isDue,
   validateSchedule,
 } from '@/lib/services/crawler/schedulePlanner';
@@ -170,5 +171,73 @@ describe('schedulePlanner.isDue', () => {
     expect(
       isDue({ mode: 'interval', enabled: false, intervalSeconds: 60 }, FIXED),
     ).toBe(false);
+  });
+});
+
+describe('schedulePlanner.isDue / dueSlot — cron prev() slot', () => {
+  const hourly: ICrawlerSchedule = { mode: 'cron', enabled: true, cron: '0 * * * *' };
+  const since = new Date('2026-05-19T08:30:00.000Z');
+
+  it('is due exactly at the slot', () => {
+    expect(isDue(hourly, new Date('2026-05-19T10:00:00.000Z'), since)).toBe(true);
+    expect(dueSlot(hourly, new Date('2026-05-19T10:00:00.000Z'), since)).toBe('2026-05-19T10:00:00.000Z');
+  });
+
+  it('is due after the slot, naming that slot', () => {
+    expect(dueSlot(hourly, new Date('2026-05-19T10:00:20.000Z'), since)).toBe('2026-05-19T10:00:00.000Z');
+  });
+
+  it('is not due before the first slot after creation', () => {
+    expect(isDue(hourly, new Date('2026-05-19T08:59:59.000Z'), since)).toBe(false);
+  });
+
+  it('is not due twice for the same slot once lastRunAt is recorded', () => {
+    const ran = { ...hourly, lastRunAt: new Date('2026-05-19T10:00:20.000Z') };
+    expect(isDue(ran, new Date('2026-05-19T10:00:50.000Z'), since)).toBe(false);
+    expect(isDue(ran, new Date('2026-05-19T10:59:59.000Z'), since)).toBe(false);
+    expect(isDue(ran, new Date('2026-05-19T11:00:00.000Z'), since)).toBe(true);
+  });
+
+  it('fires only the latest slot after downtime (no backlog replay)', () => {
+    const ran = { ...hourly, lastRunAt: new Date('2026-05-19T06:00:05.000Z') };
+    expect(dueSlot(ran, new Date('2026-05-19T10:10:00.000Z'))).toBe('2026-05-19T10:00:00.000Z');
+  });
+
+  it('has nothing due without any baseline', () => {
+    expect(isDue(hourly, new Date('2026-05-19T10:00:00.000Z'))).toBe(false);
+  });
+
+  it('does not fire before startAt, fires the first slot at or after it', () => {
+    const windowed = { ...hourly, startAt: new Date('2026-05-19T10:30:00.000Z') };
+    expect(isDue(windowed, new Date('2026-05-19T10:10:00.000Z'))).toBe(false);
+    expect(isDue(windowed, new Date('2026-05-19T10:59:59.000Z'))).toBe(false);
+    expect(dueSlot(windowed, new Date('2026-05-19T11:00:05.000Z'))).toBe('2026-05-19T11:00:00.000Z');
+  });
+
+  it('fires a slot that lands exactly on startAt', () => {
+    const windowed = { ...hourly, startAt: new Date('2026-05-19T10:00:00.000Z') };
+    expect(isDue(windowed, new Date('2026-05-19T10:00:05.000Z'))).toBe(true);
+  });
+
+  it('does not fire a slot after endAt', () => {
+    const windowed = { ...hourly, endAt: new Date('2026-05-19T09:30:00.000Z') };
+    expect(isDue(windowed, new Date('2026-05-19T10:00:05.000Z'), since)).toBe(false);
+    expect(isDue(windowed, new Date('2026-05-19T09:00:05.000Z'), since)).toBe(true);
+  });
+
+  it('computeNextRun stays strictly after now (display only)', () => {
+    expect(computeNextRun(hourly, new Date('2026-05-19T10:00:00.000Z'))?.toISOString()).toBe(
+      '2026-05-19T11:00:00.000Z',
+    );
+  });
+});
+
+describe('schedulePlanner.dueSlot — interval mode', () => {
+  it('is due on first run with a stable id, then after lastRunAt + interval', () => {
+    const base: ICrawlerSchedule = { mode: 'interval', enabled: true, intervalSeconds: 3600 };
+    expect(dueSlot(base, FIXED)).toBe('first');
+    const ran = { ...base, lastRunAt: new Date('2026-05-19T08:00:00.000Z') };
+    expect(dueSlot(ran, FIXED)).toBe('after-2026-05-19T08:00:00.000Z');
+    expect(isDue({ ...ran, lastRunAt: new Date('2026-05-19T09:30:00.000Z') }, FIXED)).toBe(false);
   });
 });

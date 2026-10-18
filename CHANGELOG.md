@@ -5,6 +5,211 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ## Unreleased
 
+### Incompatible changes
+
+- The OpenAI Assistants-compatible adapter is removed (`/client/v1/assistants`, `/client/v1/threads`, and the Studio
+  card for it). Use the agent runs and sessions API, the Responses API or chat completions instead.
+- Agent **schedules** are replaced by [triggers](docs/guide/agent-triggers.md). Existing schedules are not converted:
+  create a trigger of type `schedule`. The `schedule.fired` and `schedule.failed` webhook events become
+  `trigger.fired` and `trigger.failed`.
+- The per-agent **Execution** settings are gone (background on/off, default mode, sync timeout, background timeout and
+  the callback fields that lived there). How long a call waits is `AGENT_SYNC_TIMEOUT_MS` and how long a run may take is
+  `AGENT_BACKGROUND_MAX_DURATION_MS`, for the whole deployment. The agent's default callback is `config.callback`
+  (Studio: Build → Callback & budget) and its default session budget `config.budget`. The
+  `agent_background_disabled` error no longer exists.
+- A call that is still running when its wait window ends no longer fails: it answers `202` with a `Location` header and
+  the run carries on. Clients that treated a long call as an error should read the run instead.
+- `/responses` and `/chat/completions` run an agent's **published** version by default (the draft only while nothing is
+  published); `"version": "draft"` selects the draft. The id of an agent response is `resp_<runId>`.
+- The unused `/api/models/v1` prefix, the unmounted `src/server/api/routes/**` tree and the dashboard
+  `GET`/`POST /agents/:agentId/conversations` routes are removed; the live API is under `/api/client/v1` and the
+  Sessions routes.
+- `@cognipeer/console-sdk` 4 drops `agents.chat` (use `agents.responses` or the runs API).
+
+### Agent runs and run classes
+
+- Every agent turn from the API is a **run** (`run_<id>`) on one engine: Responses, chat completions, A2A, sessions,
+  triggers and the runs API. A call waits up to `AGENT_SYNC_TIMEOUT_MS` (10 minutes) and then answers `202` with
+  `Location` and `Retry-After` while the run continues; a run may take up to `AGENT_BACKGROUND_MAX_DURATION_MS`
+  (30 minutes).
+- **Run classes.** `default` runs are capped per tenant (`AGENT_RUN_MAX_ACTIVE_PER_TENANT`, 250; per project, off by
+  default) and a run over the cap is `429 agent_run_concurrency_limit`. `deferred` runs use their own queue and workers
+  (2 running, up to 10000 queued or scheduled) and expire after 24 hours (`expired`).
+- **Scheduled runs**: `run_at` or `delay_seconds` (up to 30 days) start a run later (status `scheduled`).
+- **Idempotency** on every mode: `Idempotency-Key` (up to 255 characters), `409 idempotency_key_conflict` for a key used
+  with another request; the `trigger:` and `hook:` prefixes are reserved (`400 idempotency_key_reserved`).
+- **Runs API** under `/api/client/v1/agents/runs`: create (`wait`, `Prefer: wait=N`), list with filters, queue view, get
+  (`?wait`), cancel, events (also as SSE) and actions for a run that waits on a person. Cancelling is one meaning on four
+  routes: the runs API, `POST /agents/sessions/{id}/cancel`, `POST /responses/{id}/cancel` and A2A `tasks/cancel`.
+- Callbacks (`callback_url`, or the agent's `config.callback`) and `agent_run.*` webhook events are for runs that ended
+  after the call returned; deliveries are signed (`x-cognipeer-signature`), retried 5 times and sent from their own queue.
+- A server that shuts down hands its runs over (`interrupted`), a run whose worker disappears is closed as `worker_lost`,
+  and retention (`AGENT_RUN_RETENTION_DAYS`) never deletes a queued, running, scheduled or waiting run.
+- `GET /responses/{id}` reports `background: true` for a run that was started with `background: true`, also when the
+  call streamed; a `service_tier: "flex"` call reads `false` (it is queued, but not a background request).
+- A waited call whose run is ended elsewhere before it finishes (the server shut down and handed its runs over, or the
+  worker was lost) answers `503 agent_run_interrupted` (retryable; tool side effects may have happened) instead of the
+  partial answer its turn had produced, and a stream ends with an `error` event and `response.failed`. Graceful shutdown
+  drains the runs **before** the HTTP server waits for its open connections (`AGENT_RUN_DRAIN_TIMEOUT_MS` applies there),
+  and open session event streams are ended (clients reconnect).
+- A run's retention (`AGENT_RUN_RETENTION_DAYS`) is counted from when it finished, whatever way it ended, and for a
+  scheduled or deferred run from its due time, so a run scheduled far ahead is not deleted soon after it ran; on MongoDB
+  the idempotency key now lives as long as its run.
+- A due scheduled run is promoted only while the tenant (or project) is under its default-class active-run cap; at the
+  cap it stays `scheduled`, so it can start later than `run_at`.
+- A paused run whose pause is dropped (a new message to an agent set to cancel pending requests, a session truncate,
+  `onTimeout: cancel`) now ends `canceled` (`canceled_by_caller`) with its callback and `agent_run.canceled` event,
+  instead of staying `requires_action`.
+- After a pause, run callbacks carry an event id of their own for each outcome (`evt_<runId>_<event>_<generation>` from
+  the second one on) and a late delivery of an older event no longer overwrites the state of a newer one.
+- Answering an approval inline continues the paused run: the response id is `resp_<runId>` of that run, its events cover
+  the continuation (they no longer stop at the pause), and a timeout continuation (`onTimeout` deny or allow) is labelled
+  `timeout` in the session events.
+- The answer to a pause is part of the paused run's events too: `action.resolved` (also when a timeout denies or ends the
+  request, then with the `session.status_idle` that closes the pause) and a client tool's `agent.tool_result` carry the
+  run's `run_id`, so `GET /agents/runs/{runId}/events` and its stream no longer skip them.
+- A run the server ends from outside its turn (the shutdown drain, `interrupted`; a worker that stopped sending heartbeats,
+  `worker_lost`) now closes its session events like a failed turn: `session.error` (`agent_run_interrupted`) and
+  `session.status_idle` with `stop_reason: error`, with the run's `run_id`. A client that follows the run or the session and
+  waits for the idle event is no longer left waiting (after a drain the log held nothing, or a `cancelled` idle that came
+  after the stream had been ended), a follower on the draining node gets both events before its stream ends, and the session
+  no longer stays `running`.
+- The agent-run quota counts a run only once it is admitted (a conflict or a concurrency refusal uses no unit), and a
+  start refused before its run exists removes the session that the same request created. A queued run whose job fails
+  before it claims its run is no longer lost: the reconciler republishes it.
+- Streams (runs API, `/responses`, chat completions) check the active-run caps and the agent quota before they open: over
+  a limit the answer is a plain JSON `429` (`Retry-After` 30 s for the cap, 60 s for the quota), not an `error` event;
+  non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a trigger's Run now) stop when the
+  client disconnects.
+- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses`, `/agents/responses`, chat
+  completions, embeddings and image generation (it carried no `error.code` on the last three); an
+  `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
+  has to arrive within the outbound timeout (`400 attachment_unreachable`), and a malformed percent-escape in its name no
+  longer fails the call.
+- An A2A task that failed after the run started (`message/send`, `message/stream`) reads the run's own public message,
+  the one `tasks/get` and the runs API return, instead of the provider's error text, which can name its endpoint,
+  deployment or request ids; an error the caller can act on keeps its message.
+- Responses `usage` always carries `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`
+  (`0` when not reported; `reasoning_tokens` is `0` for an agent run). `reasoning` is applied to runs that execute in the
+  request only: a queued (`background`, `flex`, `POST …/runs` without `stream`) run uses the agent's own effort.
+
+### Agent templates
+
+- **Agent templates**: 25 ready-made agents (support, knowledge, engineering, research, sales and marketing, operations,
+  multi-agent) in a gallery under Agents → Templates. **Use template** creates a draft agent with your model, knowledge
+  bases and guardrails, its `tpl-` skills (reused when they exist) and the suggested [triggers](docs/guide/agent-triggers.md)
+  **disabled**; a webhook trigger's secret is shown once. Creating is all-or-nothing. Each template shows whether the
+  project can run it (ready, needs setup, unavailable). New dashboard routes `GET /agents/templates`,
+  `GET /agents/templates/{templateKey}` (agents read) and `POST /agents/templates/{templateKey}/instantiate` (agents
+  write); the agent records `metadata.template`. See [Agent templates](docs/guide/agent-templates.md).
+
+### Responses, chat completions and models
+
+- `/responses` and `/chat/completions` serve **models and agents**. `model: "agent:<key>"` is an agent; a bare name is a
+  model of the project first, then an agent, and `404 model_not_found` when it is neither. Access follows the resolved
+  target: the Models service for a model, the Agents service for an agent. A model target is translated to a chat
+  completion and nothing of it is stored.
+- Agent responses stream (`response.*` events), take `previous_response_id`, `background`, `service_tier: "flex"` (a
+  `deferred` run), `GET` and `cancel`, and answer `202` past the wait window. Agent chat completions stream with a
+  keep-alive comment and `stream_options.include_usage`.
+- `GET /models` lists `agent:<key>` entries, so an OpenAI-compatible client can pick an agent from its model list.
+  `GET /models` and `GET /models/{id}` admit a token that holds Models **or** Agents (read): an Agents-only token lists
+  only agents (no models, no providers) and fetches `agent:<key>`, while fetching a model id needs Models (`403`).
+- Chat completions with an agent model check `version` like `/responses` (a positive integer, a numeric string or
+  `"draft"`; otherwise `400 invalid_version`, an unknown version `404 version_not_found`). The transcript match that
+  continues a session now covers file and image references and the OpenAI `user` field, and continues a session only when
+  exactly one of the owner's sessions matches (an ambiguous transcript starts a new session).
+- `attachments.accepts_images` on `GET /agents/{key}` is `false` while uploads are off or the bucket is unusable.
+- **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact).
+  `GET /agents/{key}` returns `variables_schema` and `output_schema`. Studio: Build → Variables and Output.
+- **Variables.** An agent can declare typed variables (`config.variables`: a name, a type of text, number, integer,
+  yes/no or JSON, required or optional, allowed values, a default) that a caller sends next to the message as
+  `variables` (runs API, `/responses`, `/chat/completions`, A2A `data` parts, triggers). They are checked before the model
+  is called: a missing required value or a wrong type is `400 invalid_variables` and nothing is spent. The prompt reads
+  them as `{{variables.<name>}}` and the model also gets them as a `Variables` JSON block in the user message. They suit
+  runs a program starts. Chat clients cannot send them, so a required variable without a default refuses every chat
+  message that arrives through the API: on an agent that is also used in chat, keep variables optional or give them a
+  default. Values belong to the request that carries them: a session does not remember them, the prompt is rendered
+  again on every turn, and the block stays in the history of each turn that sent one. Studio explains this in
+  Build → Variables and warns next to a required variable that has no default.
+- Prompt templates insert a value as it is. An agent's instructions, the prompt library's render endpoint
+  (`POST /prompts/{key}/render`) and the Prompt Studio preview no longer turn `&`, `<`, `>` and quotes into HTML entities
+  (`Tom & Jerry` used to reach the model as `Tom &amp; Jerry`); `{{x}}`, `{{{x}}}` and `{{&x}}` give the same text.
+
+### A2A
+
+- `message/send` can answer without waiting (`blocking: false`), `message/stream` streams status and artifact updates,
+  messages take file and data parts, and the agent card lists the accepted file types.
+- A `message/stream` client that disconnects no longer cancels the task. `tasks/resubscribe` (`{ "id": … }`) reattaches:
+  the current Task, then status and artifact updates until the task is final (a finished task, or one waiting on input,
+  answers the Task and its final status at once; one resubscribe stream follows a task for up to 60 minutes).
+  `tasks/cancel` works in any non-final state; a task that cannot be canceled answers `-32002` (`TaskNotCancelable`,
+  earlier `-32004`).
+- `message/send` answers a Task in state `canceled` for a run that was stopped while the call waited, and a Task in state
+  `failed` (with `metadata.errorType` / `errorCode`) for a run that failed after it started, the agent quota refusal and
+  a still-pending request included; a refusal before the run exists stays a JSON-RPC error.
+- **Public A2A** (`/api/public/a2a/...`): a task and its session are bound to the caller that created them. Ids are
+  `run_<runId>.<nonce>` and `<sessionId>.<nonce>` and must be handed back whole; without the right nonce `tasks/get`,
+  `tasks/cancel` and `tasks/resubscribe` answer `-32001` and a `contextId` answers `-32602` (`unknown contextId`).
+  Public conversations created before this change can no longer be reached from the public route. The variables of a
+  public caller's `data` part are external content and never reach the system prompt (the declared defaults do).
+
+### Triggers and incoming webhooks
+
+- **Triggers** (Studio: Ship → Triggers; `/agents/{key}/triggers` on both APIs) start an agent by their `type` and that
+  type's settings object: a cron `schedule` in an IANA timezone, `once`, `manual` or `webhook`. An agent can have several
+  triggers (a schedule one and a webhook one, say); each has one type. A fire is a queued, unattended run in a new session
+  owned by `system:trigger:<id>`, with the idempotency key `trigger:<id>:<slot>`; **Run now** and a run history per
+  trigger. The scheduler runs on every node and the database picks one winner per slot
+  (`AGENT_TRIGGER_TICK_MS`, `AGENT_TRIGGER_MISFIRE_GRACE_MS`). `trigger.fired` and `trigger.failed` are webhook events.
+  The limits, quota, spend and usage of a scheduled, once or webhook fire are counted against the trigger's last
+  updater (its creator until someone changes it); **Run now** counts against the person and API token that pressed it.
+- **Incoming webhooks**: a trigger of type `webhook` starts when something posts to
+  `POST /api/public/hooks/{tenantId}/{hookId}` (no API token; each delivery proves the trigger's secret). Presets for
+  GitHub, GitLab, Azure DevOps and a generic sender, an event allow-list and payload filters, a Mustache prompt template,
+  event-derived variables, de-duplication, a per-trigger run rate (`AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE`), secret rotation
+  with a grace period, **Run with this payload** (with `dry_run`) and a delivery log. Event text reaches the model only in
+  the message, marked as external data, never in the system prompt. The instructions still read the declared defaults and
+  the variables the trigger sets to a fixed value (not a tag): `{{variables.<name>}}` of a webhook run is no longer empty.
+- Crawler cron schedules fire again (a due slot was never detected) and every scheduler slot is claimed once across
+  replicas.
+
+### File outputs
+
+- Agents can create files without a sandbox: the `session_files_create` and `session_files_append` tools write into the
+  session's bucket. File outputs are independent of uploads: with uploads on and a bucket set they are on by default,
+  with uploads off they stay off until turned on, and the read tools are offered when uploads **or** outputs are on.
+  `attachments.outputs` on `GET /agents/{key}` shows the effective setting.
+- Files an agent produced come back on Responses, chat completions (`output_files`, `file_path` annotations) and A2A
+  artifacts. They are stored byte for byte (no text copy, a Markdown file keeps its own object, an append keeps its line
+  breaks).
+
+### Sandbox
+
+- An agent's sandbox secrets are kept out of tool output, out of files written back into the session and out of publish
+  responses. A secret that can no longer be read (the key it was stored under changed) is marked
+  `config.sandbox.secretsUnreadable: true`: saving the agent with a mix of masked and new values answers
+  `409 sandbox_secrets_unreadable` (enter every value again to replace them; only masks keeps them), its tools run without secrets and say so,
+  and Studio shows a warning.
+- Environment fields of sandbox templates and instances are write-only: stored sealed and shown masked (Enterprise).
+  An environment that cannot be decrypted is reported (`envUnreadable`) instead of dropped: a change that needs the
+  stored values answers `409 sandbox_env_unreadable` and keeps the ciphertext, and the template editor asks for every
+  value or none. A row opened with Replace and saved without a value keeps the stored one.
+- Clearing an agent's callback URL removes the whole callback, and the stored secret with it (the masked secret read back
+  next to no URL is accepted and dropped). The field is gone from the saved config: a callback sent as `{}`, with an
+  empty `url` or as `null` is no longer stored as an empty object (or as a secret with nothing to sign), and the agent
+  reads back without `callback`.
+
+### Configuration
+
+- New settings for the agent run engine, all in the *Agent Runs* table of
+  [Configuration](docs/guide/configuration.md#agent-runs): `AGENT_SYNC_TIMEOUT_MS`, `AGENT_BACKGROUND_MAX_DURATION_MS`,
+  `AGENT_RUN_MAX_ACTIVE_PER_TENANT` / `_PER_PROJECT` (replacing `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_*`), `AGENT_DEFERRED_*`, `AGENT_RUN_RETENTION_DAYS`, `AGENT_TRIGGER_*` and
+  `AGENT_WEBHOOK_*`. `.env.example` and `docker-compose.yml` list them.
+- `openapi.yaml` in the repository root is the one canonical OpenAPI description of the client API (the copy under
+  `docs/public` is gone; the docs build publishes the root file), and CI (`npm run test:openapi`) checks that its
+  paths and the registered routes agree.
+
 ### Authorization
 
 - The policy engine decides every request. The earlier legacy, shadow and monitor modes are gone: a policy is
@@ -36,7 +241,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   A refused approval that was asked through a portal names the agent as the resource and the portal apart from it, in the
   audit feed and in the decision lookup.
   Every path to a session's content asks the same question - the session routes, its files (also through the Document
-  Store and the client Files API), events, runs, tracing threads, Assistants threads and the continuation of a session
+  Store and the client Files API), events, runs, tracing threads and the continuation of a session
   by id in the Responses and chat completions routes, whichever service gate let the token in. A list shows the caller
   only their own sessions when a rule stops them from viewing others', cut in the database before the page (the sessions
   of a deleted agent count as others' too); the Sessions table shows who started each session. The tracing and Files
@@ -51,8 +256,6 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   path segment longer than eight characters hidden (`https://host/services/T0000/…`); only Admin sees it whole.
 - Importing an agent (`POST /agents/import`, `POST /agents/import/document`) that names a session-files bucket asks the
   same Files question as creating or updating one.
-- `POST /client/v1/threads/:id` only writes the keys of a thread's metadata that belong to the caller; the keys the
-  server keeps there (including the session's tool allow-list) are left as they are.
 - Levels add up in an allow rule: choosing Admin on a service (or the Admin level for every service) also allows Write and
   Read, and Write also allows Read, so a rule that names only `webhooks.admin` lets the person read, change and
   administer webhooks instead of administering what they cannot see. The policy editor shows the included levels and

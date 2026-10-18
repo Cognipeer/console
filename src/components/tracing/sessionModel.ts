@@ -55,6 +55,9 @@ export function stepCategory(type?: string): StepCategory {
   const t = type.toLowerCase();
   // Before the tool rule: `tool_approval` is a person's step, not a tool's.
   if (isHumanEventType(t) || t === 'user_question') return 'human';
+  // Context summarization is a model call of its own (billed, often the
+  // largest prompt of the turn): its time and cost belong with the LLM steps.
+  if (t === 'summarization') return 'model';
   if (t === 'ai_call' || t.startsWith('llm') || t.includes('completion') || t.includes('chat')) return 'model';
   if (t === 'tool_call' || t.startsWith('tool') || t.includes('function')) return 'tool';
   if (t === 'retrieval' || t === 'embedding' || t.includes('retriev') || t.includes('embed') || t.includes('rerank')) return 'retrieval';
@@ -298,6 +301,9 @@ function nodeLabel(event: TraceEventInput): string {
   const category = stepCategory(event.type);
   if (category === 'human') return cleanLabel(event) || (event.type === 'user_question' ? 'Question' : 'Approval');
   if (category === 'tool') return event.toolName || cleanLabel(event) || 'tool';
+  // Named for what it did, not for its model: it would otherwise read as one
+  // more turn of the agent.
+  if (event.type === 'summarization') return cleanLabel(event) || 'Context summarization';
   if (category === 'model') return event.model || cleanLabel(event) || 'model';
   return cleanLabel(event) || event.type || 'step';
 }
@@ -347,14 +353,17 @@ function containerTiming(own: StepTiming | undefined, children: TraceNode[]): St
  */
 function inferSteps(nodes: TraceNode[]): TraceNode[] {
   const frameworkGroups = nodes.some((node) => node.children.length > 0 && node.category === 'span');
-  const modelCalls = nodes.filter((node) => node.category === 'model' && node.children.length === 0).length;
+  // A summarization pass is a model call but not a step of the agent's own.
+  const opensStep = (node: TraceNode) => node.category === 'model' && node.children.length === 0
+    && node.event?.type?.toLowerCase() !== 'summarization';
+  const modelCalls = nodes.filter(opensStep).length;
   if (frameworkGroups || modelCalls < 2) return nodes;
 
   const result: TraceNode[] = [];
   let current: TraceNode | undefined;
   let step = 0;
   for (const node of nodes) {
-    if (node.category === 'model' && node.children.length === 0) {
+    if (opensStep(node)) {
       step += 1;
       current = {
         key: `inferred-${node.key}`,

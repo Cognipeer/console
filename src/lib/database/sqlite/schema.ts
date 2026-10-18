@@ -742,6 +742,69 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_alert_states_rule ON alert_states(ruleId);
   CREATE INDEX IF NOT EXISTS idx_alert_states_project_phase_notenant ON alert_states(projectId, phase);
 
+  -- Exactly-once scheduler claims: the PRIMARY KEY is the claim key.
+  CREATE TABLE IF NOT EXISTS scheduler_claims (
+    key TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_scheduler_claims_expires ON scheduler_claims(expires_at);
+
+  -- Agent triggers (a saved prompt + type per agent). The type is schedule, once,
+  -- manual or webhook; the settings of that type are JSON in the column named
+  -- after it (the others stay NULL). nextFireAt drives the scheduler.
+  CREATE TABLE IF NOT EXISTS agent_triggers (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    agentKey TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    type TEXT NOT NULL,
+    schedule TEXT,
+    once TEXT,
+    webhook TEXT,
+    prompt TEXT NOT NULL,
+    variables TEXT,
+    version INTEGER,
+    runClass TEXT NOT NULL DEFAULT 'default',
+    metadata TEXT,
+    callback TEXT,
+    responseFormat TEXT,
+    nextFireAt TEXT,
+    lastFireAt TEXT,
+    lastRunId TEXT,
+    lastStatus TEXT,
+    lastError TEXT,
+    hookId TEXT,
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_triggers_scope ON agent_triggers(tenantId, projectId, agentKey);
+  CREATE INDEX IF NOT EXISTS idx_agent_triggers_due ON agent_triggers(enabled, nextFireAt);
+
+  -- A webhook trigger's delivery log: outcome and normalized ids only, never the payload.
+  CREATE TABLE IF NOT EXISTS agent_trigger_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    triggerId TEXT NOT NULL,
+    receivedAt TEXT NOT NULL,
+    expiresAt TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    httpStatus INTEGER NOT NULL,
+    event TEXT,
+    deliveryId TEXT,
+    runId TEXT,
+    reason TEXT,
+    bytes INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_trigger_deliveries_trigger ON agent_trigger_deliveries(tenantId, triggerId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_trigger_deliveries_expires ON agent_trigger_deliveries(expiresAt);
+
   -- Reference prices for models observed via tracing but absent from the
   -- Model Hub. projectId '' = tenant-wide (NULLs are distinct in UNIQUE).
   CREATE TABLE IF NOT EXISTS external_model_pricing (
@@ -1699,7 +1762,8 @@ export const TENANT_SCHEMA_SQL = `
     lastEventSeq INTEGER,
     budget TEXT,
     spentUsd REAL,
-    runtimeTurnId TEXT
+    runtimeTurnId TEXT,
+    transcriptHash TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
@@ -1763,7 +1827,8 @@ export const TENANT_SCHEMA_SQL = `
     agentVersion INTEGER,
     usePublished INTEGER,
     createdBy TEXT,
-    clientTool TEXT
+    clientTool TEXT,
+    subagent TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
   CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
@@ -2391,6 +2456,30 @@ export const TENANT_SCHEMA_SQL = `
     userId TEXT,
     apiTokenId TEXT,
     actorType TEXT,
+    maxDurationMs INTEGER,
+    -- Run engine fields (class, scheduling, labels, structured output, queue generation).
+    runClass TEXT,
+    notBefore TEXT,
+    detachedAt TEXT,
+    metadata TEXT,
+    channel TEXT,
+    triggerId TEXT,
+    runTrigger TEXT,
+    responseFormat TEXT,
+    variables TEXT,
+    queueGeneration INTEGER,
+    lastPublishedAt TEXT,
+    unattended INTEGER,
+    externalContent INTEGER,
+    literalVariables TEXT,
+    background INTEGER,
+    -- Which event the callback bookkeeping is for; the continuation's trigger and answerer; the accountable principal.
+    callbackEventId TEXT,
+    resumeTrigger TEXT,
+    resumeUserId TEXT,
+    resumeApiTokenId TEXT,
+    accountableUserId TEXT,
+    accountableTokenId TEXT,
     createdAt TEXT NOT NULL,
     startedAt TEXT,
     completedAt TEXT,
@@ -2683,6 +2772,8 @@ export const TENANT_SCHEMA_SQL = `
     isolation TEXT NOT NULL,
     resources TEXT,
     env TEXT,
+    envSealed TEXT,
+    envKeys TEXT,
     entrypoint TEXT,
     toolboxPort INTEGER NOT NULL,
     previewPorts TEXT,
@@ -2717,6 +2808,8 @@ export const TENANT_SCHEMA_SQL = `
     studioTemplateKey TEXT,
     studioTemplateVersion INTEGER,
     env TEXT,
+    envSealed TEXT,
+    envKeys TEXT,
     persist INTEGER NOT NULL DEFAULT 0,
     blockNetwork INTEGER NOT NULL DEFAULT 0,
     previewEnabled INTEGER NOT NULL DEFAULT 1,

@@ -20,11 +20,10 @@ import { createConversation, deleteConversation, getAgentByKey, getConversationB
 import { sessionModelChoice } from '@/lib/services/agents/agentModelSelection';
 import {
   apiErrorBody,
-  backgroundDisabledErrorBody,
   invalidRequestErrorBody,
   isBackgroundModeRequested,
   queueAgentRunContinue,
-  resolveAgentExecutionLimits,
+  resolveAgentRunLimits,
   runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -433,12 +432,10 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         if (violation) return reply.code(403).send(apiErrorBody('permission_error', violation, 'budget_override_forbidden'));
       }
 
-      // A continuation runs in the background: fail before changing anything if it cannot.
+      // A continuation runs in the background, with the run limits of this caller.
       const willResume = resume && conversation.runtimeStatus === 'budget_paused';
-      const agent = willResume ? await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId) : null;
       const limits = willResume
-        ? await resolveAgentExecutionLimits({
-          agentConfig: agent?.config,
+        ? await resolveAgentRunLimits({
           quotaContext: {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
@@ -449,7 +446,6 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           },
         })
         : null;
-      if (limits && !limits.backgroundEnabled) return reply.code(400).send(backgroundDisabledErrorBody());
 
       const outcome = await updateSessionBudget({
         tenantDbName: ctx.tenantDbName,
@@ -480,6 +476,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           }),
           ...(apiTokenId ? { apiTokenId } : {}),
           actorType: 'api_token',
+          ...(limits ? { limits } : {}),
         });
         if (queued.kind === 'conflict') {
           return reply.code(409).send(RUN_CONFLICT_BODY);
@@ -604,97 +601,116 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   app.delete('/client/v1/agents/sessions/:conversationId/messages/:messageId/feedback', rateAnswer(true));
 
   app.post('/client/v1/agents/sessions/:conversationId/actions/:actionId', withClientApiRequestContext(async (request, reply, ctx) => {
+    let conversation: IAgentConversation | null;
     try {
-      const conversation = await requireSession(request, reply, ctx, 'none');
-      if (!conversation) return reply;
-      const { actionId } = request.params as { actionId: string };
-      // `approved_args` / `remember_for_session` (snake_case, like the rest of the client API).
-      const body = normalizeClientResolveBody(readJsonBody<Record<string, unknown>>(request));
+      conversation = await requireSession(request, reply, ctx, 'none');
+    } catch (error) {
+      logger.error('Client agent action resolve error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+    if (!conversation) return reply;
+    const { actionId } = request.params as { actionId: string };
+    return resolveClientSessionAction(request, reply, ctx, conversation, actionId);
+  }));
+};
 
-      const agent = await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId);
-      const limits = await resolveAgentExecutionLimits({
-        agentConfig: agent?.config,
-        quotaContext: {
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          licenseType: ctx.tenant.licenseType as LicenseType,
-          userId: ctx.tokenRecord.userId,
-          tokenId: ctx.tokenRecord._id?.toString(),
-        },
-      });
-      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body, 'sync');
-      if (background && !limits.backgroundEnabled) {
-        return reply.code(400).send(backgroundDisabledErrorBody());
-      }
+/**
+ * Answers a pending approval / question of `conversation` (the caller has
+ * already found it in the token's project) — the session actions route and the
+ * runs API's `POST /runs/{id}/actions/{actionId}` (the run's session). The
+ * engine decides whether this token may answer; an action of another session
+ * is `action_not_found`.
+ */
+export async function resolveClientSessionAction(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: ApiTokenContext,
+  conversation: IAgentConversation,
+  actionId: string,
+): Promise<FastifyReply> {
+  try {
+    // `approved_args` / `remember_for_session` (snake_case, like the rest of the client API).
+    const body = normalizeClientResolveBody(readJsonBody<Record<string, unknown>>(request));
 
-      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
-      const owner = ctx.user;
-      const outcome = await resolveAgentPendingAction({
+    const limits = await resolveAgentRunLimits({
+      quotaContext: {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
-        conversationId: String(conversation._id),
-        actionId,
-        body,
-        actor: {
-          userId: ctx.tokenRecord.userId,
-          channel: 'api',
-          ...(owner?.email ? { email: owner.email } : {}),
-          ...(owner?.role ? { role: owner.role } : {}),
-          ...(apiTokenId ? { apiTokenId } : {}),
-        },
-        // May this token answer? The engine decides, as the token's owner within the token's scope.
-        authorize: approvalAuthorizerFor(request, ctx.tenantDbName),
-        mode: background ? 'background' : 'sync',
-        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
-          userId: ctx.tokenRecord.userId,
-          tokenId: apiTokenId,
-          source: 'api',
-        }),
-        // The same ceiling a synchronous /responses call has.
-        ...(background ? {} : { cancellationCell: { deadlineAt: Date.now() + limits.syncTimeoutMs, cancelled: false } }),
-        audit: {
-          ipAddress: request.ip,
-          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
-        },
-      });
+        licenseType: ctx.tenant.licenseType as LicenseType,
+        userId: ctx.tokenRecord.userId,
+        tokenId: ctx.tokenRecord._id?.toString(),
+      },
+    });
+    const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
 
-      // The engine could not decide who may answer: 503 (never a 403), nothing was recorded.
-      if (outcome.kind === 'unavailable') {
-        return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: outcome.decisionId });
-      }
-      const refusal = clientRefusal(outcome);
-      if (refusal) return reply.code(refusal.status).send(refusal.body);
+    const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
+    const owner = ctx.user;
+    const outcome = await resolveAgentPendingAction({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      conversationId: String(conversation._id),
+      actionId,
+      body,
+      actor: {
+        userId: ctx.tokenRecord.userId,
+        channel: 'api',
+        ...(owner?.email ? { email: owner.email } : {}),
+        ...(owner?.role ? { role: owner.role } : {}),
+        ...(apiTokenId ? { apiTokenId } : {}),
+      },
+      // May this token answer? The engine decides, as the token's owner within the token's scope.
+      authorize: approvalAuthorizerFor(request, ctx.tenantDbName),
+      mode: background ? 'background' : 'sync',
+      runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: ctx.tokenRecord.userId,
+        tokenId: apiTokenId,
+        source: 'api',
+      }),
+      // The same ceiling a synchronous /responses call has.
+      ...(background ? {} : { cancellationCell: { deadlineAt: Date.now() + limits.syncWaitMs, cancelled: false } }),
+      audit: {
+        ipAddress: request.ip,
+        userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+      },
+    });
 
-      if (outcome.kind === 'queued') return reply.code(202).send(serializeAgentRun(outcome.run));
-      if (outcome.kind === 'pending') {
-        return reply.code(200).send({
-          id: `resp_${String(conversation._id)}`,
-          object: 'response',
-          model: conversation.agentKey,
-          output: [],
-          status: 'requires_action',
-          stop_reason: 'requires_action',
-          required_action: { type: 'agent_actions', actions: outcome.pendingActions.map(toClientPendingAction) },
-        });
-      }
-      if (outcome.kind === 'resumed') {
-        const { _conversation_messages, ...responseBody } = outcome.response;
-        void _conversation_messages;
-        return reply.code(200).send(responseBody);
-      }
-      return reply.code(500).send(INTERNAL_ERROR_BODY);
-    } catch (error) {
-      if (error instanceof AgentGuardrailBlockedError) return sendAgentGuardrailBlock(reply, error);
-      const classified = logAgentRouteError(logger, 'Client agent action resolve error', error);
-      const resumeStatus = (error as { status?: unknown })?.status;
-      return reply.code(
-        typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
-      ).send({ error: toClientErrorBody(classified.error) });
+    // The engine could not decide who may answer: 503 (never a 403), nothing was recorded.
+    if (outcome.kind === 'unavailable') {
+      return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: outcome.decisionId });
     }
-  }));
-};
+    const refusal = clientRefusal(outcome);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+
+    if (outcome.kind === 'queued') return reply.code(202).send(serializeAgentRun(outcome.run));
+    if (outcome.kind === 'pending') {
+      return reply.code(200).send({
+        // The paused run's response id (readable at GET /responses/{id}); a pause no run owns keeps the session's.
+        id: `resp_${outcome.runId ?? String(conversation._id)}`,
+        object: 'response',
+        model: conversation.agentKey,
+        output: [],
+        status: 'requires_action',
+        stop_reason: 'requires_action',
+        required_action: { type: 'agent_actions', actions: outcome.pendingActions.map(toClientPendingAction) },
+      });
+    }
+    if (outcome.kind === 'resumed') {
+      const { _conversation_messages, ...responseBody } = outcome.response;
+      void _conversation_messages;
+      return reply.code(200).send(responseBody);
+    }
+    return reply.code(500).send(INTERNAL_ERROR_BODY);
+  } catch (error) {
+    if (error instanceof AgentGuardrailBlockedError) return sendAgentGuardrailBlock(reply, error) ?? reply;
+    const classified = logAgentRouteError(logger, 'Client agent action resolve error', error);
+    const resumeStatus = (error as { status?: unknown })?.status;
+    return reply.code(
+      typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
+    ).send({ error: toClientErrorBody(classified.error) });
+  }
+}
 
 /** The client-envelope refusal for a resolve that did not start a continuation, or null. */
 function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown } | null {

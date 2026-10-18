@@ -17,7 +17,7 @@ import PendingActionList from '@/components/agents/session/PendingActionCards';
 import SessionSidePanel from '@/components/agents/session/SessionSidePanel';
 import SessionStatusBadge from '@/components/agents/session/SessionStatusBadge';
 import StopNotice from '@/components/agents/session/StopNotice';
-import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
+import AgentRunSettingsPanel from '@/components/agents/studio/AgentRunSettingsPanel';
 import AgentHumanInTheLoopPanel from '@/components/agents/studio/AgentHumanInTheLoopPanel';
 import {
   answerBlockedById,
@@ -546,9 +546,10 @@ describe('Configure → Approvals & questions', () => {
   });
 });
 
-describe('Configure → Execution, in Turkish', () => {
-  const panel = (locale: 'en' | 'tr') => render(h(AgentExecutionPanel, {
-    value: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' } }, onChange: noop,
+describe('Configure → Callback & budget, in Turkish', () => {
+  const panel = (locale: 'en' | 'tr') => render(h(AgentRunSettingsPanel, {
+    callback: { url: 'https://hooks.example.com/x' }, onCallbackChange: noop,
+    budget: { maxCostUsd: 5, onReach: 'pause' }, onBudgetChange: noop,
   }), locale);
 
   it('translates the Session budget block, and no longer carries the file settings', () => {
@@ -556,7 +557,10 @@ describe('Configure → Execution, in Turkish', () => {
     for (const text of ['Oturum bütçesi', 'Oturum başına bütçe (USD)', 'Duraklat ve bekle', 'Bütçeye ulaşıldığında']) {
       expect(html).toContain(text);
     }
-    for (const text of ['Session budget', 'Budget per session']) {
+    for (const text of ['Varsayılan geri çağrı', 'Geri çağrı URL’si', 'İmzalama anahtarı']) {
+      expect(html).toContain(text);
+    }
+    for (const text of ['Session budget', 'Budget per session', 'Default callback', 'Signing secret']) {
       expect(html).not.toContain(text);
     }
     // The file settings moved to their own Configure section (agent-files-ui.test.ts).
@@ -634,7 +638,7 @@ describe('keys the components ask for', () => {
       'components/agents/session/SessionSidePanel.tsx',
       'components/agents/session/SessionStatusBadge.tsx',
       'components/agents/session/StopNotice.tsx',
-      'components/agents/studio/AgentExecutionPanel.tsx',
+      'components/agents/studio/AgentRunSettingsPanel.tsx',
       'components/agents/studio/AgentFilesPanel.tsx',
       'components/agents/session/SessionFilesPanel.tsx',
       'components/agents/session/SessionAttachments.tsx',

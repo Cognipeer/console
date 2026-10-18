@@ -32,7 +32,7 @@ const hoisted = vi.hoisted(() => ({
   getConversationById: vi.fn(),
   getAgentByKey: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
+  startAgentRun: vi.fn(),
   limits: vi.fn(),
   updateBudget: vi.fn(),
   queueContinue: vi.fn(),
@@ -48,14 +48,10 @@ vi.mock('@/lib/services/agents', () => ({
   deleteAgentRecord: vi.fn(),
   listAgents: vi.fn(),
   updateAgentRecord: vi.fn(),
-  runSyncAgentTurn: hoisted.runSyncAgentTurn,
-  createBackgroundAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
   agentRunConflictErrorBody: () => ({ error: 'conflict' }),
-  agentSyncTimeoutErrorBody: () => ({ error: 'timeout' }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({ error: 'idem' }),
   idempotencyKeyConflictErrorBody: () => ({ error: 'idem' }),
   agentRunConcurrencyLimitErrorBody: () => ({ error: 'cap' }),
 }));
@@ -67,13 +63,18 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   backgroundDisabledErrorBody: () => ({ error: { type: 'invalid_request_error', code: 'background_disabled' } }),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
-  resolveAgentExecutionLimits: hoisted.limits,
+  resolveAgentRunLimits: hoisted.limits,
   queueAgentRunContinue: hoisted.queueContinue,
   serializeAgentRun: (run: { _id: string; status: string }) => ({ id: `run_${run._id}`, object: 'agent.run', status: run.status }),
   MAX_IDEMPOTENCY_KEY_LENGTH: 255,
   agentDefaultCallback: () => ({}),
   lookupIdempotentAgentRun: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  startAgentRun: hoisted.startAgentRun,
+  waitForAgentRun: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  isAgentRunActive: (run: { status: string }) => ['scheduled', 'queued', 'running'].includes(run.status),
+  publicAgentRunId: (run: { _id: string }) => `run_${run._id}`,
 }));
 
 vi.mock('@/lib/services/agents/sessionBudgetService', () => ({ updateSessionBudget: hoisted.updateBudget }));
@@ -120,7 +121,7 @@ describe('client: session budget', () => {
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant } as never));
     hoisted.getConversationById.mockResolvedValue(conversation());
     hoisted.getAgentByKey.mockResolvedValue({ key: 'support-agent', status: 'active', config: { modelKey: 'm' } });
-    hoisted.limits.mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
+    hoisted.limits.mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
     hoisted.blocking.mockResolvedValue(null);
     hoisted.db.listAgentPendingActions.mockResolvedValue([]);
     app = await createFastifyApiTestApp(async (instance) => {
@@ -193,7 +194,7 @@ describe('client: session budget', () => {
     expect(hoisted.queueContinue).not.toHaveBeenCalled();
   });
 
-  it('PATCH answers 400 for a missing or invalid budget, and refuses to resume when background runs are off', async () => {
+  it('PATCH answers 400 for a missing or invalid budget', async () => {
     let res = await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: {} });
     expect(res.statusCode).toBe(400);
 
@@ -201,13 +202,6 @@ describe('client: session budget', () => {
     res = await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: { budget: { maxCostUsd: 1 } } });
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('invalid_budget');
-
-    hoisted.getConversationById.mockResolvedValue(conversation({ runtimeStatus: 'budget_paused' }));
-    hoisted.limits.mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: false, defaultMode: 'sync' });
-    hoisted.updateBudget.mockClear();
-    res = await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: { budget: { maxCostUsd: 9 } } });
-    expect(res.statusCode).toBe(400);
-    expect(hoisted.updateBudget).not.toHaveBeenCalled(); // nothing was changed
   });
 
   it('PATCH answers 409 when another run holds the session', async () => {
@@ -220,7 +214,7 @@ describe('client: session budget', () => {
 
   it('a Responses call that starts a session passes its budget on; a bad one is a 400', async () => {
     hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-new', status: 'completed' } });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-new', agentKey: 'support-agent' }, response: { id: 'resp_run-1', status: 'completed' } });
 
     let res = await app.inject({
       method: 'POST', url: '/api/client/v1/agents/responses', headers,
@@ -241,7 +235,7 @@ describe('client: session budget', () => {
 
   it('a Responses call without a budget leaves the agent default to apply (budget argument undefined)', async () => {
     hoisted.createConversation.mockResolvedValue({ _id: 'conv-new' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'ok', response: { id: 'resp_conv-new', status: 'completed' } });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-new', agentKey: 'support-agent' }, response: { id: 'resp_run-1', status: 'completed' } });
     await app.inject({ method: 'POST', url: '/api/client/v1/agents/responses', headers, payload: { model: 'support-agent', input: 'hi' } });
     expect(hoisted.createConversation.mock.calls[0][7]).toBeUndefined();
   });
@@ -258,12 +252,12 @@ describe('client: session budget', () => {
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
       type: 'budget_reached', spent_usd: 1.02, max_cost_usd: 1,
     });
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
   describe('an agent whose admin set a session budget binds its API clients', () => {
     const bound = (extra: Record<string, unknown> = {}) => ({
       key: 'support-agent', status: 'active',
-      config: { modelKey: 'm', execution: { sessionBudget: { maxCostUsd: 2, onReach: 'pause', ...extra } } },
+      config: { modelKey: 'm', budget: { maxCostUsd: 2, onReach: 'pause', ...extra } },
     });
 
     it('PATCH cannot remove the budget or raise it past the default (403), but can lower it', async () => {

@@ -1,8 +1,9 @@
 /**
- * `input_image { image_url: 'https://…' }` is fetched by the server. It must
- * answer with an image: the fetch is how a client hands over a picture, not a
- * way to pull any web page or JSON into the model's context. (The SSRF guard
- * and the size cap are covered with the rest of the session files.)
+ * `input_image { image_url: 'https://…' }` and `input_file { file_url }` are
+ * fetched by the server through the guarded fetch, capped at the agent's file
+ * size. An image URL must answer with an image: the fetch is how a client hands
+ * over a picture, not a way to pull any web page or JSON into the model's
+ * context; a file keeps its declared type for the upload's type check.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,5 +68,66 @@ describe('an image_url that is fetched', () => {
     hoisted.safeFetch.mockResolvedValue(new Response(body, { headers: { 'content-type': 'text/plain' } }));
     await expect(store('https://img.example.com/cat.png')).rejects.toMatchObject({ status: 415 });
     expect(cancel).toHaveBeenCalled();
+  });
+});
+
+describe('an input_file file_url that is fetched', () => {
+  const storeFile = (url: string, filename?: string) => storeResponseInputFiles({
+    files: [{ kind: 'file', url, ...(filename ? { filename } : {}) }],
+    scope: { tenantDbName: 'tenant_x', tenantId: 't1', projectId: 'p1' },
+    conversation: { _id: 'conv-1', agentKey: 'support' } as never,
+    agentConfig: undefined,
+    actor: { userId: 'u1' } as never,
+  });
+
+  it('goes through the guarded fetch and keeps the declared type (the upload checks it against the agent)', async () => {
+    hoisted.safeFetch.mockResolvedValue(new Response('a,b\n1,2\n', { headers: { 'content-type': 'text/csv; charset=utf-8' } }));
+    await expect(storeFile('https://files.example.com/x/report.csv')).resolves.toEqual({ attachments: ['file-1'], named: [] });
+    expect(hoisted.safeFetch).toHaveBeenCalledWith(
+      'https://files.example.com/x/report.csv',
+      { method: 'GET', signal: expect.any(AbortSignal) },
+      expect.objectContaining({ keepAbortLinked: true }),
+    );
+    expect(hoisted.uploadSessionFile).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report.csv', contentType: 'text/csv' }));
+  });
+
+  it('is capped at the agent file size limit while it is read', async () => {
+    hoisted.safeFetch.mockResolvedValue(new Response(Buffer.alloc(1024 * 1024 + 1), { headers: { 'content-type': 'application/pdf' } }));
+    await expect(storeFile('https://files.example.com/big.pdf')).rejects.toMatchObject({ status: 413, code: 'file_too_large' });
+    expect(hoisted.uploadSessionFile).not.toHaveBeenCalled();
+  });
+
+  it('a file that cannot be fetched is a 400', async () => {
+    hoisted.safeFetch.mockRejectedValue(new Error('Blocked address'));
+    await expect(storeFile('http://10.0.0.1/a.pdf')).rejects.toMatchObject({ status: 400, code: 'attachment_unreachable' });
+  });
+
+  it('a malformed percent-escape in the path is kept as sent in the name, not a server error', async () => {
+    hoisted.safeFetch.mockResolvedValue(new Response('hello', { headers: { 'content-type': 'text/plain' } }));
+    await expect(storeFile('https://example.com/report%E0%A4%A.txt')).resolves.toEqual({ attachments: ['file-1'], named: [] });
+    expect(hoisted.uploadSessionFile).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report%E0%A4%A.txt' }));
+  });
+
+  it('a body that has not arrived when the deadline passes ends the download (400), headers alone do not hold it open', async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      // The headers answer at once; one byte arrives, then nothing more.
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new Uint8Array([1])); },
+        cancel,
+      });
+      hoisted.safeFetch.mockResolvedValue(new Response(body, { headers: { 'content-type': 'text/plain' } }));
+      const stored = storeFile('https://slow.example.com/a.txt').catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const refusal = await stored;
+      expect(refusal).toBeInstanceOf(AgentAttachmentError);
+      expect(refusal).toMatchObject({ status: 400, code: 'attachment_unreachable' });
+      expect((refusal as Error).message).toContain('did not arrive within 30 s');
+      expect(cancel).toHaveBeenCalled();
+      expect(hoisted.uploadSessionFile).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

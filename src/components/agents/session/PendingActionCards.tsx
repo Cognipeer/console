@@ -110,6 +110,7 @@ export function ToolApprovalCard({
                         {t('approvalNeeded')}
                     </Badge>
                     <Text size="sm" fw={600} ff="monospace">{action.toolName ?? '—'}</Text>
+                    {action.subagent ? <Badge size="xs" variant="outline" color="violet">{t('askedBySubagent', { name: action.subagent })}</Badge> : null}
                     {changed ? <Badge size="xs" variant="outline" color="orange">{t('argsEdited')}</Badge> : null}
                 </Group>
 

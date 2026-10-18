@@ -16,6 +16,7 @@ const db = {
     findToolByKey: vi.fn(),
     findMcpServerByKey: vi.fn(),
     findAgentByKey: vi.fn(),
+    findAgentVersion: vi.fn(),
     findFileBucketByKey: vi.fn(),
     findProviderByKey: vi.fn(),
 };
@@ -182,12 +183,84 @@ describe('validateAgentConfig', () => {
         expect(fields(result.errors)).toContain('subagents[4].header');
     });
 
+    describe('a sub-agent that is another agent, and the variables it requires', () => {
+        const target = { _id: 'a-support', key: 'tenant-support', publishedVersion: 3, config: { modelKey: 'gpt-main', variables: [] } };
+        const published = (variables: unknown[]) => db.findAgentVersion.mockResolvedValue({ version: 3, snapshot: { config: { modelKey: 'gpt-main', variables } } });
+        const ref = { kind: 'ref' as const, name: 'support', header: 'Answers customers', agentKey: 'tenant-support' };
+        const warned = (result: { warnings: Array<{ field: string; message: string }> }) => result.warnings.filter((w) => w.field === 'subagents[0].agentKey').map((w) => w.message);
+
+        beforeEach(() => {
+            db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? target : null));
+        });
+
+        it('warns about a variable it requires and this agent does not declare, from the published version', async () => {
+            published([
+                { name: 'customer_id', type: 'string', required: true },
+                { name: 'region', type: 'string', required: true },
+                { name: 'tier', type: 'string', required: true, default: 'standard' },
+                { name: 'note', type: 'string' },
+            ]);
+            const result = await validate({ modelKey: 'gpt-main', variables: [{ name: 'region', type: 'string' }], subagents: [ref] });
+            expect(result.errors).toEqual([]);
+            // `region` is declared here, `tier` has a default, `note` is optional: only `customer_id` cannot be filled.
+            expect(warned(result)).toEqual([expect.stringContaining('requires the variable "customer_id"')]);
+            expect(warned(result)[0]).toContain('stays empty');
+        });
+
+        it('names every one when several are missing', async () => {
+            published([{ name: 'a', type: 'string', required: true }, { name: 'b', type: 'integer', required: true }]);
+            const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+            expect(warned(result)).toEqual([expect.stringContaining('requires the variables "a", "b"')]);
+        });
+
+        it('says nothing when everything it requires can be supplied or defaulted', async () => {
+            published([{ name: 'region', type: 'string', required: true }]);
+            const result = await validate({ modelKey: 'gpt-main', variables: [{ name: 'region', type: 'string' }], subagents: [ref] });
+            expect(warned(result)).toEqual([]);
+        });
+
+        it('warns, without refusing the save, that an agent which is not active is skipped when this one delegates', async () => {
+            published([{ name: 'customer_id', type: 'string', required: true }]);
+            for (const status of ['inactive', 'draft']) {
+                db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? { ...target, status } : null));
+                const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+                expect(result.errors).toEqual([]);
+                // One warning, about the thing that matters: the child never runs, so what it would require is moot.
+                expect(warned(result)).toEqual([`Agent "tenant-support" is not active (${status}), so this agent skips it when it delegates`]);
+            }
+        });
+
+        it('says nothing about an active agent', async () => {
+            published([]);
+            db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? { ...target, status: 'active' } : null));
+            const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+            expect(warned(result)).toEqual([]);
+        });
+    });
+
     it('rejects a structured-output schema the provider cannot use', () => {
         const result = validateAgentConfigShape({
             modelKey: 'gpt-main',
             structuredOutput: { enabled: true, schema: { type: 'array' } },
         });
         expect(fields(result.errors)).toContain('structuredOutput.schema');
+    });
+
+    it('checks the declared variables: names, types, enums and defaults', () => {
+        const ok = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            variables: [{ name: 'customer_id', type: 'string', required: true }, { name: 'tier', type: 'string', enum: ['a', 'b'], default: 'a' }],
+        });
+        expect(fields(ok.errors)).toEqual([]);
+        const bad = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            variables: [
+                { name: 'bad name', type: 'string' },
+                { name: 'n', type: 'integer', default: 'x' },
+                { name: 'n', type: 'string' },
+            ],
+        } as unknown as IAgentConfig);
+        expect(fields(bad.errors)).toEqual(expect.arrayContaining(['variables[0].name', 'variables[1].default', 'variables[2].name']));
     });
 
     it('flags summary_only without summarization, and warns about the ignored askUser', () => {
@@ -197,6 +270,26 @@ describe('validateAgentConfig', () => {
         });
         expect(fields(result.errors)).toContain('runtime.context.policy');
         expect(fields(result.warnings)).toContain('runtime.askUser');
+    });
+
+    it('warns when summarization is configured but the agent has no tools to summarize', () => {
+        const noTools = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            runtime: { summarization: { enable: true }, context: { policy: 'hybrid', lastTurnsToKeep: 3 } },
+        });
+        const warning = noTools.warnings.find((issue) => issue.field === 'runtime.summarization');
+        expect(warning?.message).toContain('without a summary');
+        expect(warning?.message).toContain('last 3');
+
+        const withTools = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            toolBindings: [{ sourceType: 'tool', sourceKey: 't' }] as never,
+            runtime: { summarization: { enable: true }, context: { policy: 'hybrid' } },
+        });
+        expect(fields(withTools.warnings)).not.toContain('runtime.summarization');
+
+        // Nothing configured: no noise for an agent on the defaults.
+        expect(fields(validateAgentConfigShape({ modelKey: 'gpt-main' }).warnings)).not.toContain('runtime.summarization');
     });
 
     it('leaves a connected agent to its own connection checks', async () => {
@@ -271,36 +364,33 @@ describe('validateAgentConfig', () => {
     });
 });
 
-describe('validateAgentConfigShape — execution settings', () => {
-    const shape = (execution: IAgentConfig['execution']) => validateAgentConfigShape({ modelKey: 'gpt-main', execution });
+describe('validateAgentConfigShape — callback', () => {
+    const shape = (callback: IAgentConfig['callback']) => validateAgentConfigShape({ modelKey: 'gpt-main', callback });
 
-    it('accepts limits inside the env ceilings', () => {
-        const result = shape({ syncTimeoutSeconds: 30, backgroundMaxDurationMinutes: 10, defaultMode: 'background', callbackUrl: 'https://hooks.example.com/x', callbackSecret: 'a'.repeat(16) });
-        expect(result.errors).toEqual([]);
-    });
-
-    it('rejects a limit above the env ceiling (an agent can only lower it) or below the floor', () => {
-        const result = shape({ syncTimeoutSeconds: 100_000, backgroundMaxDurationMinutes: 100_000 });
-        expect(fields(result.errors)).toEqual(expect.arrayContaining(['execution.syncTimeoutSeconds', 'execution.backgroundMaxDurationMinutes']));
-        expect(fields(shape({ syncTimeoutSeconds: 1 }).errors)).toContain('execution.syncTimeoutSeconds');
-    });
-
-    it('rejects an unknown defaultMode, and background default with background disabled', () => {
-        expect(fields(shape({ defaultMode: 'later' as never }).errors)).toContain('execution.defaultMode');
-        expect(fields(shape({ defaultMode: 'background', backgroundEnabled: false }).errors)).toContain('execution.defaultMode');
+    it('accepts an https URL with a 16+ character secret', () => {
+        expect(shape({ url: 'https://hooks.example.com/x', secret: 'a'.repeat(16) }).errors).toEqual([]);
     });
 
     it('rejects a non-http(s) callback URL, warns on plain http', () => {
-        expect(fields(shape({ callbackUrl: 'ftp://hooks.example.com' }).errors)).toContain('execution.callbackUrl');
-        const http = shape({ callbackUrl: 'http://hooks.example.com/x' });
+        expect(fields(shape({ url: 'ftp://hooks.example.com' }).errors)).toContain('callback.url');
+        const http = shape({ url: 'http://hooks.example.com/x' });
         expect(http.errors).toEqual([]);
-        expect(fields(http.warnings)).toContain('execution.callbackUrl');
+        expect(fields(http.warnings)).toContain('callback.url');
     });
 
     it('rejects a short secret and a secret without a URL; the read-back mask is not re-validated', () => {
-        expect(fields(shape({ callbackUrl: 'https://h.example.com', callbackSecret: 'short' }).errors)).toContain('execution.callbackSecret');
-        expect(fields(shape({ callbackSecret: 'a'.repeat(20) }).errors)).toContain('execution.callbackSecret');
-        expect(shape({ callbackUrl: 'https://h.example.com', callbackSecret: '••••••' }).errors).toEqual([]);
+        expect(fields(shape({ url: 'https://h.example.com', secret: 'short' }).errors)).toContain('callback.secret');
+        expect(fields(shape({ secret: 'a'.repeat(20) }).errors)).toContain('callback.secret');
+        expect(shape({ url: 'https://h.example.com', secret: '••••••' }).errors).toEqual([]);
+    });
+
+    it('a read-back mask without a URL is accepted (it means: drop the callback secret)', () => {
+        expect(shape({ secret: '••••••' }).errors).toEqual([]);
+    });
+
+    it('ignores the removed execution settings a stored config may still carry', () => {
+        const legacy = { modelKey: 'gpt-main', execution: { syncTimeoutSeconds: 1, defaultMode: 'later' } } as unknown as IAgentConfig;
+        expect(validateAgentConfigShape(legacy).errors).toEqual([]);
     });
 });
 
@@ -346,4 +436,28 @@ describe('validateAgentConfig: where session files are kept', () => {
         expect((await withFiles({ bucketKey: 'gone' })).errors).toEqual([]);
         expect(db.findFileBucketByKey).not.toHaveBeenCalled();
     });
+});
+
+describe('skillPolicy and sub-agent name shape', () => {
+  it('refuses out-of-range skill policy values', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', skillPolicy: { maxOpenSkills: -3, maxBoundToolsPerSkill: 1.5, maxBoundToolsTotal: 5000, disclosure: 'x' } } as never);
+    expect(result.errors.map((e) => e.field).sort()).toEqual([
+      'skillPolicy.disclosure', 'skillPolicy.maxBoundToolsPerSkill', 'skillPolicy.maxBoundToolsTotal', 'skillPolicy.maxOpenSkills',
+    ]);
+    expect(validateAgentConfigShape({ modelKey: 'm', skillPolicy: { maxOpenSkills: 3, disclosure: 'search' } } as never).errors).toEqual([]);
+  });
+
+  it('warns (does not refuse) on a sub-agent name outside lowercase letters, digits and underscores', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', subagents: [{ kind: 'inline', name: 'Research-Bot', header: 'h', systemPrompt: 'p' }] } as never);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.map((w) => w.field)).toContain('subagents[0].name');
+  });
+});
+
+describe('callback secret without a url', () => {
+  it('is refused instead of silently dropped', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', callback: { secret: 'a-long-enough-secret-value' } } as never);
+    expect(result.errors.map((e) => e.field)).toContain('callback.secret');
+    expect(validateAgentConfigShape({ modelKey: 'm', callback: { url: 'https://example.com/hook', secret: 'a-long-enough-secret-value' } } as never).errors).toEqual([]);
+  });
 });

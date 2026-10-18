@@ -9,7 +9,12 @@
  */
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
+import {
+  maskAgentSandboxSecrets,
+  SANDBOX_SECRETS_UNREADABLE_CODE,
+  SANDBOX_SECRETS_UNREADABLE_MESSAGE,
+  sandboxSecretsConflict,
+} from '@/lib/services/agents/agentSandboxSecrets';
 import type { IAgent, IAgentConfig, IAgentVersion, IUser } from '@/lib/database';
 import {
   normalizeA2aMetadataUpdate,
@@ -71,6 +76,16 @@ export function redactAgent<T extends IAgent>(input: T): T {
       connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
     },
   } as unknown as T;
+}
+
+/**
+ * A version as it leaves the API: its snapshot froze the agent's config, so it
+ * gets the same redaction as the agent itself (sandbox and callback secrets,
+ * the connection's encrypted key).
+ */
+export function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
+  if (!version?.snapshot) return version;
+  return { ...version, snapshot: redactAgent(version.snapshot as unknown as IAgent) } as T;
 }
 
 /**
@@ -156,6 +171,16 @@ export interface AgentConfigWriteScope {
 /** A config write refused with a 400 (`badRequest` is the body) or a 403 (`forbidden`), or accepted. */
 type ConfigWriteOutcome<T> = { badRequest: Record<string, unknown> } | { forbidden: Record<string, unknown> } | T;
 
+/** The 409 body for a write that mixes masked sandbox secrets with new values while the stored ones cannot be decrypted. */
+export function sandboxSecretsUnreadableBody(): Record<string, unknown> {
+  return {
+    error: SANDBOX_SECRETS_UNREADABLE_MESSAGE,
+    type: SANDBOX_SECRETS_UNREADABLE_CODE,
+    code: SANDBOX_SECRETS_UNREADABLE_CODE,
+    field: 'config.sandbox.secrets',
+  };
+}
+
 /** The 403 body for a write that named a bucket its caller may not name (`bucketNamingRefusal` found it). */
 export function bucketNamingForbiddenBody(refusal: Pick<BucketNamingRefusal, 'decisionId'>): Record<string, unknown> {
   return {
@@ -223,14 +248,14 @@ export function connectedConfigForUpdate(cfg: Record<string, unknown>, existing:
   return normalizeAgentConfig({ ...cfg, connection });
 }
 
-/** A native config sent on update: guardrail bindings, then validation. */
+/** A native config sent on update: guardrail bindings, then validation; a 409 (`conflict`) when it cannot be saved over what is stored. */
 export async function validateNativeConfigUpdate(
   cfg: Record<string, unknown>,
   agentKey: string,
   scope: AgentConfigWriteScope,
   /** The config stored now: re-saving its bucket is not a change. */
   previous?: IAgentConfig,
-): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }>> {
+): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }> | { conflict: Record<string, unknown> }> {
   // The config replaces the stored one wholesale, so the projected legacy
   // slots must be written on the SAME object — leaving them out would clear
   // the columns an older binary still reads.
@@ -248,6 +273,7 @@ export async function validateNativeConfigUpdate(
     agentKey,
   });
   if (validation.errors.length > 0) return { badRequest: invalidConfigBody(validation) };
+  if (sandboxSecretsConflict(config.sandbox, previous?.sandbox)) return { conflict: sandboxSecretsUnreadableBody() };
   const refusal = await attachmentsBucketRefusal(config, previous, scope);
   if (refusal) return refusal;
   return { warnings: validation.warnings };
@@ -310,4 +336,21 @@ export function pickAgentUpdateFields(body: Record<string, unknown>): Partial<Pi
     if (body[field] !== undefined) picked[field] = body[field];
   }
   return picked as Partial<Pick<IAgent, typeof AGENT_UPDATABLE_FIELDS[number]>>;
+}
+
+const AGENT_STATUSES = ['active', 'inactive', 'draft'] as const;
+
+/**
+ * The 400 body for a write whose `status` is not one of the agent statuses
+ * (`active`, `inactive`, `draft`), else null. An absent status is fine.
+ */
+export function invalidAgentStatusBody(body: Record<string, unknown>): Record<string, unknown> | null {
+  if (body.status === undefined) return null;
+  if (typeof body.status === 'string' && (AGENT_STATUSES as readonly string[]).includes(body.status)) return null;
+  return {
+    error: `status must be one of: ${AGENT_STATUSES.join(', ')}`,
+    type: 'invalid_request',
+    code: 'invalid_status',
+    field: 'status',
+  };
 }

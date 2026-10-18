@@ -16,7 +16,8 @@ import type {
 } from '@/lib/database';
 
 /**
- * Tools that only READ. They follow `toolApproval.tools[name]` when one is set
+ * Tools that only READ (and the agent's own file-writing tools, which never touch anything outside
+ * the session). They follow `toolApproval.tools[name]` when one is set
  * and are otherwise never asked about — approving every knowledge lookup would
  * make the feature unusable. Everything else Console builds (bound / MCP /
  * custom tools, memory writes, sandbox_exec / run_code / write_file) follows
@@ -37,6 +38,9 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'session_files_list',
     'session_files_read',
     'session_files_view_image',
+    // The agent's own text files for the user (agentFileOutputTools.ts): scratch output of the run, delivered after the turn.
+    'session_files_create',
+    'session_files_append',
     // The SDK's own ask-user tool: asking IS the human step.
     'ask_user_question',
 ];
@@ -171,7 +175,7 @@ export type HitlRunMode = 'ask' | 'deny' | 'allow';
 
 /**
  * Picks the mode of a run. `unattended` = no interactive user on it (a
- * schedule, an evaluation, an OpenAI-shaped or Assistants client…); the agent's
+ * schedule, an evaluation, an OpenAI-shaped client…); the agent's
  * own `unattended` setting then decides. `canPause: false` = there is nowhere
  * to park a paused turn (a stateless playground call has no conversation), so
  * `pause` cannot be honoured there and degrades to `deny` — never to `allow`.
@@ -229,6 +233,35 @@ export function denyUnattendedTools<T extends ToolRecord>(
     });
 }
 
+/** One set of approval settings a sub-agent's tools answer to, and how it applies to this run. */
+export interface ChildApprovalSide {
+    hitl: ResolvedHitlConfig;
+    mode: HitlRunMode;
+}
+
+/**
+ * The tools of a sub-agent, gated the way the people who own it would gate them.
+ * A sub-agent's tools answer to every side that applies to it: the delegating
+ * agent's settings always, and, when the sub-agent is another agent, that agent's
+ * own settings too. A tool that any side gates is gated; a side that cannot ask
+ * anybody on this run (`deny`) refuses the call, whatever the other sides say.
+ * Calls that wait for approval are applied first so a refusal is never undone.
+ */
+export function gateChildTools<T extends ToolRecord>(
+    tools: T[],
+    sides: ChildApprovalSide[],
+    allowedTools: ReadonlySet<string>,
+): T[] {
+    let gated = tools;
+    for (const side of sides) {
+        if (side.mode === 'ask') gated = applyToolApprovals(gated, side.hitl, allowedTools);
+    }
+    for (const side of sides) {
+        if (side.mode === 'deny') gated = denyUnattendedTools(gated, side.hitl, allowedTools);
+    }
+    return gated;
+}
+
 /** Warnings/errors for the saved config — `agentConfigValidation` merges them into its report. */
 export function validateHitlConfig(config: IAgentConfig): {
     errors: Array<{ field: string; message: string }>;
@@ -270,12 +303,6 @@ export function validateHitlConfig(config: IAgentConfig): {
         enumCheck('humanInTheLoop.toolApproval.defaultPolicy', approval.defaultPolicy, ['always', 'never']);
         for (const [tool, policy] of Object.entries(approval.tools ?? {})) {
             enumCheck(`humanInTheLoop.toolApproval.tools.${tool}`, policy, ['always', 'never']);
-        }
-        if (approval.enabled && (config.subagents ?? []).length > 0) {
-            warnings.push({
-                field: 'humanInTheLoop.toolApproval',
-                message: 'Tool approval covers this agent\'s own tools only; tool calls made by its sub-agents run without asking',
-            });
         }
     }
     if (hitl.unattended === 'allow' && (approval?.enabled || hitl.askUser?.enabled)) {

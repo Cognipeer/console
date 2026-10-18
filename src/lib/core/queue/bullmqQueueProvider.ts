@@ -26,6 +26,16 @@ const log = createLogger('queue.bullmq');
 
 const AUTO_NODE = 'auto';
 
+/**
+ * BullMQ rejects a custom job id containing ':' (its Redis keys are
+ * colon-delimited), so a dedup key such as `ar:<runId>` would make `add` throw.
+ * The provider contract treats `dedupKey` as an opaque string, hence it is
+ * sanitized here for every caller.
+ */
+export function sanitizeBullmqJobId(dedupKey: string | undefined): string | undefined {
+  return dedupKey === undefined ? undefined : dedupKey.replace(/:/g, '_');
+}
+
 interface BullMQConfig {
   redisUrl: string;
   prefix: string;
@@ -206,7 +216,7 @@ export class BullMQQueueProvider implements QueueProvider {
       delay: opts.delayMs,
       removeOnComplete: { age: 3_600 },
       removeOnFail: { age: 24 * 3_600 },
-      jobId: opts.dedupKey,
+      jobId: sanitizeBullmqJobId(opts.dedupKey),
     };
   }
 

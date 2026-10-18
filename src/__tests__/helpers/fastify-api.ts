@@ -31,10 +31,14 @@ function buildContextHeaders(request: FastifyRequest) {
 
 export async function createFastifyApiTestApp(
   plugin: FastifyPluginAsync,
-  options: { trustProxy?: boolean | string[] } = {},
+  options: { trustProxy?: boolean | string[]; /** The production JSON parser: the body stays the raw string, an empty one reaches the handler. */ rawJsonBody?: boolean } = {},
 ) {
   const app = Fastify({ logger: false, ...(options.trustProxy !== undefined ? { trustProxy: options.trustProxy } : {}) });
   await app.register(cookie);
+  if (options.rawJsonBody) {
+    app.removeContentTypeParser('application/json');
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+  }
 
   app.addHook('onRequest', async (request) => {
     request.apiRequestId = 'test-request';

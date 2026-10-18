@@ -21,29 +21,19 @@
  */
 
 import { isIP } from 'node:net';
-import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
-import { createLogger } from '@/lib/core/logger';
 import type { IMcpServer } from '@/lib/database';
 import { checkRateLimit } from '@/lib/services/auth/rateLimiter';
+import {
+  RATE_ALLOWED as ALLOWED,
+  RATE_WINDOW_SECONDS as WINDOW_SECONDS,
+  countRequest,
+  rateRefused as refused,
+  resetSharedCounterState,
+  type RateDecision,
+} from '@/lib/services/auth/sharedRateCounter';
 
-const logger = createLogger('mcp-public-guard');
-
-/** The shared counter failing is logged this often at most, not once per request. */
-const SHARED_COUNTER_WARNING_INTERVAL_MS = 30_000;
-let lastSharedCounterWarningAt = 0;
-/** After the shared counter fails it is not asked again for this long; the local counters apply meanwhile. */
-const SHARED_COUNTER_RETRY_MS = 10_000;
-let sharedCounterRetryAt = 0;
-
-export interface PublicLimitDecision {
-  allowed: boolean;
-  /** Seconds until a refused caller may retry. */
-  retryAfterSeconds: number;
-}
-
-const ALLOWED: PublicLimitDecision = { allowed: true, retryAfterSeconds: 0 };
-const WINDOW_SECONDS = 60;
+export type PublicLimitDecision = RateDecision;
 /** The address-wide limit is this many times the per-endpoint one. */
 const ADDRESS_LIMIT_FACTOR = 10;
 
@@ -101,10 +91,6 @@ export function clientAddressBucket(address: string | undefined): string {
 
 // ── Request rate ──────────────────────────────────────────────────────────
 
-function refused(retryAfterSeconds: number): PublicLimitDecision {
-  return { allowed: false, retryAfterSeconds: Math.max(1, retryAfterSeconds) };
-}
-
 /**
  * Per client address, across every public endpoint. Local and synchronous, so
  * it can run before the request body is read or the endpoint is looked up.
@@ -123,40 +109,6 @@ export interface PublicEndpointRateInput {
   /** The endpoint's stored record: counters are keyed on its ids, not on the URL's path parameters. */
   server: Pick<IMcpServer, 'tenantId' | '_id' | 'key'>;
   clientAddress: string;
-}
-
-/** The shared (Redis) count for a key, or null when the shared counter is not in use or cannot be reached. */
-async function incrementSharedCounter(key: string): Promise<{ count: number; resetAt: Date } | null> {
-  if (getConfig().rateLimit.provider !== 'redis') return null;
-  const now = Date.now();
-  if (now < sharedCounterRetryAt) return null;
-  try {
-    const cache = await getCache();
-    if (cache.name !== 'redis') return null;
-    return await cache.incrementCounter(key, WINDOW_SECONDS, 1);
-  } catch (error) {
-    // The shared counter is unavailable: the local limit still applies.
-    sharedCounterRetryAt = now + SHARED_COUNTER_RETRY_MS;
-    if (now - lastSharedCounterWarningAt >= SHARED_COUNTER_WARNING_INTERVAL_MS) {
-      lastSharedCounterWarningAt = now;
-      logger.warn('Shared MCP rate-limit counter unavailable; using the local limit', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    return null;
-  }
-}
-
-/** Count one request against `key`, locally and (with RATE_LIMIT_PROVIDER=redis) across replicas. */
-async function countRequest(key: string, limit: number): Promise<PublicLimitDecision> {
-  const local = checkRateLimit(key, { maxAttempts: limit, windowSeconds: WINDOW_SECONDS });
-  if (!local.allowed) return refused(local.retryAfterSeconds);
-
-  const shared = await incrementSharedCounter(key);
-  if (shared && shared.count > limit) {
-    return refused(Math.ceil((shared.resetAt.getTime() - Date.now()) / 1000));
-  }
-  return ALLOWED;
 }
 
 /**
@@ -216,6 +168,5 @@ export function publicCallsInFlight(tenantId: string): number {
 /** For tests: forget the in-flight counts and the shared-counter timers. */
 export function resetPublicGuardState(): void {
   inflightByTenant.clear();
-  lastSharedCounterWarningAt = 0;
-  sharedCounterRetryAt = 0;
+  resetSharedCounterState();
 }

@@ -160,7 +160,7 @@ export interface SessionListItem {
     /** `requires_action`: the agent is waiting for an approval or an answer; `budget_paused`: it stopped on the session's spend budget. */
     runtimeStatus?: 'idle' | 'running' | 'requires_action' | 'budget_paused';
     hasContext?: boolean;
-    /** Who started it: the id, and the person's name or the kind of traffic that did (a schedule, a public A2A call...). */
+    /** Who started it: the id, and the person's name or the kind of traffic that did (a trigger, a public A2A call...). */
     createdBy?: string;
     owner?: SessionOwnerView;
     /** The viewer started it. */
@@ -177,6 +177,8 @@ const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
     console: { label: 'Test', color: 'teal' },
     api: { label: 'API', color: 'indigo' },
     a2a: { label: 'A2A', color: 'violet' },
+    trigger: { label: 'Trigger', color: 'orange' },
+    // Sessions of the agent schedules that triggers replaced.
     schedule: { label: 'Schedule', color: 'orange' },
     evaluation: { label: 'Evaluation', color: 'blue' },
     redteam: { label: 'Red team', color: 'red' },
@@ -209,7 +211,7 @@ export function sessionOwnerText(session: Pick<SessionListItem, 'owner' | 'creat
     if (!owner) return session.createdBy ?? '—';
     switch (owner.kind) {
         case 'user': return owner.name || owner.email || owner.id;
-        case 'schedule': return say('ownerSchedule');
+        case 'trigger': return say('ownerTrigger');
         case 'public_a2a': return say('ownerPublicA2a');
         case 'evaluation': return say('ownerEvaluation');
         case 'redteam': return say('ownerRedteam');

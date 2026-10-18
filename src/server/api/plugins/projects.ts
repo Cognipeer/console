@@ -45,6 +45,7 @@ import {
 import { directoryDefaultsFor, loadProjectStats } from '@/lib/services/projects/projectStats';
 import {
   readJsonBody,
+  readJsonObjectBody,
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
@@ -622,7 +623,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       if (typeof body.userId !== 'string' && typeof body.email !== 'string') {
         return reply.code(400).send({ error: 'userId or email is required' });
       }
@@ -656,6 +657,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ success: true });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Remove project member error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }

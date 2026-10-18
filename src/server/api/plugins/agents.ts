@@ -7,7 +7,6 @@ import {
   type ApplyAgentDocumentImportInput,
 } from '@/lib/services/agents/import/importService';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -49,6 +48,7 @@ import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from '@/lib
 import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 import {
   AgentManifestError,
+  manifestErrorStatus,
   applyAgentManifest,
   buildAgentManifest,
   parseAgentManifest,
@@ -62,21 +62,14 @@ import {
   type AgentCodegenTarget,
 } from '@/lib/services/agents/agentCodegen';
 import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
-import {
-  computeScheduleNextRun,
-  deleteAgentSchedule,
-  readSchedules,
-  runAgentSchedule,
-  upsertAgentSchedule,
-  type AgentScheduleInput,
-} from '@/lib/services/agents/agentScheduleService';
 import { getDatabase } from '@/lib/database';
 import {
+  AGENT_RUN_TRIGGERS,
   getAgentRunStatus,
   listAgentRuns,
   requestAgentRunCancellation,
   reserveConversationForSyncTurn,
-  resolveAgentExecutionLimits,
+  resolveAgentRunLimits,
   runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -135,11 +128,13 @@ import {
   applyConfigGuardrailBindings,
   bucketNamingForbiddenBody,
   connectedConfigForUpdate,
+  invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
+  redactVersion,
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
@@ -155,12 +150,6 @@ import {
 } from '@/lib/services/agents/agentFeedback';
 
 const logger = createLogger('api:agents');
-
-/** A version snapshot carries the config it froze — sandbox secrets included. */
-function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
-  if (!version?.snapshot?.config?.sandbox) return version;
-  return { ...version, snapshot: maskAgentSandboxSecrets(version.snapshot) } as T;
-}
 
 /**
  * Resolve an agent by id within the caller's project scope.
@@ -403,7 +392,7 @@ const SESSION_BUSY_BODY = {
 };
 
 /**
- * Dashboard chat may only extend a console session. API / A2A / scheduled /
+ * Dashboard chat may only extend a console session. API / A2A / trigger /
  * eval sessions are real traffic — the UI shows them read-only, and this keeps
  * a hand-crafted request from appending to them. Legacy sessions (no source)
  * stay writable, matching `isContinuableSession` on the client.
@@ -700,7 +689,7 @@ function summariseConversation(
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
-    // Whose it is: the person who started it (a name), or the kind of traffic that did (a schedule, a public A2A call...).
+    // Whose it is: the person who started it (a name), or the kind of traffic that did (a trigger, a public A2A call...).
     createdBy: conversation.createdBy,
     ...(owner ? { owner } : {}),
     // The viewer started it (so the table can say "you" without knowing who the viewer is).
@@ -739,6 +728,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session, user } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
 
       if (typeof body.name !== 'string') {
         return reply.code(400).send({ error: 'Agent name is required' });
@@ -800,6 +791,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent: existing, agentId, projectId, session, user } = scoped;
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
       let warnings: AgentConfigIssue[] = [];
 
       if (body.config && typeof body.config === 'object') {
@@ -836,6 +829,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
+          if ('conflict' in checked) return reply.code(409).send(checked.conflict);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
           warnings = checked.warnings;
         }
@@ -1047,7 +1041,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send(bucketNamingForbiddenBody(error));
       }
       if (error instanceof AgentManifestError) {
-        return reply.code(400).send({ error: error.message, issues: error.issues });
+        return reply.code(manifestErrorStatus(error)).send({
+          error: error.message,
+          issues: error.issues,
+          ...(error.code ? { type: error.code, code: error.code } : {}),
+        });
       }
       return sendRouteError(reply, error, 'Import agent error', 'Failed to import agent');
     }
@@ -1063,7 +1061,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
-    if (error instanceof AgentManifestError) return reply.code(400).send({ error: error.message, issues: error.issues });
+    if (error instanceof AgentManifestError) return reply.code(manifestErrorStatus(error)).send({ error: error.message, issues: error.issues, ...(error.code ? { type: error.code, code: error.code } : {}) });
     return null;
   };
 
@@ -1112,103 +1110,6 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return sendImportError(reply, error)
         ?? sendRouteError(reply, error, 'Agent document import error', 'Failed to import agent');
-    }
-  }));
-
-  // ── Schedules ──────────────────────────────────────────────────────────
-
-  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent } = scoped;
-
-      const schedules = readSchedules(agent);
-      return reply.code(200).send({
-        schedules,
-        // Recomputed for display rather than trusted from storage: a stored
-        // nextRunAt goes stale the moment the cron is edited elsewhere.
-        nextRuns: Object.fromEntries(
-          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
-        ),
-        publishedVersion: agent.publishedVersion ?? null,
-      });
-    } catch (error) {
-      return sendRouteError(reply, error, 'List agent schedules error', 'Failed to list schedules');
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-
-      const body = await readJsonBody<AgentScheduleInput>(request);
-      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
-
-      const { schedule, schedules } = await upsertAgentSchedule(
-        session.tenantDbName,
-        agent,
-        body,
-        String(user._id),
-      );
-      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
-    } catch (error) {
-      // Validation failures here are the operator's cron, not a server fault.
-      const message = error instanceof Error ? error.message : String(error);
-      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
-        return reply.code(400).send({ error: message });
-      }
-      return sendRouteError(reply, error, 'Save agent schedule error', 'Failed to save schedule');
-    }
-  }));
-
-  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-      const { scheduleId } = request.params as { scheduleId: string };
-
-      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
-      return reply.code(200).send({ schedules });
-    } catch (error) {
-      return sendRouteError(reply, error, 'Delete agent schedule error', 'Failed to delete schedule');
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, session, user } = scoped;
-      const { scheduleId } = request.params as { scheduleId: string };
-      if (!agent.publishedVersion) {
-        return reply.code(409).send({
-          error: 'Publish the agent first — a scheduled run always uses the published version',
-        });
-      }
-
-      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
-      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
-
-      // A manual run is awaited (the operator is watching) but must NOT advance
-      // `nextRunAt` — testing a schedule should not skip its next real fire.
-      const result = await runAgentSchedule({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId: agent.projectId,
-        agent,
-        schedule,
-        trigger: 'manual',
-        userId: String(user._id),
-      });
-
-      return reply.code(200).send(result);
-    } catch (error) {
-      return sendAgentGuardrailBlock(reply, error)
-        ?? sendRouteError(reply, error, 'Manual schedule run error', 'Failed to run schedule');
     }
   }));
 
@@ -1294,7 +1195,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         session.userId,
       );
       if ('badRequest' in published) return reply.code(400).send(published.badRequest);
-      return reply.code(201).send({ version: published.version });
+      return reply.code(201).send({ version: redactVersion(published.version) });
     } catch (error) {
       return sendRouteError(
         reply,
@@ -1329,12 +1230,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // Effective execution ceilings for this tenant/project (env ∧ quota) —
-  // the Build → Execution card shows them as the maximum an agent may set.
+  // Effective run limits for this tenant/project (env ∧ quota). Agents have no
+  // say in them any more; the Studio shows them for reference.
   app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const limits = await resolveAgentExecutionLimits({
+      const limits = await resolveAgentRunLimits({
         quotaContext: {
           tenantDbName: session.tenantDbName,
           tenantId: session.tenantId,
@@ -1344,10 +1245,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       });
       return reply.code(200).send({
-        syncTimeoutSeconds: Math.floor(limits.syncTimeoutMs / 1000),
-        backgroundMaxDurationMinutes: Math.floor(limits.backgroundMaxDurationMs / 60_000),
-        maxConcurrentRunsPerTenant: limits.maxConcurrentRunsPerTenant,
-        maxConcurrentRunsPerProject: limits.maxConcurrentRunsPerProject,
+        syncWaitSeconds: Math.floor(limits.syncWaitMs / 1000),
+        maxDurationMinutes: Math.floor(limits.maxDurationMs / 60_000),
+        maxActivePerTenant: limits.maxActivePerTenant,
+        maxActivePerProject: limits.maxActivePerProject,
       });
     } catch (error) {
       return sendRouteError(reply, error, 'Agent execution limits error', 'Failed to read execution limits');
@@ -1360,9 +1261,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
-      const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
-      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string };
+      const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
+      const allowed = new Set(['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
       // this agent sees only the runs they queued, and a run of one session is the session's to read.
       const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
@@ -1380,9 +1282,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         agentKey: agent.key,
-        mode: 'background',
+        // Every run (queued or inline); a dashboard reservation is not one.
+        excludeModes: ['sync'],
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        // A trigger's history (Studio's Triggers list links here).
+        ...(query.triggerId ? { triggerId: query.triggerId } : {}),
+        ...(trigger ? { trigger } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });
@@ -1400,7 +1306,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { runId } = request.params as { runId: string };
       // Ownership first: the run must belong to THIS agent, not merely to the project.
       const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
-      if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
+      if (!existing || existing.agentKey !== agent.key || existing.mode === 'sync') {
         return reply.code(404).send({ error: 'Run not found' });
       }
       // Cancelling a run is acting on its session: the session's owner always may, anybody else needs
@@ -1488,57 +1394,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.get('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-
-      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
-      // database, before the page, so a busy teammate cannot push theirs off it.
-      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      const conversations = await listConversations(session.tenantDbName, agent.key, {
-        limit: 50,
-        projectId,
-        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
-      });
-
-      return reply.code(200).send({ conversations });
-    } catch (error) {
-      return sendRouteError(reply, error, 'List agent conversations error', 'Failed to list conversations');
-    }
-  }));
-
-  app.post('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const scoped = await requireScopedAgent(request, reply);
-      if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const conversation = await createConversation(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        session.userId,
-        agent.key,
-        typeof body.title === 'string' ? body.title : undefined,
-        { source: 'console' },
-      );
-
-      return reply.code(201).send({ conversation });
-    } catch (error) {
-      return sendRouteError(reply, error, 'Create agent conversation error', 'Failed to create conversation');
-    }
-  }));
-
   // ── Sessions ─────────────────────────────────────────────────────────
   //
   // A Session is the conversation record, presented under the name the
-  // Sessions page uses. Kept as its own route group rather than renaming
-  // `/conversations` above — nothing else in the codebase depends on that
-  // name yet, but adding rather than renaming means neither guess can be
-  // wrong about who else might.
+  // Sessions page uses.
 
   app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
     try {

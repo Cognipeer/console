@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
 import { AttachButton, AttachmentChips, MessageAttachments } from '@/components/agents/session/SessionAttachments';
-import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
+import AgentRunSettingsPanel from '@/components/agents/studio/AgentRunSettingsPanel';
 import {
   attachmentIds,
   checkAttachmentCandidate,
@@ -146,19 +146,24 @@ describe('the composer pieces', () => {
   });
 });
 
-describe('Configure → Execution no longer carries the file settings', () => {
+describe('Configure → Callback & budget does not carry the file settings', () => {
   it('shows none of them', () => {
-    const html = render(h(AgentExecutionPanel, { value: undefined, onChange: noop }));
+    const html = render(h(AgentRunSettingsPanel, { callback: undefined, onCallbackChange: noop, budget: undefined, onBudgetChange: noop }));
     for (const label of ['Accept attached files', 'Let people attach files', 'Files per session', 'Largest file (MB)', 'Allowed file types', 'Storage bucket']) {
       expect(html).not.toContain(label);
     }
-    expect(html).toContain('Background runs');
+    expect(html).toContain('Default callback');
+    // The removed Execution settings are gone with it.
+    for (const label of ['Background runs', 'Timeout (seconds)', 'Maximum run time (minutes)', 'When a call doesn’t say']) {
+      expect(html).not.toContain(label);
+    }
   });
 
-  it('the Files section owns config.attachments, so a change there marks Files — not Execution — changed', () => {
+  it('the Files section owns config.attachments, so a change there marks Files — not Callback & budget — changed', () => {
     expect(CONFIG_SECTION_KEYS.files).toEqual(['attachments']);
-    expect(CONFIG_SECTION_KEYS.execution).toEqual(['execution']);
-    expect(Object.keys(CONFIG_SECTION_KEYS).indexOf('files')).toBe(Object.keys(CONFIG_SECTION_KEYS).indexOf('execution') + 1);
+    expect(CONFIG_SECTION_KEYS.callback).toEqual(['callback', 'budget']);
+    expect(CONFIG_SECTION_KEYS.execution).toBeUndefined();
+    expect(Object.keys(CONFIG_SECTION_KEYS).indexOf('files')).toBe(Object.keys(CONFIG_SECTION_KEYS).indexOf('callback') + 1);
   });
 });
 

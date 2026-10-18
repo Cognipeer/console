@@ -1,5 +1,5 @@
 /**
- * The Agent Studio dashboard routes: export / import, schedules, code export,
+ * The Agent Studio dashboard routes: export / import, code export,
  * sessions and the skill library — over their real Fastify handlers.
  *
  * Each one is checked for the thing that would hurt if it regressed: an agent
@@ -62,16 +62,11 @@ vi.mock('@/lib/services/agents/agentManifest', async (importOriginal) => {
     return { ...actual, previewAgentImport: vi.fn(), applyAgentManifest: vi.fn() };
 });
 
-vi.mock('@/lib/services/agents/agentScheduleService', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('@/lib/services/agents/agentScheduleService')>();
-    return { ...actual, upsertAgentSchedule: vi.fn(), deleteAgentSchedule: vi.fn(), runAgentSchedule: vi.fn() };
-});
-
 vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
     return {
         ...actual,
-        resolveAgentExecutionLimits: vi.fn(),
+        resolveAgentRunLimits: vi.fn(),
         listAgentRuns: vi.fn(),
         getAgentRunStatus: vi.fn(),
         requestAgentRunCancellation: vi.fn(),
@@ -107,12 +102,14 @@ import {
     createConversation,
     deleteConversation,
     getAgentById,
+    getAgentVersion,
+    listAgentVersions,
+    publishAgent,
     updateAgentRecord,
     getConversationById,
     listConversations,
 } from '@/lib/services/agents';
 import { applyAgentManifest, previewAgentImport } from '@/lib/services/agents/agentManifest';
-import { deleteAgentSchedule, runAgentSchedule, upsertAgentSchedule } from '@/lib/services/agents/agentScheduleService';
 import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from '@/lib/services/agents/skillService';
 import { checkAgentModel } from '@/lib/services/agents/agentService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
@@ -121,7 +118,7 @@ import {
     getAgentRunStatus,
     listAgentRuns,
     requestAgentRunCancellation,
-    resolveAgentExecutionLimits,
+    resolveAgentRunLimits,
 } from '@/lib/services/agents/agentRunService';
 import {
     AgentImportError,
@@ -149,7 +146,6 @@ const AGENT = {
     projectId: 'proj-1',
     publishedVersion: 2,
     config: { modelKey: 'gpt-5-terra', systemPrompt: 'You help on call.' },
-    metadata: { schedules: [{ id: 's1', name: 'Nightly', cron: '0 2 * * *', message: 'Summarise.', enabled: true }] },
 };
 
 /** An agent that belongs to a different project — must be invisible. */
@@ -208,54 +204,6 @@ describe('export / import', () => {
         expect(res.statusCode).toBe(200);
         expect(mockFn(previewAgentImport)).toHaveBeenCalled();
         expect(mockFn(applyAgentManifest)).not.toHaveBeenCalled();
-    });
-});
-
-describe('schedules', () => {
-    it('GET /agents/:agentId/schedules lists the agent\'s schedules', async () => {
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/schedules' });
-        expect(res.statusCode).toBe(200);
-        expect(parseJsonBody<{ schedules: Array<{ id: string }> }>(res.body).schedules.map((s) => s.id)).toEqual(['s1']);
-    });
-
-    it('POST /agents/:agentId/schedules creates one (201) and 404s across projects', async () => {
-        mockFn(upsertAgentSchedule).mockResolvedValue({ schedule: { id: 's2' }, schedules: [] });
-        const app = await agentsApp();
-        const created = await app.inject({
-            method: 'POST',
-            url: '/api/agents/agent-1/schedules',
-            payload: { name: 'Hourly', cron: '0 * * * *', message: 'Check.', enabled: true },
-        });
-        expect(created.statusCode).toBe(201);
-        const foreign = await app.inject({ method: 'POST', url: '/api/agents/agent-9/schedules', payload: { name: 'x' } });
-        expect(foreign.statusCode).toBe(404);
-        expect(mockFn(upsertAgentSchedule)).toHaveBeenCalledTimes(1);
-    });
-
-    it('DELETE /agents/:agentId/schedules/:scheduleId removes it', async () => {
-        mockFn(deleteAgentSchedule).mockResolvedValue([]);
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'DELETE', url: '/api/agents/agent-1/schedules/s1' });
-        expect(res.statusCode).toBe(200);
-        expect(mockFn(deleteAgentSchedule).mock.calls[0][2]).toBe('s1');
-    });
-
-    it('POST /agents/:agentId/schedules/:scheduleId/run refuses an unpublished agent', async () => {
-        mockFn(getAgentById).mockResolvedValue({ ...AGENT, publishedVersion: null });
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/schedules/s1/run' });
-        // A scheduled run always uses the published version — there is none.
-        expect(res.statusCode).toBe(409);
-        expect(mockFn(runAgentSchedule)).not.toHaveBeenCalled();
-    });
-
-    it('POST /agents/:agentId/schedules/:scheduleId/run runs a published agent\'s schedule', async () => {
-        mockFn(runAgentSchedule).mockResolvedValue({ conversationId: 'c1', status: 'success' });
-        const app = await agentsApp();
-        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/schedules/s1/run' });
-        expect(res.statusCode).toBe(200);
-        expect(mockFn(runAgentSchedule)).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -416,6 +364,47 @@ describe('config validation and model check', () => {
     });
 });
 
+describe('publish and version responses redact the frozen config', () => {
+    const VERSION = {
+        agentKey: 'field-ops',
+        version: 3,
+        snapshot: {
+            name: 'Field Ops',
+            status: 'active',
+            config: {
+                modelKey: 'gpt-5-terra',
+                sandbox: { enabled: true, secretsSealed: 'sealed-sandbox-blob' },
+                callback: { url: 'https://hooks.example.com/a', secretSealed: 'sealed-callback-blob' },
+                connection: { protocol: 'openai', url: 'https://agent.example.com', apiKeyEnc: 'sealed-key-blob' },
+            },
+        },
+    };
+    const LEAK = /sealed-(sandbox|callback|key)-blob|secretsSealed|secretSealed|apiKeyEnc/;
+
+    it('POST /agents/:agentId/publish returns the version without sealed secrets', async () => {
+        mockFn(validateAgentConfig).mockResolvedValue({ errors: [], warnings: [] });
+        mockFn(publishAgent).mockResolvedValue(VERSION);
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/publish', payload: {} });
+        expect(res.statusCode).toBe(201);
+        expect(res.body).not.toMatch(LEAK);
+        expect(parseJsonBody<{ version: { snapshot: { config: { callback: unknown } } } }>(res.body).version.snapshot.config.callback)
+            .toEqual({ url: 'https://hooks.example.com/a', secret: '••••••' });
+    });
+
+    it('GET /agents/:agentId/versions (one version and the list) never returns sealed secrets', async () => {
+        mockFn(getAgentVersion).mockResolvedValue(VERSION);
+        mockFn(listAgentVersions).mockResolvedValue({ versions: [VERSION], total: 1 });
+        const app = await agentsApp();
+        const one = await app.inject({ method: 'GET', url: '/api/agents/agent-1/versions?version=3' });
+        const list = await app.inject({ method: 'GET', url: '/api/agents/agent-1/versions' });
+        expect(one.statusCode).toBe(200);
+        expect(list.statusCode).toBe(200);
+        expect(one.body).not.toMatch(LEAK);
+        expect(list.body).not.toMatch(LEAK);
+    });
+});
+
 describe('sandbox capabilities', () => {
     it('GET /agents/sandbox/capabilities lists templates when the module and the license allow it', async () => {
         mockFn(resolveSandboxAvailability).mockResolvedValue({
@@ -474,29 +463,27 @@ describe('execution limits and background runs', () => {
         createdAt: new Date('2026-09-24T10:00:00Z'),
     };
 
-    it('GET /agents/execution/limits returns the effective ceilings for this project', async () => {
-        mockFn(resolveAgentExecutionLimits).mockResolvedValue({
-            syncTimeoutMs: 120_000,
-            backgroundEnabled: true,
-            backgroundMaxDurationMs: 600_000,
-            defaultMode: 'sync',
-            maxConcurrentRunsPerTenant: 5,
-            maxConcurrentRunsPerProject: 0,
+    it('GET /agents/execution/limits returns the effective run limits for this project', async () => {
+        mockFn(resolveAgentRunLimits).mockResolvedValue({
+            syncWaitMs: 120_000,
+            maxDurationMs: 600_000,
+            maxActivePerTenant: 5,
+            maxActivePerProject: 0,
         });
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/execution/limits' });
         expect(res.statusCode).toBe(200);
         expect(parseJsonBody(res.body)).toEqual({
-            syncTimeoutSeconds: 120,
-            backgroundMaxDurationMinutes: 10,
-            maxConcurrentRunsPerTenant: 5,
-            maxConcurrentRunsPerProject: 0,
+            syncWaitSeconds: 120,
+            maxDurationMinutes: 10,
+            maxActivePerTenant: 5,
+            maxActivePerProject: 0,
         });
-        const call = mockFn(resolveAgentExecutionLimits).mock.calls[0][0];
+        const call = mockFn(resolveAgentRunLimits).mock.calls[0][0];
         expect(call.quotaContext).toMatchObject({ tenantId: 'tenant-1', projectId: 'proj-1' });
     });
 
-    it('GET /agents/:agentId/runs lists this agent\'s background runs without secrets or caller headers', async () => {
+    it('GET /agents/:agentId/runs lists this agent\'s runs (queued and inline, not reservations) without secrets or caller headers', async () => {
         mockFn(listAgentRuns).mockResolvedValue([RUN]);
         const app = await agentsApp();
         const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/runs?status=running,bogus' });
@@ -506,7 +493,7 @@ describe('execution limits and background runs', () => {
         expect(JSON.stringify(body)).not.toContain('sealed-secret');
         expect(JSON.stringify(body)).not.toContain('runtimeContext');
         expect(mockFn(listAgentRuns)).toHaveBeenCalledWith('tenant_acme', expect.objectContaining({
-            agentKey: 'field-ops', projectId: 'proj-1', mode: 'background', status: ['running'],
+            agentKey: 'field-ops', projectId: 'proj-1', excludeModes: ['sync'], status: ['running'],
         }));
     });
 

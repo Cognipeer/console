@@ -14,10 +14,6 @@
   align-self: flex-end;
 }
 
-.codeGrow {
-  flex: 1;
-}
-
 .snapshotCode {
   max-height: 31.25rem;
   overflow: auto;

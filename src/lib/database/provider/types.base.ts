@@ -288,8 +288,8 @@ export interface IAgentTracingSession extends IUsageAttributionFields {
   threadId?: string;
   tenantId: string;
   projectId?: string;
-  /** Ingestion source: 'custom' for legacy JSON, 'otlp' for OpenTelemetry. */
-  source?: 'custom' | 'otlp';
+  /** Ingestion source: 'custom' for legacy JSON, 'otlp' for OpenTelemetry, 'trigger' for a hosted run a trigger started. */
+  source?: 'custom' | 'otlp' | 'trigger';
   agent?: Record<string, unknown>;
   agentName?: string;
   agentVersion?: string;

@@ -30,6 +30,7 @@ npm run test:watch          # Lokal geliştirme
 npm run test:coverage       # Coverage raporu (lib/services, providers, license, server/api)
 npm run test:ui             # Vitest UI
 npm run test:endpoints      # Endpoint coverage gate (yeni endpoint için test var mı?)
+npm run test:openapi        # openapi.yaml ↔ kayıtlı route'lar (yeni endpoint spec'te var mı?)
 npm run test:flake          # Tüm suite'i 3x koşar, flake yakalar (FLAKE_RUNS=5 ile değiştir)
 npm run test:smoke          # L8 — gerçek sunucuyu ayağa kaldırıp tüm modülleri uçtan uca test eder
 npm run test:e2e:docker     # L9 — Docker'da gerçek LLM ile uçtan uca + load testi (tests/e2e/.env gerekir)
@@ -143,6 +144,10 @@ Baseline'dan satır kaldırmak için:
 3. Baseline JSON'dan o satırı silin.
 
 Bir route'u kasıtlı atlamak istiyorsanız route üstüne `// @test-skip: <reason>` koyun.
+
+## OpenAPI route gate
+
+`scripts/check-openapi-routes.ts` gerçek API'yi (`fastifyApiPlugin`) kurup `/client/v1` ve `/public` route'larını kökteki `openapi.yaml` ile METHOD + path olarak karşılaştırır. Spec'te olmayan yeni bir route **ya da** hiçbir route'un karşılamadığı yeni bir spec operasyonu CI'ı düşürür. Bilinen açıklar `scripts/openapi-routes.baseline.json` içinde (`undocumented`, `specOnly`) dondurulmuştur; artık geçerli olmayan satırı gate listeler, siz silersiniz.
 
 ---
 

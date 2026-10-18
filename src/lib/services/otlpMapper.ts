@@ -97,6 +97,31 @@ function getStringAttr(attrs: OtlpKeyValue[] | undefined, key: string): string |
   return found?.value?.stringValue ?? undefined;
 }
 
+/** Plain JS form of an OTLP AnyValue (nested kvlist/array aware). */
+function anyValueToPlain(v: OtlpAnyValue | undefined): unknown {
+  if (!v) return undefined;
+  if (v.stringValue != null) return v.stringValue;
+  if (v.intValue != null) return Number(v.intValue);
+  if (v.doubleValue != null) return v.doubleValue;
+  if (v.boolValue != null) return v.boolValue;
+  if (v.kvlistValue) {
+    const out: Record<string, unknown> = {};
+    for (const kv of v.kvlistValue.values ?? []) out[kv.key] = anyValueToPlain(kv.value);
+    return out;
+  }
+  if (v.arrayValue) return (v.arrayValue.values ?? []).map(anyValueToPlain);
+  return undefined;
+}
+
+/** Read an attribute that may be a string or a structured (object/array) value; structured values are JSON-encoded. */
+function getStringOrStructuredAttr(attrs: OtlpKeyValue[] | undefined, key: string): string | undefined {
+  const found = attrs?.find((a) => a.key === key);
+  if (!found) return undefined;
+  if (found.value?.stringValue != null) return found.value.stringValue;
+  const plain = anyValueToPlain(found.value as OtlpAnyValue);
+  return plain === undefined ? undefined : JSON.stringify(plain);
+}
+
 /** Read integer attribute (OTel ints are JSON strings) */
 function getIntAttr(attrs: OtlpKeyValue[] | undefined, key: string): number | undefined {
   const found = attrs?.find((a) => a.key === key);
@@ -753,6 +778,11 @@ export function mapOtlpToInternalModels(
         }
       }
 
+      // A bare ERROR status (no exception event) still carries the reason.
+      if (eventStatus === 'error' && !eventError && span.status?.message) {
+        eventError = { message: span.status.message };
+      }
+
       if (eventStatus === 'error') {
         errors.push({
           eventId,
@@ -969,10 +999,12 @@ function buildSectionsFromSpan(
   if (eventType === 'tool_call') {
     const toolArgs = getStringAttr(attrs, 'tool.args')
       || getStringAttr(attrs, 'cognipeer.tool.args')
-      || getStringAttr(attrs, 'tool.parameters');
+      || getStringAttr(attrs, 'tool.parameters')
+      || getStringOrStructuredAttr(attrs, 'gen_ai.tool.call.arguments');
     const toolResult = getStringAttr(attrs, 'tool.result')
       || getStringAttr(attrs, 'cognipeer.tool.result')
-      || getStringAttr(attrs, 'tool.output');
+      || getStringAttr(attrs, 'tool.output')
+      || getStringOrStructuredAttr(attrs, 'gen_ai.tool.call.result');
 
     if (toolArgs && !inputContent) {
       sections.push([{

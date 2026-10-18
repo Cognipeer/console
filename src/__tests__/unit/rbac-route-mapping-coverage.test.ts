@@ -12,7 +12,7 @@ import { getPermissionServiceForPath } from '@/lib/security/rbac';
  *
  * This has happened twice already: once for `/a2a` (fixed by a point patch),
  * then again — simultaneously — for `/audio`, `/images`, `/ocr`,
- * `/assistants`, `/threads`, and (previously unnoticed) `/rerankers`. A point
+ * and (previously unnoticed) `/rerankers`. A point
  * fix does not stop a THIRD occurrence when the next `/client/v1/*` plugin
  * ships. This test statically scans every client-token plugin file for its
  * registered route paths and fails if any of them falls through the RBAC map

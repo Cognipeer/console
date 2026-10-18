@@ -6,7 +6,7 @@ Cognipeer Console exposes two HTTP surfaces:
 - **Dashboard/Internal API** under `/api/` for JWT-authenticated console features such as incidents and health.
 
 ::: tip Machine-readable spec
-The full Client API is published as an OpenAPI 3.0 document — see [OpenAPI Specification](./openapi) to download it or generate a client. Direct link: [openapi.yaml](/openapi.yaml).
+The full Client API is published as an OpenAPI 3.0 document — see [OpenAPI Specification](./openapi) to download it or generate a client. Direct link: [openapi.yaml](https://docs.cognipeer.com/console/openapi.yaml) (source: `openapi.yaml` in the repository root).
 :::
 
 ## Base URL
@@ -80,9 +80,6 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Browser Snapshot / Extract / Artifacts](./browser) | `/browser/sessions/:sessionKey/{snapshot,extract,screenshot,pdf}` | GET, POST |
 | [Browser MCP SSE](./browser) | `/browser/:browserKey/mcp/sse` | GET |
 | [Browser MCP Message](./browser) | `/browser/:browserKey/mcp/message` | POST |
-| [Tools](./tools) | `/tools` | GET |
-| [Tool Detail](./tools) | `/tools/:toolKey` | GET |
-| [Tool Execute](./tools) | `/tools/:toolKey/actions/:actionKey/execute` | POST |
 | [MCP Execute](./mcp) | `/mcp/:serverKey/execute` | GET, POST |
 | [MCP SSE](./mcp) | `/mcp/:serverKey/sse` | GET |
 | [MCP Message](./mcp) | `/mcp/:serverKey/message` | POST |

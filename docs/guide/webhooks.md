@@ -1,6 +1,6 @@
 # Webhooks
 
-A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires, an alert fires or resolves. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
+A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a trigger fires, an alert fires or resolves. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
 Manage them under **Agents → Webhooks** in the dashboard (`/dashboard/agents/webhooks`; the old `/dashboard/webhooks` address redirects there), or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
 
@@ -36,13 +36,14 @@ Agents → Webhooks shows only what the person may do: without Admin the page is
 | `action.required` | `sessionId`, `conversationId`, `agentKey`, `actionId`, `kind`. Nothing of the request itself travels in a webhook: read it with `GET /api/client/v1/agents/sessions/{sessionId}` (`pending_actions`) and answer on `POST …/actions/{actionId}`. |
 | `budget.reached` | `sessionId`, `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd` |
 | `feedback.recorded` | `sessionId`, `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback)). The comment itself is never sent. |
-| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey` |
-| `schedule.fired`, `schedule.failed` | `scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?` |
+| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId` (`run_…`), `sessionId`, `conversationId`, `agentKey`, `status`, `class`, `metadata`, `triggerId`. Sent for [runs nobody waits on](/guide/agent-background-execution#callbacks-and-webhooks): queued runs and calls that outran their wait window |
+| `trigger.fired` | `triggerId`, `agentKey`, `trigger` (what started the fire: `schedule`, `once`, `manual` or `webhook`), `runId`, `event?`: a [trigger](/guide/agent-triggers) started a run |
+| `trigger.failed` | `triggerId`, `agentKey`, `trigger`, `reason`, `event?` (at most one per trigger and reason an hour) |
 | `alert.fired` | `ruleId`, `ruleName`, `metric`, `entityType`, `entityKey`, `value`, `threshold`, `baseline`, `severity`, `incidentId`, `firedAt`: an [alert rule](/guide/monitoring#alerts-incidents) fired for an entity |
 | `alert.resolved` | the same fields as `alert.fired`, plus `resolvedAt`: the alert recovered (two clean evaluation windows) |
 | `webhook.test` | none (sent by **Send test event**) |
 
-A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `alert.*`); `*` subscribes to everything.
+A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`, `trigger.*`, `alert.*`); `*` subscribes to everything. The `schedule.fired` and `schedule.failed` events of the agent schedules of earlier releases no longer exist: subscribe to `trigger.*`.
 
 **Alert events.** One event is published per rule and entity when its alert fires and again when it resolves (reminders are not published). The event belongs to the project of the rule: an endpoint of that project, or a tenant-wide endpoint, receives it. `entityType` is `agent`, `model`, `tool`, `mcp` or `kb`, and `entityKey` is the agent name, model key, tool key, MCP server key or knowledge base key. Both are `null` for a rule without an entity target (the project-wide metrics and rules created before per-entity alerting). `value` is the metric over the evaluation window and `null` when it could not be judged. `threshold` is the rule's threshold for a threshold rule and `null` for the other condition types, `baseline` is the normal value for a baseline rule and `null` otherwise, and `severity` is `critical`, `warning` or `info`. `incidentId` points to the incident (`GET /api/alerts/incidents/{incidentId}`) or is `null` when it could not be created. For `alert.resolved`, `value` is the value at recovery and `firedAt` the moment the alert had fired.
 

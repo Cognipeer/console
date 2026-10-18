@@ -31,7 +31,7 @@ vi.mock('@/lib/core/lifecycle', () => ({
 
 const hoisted = vi.hoisted(() => ({
   getAgentRunStatus: vi.fn(),
-  requestAgentRunCancellation: vi.fn(),
+  cancelAgentRun: vi.fn(),
   getConversationById: vi.fn(),
   ending: vi.fn(),
   access: vi.fn(),
@@ -43,7 +43,7 @@ vi.mock('@/lib/services/agents/turnCancellation', () => ({ cancelConversationTur
 
 vi.mock('@/lib/services/agents', () => ({
   getAgentRunStatus: hoisted.getAgentRunStatus,
-  requestAgentRunCancellation: hoisted.requestAgentRunCancellation,
+  cancelAgentRun: hoisted.cancelAgentRun,
   getConversationById: hoisted.getConversationById,
 }));
 
@@ -169,7 +169,7 @@ describe('client agent runs routes', () => {
   });
 
   it('POST /api/client/v1/agents/runs/:runId/cancel requests cancellation in tenant/project scope', async () => {
-    hoisted.requestAgentRunCancellation.mockResolvedValue({
+    hoisted.cancelAgentRun.mockResolvedValue({
       kind: 'accepted',
       run: {
         _id: 'run-1',
@@ -192,7 +192,7 @@ describe('client agent runs routes', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(hoisted.requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
+    expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run-1' });
   });
 
   describe('cancelling a run that is paused on an approval answers the open request with "no"', () => {
@@ -209,20 +209,20 @@ describe('client agent runs routes', () => {
 
       expect(res.statusCode).toBe(403);
       expect(parseJsonBody<{ error: { code: string; decision_id: string } }>(res.body).error).toMatchObject({ code: 'action_forbidden', decision_id: 'dec-7' });
-      expect(hoisted.requestAgentRunCancellation).not.toHaveBeenCalled();
+      expect(hoisted.cancelAgentRun).not.toHaveBeenCalled();
       expect(hoisted.ending).toHaveBeenCalledWith(expect.anything(), { tenantDbName: 'tenant_acme', conversation });
     });
 
     it('cancels for a token that may answer', async () => {
       hoisted.getAgentRunStatus.mockResolvedValue(paused);
       hoisted.getConversationById.mockResolvedValue(conversation);
-      hoisted.requestAgentRunCancellation.mockResolvedValue({
+      hoisted.cancelAgentRun.mockResolvedValue({
         kind: 'accepted',
         run: { ...paused, status: 'canceled', createdAt: new Date(), startedAt: null, completedAt: null, result: null, errorReason: null, errorMessage: null },
       });
       const res = await cancel();
       expect(res.statusCode).toBe(200);
-      expect(hoisted.requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
+      expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run-1' });
     });
 
     it('cancelling is acting on the session: a refusal there stops the cancel before anything else is asked', async () => {
@@ -232,7 +232,7 @@ describe('client agent runs routes', () => {
       const res = await cancel();
       expect(res.statusCode).toBe(403);
       expect(hoisted.access).toHaveBeenCalledWith(expect.anything(), conversation, expect.objectContaining({ need: 'manage' }));
-      expect(hoisted.requestAgentRunCancellation).not.toHaveBeenCalled();
+      expect(hoisted.cancelAgentRun).not.toHaveBeenCalled();
       expect(hoisted.ending).not.toHaveBeenCalled();
     });
 
@@ -242,11 +242,11 @@ describe('client agent runs routes', () => {
       hoisted.ending.mockResolvedValue({ allowed: false, unavailable: true, decisionId: 'dec-5' });
       const res = await cancel();
       expect(res.statusCode).toBe(503);
-      expect(hoisted.requestAgentRunCancellation).not.toHaveBeenCalled();
+      expect(hoisted.cancelAgentRun).not.toHaveBeenCalled();
     });
 
     it('asks nothing for a run that is not paused, or for a session of another project', async () => {
-      hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'not_found' });
+      hoisted.cancelAgentRun.mockResolvedValue({ kind: 'not_found' });
       hoisted.getAgentRunStatus.mockResolvedValue({ ...paused, status: 'running' });
       await cancel();
       hoisted.getAgentRunStatus.mockResolvedValue(paused);
@@ -322,12 +322,16 @@ describe('client agent runs routes', () => {
       expect(hoisted.cancelTurn).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'conv-1', projectId: 'proj-1' }));
     });
 
-    it('POST /api/client/v1/responses/:responseId/cancel takes a background run id (run_<runId>) through its session', async () => {
-      hoisted.getAgentRunStatus.mockResolvedValue({ _id: 'run-7', conversationId: 'conv-1', status: 'running' });
+    it('POST /api/client/v1/responses/:responseId/cancel takes a run id (run_<runId>): the run is cancelled, its Response object comes back', async () => {
+      const running = { _id: 'run-7', mode: 'background', agentKey: 'support-agent', conversationId: 'conv-1', status: 'running' };
+      hoisted.getAgentRunStatus.mockResolvedValue(running);
+      hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: { ...running, cancelRequestedAt: new Date() } });
       const res = await post('/api/client/v1/responses/run_run-7/cancel');
       expect(res.statusCode).toBe(200);
       expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-7');
-      expect(parseJsonBody(res.body)).toMatchObject({ id: 'run_run-7', conversation_id: 'conv-1' });
+      expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run-7' });
+      expect(parseJsonBody(res.body)).toMatchObject({ id: 'resp_run-7', object: 'response', status: 'in_progress', conversation: { id: 'conv-1' } });
+      expect(hoisted.cancelTurn).not.toHaveBeenCalled();
     });
 
     it('an id that is neither resp_ nor run_, or a run that is not there, is 404', async () => {

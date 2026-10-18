@@ -304,6 +304,37 @@ describe('createModel - provider validation', () => {
   });
 });
 
+describe('createModel - key clash', () => {
+  let db: ReturnType<typeof createMockDb>;
+  const provider = { key: 'openai-main', type: 'model', driver: 'openai', label: 'OpenAI', hasCredentials: true, status: 'active', driverCapabilities: {} };
+  const input = (extra: object) => ({
+    name: 'My Model', providerKey: 'openai-main', category: 'llm' as const, modelId: 'gpt-4o',
+    pricing: { currency: 'USD', inputTokenPer1M: 5, outputTokenPer1M: 15, cachedTokenPer1M: 0 }, settings: {}, ...extra,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    (getProviderConfigByKey as ReturnType<typeof vi.fn>).mockResolvedValue(provider);
+    db.findModelByKey.mockImplementation(async (key: string) => (key === 'taken' || key === 'my-model' ? makeModel({ key }) : null));
+    db.createModel.mockImplementation((async (m: object) => m) as never);
+  });
+
+  it('a key the caller names that is taken is a ModelKeyConflictError, nothing is created', async () => {
+    const { createModel } = await import('@/lib/services/models/modelService');
+    const { ModelKeyConflictError } = await import('@/lib/services/models/modelCapabilities');
+    await expect(createModel(TENANT_DB, TENANT_ID, PROJECT_ID, 'user-1', input({ key: 'taken' }))).rejects.toBeInstanceOf(ModelKeyConflictError);
+    expect(db.createModel).not.toHaveBeenCalled();
+  });
+
+  it('a key derived from the name still gets a suffix', async () => {
+    const { createModel } = await import('@/lib/services/models/modelService');
+    const created = await createModel(TENANT_DB, TENANT_ID, PROJECT_ID, 'user-1', input({}));
+    expect(created.key).toBe('my-model-2');
+  });
+});
+
 // ── validateDynamicConfigReferences ───────────────────────────────────────────
 
 describe('validateDynamicConfigReferences', () => {

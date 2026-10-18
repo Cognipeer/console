@@ -15,7 +15,6 @@ import {
   Divider,
   Badge,
   Code,
-  CopyButton,
   Tooltip,
   Modal,
   Table,
@@ -30,8 +29,6 @@ import {
   IconMessageCircle,
   IconCode,
   IconThumbUp,
-  IconCopy,
-  IconCheck,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -59,6 +56,9 @@ import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
 import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
+import AgentUsagePanel from './AgentUsagePanel';
+import { a2aSendCurl, sampleVariables, variablesOfRunVersion } from './agentUsageSnippets';
+import CopyableCode from './CopyableCode';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
@@ -70,7 +70,8 @@ import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
-import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
+import AgentVariablesEditor from './studio/AgentVariablesEditor';
 import AgentFilesPanel from './studio/AgentFilesPanel';
 import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
@@ -82,7 +83,7 @@ import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
-import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
+import AgentTriggersPanel from './studio/AgentTriggersPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
@@ -90,13 +91,14 @@ import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
+import { subagentPolicyToStore } from './studio/subagentSettings';
 import { migrateAgentReasoning } from '@/lib/services/agents/agentReasoning';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentConfig,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
-  IAgentExecutionConfig,
+  IAgentCallbackConfig,
   IAgentClientToolSurfaces,
   IAgentHumanInTheLoopConfig,
   IAgentAdditionalModel,
@@ -209,7 +211,10 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   skills: { top: 'configure', sub: 'skills' },
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
-  execution: { top: 'configure', sub: 'execution' },
+  callback: { top: 'configure', sub: 'callback' },
+  // Old links to the removed Execution section land on what is left of it.
+  execution: { top: 'configure', sub: 'callback' },
+  budget: { top: 'configure', sub: 'callback' },
   files: { top: 'configure', sub: 'files' },
   attachments: { top: 'configure', sub: 'files' },
   hitl: { top: 'configure', sub: 'hitl' },
@@ -219,10 +224,13 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   feedback: { top: 'feedback' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
+  variables: { top: 'configure', sub: 'variables' },
   deploy: { top: 'deploy' },
   versions: { top: 'deploy', sub: 'versions' },
   publish: { top: 'deploy', sub: 'publish' },
-  schedules: { top: 'deploy', sub: 'schedules' },
+  triggers: { top: 'deploy', sub: 'triggers' },
+  // The section triggers replaced; old links land on it.
+  schedules: { top: 'deploy', sub: 'triggers' },
   export: { top: 'deploy', sub: 'export' },
   observe: { top: 'sessions' },
   traces: { top: 'sessions' },
@@ -288,6 +296,7 @@ export default function AgentDetailPage() {
   // config it had before these sections existed.
   const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
+  const [variablesConfig, setVariablesConfig] = useState<IAgentConfig['variables']>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
@@ -297,7 +306,8 @@ export default function AgentDetailPage() {
   const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
-  const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  const [callbackConfig, setCallbackConfig] = useState<IAgentCallbackConfig | undefined>(undefined);
+  const [budgetConfig, setBudgetConfig] = useState<IAgentConfig['budget']>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
@@ -306,6 +316,9 @@ export default function AgentDetailPage() {
   const [filesSaveRefused, setFilesSaveRefused] = useState(false);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
+  // What `publishedConfig` has answered for, as `<agent id>@<version>` (it holds that snapshot, or the request failed):
+  // the Usage tab and the Overview quick start wait for it, because a call runs the snapshot, not the draft.
+  const [publishedConfigKey, setPublishedConfigKey] = useState<string | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
@@ -349,6 +362,8 @@ export default function AgentDetailPage() {
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
+  /** Background runs narrowed to one trigger (its "Runs" link). */
+  const [runsTrigger, setRunsTrigger] = useState<{ id: string; name: string } | null>(null);
   const [activeRunCount, setActiveRunCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
@@ -404,13 +419,15 @@ export default function AgentDetailPage() {
         setShowReasoning(migrated.showReasoning !== false);
         setRuntimeConfig(migrated.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
+        setVariablesConfig(cfg.variables);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
         setSkills(cfg.skills ?? []);
         setSkillPolicy(cfg.skillPolicy);
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
-        setExecutionConfig(cfg.execution);
+        setCallbackConfig(cfg.callback);
+        setBudgetConfig(cfg.budget);
         setHitlConfig(cfg.humanInTheLoop);
         setClientToolsConfig(cfg.clientTools);
         setClientToolSurfaces(cfg.clientToolSurfaces);
@@ -603,8 +620,13 @@ export default function AgentDetailPage() {
       .then((data: { version?: AgentVersion } | null) => {
         if (cancelled) return;
         setPublishedConfig((data?.version?.snapshot?.config as Record<string, unknown> | undefined) ?? null);
+        setPublishedConfigKey(`${agentId}@${publishedVersionNumber}`);
       })
-      .catch(() => { if (!cancelled) setPublishedConfig(null); });
+      .catch(() => {
+        if (cancelled) return;
+        setPublishedConfig(null);
+        setPublishedConfigKey(`${agentId}@${publishedVersionNumber}`);
+      });
     return () => { cancelled = true; };
   }, [agentId, publishedVersionNumber]);
 
@@ -659,8 +681,9 @@ export default function AgentDetailPage() {
     // and would start showing up in every manifest and diff for no reason.
     nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
+    nextConfig.variables = variablesConfig && variablesConfig.length > 0 ? variablesConfig : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
-    nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.subagentPolicy = subagentPolicyToStore(subagents, subagentPolicy);
     nextConfig.skills = skills.length > 0 ? skills : undefined;
     nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
     nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey || memoryConfig?.mounts?.length ? memoryConfig : undefined;
@@ -668,7 +691,9 @@ export default function AgentDetailPage() {
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.
     nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
-    nextConfig.execution = executionConfig && Object.keys(executionConfig).length > 0 ? executionConfig : undefined;
+    // The callback secret comes back masked; sending the mask back keeps the stored value.
+    nextConfig.callback = callbackConfig && Object.keys(callbackConfig).length > 0 ? callbackConfig : undefined;
+    nextConfig.budget = budgetConfig ?? undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -871,6 +896,14 @@ export default function AgentDetailPage() {
     ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
+
+  // The variables a call has to supply are those of the version it runs: the published snapshot's, not the draft's.
+  const variablesLoading = Boolean(publishedVersionNumber) && publishedConfigKey !== `${agentId}@${publishedVersionNumber}`;
+  const callVariables = variablesOfRunVersion({
+    publishedVersion: publishedVersionNumber,
+    publishedConfig,
+    draftVariables: agent.config?.variables,
+  });
 
   /**
    * The General section's fields, all open.
@@ -1166,6 +1199,8 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="overview">
           <AgentOverviewPanel
             agent={agent}
+            variables={callVariables}
+            variablesLoading={variablesLoading}
             isConnected={isConnected}
             sessionCount={sessions.length}
             onStartSession={() => setStartSessionOpen(true)}
@@ -1190,7 +1225,7 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
-            description="Every conversation with this agent — console tests, API, A2A and scheduled runs. Click one to inspect it; sessions started here can be continued."
+            description="Every conversation with this agent — console tests, API, A2A and trigger runs. Click one to inspect it; sessions started here can be continued."
           >
             <SegmentedControl
               mb="md"
@@ -1220,6 +1255,8 @@ export default function AgentDetailPage() {
             <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
               <AgentRunsTable
                 agentId={agentId}
+                trigger={runsTrigger}
+                onClearTrigger={() => setRunsTrigger(null)}
                 onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
                 onActiveCountChange={setActiveRunCount}
               />
@@ -1340,14 +1377,16 @@ export default function AgentDetailPage() {
               ) : null,
             )}
             {buildSection(
-              'execution',
-              'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
-              <AgentExecutionPanel
-                value={executionConfig}
-                onChange={setExecutionConfig}
+              'callback',
+              t('runSettings.sectionDescription'),
+              <AgentRunSettingsPanel
+                callback={callbackConfig}
+                onCallbackChange={setCallbackConfig}
+                budget={budgetConfig}
+                onBudgetChange={setBudgetConfig}
               />,
-              executionConfig?.defaultMode === 'background' ? (
-                <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              callbackConfig?.url ? (
+                <Badge size="xs" color="indigo" variant="light" w="fit-content">{t('runSettings.badgeCallback')}</Badge>
               ) : null,
             )}
             {buildSection(
@@ -1417,6 +1456,14 @@ export default function AgentDetailPage() {
               />,
             )}
             {buildSection(
+              'variables',
+              t('variables.sectionDescription'),
+              <AgentVariablesEditor value={variablesConfig} onChange={setVariablesConfig} />,
+              variablesConfig?.length ? (
+                <Badge size="xs" color="cyan" variant="light" w="fit-content">{t('variables.badge', { count: variablesConfig.length })}</Badge>
+              ) : null,
+            )}
+            {buildSection(
               'output',
               'Make the agent answer with JSON that matches a schema instead of free text.',
               <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />,
@@ -1462,8 +1509,8 @@ export default function AgentDetailPage() {
 
         {/*
           Deploy — the lifecycle of a config that is already written:
-          freeze it (Versions), expose it (Publish), run it on a cadence
-          (Schedules), or take it out of the console entirely (Export).
+          freeze it (Versions), expose it (Publish), start it on its own
+          (Triggers), or take it out of the console entirely (Export).
         */}
         <Tabs.Panel value="deploy">
           {/*
@@ -1633,27 +1680,15 @@ export default function AgentDetailPage() {
                     <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
                     <CopyableCode value={a2aEndpointUrl} />
 
-                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
-                    <Code block>
-                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
-  -H "Authorization: Bearer YOUR_API_KEY" \\`}
-  -H "Content-Type: application/json" \\
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Hello!" }],
-        "messageId": "msg-1"
-      }
-    }
-  }'
-
-# Continue the same conversation: set params.message.contextId
-# to the "contextId" returned in the previous task.`}
-                    </Code>
+                    {/* The example carries the variables of the version a call runs: it waits until they are known. */}
+                    {!variablesLoading && (
+                      <>
+                        <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                        <Code block>
+                          {a2aSendCurl({ endpointUrl: a2aEndpointUrl, isPublic: a2aIsPublic, variables: sampleVariables(callVariables) })}
+                        </Code>
+                      </>
+                    )}
                   </>
                 )}
               </Stack>
@@ -1661,11 +1696,21 @@ export default function AgentDetailPage() {
 
             {!isConnected ? (
               <ConfigSection
-                id="schedules"
-                title="Recurring runs"
-                description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+                id="triggers"
+                title={t('triggers.sectionTitle')}
+                description={t('triggers.sectionDescription')}
               >
-                <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+                <AgentTriggersPanel
+                  agentId={agentId}
+                  agentName={agent.name}
+                  declaredVariables={agent.config?.variables}
+                  versions={versions.map((version) => version.version)}
+                  onShowRuns={(trigger) => {
+                    setRunsTrigger(trigger);
+                    setSessionsView('runs');
+                    setActiveTab('sessions');
+                  }}
+                />
               </ConfigSection>
             ) : null}
 
@@ -1695,269 +1740,21 @@ export default function AgentDetailPage() {
           {activeTab === 'feedback' ? <AgentFeedbackPanel agentId={agentId} /> : null}
         </Tabs.Panel>
 
+        {/* ── Usage ───────────────────────────────────────────── */}
         <Tabs.Panel value="usage">
-          <SectionCard p="md">
-            <Stack gap="md">
-              <Text size="lg" fw={600}>
-                {t('usage.title')}
-              </Text>
-              <Text size="sm" c="dimmed">
-                {t('usage.description', { name: agent.name })}
-              </Text>
-
-              <Divider />
-
-              {/* ── SDK Usage ─────────────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.sdkTitle')}
-              </Text>
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.installLabel')}
-              </Text>
-              <CopyableCode value="npm install @cognipeer/console-sdk" />
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.chatLabel')}
-              </Text>
-              <Code block>
-                {`import { ConsoleClient } from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_KEY',
-  baseURL: '${origin}',
-});
-
-// ── Single turn ──────────────────────────────────
-const response = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Hello, how can you help me?',
-});
-console.log(response.output[0].content[0].text);
-
-// ── Multi-turn conversation ──────────────────────
-// Pass previous_response_id to continue the conversation
-const followUp = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Tell me more about that',
-  previous_response_id: response.id,
-});
-console.log(followUp.output[0].content[0].text);
-
-// ── Use a specific published version ─────────────
-const res = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Summarize the key points',
-  version: ${agent.publishedVersion || 1},
-});`}
-              </Code>
-
-              <Divider />
-
-              {/* ── REST Usage ────────────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.restTitle')}
-              </Text>
-
-              <Text size="sm" c="dimmed" mb="xs">
-                {t('usage.restLabel')}
-              </Text>
-              <Code block>
-                {`# First message
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello, how can you help me?"
-  }'
-
-# Continue conversation (use the id from the previous response)
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Tell me more about that",
-    "previous_response_id": "resp_<conversation_id>"
-  }'
-
-# Use a specific published version
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello!",
-    "version": ${agent.publishedVersion || 1}
-  }'`}
-              </Code>
-
-              <Divider />
-
-              {/* ── Response Format ──────────────────────── */}
-              <Text size="sm" fw={600}>
-                {t('usage.responseTitle')}
-              </Text>
-              <Code block>
-                {`{
-  "id": "resp_<conversation_id>",
-  "object": "response",
-  "model": "${agent.name}",
-  "output": [
-    {
-      "id": "msg_abc123",
-      "type": "message",
-      "role": "assistant",
-      "content": [
-        {
-          "type": "output_text",
-          "text": "Agent response text..."
-        }
-      ]
-    }
-  ],
-  "status": "completed",
-  "usage": {
-    "input_tokens": 50,
-    "output_tokens": 100,
-    "total_tokens": 150
-  },
-  "created_at": 1719500000,
-  "previous_response_id": null,
-  "version": ${agent.publishedVersion || 'null'}
-}`}
-              </Code>
-
-              <Divider />
-
-              {/* ── Background execution ─────────────────── */}
-              <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
-              <Text size="xs" c="dimmed">
-                For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
-                <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call — or send{' '}
-                <code>&quot;background&quot;: true</code> in the body, as an OpenAI SDK does. The header wins over the
-                body field, and either wins over the agent&apos;s default mode. Instead of
-                the completed answer, you immediately get back a run id to poll — the turn keeps executing
-                server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
-                request replays the same run instead of starting a second one, or <code>callback_url</code> to
-                get an HMAC-signed webhook when it finishes instead of polling.
-              </Text>
-              <Code block>
-{`# 1. Start it in the background — returns immediately with 202
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: ******" \\
-  -H "Content-Type: application/json" \\
-  -H "x-cognipeer-background: true" \\
-  -H "Idempotency-Key: <a-client-generated-uuid>" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Research this topic in depth and summarize the findings",
-    "callback_url": "https://your-server.com/webhooks/agent-run"
-  }'
-
-# → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
-
-# Same thing with the body field instead of the header (what an OpenAI SDK sends).
-# Precedence: x-cognipeer-background header > "background" body field > the agent's default mode.
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Research this topic in depth and summarize the findings",
-    "background": true,
-    "callback_url": "https://your-server.com/webhooks/agent-run"
-  }'
-
-# 2. Poll status until it leaves "queued"/"running"
-curl ${origin}/api/client/v1/agents/runs/run_<run_id> \\
-  -H "Authorization: ******"
-
-# → 200 { "id": "run_<run_id>", "object": "agent.run", "status": "succeeded",
-#         "result": { ...same shape as a synchronous response... }, "error": null,
-#         "created_at": ..., "started_at": ..., "completed_at": ... }
-# status is one of: queued | running | succeeded | failed | canceled
-
-# 3. (optional) Cancel it before it finishes
-curl -X POST ${origin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
-  -H "Authorization: ******"
-
-# Once succeeded, continue the conversation with a normal (synchronous) call —
-# the run's own "resp_" id inside "result.id" works as previous_response_id too:
-curl -X POST ${origin}/api/client/v1/responses \\
-  -H "Authorization: ******" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Now write it up as a one-pager",
-    "previous_response_id": "run_<run_id>"
-  }'`}
-              </Code>
-              <Text size="xs" c="dimmed">
-                Only one background (or synchronous) run may be in flight per conversation at a time — a
-                second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
-                until the first one finishes.
-              </Text>
-
-              {/*
-                Every other surface the agent is reachable on. They were
-                built one at a time and only the Responses API was ever
-                documented here, so an integrator reading this tab would
-                not know an OpenAI client could call the agent at all.
-              */}
-              <Divider />
-              <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
-              <Text size="xs" c="dimmed">
-                Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
-                model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
-                set <code>stream: true</code> for token deltas.
-              </Text>
-              <Code block>
-{`from openai import OpenAI
-
-client = OpenAI(base_url="${origin}/api/client/v1", api_key="YOUR_API_TOKEN")
-
-stream = client.chat.completions.create(
-    model="${agent.key}",
-    messages=[{"role": "user", "content": "Hello"}],
-    stream=True,
-)
-for chunk in stream:
-    print(chunk.choices[0].delta.content or "", end="")`}
-              </Code>
-              <Code block>
-{`curl -N -X POST ${origin}/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
-              </Code>
-
-              <Divider />
-              <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
-              <Text size="xs" c="dimmed">
-                {a2aEnabled
-                  ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
-                  : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
-              </Text>
-              <Code block>{`GET ${a2aCardUrl}`}</Code>
-
-              <Divider />
-              <Text size="sm" fw={600}>Assistants API</Text>
-              <Text size="xs" c="dimmed">
-                For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
-                {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
-                a new, separate agent. Start a thread and run it in one call:
-              </Text>
-              <Code block>
-{`POST ${origin}/api/client/v1/threads/runs
-{
-  "assistant_id": "asst_${agent.key}",
-  "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
-}`}
-              </Code>
-            </Stack>
-          </SectionCard>
+          {activeTab === 'usage' ? (
+            <AgentUsagePanel
+              agentName={agent.name}
+              agentKey={agent.key}
+              publishedVersion={agent.publishedVersion}
+              variables={callVariables}
+              variablesLoading={variablesLoading}
+              origin={origin}
+              a2aEnabled={a2aEnabled}
+              a2aEndpointUrl={a2aEndpointUrl}
+              a2aIsPublic={a2aIsPublic}
+            />
+          ) : null}
         </Tabs.Panel>
       </Tabs>
 
@@ -2043,24 +1840,6 @@ for chunk in stream:
         />
       ) : null}
     </PageContainer>
-  );
-}
-
-/** One-line code block with a copy button. */
-function CopyableCode({ value }: { value: string }) {
-  return (
-    <Group gap="xs" align="center">
-      <Code block className={classes.codeGrow}>{value}</Code>
-      <CopyButton value={value}>
-        {({ copied, copy }) => (
-          <Tooltip label={copied ? 'Copied' : 'Copy'}>
-            <ActionIcon variant="subtle" onClick={copy} color={copied ? 'teal' : 'gray'}>
-              {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-            </ActionIcon>
-          </Tooltip>
-        )}
-      </CopyButton>
-    </Group>
   );
 }
 

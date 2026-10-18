@@ -777,7 +777,7 @@ describe('the OpenAI chat completions bridge runs the agent\'s client tools', ()
 
     const first = await bridge({ messages: [{ role: 'user', content: 'where is order A-1?' }] });
     expect('error' in first).toBe(false);
-    if ('error' in first) return;
+    if ('error' in first || 'accepted' in first) return;
     expect(first.toolCalls).toHaveLength(1);
     expect(first.toolCalls![0]).toMatchObject({ type: 'function', function: { name: 'lookup_order', arguments: '{"id":"A-1"}' } });
     const callId = first.toolCalls![0].id;
@@ -791,7 +791,7 @@ describe('the OpenAI chat completions bridge runs the agent\'s client tools', ()
       ],
     });
     expect('error' in second).toBe(false);
-    if ('error' in second) return;
+    if ('error' in second || 'accepted' in second) return;
     expect(second.toolCalls).toBeUndefined();
     expect(second.content).toBe(`order: ${untrusted('{"status":"shipped"}')}`);
     expect(String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content)).toBe(untrusted('{"status":"shipped"}'));
@@ -802,6 +802,7 @@ describe('the OpenAI chat completions bridge runs the agent\'s client tools', ()
     const model = scriptModel(orderScript());
     const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
     if ('error' in first) throw new Error(first.error);
+    if ('accepted' in first) throw new Error('the run detached');
     const second = await bridge({
       conversationId: first.conversationId,
       messages: [{ role: 'tool', tool_call_id: first.toolCalls![0].id, content: 'order service is down', is_error: true }],
@@ -815,6 +816,7 @@ describe('the OpenAI chat completions bridge runs the agent\'s client tools', ()
     scriptModel(orderScript());
     const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
     if ('error' in first) throw new Error(first.error);
+    if ('accepted' in first) throw new Error('the run detached');
     expect(await bridge({ messages: [{ role: 'tool', tool_call_id: first.toolCalls![0].id, content: 'x' }] })).toMatchObject({ status: 400 });
     expect(await bridge({ conversationId: first.conversationId, messages: [{ role: 'tool', tool_call_id: 'act_000000000000000000000000', content: 'x' }] })).toMatchObject({ status: 404 });
   });
@@ -831,6 +833,7 @@ describe('the OpenAI chat completions bridge runs the agent\'s client tools', ()
     scriptModel(orderScript());
     const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
     if ('error' in first) throw new Error(first.error);
+    if ('accepted' in first) throw new Error('the run detached');
     expect(first.toolCalls?.[0].function.name).toBe('lookup_order');
   });
 });

@@ -723,7 +723,8 @@ describe('back-compat: no attachments', () => {
 
     expect(response.status).toBe('completed');
     expect(userTurn(model.seen[0]).content).toBe('hello there');
-    expect(model.toolNames.filter((name) => name.startsWith('session_files'))).toEqual([]);
+    // No file to read: none of the read tools (the agent's own file-writing tools are a separate feature).
+    expect(model.toolNames.filter((name) => ['session_files_list', 'session_files_read', 'session_files_view_image'].includes(name))).toEqual([]);
     const after = await stored(id);
     expect(after.messages[0]).not.toHaveProperty('attachments');
     expect(after.messages[0].content).toBe('hello there');

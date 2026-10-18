@@ -45,7 +45,7 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import crypto from 'node:crypto';
 import { encryptObject } from '@/lib/utils/crypto';
 import {
-  AGENT_RUN_QUEUE,
+  AGENT_RUN_CALLBACK_QUEUE,
   fireAgentRunCallback,
   deliverAgentRunCallbackJob,
   signAgentRunCallback,
@@ -107,14 +107,14 @@ describe('fireAgentRunCallback (enqueue side)', () => {
     expect(hoisted.safeFetch).not.toHaveBeenCalled();
   });
 
-  it('enqueues a retried callback job on the agent-runs queue instead of delivering in-process', async () => {
+  it('enqueues a retried callback job on the agent-run-callbacks queue instead of delivering in-process', async () => {
     const run = await makeRun('https://example.com/webhook');
     await fireAgentRunCallback(run, 'succeeded', { result: { id: 'resp_x' } });
 
     expect(hoisted.safeFetch).not.toHaveBeenCalled();
     expect(hoisted.publish).toHaveBeenCalledTimes(1);
     const [queue, name, payload, options] = hoisted.publish.mock.calls[0];
-    expect(queue).toBe(AGENT_RUN_QUEUE);
+    expect(queue).toBe(AGENT_RUN_CALLBACK_QUEUE);
     expect(name).toBe('callback');
     expect(payload).toMatchObject({ runId: String(run._id), event: 'succeeded', callbackUrl: 'https://example.com/webhook' });
     expect((options as { attempts: number }).attempts).toBeGreaterThan(1);

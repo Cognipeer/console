@@ -126,6 +126,9 @@ jobs:
       - name: Endpoint auth-coverage gate
         run: npm run test:endpoints
 
+      - name: OpenAPI route gate
+        run: npm run test:openapi
+
   docs:
     runs-on: cognipeer-azure-runners
     steps:

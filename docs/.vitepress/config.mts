@@ -1,3 +1,6 @@
+import { copyFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitepress';
 
 const docsBase = process.env.GITHUB_PAGES === 'true' ? '/console/' : '/';
@@ -30,6 +33,10 @@ export default defineConfig({
   description:
     'Open-source, self-hosted AI gateway: LLM routing, RAG, MCP hub, GPU fleet, sandboxes, AI red-teaming, guardrails, and cost optimization for multi-tenant orgs.',
   base: docsBase,
+  // The canonical OpenAPI document lives in the repository root; the site serves a copy next to the pages.
+  buildEnd: ({ outDir }) => {
+    copyFileSync(fileURLToPath(new URL('../../openapi.yaml', import.meta.url)), join(outDir, 'openapi.yaml'));
+  },
   // Kept strict on purpose. This was `true`, and it was quietly hiding a whole
   // sidebar section's worth of links to pages that did not exist yet.
   ignoreDeadLinks: false,
@@ -53,7 +60,7 @@ export default defineConfig({
       { text: 'Architecture', link: '/guide/architecture' },
       { text: 'Core Modules', link: '/guide/core-overview' },
       { text: 'API Reference', link: '/api/overview' },
-      { text: 'SDK Docs', link: 'https://cognipeer.github.io/console-sdk/' },
+      { text: 'SDK Docs', link: 'https://docs.cognipeer.com/console-sdk/' },
       { text: 'Licensing', link: '/guide/licensing' },
       {
         // The current community release line. Bump this when a new minor line
@@ -129,8 +136,11 @@ export default defineConfig({
             { text: 'Providers', link: '/guide/providers' },
             { text: 'Model Hub', link: '/guide/model-hub' },
             { text: 'Model Inference', link: '/guide/inference' },
-            { text: 'Agent Background Execution', link: '/guide/agent-background-execution' },
+            { text: 'Agent Runs & Background', link: '/guide/agent-background-execution' },
+            { text: 'Agent Templates', link: '/guide/agent-templates' },
+            { text: 'Agent Triggers', link: '/guide/agent-triggers' },
             { text: 'Approvals & Questions', link: '/guide/agent-approvals' },
+            { text: 'Delegation (Sub-agents)', link: '/guide/agent-delegation' },
             { text: 'Agent Sessions API', link: '/guide/agent-sessions' },
             { text: 'Session Events', link: '/guide/agent-session-events' },
             { text: 'Feedback & Message Actions', link: '/guide/agent-feedback' },
@@ -228,7 +238,6 @@ export default defineConfig({
             { text: 'Red Team', link: '/api/redteam' },
             { text: 'Agents', link: '/api/agents' },
             { text: 'Browser', link: '/api/browser' },
-            { text: 'Tools', link: '/api/tools' },
             { text: 'MCP Servers', link: '/api/mcp' },
             { text: 'Vector', link: '/api/vector' },
             { text: 'Reranker', link: '/api/reranker' },

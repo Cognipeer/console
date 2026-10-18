@@ -142,9 +142,9 @@ kind('agent.guardrail', 'agent', 'guardrail', 'project-then-tenant', 'error', { 
 kind('agent.tool', 'agent', 'tool', 'project-then-tenant', 'warning', { inactiveBreaks: true });
 kind('agent.mcp', 'agent', 'mcp-server', 'project-then-tenant', 'warning', { inactiveBreaks: true });
 kind('agent.knowledge', 'agent', 'rag-module', 'project-then-tenant', 'warning', { inactiveBreaks: true });
-// resolveAgentConfig never looks at the target's status (a draft/inactive agent
-// runs from its draft config), so only a missing/cross-project target breaks it.
-kind('agent.subagent', 'agent', 'agent', 'strict-project', 'warning');
+// A run skips a sub-agent whose agent is not active (resolveSubagentTarget), the way every other way
+// of running an agent refuses it: the parent carries on without that child and says so in its warnings.
+kind('agent.subagent', 'agent', 'agent', 'strict-project', 'warning', { inactiveBreaks: true, requiresActive: true });
 // buildSubagentModel falls back to the parent's model: reduced, not broken.
 kind('agent.subagentModel', 'agent', 'model', 'strict-project', 'warning');
 kind('agent.subagentKnowledge', 'agent', 'rag-module', 'project-then-tenant', 'warning', { inactiveBreaks: true });

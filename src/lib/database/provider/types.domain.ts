@@ -2575,34 +2575,42 @@ export interface IAgentSubagentPolicy {
   allowAdhocTools?: boolean;
 }
 
-export interface IAgentExecutionConfig {
-  /** Synchronous ceiling for this agent, seconds. */
-  syncTimeoutSeconds?: number;
-  /** false = API calls may not run this agent in the background. Default true. */
-  backgroundEnabled?: boolean;
-  /** Longest a background run of this agent may take, minutes. */
-  backgroundMaxDurationMinutes?: number;
-  /**
-   * Default spend budget of a session of this agent (copied to each session
-   * when it starts). Absent = sessions have no budget; the per-turn
-   * `runtime.limits.maxCostUsd` is separate and unchanged.
-   */
-  sessionBudget?: IAgentSessionBudget & {
-    /**
-     * May an API client remove this budget or raise it past `maxCostUsd`
-     * (session create / `PATCH`)? Default false: the budget the admin set binds
-     * the integration it is meant to constrain. Dashboard users are not affected.
-     */
-    allowClientOverride?: boolean;
-  };
-  /** What an API call that does not say `background` gets. Default 'sync'. */
-  defaultMode?: 'sync' | 'background';
-  /** Callback for background runs started without their own `callback_url`. */
-  callbackUrl?: string;
-  /** Write-only HMAC secret for that callback: plaintext in, masked out. */
-  callbackSecret?: string;
-  /** Sealed `callbackSecret`; never returned by the API. */
-  callbackSecretSealed?: string;
+/** Where a run's result is POSTed (`IAgentConfig.callback`). */
+export interface IAgentCallbackConfig {
+  url?: string;
+  /** Write-only HMAC secret: plaintext in, masked out. */
+  secret?: string;
+  /** Sealed `secret`; never returned by the API. */
+  secretSealed?: string;
+}
+
+/**
+ * Class of an agent run. `default` is interactive and counts against the
+ * tenant's active cap; `deferred` is low priority, queued on its own and
+ * managed by its own caps.
+ */
+export type AgentRunClass = 'default' | 'deferred';
+
+/** Per-request structured output of a run (Responses `text.format`, chat `response_format`, runs API). */
+export interface AgentResponseFormat {
+  type: 'json_schema' | 'json_object';
+  /** json_schema only; default 'response'. */
+  name?: string;
+  /** json_schema only; draft-07 subset (the converter `config.structuredOutput` uses). */
+  schema?: Record<string, unknown>;
+  strict?: boolean;
+}
+
+/** One declared variable of an agent (`IAgentConfig.variables`). */
+export interface IAgentVariable {
+  /** `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, unique within the agent. */
+  name: string;
+  label?: string;
+  description?: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'json';
+  enum?: Array<string | number>;
+  required?: boolean;
+  default?: unknown;
 }
 
 /**
@@ -2618,6 +2626,17 @@ export interface IAgentExecutionConfig {
 export interface IAgentAttachmentsConfig {
   /** true = the agent takes attachments (needs `bucketKey`). Default false. */
   enabled?: boolean;
+  /**
+   * Files the agent writes itself (`session_files_create` / `session_files_append`),
+   * stored in the same bucket. Default ON when the agent has a `bucketKey`.
+   */
+  outputs?: {
+    enabled?: boolean;
+    /** Most files one turn may create. */
+    maxFilesPerTurn?: number;
+    /** Largest generated file, MB. */
+    maxFileSizeMb?: number;
+  };
   /** Most files one session may hold. Default 10. */
   maxFiles?: number;
   /** Largest single file, MB. Default 20. */
@@ -2764,11 +2783,29 @@ export interface IAgentConfig {
   /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
   sandbox?: IAgentSandboxConfig;
   /**
-   * How API calls to this agent execute (docs/guide/agent-background-execution.md).
-   * Every limit here is an upper bound the agent opts into; the effective
-   * value is min(env ceiling, tenant quota, this).
+   * Callback for runs started without their own `callback_url` (every dialect,
+   * triggers included). The secret is write-only: plaintext in, masked out;
+   * only the sealed form is stored.
    */
-  execution?: IAgentExecutionConfig;
+  callback?: IAgentCallbackConfig;
+  /**
+   * Default spend budget of a session of this agent (copied to each session when
+   * it starts). Absent = sessions have no budget; the per-turn
+   * `runtime.limits.maxCostUsd` is separate and unchanged.
+   */
+  budget?: IAgentSessionBudget & {
+    /**
+     * May an API client remove this budget or raise it past `maxCostUsd`
+     * (session create / `PATCH`)? Default false: the budget the admin set binds
+     * the integration it is meant to constrain. Dashboard users are not affected.
+     */
+    allowClientOverride?: boolean;
+  };
+  /**
+   * Declared variables of the agent (a form for a human, a validated object for an
+   * API / trigger caller). Absent = the agent takes free text only. At most 32.
+   */
+  variables?: IAgentVariable[];
   /**
    * Human in the loop: tool approvals and questions to the user. Absent (every
    * agent created before this existed) = nothing ever pauses.
@@ -2821,7 +2858,7 @@ export type AgentToolApprovalPolicy = 'always' | 'never';
 /**
  * What an approval-gated tool call or an ask-user question does on a run that
  * has no interactive user (a schedule, an evaluation or red-team case, an
- * OpenAI-shaped or Assistants client):
+ * OpenAI-shaped client):
  *  - `deny` (default): the call returns an error result to the model and never
  *    runs; the run continues. The ask-user tool is not offered.
  *  - `pause`: behaves as an attended run — the turn stops and the request waits
@@ -2918,6 +2955,8 @@ export interface IAgentSandboxConfig {
   secrets?: Record<string, string>;
   /** Sealed form of `secrets`; never leaves the server. */
   secretsSealed?: string;
+  /** Set on agent reads only (never stored): secrets are stored but cannot be decrypted, see `agentSandboxSecrets.ts`. */
+  secretsUnreadable?: boolean;
   /** Which tool groups to give the agent. All on by default. */
   tools?: { exec?: boolean; code?: boolean; files?: boolean };
   /**
@@ -2957,39 +2996,167 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
+/** The sender an incoming webhook is set up for (its event / delivery id headers and auth choices). */
+export type AgentTriggerWebhookPreset = 'github' | 'gitlab' | 'azure_devops' | 'generic';
+
 /**
- * A recurring run of an agent.
- *
- * Schedules live in `agent.metadata.schedules` rather than their own
- * collection: they are small, always read alongside the agent, and never
- * queried independently. A run's record is the conversation it creates —
- * stamped with the schedule id in its metadata — so history came for free
- * rather than needing a second write path.
- *
- * It extends `ICrawlerSchedule` so both features share `schedulePlanner`;
- * cron semantics that diverge between two schedulers in the same product is
- * a support ticket waiting to happen.
+ * How a delivery proves it knows the trigger's secret. The first three sign
+ * the raw body (checked once the body is read); the rest carry the secret in a
+ * header (checked before the body is read).
  */
-export interface IAgentSchedule extends ICrawlerSchedule {
-  /** Stable id, generated on create. Stamped onto every run's conversation. */
-  id: string;
-  name: string;
-  /** The message sent to the agent on each fire. Supports prompt variables. */
-  message: string;
-  /**
-   * Per-run values merged into the prompt-variable context, exactly as a live
-   * caller's `runtimeContext.metadata` would be. A nightly digest and an hourly
-   * triage can therefore share one prompt and differ only here.
-   */
-  variables?: Record<string, string>;
-  /** Outcome of the most recent fire, for the schedule list. */
-  lastStatus?: 'ok' | 'error';
-  lastError?: string;
-  /** Conversation created by the most recent fire. */
-  lastConversationId?: string;
-  createdBy?: string;
-  createdAt?: Date;
+export type AgentTriggerWebhookAuth =
+  /** `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(secret, raw body)>`. */
+  | 'github_signature'
+  /** Standard Webhooks: `webhook-id` / `webhook-timestamp` / `webhook-signature: v1,<base64>`; the sender's `whsec_` secret. */
+  | 'standard_webhooks'
+  /** `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`. */
+  | 'signature'
+  /** `X-Gitlab-Token: <secret>`. */
+  | 'gitlab_token'
+  /** `Authorization: Bearer <secret>`. */
+  | 'bearer'
+  /** `Authorization: Basic base64(<any user>:<secret>)`. */
+  | 'basic'
+  /** `<headerName>: <secret>`. */
+  | 'header';
+
+/** One filter rule over the delivery (all rules must match). */
+export interface AgentTriggerWebhookFilterRule {
+  /** `payload.action`, `payload.pull_request.labels.*.name`, `headers.x-github-event`, `event`. */
+  path: string;
+  op: 'eq' | 'neq' | 'in' | 'not_in' | 'exists' | 'not_exists' | 'contains' | 'starts_with' | 'glob';
+  value?: string | number | boolean | Array<string | number | boolean>;
 }
+
+/**
+ * The settings of a `webhook` trigger: each authenticated, matching delivery to
+ * its URL fires the trigger. Stored in the trigger's `webhook` object.
+ */
+export interface AgentTriggerWebhook {
+  /** `wh_` + 18 random bytes (base64url): the URL's locator. Kept while the trigger stays a webhook one; never reused. */
+  hookId: string;
+  preset: AgentTriggerWebhookPreset;
+  auth: AgentTriggerWebhookAuth;
+  /** Auth `header` only; lower-case. */
+  headerName?: string | null;
+  /** `encryptObject(secret)`; never serialized. */
+  secretSealed: string;
+  /** The secret's last 4 characters. */
+  secretHint: string;
+  /** `provided` only with `standard_webhooks` (the sender generates that secret). */
+  secretSource: 'generated' | 'provided';
+  /** The secret before the last rotation, accepted until `previousSecretExpiresAt`. */
+  previousSecretSealed?: string | null;
+  previousSecretExpiresAt?: Date | null;
+  /** Normalized event names to accept; empty / absent = every event. */
+  events?: string[] | null;
+  /** All must match (≤ 20). */
+  filter?: AgentTriggerWebhookFilterRule[] | null;
+  /** Append the event payload (JSON) to the message. */
+  includePayload: boolean;
+}
+
+/** The settings of a `schedule` trigger: a 5-field cron expression evaluated in an IANA timezone (default 'UTC'). */
+export interface AgentTriggerSchedule {
+  cron: string;
+  timezone: string;
+}
+
+/** The settings of a `once` trigger: one run at a fixed time. */
+export interface AgentTriggerOnce {
+  runAt: Date;
+}
+
+/** What starts a trigger's runs. */
+export type AgentTriggerType = 'schedule' | 'once' | 'manual' | 'webhook';
+
+/**
+ * A trigger's type and the ONE settings object named after it (`manual` has
+ * none): a union on `type`, the same shape the API shows and both stores keep.
+ * The other types' objects are absent.
+ */
+export type AgentTriggerTypeSettings =
+  | { type: 'schedule'; schedule: AgentTriggerSchedule }
+  | { type: 'once'; once: AgentTriggerOnce }
+  /** Only started on request (Run now, `POST …/triggers/{id}/run`). */
+  | { type: 'manual' }
+  | { type: 'webhook'; webhook: AgentTriggerWebhook };
+
+export type AgentTriggerDeliveryOutcome =
+  'accepted' | 'duplicate' | 'filtered' | 'ignored' | 'unauthorized' | 'rejected' | 'failed';
+
+/**
+ * One request to a trigger's webhook URL, as its delivery log keeps it: the
+ * outcome and normalized ids only — never the payload, headers or a secret.
+ */
+export interface IAgentTriggerDelivery {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  triggerId: string;
+  receivedAt: Date;
+  /** `receivedAt` + 7 days; the reconciler's retention removes it after. */
+  expiresAt: Date;
+  outcome: AgentTriggerDeliveryOutcome;
+  httpStatus: number;
+  event?: string | null;
+  deliveryId?: string | null;
+  runId?: string | null;
+  /** A fixed reason text (≤ 300 chars); never payload text. */
+  reason?: string | null;
+  bytes: number;
+}
+
+/** The fields every trigger has, whatever starts it (see `IAgentTrigger`). */
+export interface IAgentTriggerBase {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  /** The message each fire sends (≤ 32k chars). */
+  prompt: string;
+  variables?: Record<string, unknown> | null;
+  /** A pinned published version; null/absent = the published one. */
+  version?: number | null;
+  runClass: AgentRunClass;
+  /** Copied onto each run. */
+  metadata?: Record<string, string> | null;
+  /** Where each run's result is POSTed; the secret is sealed and never serialized. */
+  callback?: { url: string; secretSealed?: string | null } | null;
+  responseFormat?: AgentResponseFormat | null;
+  /** The next due slot; null for manual and webhook triggers, a finished once, or a disabled trigger. */
+  nextFireAt?: Date | null;
+  lastFireAt?: Date | null;
+  lastRunId?: string | null;
+  lastStatus?: 'started' | 'failed' | null;
+  lastError?: string | null;
+  createdBy: string;
+  updatedBy?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * A trigger: a saved way of starting an agent — a prompt (+ variables) and a
+ * `type` (`schedule`, `once`, `manual`, `webhook`) with that type's settings
+ * object. Every fire is an ordinary AgentRun (`channel: 'trigger'`,
+ * `triggerId`), so its history is the runs list filtered by trigger.
+ */
+export type IAgentTrigger = IAgentTriggerBase & AgentTriggerTypeSettings;
+
+/** The trigger of one type (`AgentTriggerOfType<'webhook'>` has `webhook`). */
+export type AgentTriggerOfType<T extends AgentTriggerType> = Extract<IAgentTrigger, { type: T }>;
+
+/** A trigger as `createAgentTrigger` takes it. */
+export type NewAgentTrigger = Omit<IAgentTriggerBase, '_id' | 'createdAt' | 'updatedAt'> & AgentTriggerTypeSettings;
+
+/** What `updateAgentTrigger` changes: a new `type` always comes with its settings object (the others are dropped). */
+export type AgentTriggerPatch =
+  & Partial<Omit<IAgentTriggerBase, '_id' | 'tenantId' | 'projectId' | 'agentKey' | 'createdAt' | 'createdBy'>>
+  & (AgentTriggerTypeSettings | { type?: undefined });
 
 export interface IAgent {
   _id?: ObjectId | string;
@@ -3178,11 +3345,20 @@ export interface IAgentTurnCompaction {
   outputTokens?: number;
   summary?: {
     userDirectives?: string[];
+    /** Directive → the user's own words it came from (agent-sdk ≥ 0.15). */
+    directiveSources?: Record<string, string>;
     facts?: Array<{ key: string; value: string }>;
     goals?: string[];
     openQuestions?: string[];
     discarded?: string[];
   };
+  /**
+   * Directives the summarizer returned that no user message supports, so the
+   * SDK did not keep them (agent-sdk ≥ 0.15).
+   */
+  droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+  /** Model that produced the summary. */
+  model?: string;
   integrityNotes?: string[];
   /** The summarizer call failed and a local fallback summary was used. */
   failed?: boolean;
@@ -3251,6 +3427,8 @@ export interface IAgentMessagePendingAction {
   id: string;
   kind: AgentPendingActionKind;
   toolName?: string;
+  /** The sub-agent whose tool call or question this is. */
+  subagent?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3277,6 +3455,8 @@ export interface IAgentPendingAction {
   sdkId: string;
   toolCallId?: string;
   toolName?: string;
+  /** The sub-agent whose tool call or question this is (a child's pause surfaced by the SDK). */
+  subagent?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3390,7 +3570,7 @@ export interface IAgentConversation {
   /** Highest `agent_session_events.seq` written for this conversation. */
   lastEventSeq?: number;
   /**
-   * This session's spend budget. Copied from the agent's `execution.sessionBudget`
+   * This session's spend budget. Copied from the agent's `budget`
    * when the session is created; can be set, raised or removed (`null`) later.
    */
   budget?: IAgentSessionBudget | null;
@@ -3403,6 +3583,12 @@ export interface IAgentConversation {
    * that started after it. Never part of an API response.
    */
   runtimeTurnId?: string;
+  /**
+   * sha256 of the transcript a chat-completions client holds after this session's last turn (its messages
+   * without system/developer ones, plus the answer it was given). A client that resends its whole transcript
+   * and no session id is matched back to the session by it (`findAgentConversationsByTranscriptHash`).
+   */
+  transcriptHash?: string;
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
@@ -4416,19 +4602,25 @@ export interface IPrescriptionReport {
 // agent turns can carry irreversible tool side effects that crawl jobs do not.
 
 /**
- * Which path created this row. A `'sync'` row exists only to hold the
- * single-active-run reservation (see `createAgentRun` in contract.ts for
- * `conversationId`, §6/§12.14) for the duration of an inline call — it is
- * always deleted when the call ends (success, timeout, or error), never left
- * in a terminal state and never intended to be polled.
+ * Which path created this row.
+ *  - `'sync'`: a dashboard/portal reservation that only holds the
+ *    single-active-run slot (see `createAgentRun` in contract.ts for
+ *    `conversationId`, §6/§12.14) for the duration of a call — deleted when the
+ *    turn ends (success, timeout, or error), never polled.
+ *  - `'inline'`: an API turn executed in the request process. Recorded like a
+ *    background run (finalized, kept until retention), heartbeats, and may
+ *    detach (the caller stops waiting and gets 202).
+ *  - `'background'`: a queue worker run.
  */
-export type AgentRunMode = 'sync' | 'background';
+export type AgentRunMode = 'sync' | 'inline' | 'background';
 
 /**
- * No `timeout` state: a timeout only happens in synchronous mode, whose
- * reservation row is deleted when the call ends, never finalized (§6).
+ * `scheduled` is not active: it holds no conversation slot and is promoted to
+ * `queued` when `notBefore` is due. A dashboard `sync` row never reaches a
+ * terminal state (its row is deleted when the turn ends, §6).
  */
 export type AgentRunStatus =
+  | 'scheduled'
   | 'queued'
   | 'running'
   /**
@@ -4444,10 +4636,12 @@ export type AgentRunStatus =
 /**
  * Distinguishes an agent-side failure, a worker that died mid-run (§12.1),
  * the server-side background ceiling firing (§12.13), and an explicit caller
- * cancel — three different causes should not collapse into one generic value.
+ * cancel — different causes should not collapse into one generic value.
  */
 export type AgentRunErrorReason =
   | 'agent_error'
+  /** A guardrail refused the prompt or the answer: a policy decision, not a fault. */
+  | 'guardrail_block'
   | 'worker_lost'
   | 'max_duration_exceeded'
   | 'canceled_by_caller'
@@ -4457,10 +4651,21 @@ export type AgentRunErrorReason =
   | 'owner_disabled'
   /** The owner's account state could not be read, so the run was refused (fail closed). */
   | 'owner_unverifiable'
+  /** A deferred / scheduled run that did not start within `AGENT_DEFERRED_MAX_WAIT_MS` of becoming due. */
+  | 'expired'
+  /** The server shut down while the run was executing; not retried automatically. */
+  | 'interrupted'
   | null;
 
 /** Durable delivery state for the optional callback webhook (§12.6). */
-export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
+export type AgentRunCallbackStatus =
+  | 'pending'
+  | 'delivered'
+  | 'failed'
+  /** A caller is waiting on the run (a `wait` window): no callback is owed unless it stops waiting before the answer. */
+  | 'waiting'
+  /** The waiting caller got the final state: no callback is owed. */
+  | 'answered';
 
 // ── Webhook subscriptions ────────────────────────────────────────────────
 
@@ -4581,15 +4786,87 @@ export interface IAgentRun extends IUsageAttributionFields {
    * with. Never returned by the API.
    */
   callbackSecret?: string | null;
-  /** Effective background ceiling resolved at submit time (env ∧ tenant quota ∧ agent). */
+  /** Effective run ceiling resolved at submit time (env ∧ tenant quota). */
   maxDurationMs?: number | null;
+  /** Absent = `default`. */
+  runClass?: AgentRunClass;
+  /** Scheduled start: a `scheduled` row is promoted to `queued` once this is due. */
+  notBefore?: Date | null;
+  /** Set when an `inline` run's caller stopped waiting (the call answered 202). */
+  detachedAt?: Date | null;
+  /**
+   * The request asked for `background: true` (Responses). A queued run is
+   * background by its mode; this keeps the choice on a streamed one, which runs
+   * inline, so a read of the run reports it. Absent = not asked.
+   */
+  background?: boolean;
+  /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
+  metadata?: Record<string, string> | null;
+  /** The surface that created the run. */
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | null;
+  triggerId?: string | null;
+  trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
+  /**
+   * No interactive user on the run (a trigger fire): a gated tool follows the
+   * agent's `humanInTheLoop.unattended` setting. Every continuation keeps it.
+   */
+  unattended?: boolean;
+  /**
+   * The message / variables came from an external payload: values taken from it never fill the
+   * system prompt's `{{variables.*}}` and the Variables block is closed (agentVariables.ts).
+   * Every continuation keeps it.
+   */
+  externalContent?: boolean;
+  /**
+   * With `externalContent`: the names of `variables` whose values did not come from the
+   * payload (a trigger's own fixed values, a Run now's overrides). Only these, besides the
+   * declared defaults, fill `{{variables.*}}` in the system prompt. Absent = none. Every
+   * continuation keeps it.
+   */
+  literalVariables?: string[] | null;
+  /** Per-request structured output; the worker and a resume re-apply it. */
+  responseFormat?: AgentResponseFormat | null;
+  /** Validated agent variables (`IAgentConfig.variables`). */
+  variables?: Record<string, unknown> | null;
+  /**
+   * Bumped on every (re)queue for a NEW execution (create = 1, resume/continue
+   * +1). The job dedup key is `ar_${runId}_${queueGeneration}`, so a reconciler
+   * republish of the same generation is a no-op.
+   */
+  queueGeneration?: number;
+  /** When the queue job was last published (reconciler republish bookkeeping). */
+  lastPublishedAt?: Date | null;
   callbackStatus?: AgentRunCallbackStatus | null;
   /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
   callbackAttempts?: number;
+  /**
+   * The event id (`evt_…`) `callbackStatus` / `callbackAttempts` belong to: a
+   * delivery job of an older event of the run does not write over them.
+   */
+  callbackEventId?: string | null;
+  /**
+   * Set while the run is queued to continue a paused turn: what continues it
+   * (`resume` = somebody answered, `timeout` = the timeout sweep) and who
+   * answered (user and API token). The worker reads them.
+   */
+  resumeTrigger?: 'resume' | 'timeout' | null;
+  resumeUserId?: string | null;
+  resumeApiTokenId?: string | null;
+  /**
+   * The principal whose spend and quota policies the run counts against when
+   * its owner is a synthetic actor (a trigger fire): the trigger's last
+   * updater (or creator), or the person and token that pressed Run now.
+   */
+  accountableUserId?: string | null;
+  accountableTokenId?: string | null;
   createdAt?: Date;
   startedAt?: Date | null;
   completedAt?: Date | null;
-  /** Retention cutoff (§12.10) — userMessage/result are not kept indefinitely. */
+  /**
+   * Retention cutoff (§12.10) — userMessage/result are not kept indefinitely.
+   * Counted from the run's earliest possible end at insert, and again from
+   * `completedAt` once the run is terminal.
+   */
   expiresAt?: Date | null;
   updatedAt?: Date;
 }

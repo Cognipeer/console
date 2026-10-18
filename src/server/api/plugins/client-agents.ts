@@ -1,96 +1,102 @@
-import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { agentShowsReasoning } from '@/lib/services/agents/agentReasoning';
 import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
-import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { AgentRunClass, AgentStatus, IAgentConfig, IAgentConversation, IAgentRun, IAgentSessionBudget } from '@/lib/database';
+import type { AgentConfigIssue } from '@/lib/services/agents/agentConfigValidation';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
-  createConversation,
   deleteAgentRecord,
   getAgentByKey,
   getConversationById,
   listAgents,
   updateAgentRecord,
-  runSyncAgentTurn,
-  createBackgroundAgentRun,
   getAgentRunStatus,
   isBackgroundModeRequested,
-  agentRunConflictErrorBody,
-  agentSyncTimeoutErrorBody,
-  idempotencyKeyRequiresBackgroundErrorBody,
   idempotencyKeyConflictErrorBody,
-  agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
 import {
-  MAX_IDEMPOTENCY_KEY_LENGTH,
-  agentDefaultCallback,
-  apiErrorBody,
-  backgroundDisabledErrorBody,
-  invalidRequestErrorBody,
+  isAgentRunActive,
   lookupIdempotentAgentRun,
-  resolveAgentExecutionLimits,
-  serializeAgentRun,
-  validateCallbackRequest,
+  waitForAgentRun,
 } from '@/lib/services/agents/agentRunService';
-import { resolveAgentConfig } from '@/lib/services/agents/agentService';
-import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
-import type { LicenseType } from '@/lib/license/license-manager';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
-import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
-import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
-import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
-import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
+import { namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
-import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   authorizationRefusalOf,
   getApiTokenContextForRequest,
   getHeaderValue,
   readJsonBody,
   withClientApiRequestContext,
+  withOpenAiApiRequestContext,
 } from '../fastify-utils';
+import { authz } from '@/lib/iam/routeAuthz';
 import {
   connectedConfigForUpdate,
+  invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
+  redactVersion,
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
-import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { advertisedModelsForRequest } from './agent-model-authz';
+import { sendAuthorizationUnavailable } from './agent-session-access';
 import {
-  AgentModelError,
-  advertisedModelsForRequest,
-  rememberSessionModel,
-  requestedAgentModel,
-  resolveRunModelForRequest,
-  sendAgentModelError,
-} from './agent-model-authz';
-import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
+  authorizeInvocationTarget,
+  checkSessionContinuable,
+  clientGoneSignal,
+  invocationApiTokenId,
+  invocationRuntimeContext,
+  openAiEnvelopeOf,
+  parseInvocationInput,
+  parseInvocationReasoning,
+  parseNewSessionBudget,
+  parseInvocationResponseFormat,
+  parseRunMetadata,
+  prepareInvocationSession,
+  readIdempotencyKey,
+  readInvocationBody,
+  refuseStreamAdmission,
+  resolveInvocationAgent,
+  resolveInvocationCallback,
+  resolveInvocationConfig,
+  resolveInvocationVariables,
+  resolveInvocationLimits,
+  resolveInvocationModel,
+  resolveInvocationTarget,
+  resolvePublishedAgentConfig,
+  runOutcomeRefusal,
+  sendInvocationFailure,
+  sendRunRefusal,
+  startRunOnSession,
+} from './agent-invocation';
+import { sendAgentResponseObject } from './agent-response-object';
+import { streamAgentRunAsResponses, streamRunSnapshot } from './agent-responses-stream';
+import { sendModelResponse } from './model-responses';
+import { variablesToJsonSchema } from '@/lib/services/agents/agentVariables';
 
 const logger = createLogger('api:client-agents');
 
 /**
- * Dual-prefix (§8, §12.3): `resp_<id>` is the synchronous scheme's id
- * (conversation-scoped) and also what a completed background run embeds as
- * its OWN `result.id` (`resp_<runId>`, §8); `run_<id>` is the background
- * run RESOURCE's own top-level id (the status-envelope `id` a caller
- * polling `GET /runs/:id` actually sees and is the most natural thing to
- * copy back as `previous_response_id`). Both must be accepted. Returns
- * `null` for anything else — an unrecognized prefix must 404, not silently
- * fall through to starting a brand-new conversation.
+ * `previous_response_id` → the run (or, for the oldest ids, the session) it
+ * names. `resp_<runId>` is what every response is now (one run = one
+ * response); `run_<runId>` is the runs API's id of the same run; a
+ * `resp_<conversationId>` from before responses were run-scoped still names
+ * its session. Null for anything else — an unrecognized prefix must 404, not
+ * silently start a new conversation.
  */
-function conversationIdFromResponseId(
-  responseId: string,
-): { strippedId: string; kind: 'resp' | 'run' } | null {
+function responseIdReference(responseId: string): { strippedId: string; kind: 'resp' | 'run' } | null {
   if (responseId.startsWith('resp_')) return { strippedId: responseId.slice(5), kind: 'resp' };
   if (responseId.startsWith('run_')) return { strippedId: responseId.slice(4), kind: 'run' };
   return null;
@@ -118,388 +124,271 @@ export function readSessionReference(body: Record<string, unknown>): { id?: stri
   return named.length > 0 ? { id: named[0] } : {};
 }
 
-function createResponsesHandler(usePublished: boolean) {
-  return withClientApiRequestContext(async (request, reply) => {
+/** Responses parameters an agent does not take (its own config decides); listed back in `X-Cognipeer-Ignored-Params`. */
+const AGENT_IGNORED_PARAMS = ['instructions', 'temperature', 'top_p', 'max_output_tokens', 'tools', 'tool_choice', 'parallel_tool_calls', 'truncation'] as const;
+
+const openAiFail = (
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  code: string,
+  options: { type?: string; param?: string; extra?: Record<string, unknown> } = {},
+) => sendInvocationFailure(reply, 'openai', {
+  status, type: options.type ?? 'invalid_request_error', message, code, ...(options.param ? { param: options.param } : {}), ...(options.extra ? { extra: options.extra } : {}),
+});
+
+/**
+ * `POST /client/v1/responses` (models and agents) and `POST
+ * /client/v1/agents/responses` (agents only). A model target is a gateway call
+ * (model-responses.ts). An agent turn is a run (§4.1): a plain call waits up to
+ * the window and answers 200 with the response, or 202 with it `in_progress`
+ * while the run carries on; `background: true` queues it (202 `queued`);
+ * `service_tier: "flex"` makes it a deferred run the call waits on like a plain
+ * one; `stream: true` runs it inline as Responses events (a disconnect cancels
+ * it, unless `background: true`: then it carries on detached). Both routes run
+ * the published version unless the request pins `version: N` or asks for `"draft"`.
+ */
+function createResponsesHandler(agentsOnly: boolean) {
+  return withOpenAiApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readInvocationBody(request, reply, 'openai');
+      if (!body) return reply;
       const model = body.model;
-
-      if (typeof model !== 'string') {
-        return reply.code(400).send({
-          error: 'model field is required and must contain the agent key',
-        });
+      if (typeof model !== 'string' || model.trim() === '') {
+        return openAiFail(reply, 400, agentsOnly
+          ? 'model is required and must contain the agent key'
+          : 'model is required: a model key, an agent key or agent:<key>', 'missing_model', { param: 'model' });
       }
 
-      const requestedVersion = body.version !== undefined && body.version !== null
-        ? Number(body.version)
-        : undefined;
-      if (requestedVersion !== undefined && (!Number.isFinite(requestedVersion) || requestedVersion < 1)) {
-        return reply.code(400).send({ error: 'version must be a positive integer' });
+      const resolvedTarget = await resolveInvocationTarget(ctx, model, { agentsOnly });
+      if (resolvedTarget.kind === 'not_found') {
+        return openAiFail(reply, 404, `The model "${model}" does not exist in this project`, 'model_not_found', { param: 'model' });
       }
+      // §5.8: agents for an agent target, models for a model target.
+      await authorizeInvocationTarget(request, resolvedTarget.kind);
+      if (resolvedTarget.kind === 'model') return await sendModelResponse(request, reply, ctx, body, resolvedTarget.modelKey);
 
-      const agent = await getAgentByKey(ctx.tenantDbName, model, ctx.projectId);
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
+      const target = await resolveInvocationAgent(reply, 'openai', ctx, resolvedTarget.agentKey, body.version);
+      if (!target) return reply;
+      const { agent } = target;
 
-      if (agent.status !== 'active') {
-        return reply.code(400).send({ error: 'Agent is not active' });
-      }
+      const ignored = AGENT_IGNORED_PARAMS.filter((name) => body[name] !== undefined && body[name] !== null);
+      if (ignored.length > 0) void reply.header('X-Cognipeer-Ignored-Params', ignored.join(','));
 
       // The text, and the files (`input_file` / `input_image`) of the last user message.
-      const userInput = extractResponseUserInput(body.input);
-      const userMessage = userInput.text ?? '';
-      if (!userMessage && userInput.files.length === 0) {
-        return reply.code(400).send({
-          error: 'input field is required (string or array of message items)',
-        });
+      const input = parseInvocationInput(reply, 'openai', agent, body.input, { allowEmpty: body.variables !== undefined && body.variables !== null });
+      if (!input) return reply;
+      const { userInput, userMessage } = input;
+
+      const metadata = parseRunMetadata(body.metadata);
+      if (!metadata.ok) return openAiFail(reply, 400, metadata.message, 'invalid_metadata', { param: 'metadata' });
+      const textFormat = body.text && typeof body.text === 'object' && !Array.isArray(body.text)
+        ? (body.text as { format?: unknown }).format
+        : undefined;
+      const responseFormat = parseInvocationResponseFormat(reply, 'openai', textFormat, 'text.format');
+      if (!responseFormat) return reply;
+      const runConfig = await resolveInvocationConfig(ctx, target);
+      const variables = resolveInvocationVariables(reply, 'openai', runConfig, body.variables);
+      if (!variables) return reply;
+      // `flex` is OpenAI's "cheaper, slower" tier: here the deferred class. Anything else runs as default.
+      const runClass: AgentRunClass = body.service_tier === 'flex' ? 'deferred' : 'default';
+      const background = isBackgroundModeRequested(getHeaderValue(request, 'x-cognipeer-background'), body);
+      if (body.stream !== undefined && body.stream !== null && typeof body.stream !== 'boolean') {
+        return openAiFail(reply, 400, 'stream must be a boolean', 'invalid_request', { param: 'stream' });
       }
-      const attachmentsAvailable = attachmentsAvailability(agent.config);
-      if (userInput.files.length > 0 && !attachmentsAvailable.available) {
-        return reply.code(403).send(invalidRequestErrorBody(attachmentsUnavailableMessage(attachmentsAvailable.reason), 'attachments_disabled'));
-      }
-      // The session this request continues: `previous_response_id`, or `session_id` / `conversation`.
-      const sessionRef = readSessionReference(body);
-      if ('error' in sessionRef) return reply.code(400).send(invalidRequestErrorBody(sessionRef.error, 'invalid_request'));
-      if (userInput.files.some((file) => file.fileId)
-        && typeof body.previous_response_id !== 'string' && sessionRef.id === undefined) {
-        return reply.code(400).send(invalidRequestErrorBody(
-          'file_id names a file already uploaded to a session: continue that session with session_id (or previous_response_id), or send file_data / image_url.',
-          'attachment_not_found',
-        ));
+      const stream = body.stream === true;
+      // A deferred run waits for a slot in its own queue: there is no turn to stream yet.
+      if (stream && runClass === 'deferred') {
+        return openAiFail(reply, 400, 'stream cannot be combined with service_tier "flex"', 'unsupported_parameter', { param: 'service_tier' });
       }
 
-      let conversationId: string | undefined;
+      // The session this request continues: `previous_response_id`, or `session_id` / `conversation`.
+      const sessionRef = readSessionReference(body);
+      if ('error' in sessionRef) return openAiFail(reply, 400, sessionRef.error, 'invalid_request');
+      const previousResponseId = typeof body.previous_response_id === 'string' ? body.previous_response_id : null;
+      if (userInput.files.some((file) => file.fileId) && previousResponseId === null && sessionRef.id === undefined) {
+        return openAiFail(
+          reply,
+          400,
+          'file_id names a file already uploaded to a session: continue that session with session_id (or previous_response_id), or send file_data / image_url.',
+          'attachment_not_found',
+        );
+      }
+
       let sessionConversation: IAgentConversation | null = null;
-      // §12.15's hash must never depend on a conversationId that is FRESH
-      // on this specific attempt — a caller retrying "start a new
-      // conversation" (no previous_response_id) gets a brand-new
-      // conversationId on every attempt, so including it in the hash would
-      // make the SAME logical retry never match itself. Only stabilize the
-      // hash on conversationId when the caller explicitly continued an
-      // EXISTING conversation via previous_response_id or session_id.
+      // The idempotency hash must never depend on a conversation that is FRESH on
+      // this attempt (a retry of "start a new conversation" gets a new one every
+      // time); it is the session only when the request continues an existing one.
       let idempotencyConversationScope: string | null = null;
       let resolvedConversationId: string | undefined;
-      if (typeof body.previous_response_id === 'string') {
-        // Dual-mode (§8, §12.3): a background/run response is polled by its
-        // OWN `run_<runId>` id, and its embedded `result.id` is
-        // `resp_<runId>` — a caller may reasonably pass either back as
-        // `previous_response_id`. A `run_` id MUST resolve via the AgentRun
-        // lookup (no raw-conversationId fallback: that scheme never existed
-        // for run ids). A `resp_` id keeps the existing dual-mode: try the
-        // AgentRun lookup first, fall back to the raw-conversationId scheme
-        // (the synchronous, conversation-scoped id) only if no run matches.
-        //
-        // agentKey alone is not unique across projects (findAgentByKey takes
-        // an optional projectId precisely because the same key can exist in
-        // more than one) — without the projectId check, a token in project B
-        // could reuse a previous_response_id from project A's conversation
-        // with the same-keyed agent and read/append to project A's history.
-        const parsed = conversationIdFromResponseId(body.previous_response_id);
+      if (previousResponseId !== null) {
+        // Scoped on tenant AND project: the same agent key can exist in another project.
+        const parsed = responseIdReference(previousResponseId);
         const run = parsed
           ? await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId)
           : null;
         resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
         if (resolvedConversationId === undefined) {
-          return reply.code(404).send({ error: 'previous_response_id does not match a valid conversation' });
+          return openAiFail(reply, 404, 'previous_response_id does not match a response of this project', 'previous_response_not_found', { param: 'previous_response_id' });
         }
       }
-      // `session_id` / `conversation` name the same thing in the session's own words. With
-      // `previous_response_id` too they must agree: two different sessions is a mistake, not a choice.
+      // With `previous_response_id` too they must agree: two different sessions is a mistake, not a choice.
       if (sessionRef.id !== undefined) {
         if (resolvedConversationId !== undefined && resolvedConversationId !== sessionRef.id) {
-          return reply.code(400).send(invalidRequestErrorBody(
-            'session_id and previous_response_id name different sessions: send one of them',
-            'session_conflict',
-          ));
+          return openAiFail(reply, 400, 'session_id and previous_response_id name different sessions: send one of them', 'session_conflict');
         }
         resolvedConversationId = sessionRef.id;
       }
       if (resolvedConversationId !== undefined) {
         const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId).catch(() => null);
         if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-          return reply.code(404).send(sessionRef.id !== undefined && typeof body.previous_response_id !== 'string'
-            ? apiErrorBody('not_found_error', 'session_id does not match a session of this agent', 'session_not_found')
-            : { error: 'previous_response_id does not match a valid conversation' });
+          return sessionRef.id !== undefined && previousResponseId === null
+            ? openAiFail(reply, 404, 'session_id does not match a session of this agent', 'session_not_found', { param: 'session_id' })
+            : openAiFail(reply, 404, 'previous_response_id does not match a response of this agent', 'previous_response_not_found', { param: 'previous_response_id' });
         }
-        // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
-        // `agent.session_manage_others` and `agent.session_view_others` (the answer is built from what the session
-        // holds). Whichever route the request came in on (this one is `agents`, the OpenAI-shaped `/responses` is
-        // `models`), a token only reaches a session through this check.
-        const access = await decideSessionAccess(request, conversation, {
-          need: 'continue',
-          agent,
-          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
-        });
-        if (!access.ok) return sendClientSessionRefusal(reply, request, access);
-        // Waiting on an approval or an answer, and the agent refuses new
-        // messages meanwhile: say so before any run is created.
-        const blocking = await pendingActionsBlockingMessage(ctx.tenantDbName, conversation, agent.config);
-        if (blocking) {
-          return reply.code(409).send({
-            error: {
-              type: 'pending_action',
-              code: 'pending_action',
-              message: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
-              pending_action_ids: blocking,
-            },
-          });
-        }
-        // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it
-        // with "no", so it takes the permission to answer.
-        const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
-        if (cancelRefusal?.unavailable) {
-          return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
-        }
-        if (cancelRefusal) {
-          return reply.code(403).send(apiErrorBody(
-            'permission_error',
-            CANCEL_PENDING_FORBIDDEN_MESSAGE,
-            'action_forbidden',
-            cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : undefined,
-          ));
-        }
-        // The session has used up its own spend budget: nothing to run (402).
-        assertSessionBudgetAvailable(conversation);
-        conversationId = resolvedConversationId;
+        // Access, an open approval/question, `cancel_pending` and a spent budget (agent-invocation.ts).
+        if (!await checkSessionContinuable(request, reply, 'openai', ctx, agent, conversation)) return reply;
         sessionConversation = conversation;
         idempotencyConversationScope = resolvedConversationId;
       }
 
-      // A spend budget for the session this request starts (`null` = none).
-      // A request that continues a session ignores the field altogether — not
-      // read, not validated, so a client that always sends its default budget
-      // keeps working on follow-up turns. That session's budget changes with
-      // PATCH /client/v1/agents/sessions/:conversationId.
+      // A spend budget for the session this request starts; a follow-up turn ignores the field
+      // (that session's budget changes with PATCH /client/v1/agents/sessions/:id).
       let sessionBudget: IAgentSessionBudget | null | undefined;
-      if (!conversationId) {
-        if (body.budget === null) sessionBudget = null;
-        else if (body.budget !== undefined) {
-          const parsed = parseSessionBudget(body.budget);
-          if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
-          sessionBudget = parsed.budget;
-        }
-        // An agent whose admin set a session budget binds its API clients to it.
-        if (sessionBudget !== undefined) {
-          const violation = clientBudgetViolation(agent.config, sessionBudget);
-          if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
-        }
+      if (!sessionConversation) {
+        const parsedBudget = parseNewSessionBudget(reply, 'openai', agent, body.budget);
+        if (!parsedBudget) return reply;
+        sessionBudget = parsedBudget.budget;
       }
 
-      // `reasoning_effort` / `reasoning: { effort }`: the lowest rung of the reasoning precedence (the agent's
-      // own pick and the Model Hub default win), so a bad value is refused instead of silently ignored.
-      const reasoningRequest = parseAgentRequestReasoning(body);
-      if (reasoningRequest.error) {
-        return reply.code(400).send(invalidRequestErrorBody(reasoningRequest.error, 'invalid_reasoning'));
-      }
+      const reasoningRequest = parseInvocationReasoning(reply, 'openai', body);
+      if (!reasoningRequest) return reply;
+      const chosenModel = await resolveInvocationModel(request, reply, 'openai', ctx, { target, body, conversation: sessionConversation });
+      if (!chosenModel) return reply;
+      const { modelChoice } = chosenModel;
+      const limits = await resolveInvocationLimits(ctx);
+      const idempotency = readIdempotencyKey(request, reply, 'openai');
+      if (!idempotency) return reply;
+      const idempotencyKey = idempotency.key;
+      // Accepted on any call; it fires only if the run ends up async (queued, or detached past the window).
+      const callback = await resolveInvocationCallback(reply, 'openai', agent, body.callback_url, body.callback_secret);
+      if (!callback) return reply;
 
-      // Which of the agent's models this run uses (`agent_model` / header; the sticky model of the session otherwise).
-      // The config that will run decides the list: the published one for /agents/responses or a pinned version.
-      let modelChoice: AgentModelChoice | undefined;
-      const askedModel = requestedAgentModel(request, body);
-      if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
-        const runConfig = usePublished || requestedVersion !== undefined
-          ? (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId, requestedVersion)).config
-          : agent.config;
-        if (askedModel || runConfig.additionalModels?.length) {
-          try {
-            modelChoice = await resolveRunModelForRequest(request, {
-              agent, config: runConfig, projectId: ctx.projectId, requested: askedModel, conversation: sessionConversation,
-            });
-          } catch (error) {
-            if (error instanceof AgentModelError) return sendAgentModelError(reply, request, error);
-            throw error;
-          }
-        }
-      }
-
-      // Effective execution limits: min(env ceiling, tenant quota, the
-      // agent's own Execution settings). Execution settings are operational
-      // and apply without publishing, so they are read from the live agent.
-      const limits = await resolveAgentExecutionLimits({
-        agentConfig: agent.config,
-        quotaContext: {
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          licenseType: ctx.tenant.licenseType as LicenseType,
-          userId: ctx.tokenRecord.userId,
-          tokenId: ctx.tokenRecord._id?.toString(),
-        },
-      });
-
-      const idempotencyKey = getHeaderValue(request, 'idempotency-key');
-      const background = isBackgroundModeRequested(
-        getHeaderValue(request, 'x-cognipeer-background'),
-        body,
-        limits.defaultMode,
-      );
-      // §9/§12.15: Idempotency-Key is background-only — sync mode persists
-      // nothing to key a retry against, so honoring it would silently do
-      // nothing. Rejected loudly instead.
-      if (idempotencyKey && !background) {
-        return reply.code(400).send(idempotencyKeyRequiresBackgroundErrorBody());
-      }
-      if (idempotencyKey && idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
-        return reply.code(400).send(invalidRequestErrorBody(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
-      }
-      if (background && !limits.backgroundEnabled) {
-        return reply.code(400).send(backgroundDisabledErrorBody());
-      }
-
-      let callback: { url?: string; secret?: string } = {};
-      if (background) {
-        const requested = await validateCallbackRequest(body.callback_url, body.callback_secret);
-        if (!requested.ok) return reply.code(400).send(invalidRequestErrorBody(requested.message, 'invalid_callback'));
-        callback = requested.url ? { url: requested.url, secret: requested.secret } : agentDefaultCallback(agent.config);
-      }
+      const objectOptions = {
+        model,
+        previousResponseId,
+        ...(modelChoice ? { agentModel: modelChoice.modelKey } : {}),
+        includeReasoning: shouldReturnReasoning(undefined, body),
+        background,
+      };
+      const ref = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
+      // A stream is always an inline turn: the caller is receiving it.
+      const queued = !stream && (background || runClass === 'deferred');
+      // A plain (or flex) call waits up to the window on a run that is still going; `background` never waits.
+      // The wait stops when the client goes away.
+      const gone = clientGoneSignal(reply);
+      const settle = async (run: IAgentRun) => (!background && isAgentRunActive(run) && run.status !== 'scheduled'
+        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, limits.syncWaitMs, gone)) ?? run
+        : run);
 
       // A replayed request must not mint a fresh conversation first — every
       // retry of "start a new conversation" would leave an orphan behind.
-      if (background && idempotencyKey) {
+      if (idempotencyKey) {
         const prior = await lookupIdempotentAgentRun({
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
+          ...ref,
           agentKey: agent.key,
           userMessage,
           idempotencyAttachments: namedFileIds(userInput.files),
-          version: requestedVersion,
+          version: target.version,
           idempotencyKey,
           idempotencyConversationScope,
         });
-        if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
-        if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
+        if (prior.kind === 'conflict') return reply.code(409).send(openAiEnvelopeOf(idempotencyKeyConflictErrorBody()));
+        if (prior.kind === 'replay') {
+          const settled = await settle(prior.run);
+          return stream ? streamRunSnapshot(reply, settled, objectOptions) : sendAgentResponseObject(reply, settled, objectOptions);
+        }
       }
 
-      // A queued turn learns of an exhausted tenant spend limit here (429), not
-      // from a run that fails later — and before a conversation is created for it.
-      if (background) {
-        await assertQueuedTurnSpendAllowed({
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          projectId: ctx.projectId,
-          agentKey: agent.key,
-          userId: ctx.tokenRecord.userId,
-        });
+      // A queued turn learns of an exhausted tenant spend limit here (429), before a session is created for it.
+      if (queued) {
+        await assertQueuedTurnSpendAllowed({ ...ref, agentKey: agent.key, userId: ctx.tokenRecord.userId });
+      } else if (stream && await refuseStreamAdmission(reply, 'openai', ctx, agent.key, limits)) {
+        // Over a cap or the quota: a plain 429 before the stream opens (and before a session exists).
+        return reply;
       }
 
-      if (!conversationId) {
-        const conversation = await createConversation(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          ctx.tokenRecord.userId,
-          agent.key,
-          undefined,
-          { source: 'api' },
-          sessionBudget,
-        );
-        conversationId = String(conversation._id);
-        sessionConversation = conversation;
-      }
-      // A queued run reads the choice from its session, so it is stored before the run is created.
-      if (modelChoice && sessionConversation) await rememberSessionModel(ctx.tenantDbName, sessionConversation, modelChoice);
-
-      // Files in the request become files of the session this turn runs on.
-      let attachments: string[] = [];
-      let namedAttachments: string[] = [];
-      if (userInput.files.length > 0 && sessionConversation) {
-        const stored = await storeResponseInputFiles({
-          files: userInput.files,
-          scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-          conversation: sessionConversation,
-          agentConfig: agent.config,
-          actor: {
-            userId: ctx.tokenRecord.userId,
-            licenseType: ctx.tenant.licenseType,
-            tokenId: ctx.tokenRecord._id?.toString() ?? ctx.token,
-          },
-        });
-        attachments = stored.attachments;
-        namedAttachments = stored.named;
-      }
-
-      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
-      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
-        userId: ctx.tokenRecord.userId,
-        tokenId: apiTokenId,
-        source: 'api',
+      // The session (new or continued), the model choice stored on it, the request's files as its files.
+      const prepared = await prepareInvocationSession(ctx, {
+        agent,
+        conversation: sessionConversation,
+        sessionBudget,
+        ...(modelChoice ? { modelChoice } : {}),
+        userInput,
       });
+      const apiTokenId = invocationApiTokenId(ctx);
+      const base = {
+        ...ref,
+        agentKey: agent.key,
+        conversationId: prepared.conversationId,
+        userMessage,
+        ...(prepared.attachments.length > 0 ? { attachments: prepared.attachments, idempotencyAttachments: prepared.namedAttachments } : {}),
+        userId: ctx.tokenRecord.userId,
+        ...(apiTokenId ? { apiTokenId } : {}),
+        actorType: 'api_token' as const,
+        ...(target.version !== undefined ? { version: target.version } : {}),
+        usePublished: target.usePublished,
+        runtimeContext: invocationRuntimeContext(request, ctx, body.runtime_context),
+        responseFormat: responseFormat.format,
+        variables: variables.variables,
+        runClass,
+        channel: 'responses' as const,
+        trigger: 'request' as const,
+        ...(background ? { background: true } : {}),
+        metadata: metadata.metadata,
+        callback: callback.url ? { url: callback.url, ...(callback.secret ? { secret: callback.secret } : {}) } : null,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        idempotencyConversationScope,
+        limits,
+      };
 
-      if (background) {
-        const outcome = await createBackgroundAgentRun({
-          tenantId: ctx.tenantId,
-          tenantDbName: ctx.tenantDbName,
-          projectId: ctx.projectId,
-          agentKey: agent.key,
-          conversationId,
-          userMessage,
-          ...(attachments.length > 0 ? { attachments, idempotencyAttachments: namedAttachments } : {}),
-          userId: ctx.tokenRecord.userId,
-          version: requestedVersion,
-          usePublished,
-          runtimeContext,
-          apiTokenId,
-          callbackUrl: callback.url,
-          callbackSecret: callback.secret,
-          idempotencyKey: idempotencyKey ?? undefined,
-          idempotencyConversationScope,
-          limits,
+      if (stream) {
+        return await streamAgentRunAsResponses(reply, base, {
+          cancelOnDisconnect: !background,
+          modelKey: modelChoice?.modelKey,
+          requestReasoning: reasoningRequest.value,
+          streamReasoning: objectOptions.includeReasoning && agentShowsReasoning(runConfig),
+          object: objectOptions,
+          newSession: prepared.created,
         });
-        if (outcome.kind === 'conflict') {
-          return reply.code(409).send(agentRunConflictErrorBody());
-        }
-        if (outcome.kind === 'idempotency_conflict') {
-          return reply.code(409).send(idempotencyKeyConflictErrorBody());
-        }
-        if (outcome.kind === 'concurrency_limit') {
-          return reply.code(429).send(agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope));
-        }
-        // `idempotent_replay` returns the SAME run a prior identical request
-        // already created — 200, not 202, since no new work was queued here.
-        return reply.code(outcome.kind === 'idempotent_replay' ? 200 : 202).send(serializeAgentRun(outcome.run));
       }
 
-      // §3.2/§12.14: the same single-active-run check runs against
-      // AgentRun before running inline — a background run already
-      // `queued`/`running` for this conversation rejects a synchronous
-      // request the same way it would reject a second background one.
-      const syncOutcome = await runSyncAgentTurn({
-        request: {
-          agentKey: agent.key,
-          conversationId,
-          projectId: ctx.projectId,
-          tenantDbName: ctx.tenantDbName,
-          tenantId: ctx.tenantId,
-          usePublished,
-          userId: ctx.tokenRecord.userId,
-          userMessage,
-          ...(attachments.length > 0 ? { attachments } : {}),
-          version: requestedVersion,
-          runtimeContext,
+      const session = { tenantDbName: ctx.tenantDbName, conversationId: prepared.conversationId, created: prepared.created };
+      const outcome = await startRunOnSession(queued
+        ? { ...base, execution: { kind: 'queued' } }
+        : {
+          ...base,
           ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
           ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
-        },
-        syncTimeoutMs: limits.syncTimeoutMs,
-      });
-      if (syncOutcome.kind === 'conflict') {
-        return reply.code(409).send(agentRunConflictErrorBody());
+          execution: { kind: 'inline', waitMs: limits.syncWaitMs, cancelOnDisconnect: false },
+        }, session);
+      const refusal = runOutcomeRefusal(outcome);
+      if (refusal) return sendRunRefusal(reply, 'openai', refusal);
+      if (outcome.kind === 'completed') {
+        const { _conversation_messages, ...responseBody } = outcome.response;
+        void _conversation_messages;
+        return sendAgentResponseObject(reply, outcome.run, objectOptions, responseBody as unknown as Record<string, unknown>);
       }
-      if (syncOutcome.kind === 'timeout') {
-        return reply.code(504).send(agentSyncTimeoutErrorBody());
+      // `detached`: the window ended with the run still going — it continues; follow it with GET /responses/{id}.
+      if (outcome.kind === 'detached') return sendAgentResponseObject(reply, outcome.run, objectOptions);
+      if (outcome.kind === 'accepted' || outcome.kind === 'replay') {
+        return sendAgentResponseObject(reply, await settle(outcome.run), objectOptions);
       }
-
-      const { _conversation_messages, ...fullBody } = syncOutcome.response;
-      void _conversation_messages;
-      // The agent's `showReasoning` already left the reasoning item out; `include_reasoning: false` lets
-      // a request narrow it further for itself (it can never bring back what the agent hid).
-      const responseBody = !shouldReturnReasoning(undefined, body)
-        ? { ...fullBody, output: (fullBody.output ?? []).filter((item) => item.type !== 'reasoning') }
-        : fullBody;
-      return reply.code(200).send(modelChoice ? { ...responseBody, cognipeer: { agent_model: modelChoice.modelKey } } : responseBody);
+      return openAiFail(reply, 500, 'Internal error', 'internal_error', { type: 'server_error' });
     } catch (error) {
+      // A refused target is the wrapper's to answer (403 / 503, OpenAI envelope).
+      if (authorizationRefusalOf(error)) throw error;
       if (error instanceof AgentGuardrailBlockedError) {
         // Info, not error: a refused prompt is policy working as configured.
         logger.info('Client agent response blocked by guardrail', {
@@ -513,7 +402,7 @@ function createResponsesHandler(usePublished: boolean) {
       // refusal the caller can act on (a spent budget, a pending approval) is
       // logged as such, without a stack; only a server fault is an error.
       const classified = logAgentRouteError(logger, 'Client agent responses error', error);
-      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
+      return reply.code(classified.status).send(openAiEnvelopeOf({ error: toClientErrorBody(classified.error) }));
     }
   });
 }
@@ -569,9 +458,12 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // The config API callers run: the published version (the draft while nothing is published).
+      const runConfig = await resolvePublishedAgentConfig(ctx.tenantDbName, agent, ctx.projectId);
+
       // The models a caller may pick, when the agent offers more than its main one (those they may not use are left out).
       const models = !agent.config.additionalModels?.length ? undefined : await advertisedModelsForRequest(request, {
-        agent: { ...agent, config: (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId).catch(() => null))?.config ?? agent.config },
+        agent: { ...agent, config: runConfig },
         tenantDbName: ctx.tenantDbName,
         projectId: ctx.projectId,
       }).catch(() => undefined);
@@ -599,6 +491,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
+          // The agent as a typed function: what `variables` it takes and the shape of its structured answer (null = none).
+          variables_schema: variablesToJsonSchema(runConfig.variables),
+          output_schema: runConfig.structuredOutput?.enabled && runConfig.structuredOutput.schema ? runConfig.structuredOutput.schema : null,
           ...(models ? { models } : {}),
           ...(attachments ? {
             attachments: {
@@ -607,6 +502,13 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
               max_file_size_mb: attachments.maxFileSizeMb,
               allowed_mime_types: attachments.allowedMimeTypes,
               accepts_images: attachments.acceptsImages,
+              // Files the agent writes for the person (session_files_create): off, or on with its limits and types.
+              outputs: {
+                enabled: attachments.outputs.enabled,
+                max_files_per_turn: attachments.outputs.maxFilesPerTurn,
+                max_file_size_mb: attachments.outputs.maxFileSizeMb,
+                types: attachments.outputs.types,
+              },
             },
           } : {}),
         },
@@ -617,20 +519,18 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // Deliberately different defaults, not a typo: /agents/responses always
-  // runs the published version (usePublished=true); the general /responses
-  // dialect runs the current draft config unless the caller asks for a
-  // specific version (usePublished=false). A caller who has only ever seen
-  // a published version in the dashboard can otherwise assume the general
-  // Responses route uses it too — it does not, unless told to.
+  // Both run the published version by default (`version: "draft"` asks for the draft);
+  // /agents/responses is the agents-only alias, /responses resolves models and agents (§1.2).
   app.post('/client/v1/agents/responses', createResponsesHandler(true));
-  app.post('/client/v1/responses', createResponsesHandler(false));
+  app.post('/client/v1/responses', { config: authz.serviceAnyOf(['models', 'agents']) }, createResponsesHandler(false));
 
   // ── Authoring: create an agent definition ──
   app.post('/client/v1/agents', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
 
       if (typeof body.name !== 'string' || body.name.trim() === '') {
         return reply.code(400).send({ error: 'Agent name is required' });
@@ -662,7 +562,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(201).send({ agent: redactAgent(agent) });
+      return reply.code(201).send({ agent: redactAgent(agent), warnings: prepared.warnings });
     } catch (error) {
       // The engine could not decide who may name the bucket: 503, not a failure of ours.
       const refusal = authorizationRefusalOf(error);
@@ -685,6 +585,10 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
+
+      let warnings: AgentConfigIssue[] = [];
 
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
@@ -719,7 +623,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
+          if ('conflict' in checked) return reply.code(409).send(checked.conflict);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
+          warnings = checked.warnings;
         }
       }
 
@@ -735,7 +641,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      return reply.code(200).send({ agent: redactAgent(agent) });
+      return reply.code(200).send({ agent: redactAgent(agent), warnings });
     } catch (error) {
       const refusal = authorizationRefusalOf(error);
       if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });
@@ -788,7 +694,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.tokenRecord.userId,
       );
       if ('badRequest' in published) return reply.code(400).send(published.badRequest);
-      return reply.code(201).send({ version: published.version });
+      return reply.code(201).send({ version: redactVersion(published.version) });
     } catch (error) {
       logger.error('Publish client agent error', { error });
       return reply.code(500).send({

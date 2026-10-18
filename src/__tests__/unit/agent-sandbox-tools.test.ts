@@ -31,6 +31,24 @@ vi.mock('@/lib/database', async (importOriginal) => {
     };
 });
 
+const downloaded = vi.hoisted(() => ({ files: new Map<string, Uint8Array>() }));
+vi.mock('@/lib/services/files', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/files')>();
+    return { ...actual, downloadFile: vi.fn(async (_db: string, _t: string, _p: string, _bucket: string, key: string) => ({ data: downloaded.files.get(key) })) };
+});
+
+const savedOutputs = vi.hoisted(() => [] as Array<{ fileName: string; data: Buffer }>);
+vi.mock('@/lib/services/agents/sessionFiles', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/sessionFiles')>();
+    return {
+        ...actual,
+        saveAgentOutputFile: vi.fn(async (input: { fileName: string; data: Buffer }) => {
+            savedOutputs.push({ fileName: input.fileName, data: input.data });
+            return { fileId: `f_${input.fileName}`, name: input.fileName, mimeType: 'text/plain', size: input.data.length, origin: 'agent_output' };
+        }),
+    };
+});
+
 import { agentSandboxRunner, type AgentSandboxRunner } from '@/enterprise/registry';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { buildAgentSandboxTools, destroyConversationSandbox } from '@/lib/services/agents/agentSandboxTools';
@@ -180,6 +198,70 @@ describe('secrets', () => {
         expect((fake.calls[1].args[2] as { env: Record<string, string> }).env).toEqual({ API_TOKEN: 's3cr3t-value' });
         expect(out.stdout).not.toContain('s3cr3t-value');
         expect(out.stdout).toContain('••••••');
+    });
+});
+
+describe('secrets — seed files, outputs and an unreadable store', () => {
+    const SECRET = 's3cr3t-value';
+    const seedFile = {
+        id: 'seed-1', name: 'template.txt', path: '/workspace/templates/template.txt', size: 5,
+        fileRef: { bucketKey: 'assets', objectKey: 'agent-assets/builder/template.txt' },
+    };
+
+    it('writes seed files without the agent secrets in the command environment', async () => {
+        downloaded.files.set('agent-assets/builder/template.txt', new Uint8Array([1, 2, 3, 4, 5]));
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: SECRET }, seedFiles: [seedFile] }, undefined)!;
+        const { byName } = await build(sandbox);
+        await byName('sandbox_exec').invoke({ command: 'echo $API_TOKEN' });
+
+        const execs = fake.calls.filter((c) => c.op === 'exec');
+        expect(execs.length).toBeGreaterThan(1);
+        const [command, ...seedWrites] = [execs[execs.length - 1]!, ...execs.slice(0, -1)];
+        expect((command!.args[2] as { env: Record<string, string> }).env).toEqual({ API_TOKEN: SECRET });
+        for (const write of seedWrites) {
+            expect((write.args[2] as { env?: unknown }).env).toBeUndefined();
+            expect(JSON.stringify(write.args)).not.toContain(SECRET);
+        }
+    });
+
+    it('scrubs secret values from text files in /outputs and leaves binary files as they are', async () => {
+        savedOutputs.length = 0;
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: SECRET } }, undefined)!;
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
+        const binary = Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(SECRET)]);
+        const files: Record<string, Buffer> = {
+            '/outputs/report.txt': Buffer.from(`token: ${SECRET}\nend`),
+            '/outputs/blob.bin': binary,
+        };
+        fake.runner.exec = async (...args) => {
+            fake.calls.push({ op: 'exec', args });
+            const command = (args[2] as { command: string }).command;
+            return command.startsWith('find ')
+                ? { exitCode: 0, stdout: Object.entries(files).map(([path, data]) => `10|${data.length}|${path}`).join('\n'), stderr: '' }
+                : { exitCode: 0, stdout: 'ok', stderr: '' };
+        };
+        fake.runner.readFileBytes = async (_ref, _id, path) => files[path]!;
+
+        const { byName, collectOutputs } = await build(sandbox, {
+            conversation: { _id: 'conv-1', metadata: {} },
+            outputs: { agentConfig: undefined, actorId: 'user-1' },
+        });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        const { attachments } = await collectOutputs();
+
+        expect(attachments).toHaveLength(2);
+        const text = savedOutputs.find((f) => f.fileName === 'report.txt')!;
+        expect(text.data.toString('utf8')).toBe(`token: ••••••\nend`);
+        expect(savedOutputs.find((f) => f.fileName === 'blob.bin')!.data.equals(binary)).toBe(true);
+    });
+
+    it('says the secrets are unavailable when the stored ones cannot be decrypted', async () => {
+        const { byName, tools } = await build({ enabled: true, secretsSealed: 'not-a-valid-ciphertext' });
+        expect((tools.find((t: { name: string }) => t.name === 'sandbox_exec') as { description: string }).description).toMatch(/unavailable/);
+        const out = await byName('sandbox_exec').invoke({ command: 'echo hi' }) as { notice?: string; stdout: string };
+        expect(out.notice).toMatch(/secrets .* unavailable/);
+        expect(out.notice).toMatch(/encryption key/);
+        expect((fake.calls[1]!.args[2] as { env: Record<string, string> }).env).toEqual({});
     });
 });
 

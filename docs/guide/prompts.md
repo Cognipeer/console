@@ -89,6 +89,8 @@ Authorization: Bearer <token>
 
 Prompt templates use `{{variable}}` syntax (Handlebars-compatible). The API returns detected variables alongside the template for client-side rendering.
 
+When the platform renders a template (the render endpoint, an agent's instructions, the Studio preview), a value is inserted exactly as it was given. The text is for a model, so `&`, `<`, `>` and quotes are not turned into HTML entities, and the double-brace, triple-brace and ampersand forms of a variable give the same result.
+
 ## Version Control
 
 - Every template change creates a new version automatically

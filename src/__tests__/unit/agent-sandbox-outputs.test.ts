@@ -4,6 +4,7 @@ import {
   collectSandboxOutputs,
   outputFileName,
   parseStatListing,
+  scrubTextFile,
   readBytesViaExec,
   withSandboxOutputsPrompt,
   type OutputEntry,
@@ -76,6 +77,30 @@ describe('collectSandboxOutputs', () => {
     expect(failing.warnings[0]).toMatch(/no sandbox/);
   });
 
+  it('scrubs text files before they are stored and leaves binary files alone', async () => {
+    const bytes: Record<string, Buffer> = {
+      '/outputs/a.txt': Buffer.from('key=top-secret-1 and top-secret-1'),
+      '/outputs/b.png': Buffer.concat([Buffer.from([0x89, 0, 1]), Buffer.from('top-secret-1')]),
+      '/outputs/c.csv': Buffer.from('nothing here'),
+    };
+    const entries = Object.entries(bytes).map(([path, data]) => ({ path, size: data.length, mtime: 1 }));
+    const scrub = (text: string) => text.split('top-secret-1').join('••••••');
+    const { d, store } = deps(entries, { readBytes: async (e: OutputEntry) => bytes[e.path]!, scrub });
+    await collectSandboxOutputs(d);
+    const stored = Object.fromEntries(store.mock.calls.map(([f]) => [f.name, f.data]));
+    expect(stored['a.txt']!.toString('utf8')).toBe('key=•••••• and ••••••');
+    expect(stored['b.png']!.equals(bytes['/outputs/b.png']!)).toBe(true);
+    expect(stored['c.csv']!.toString('utf8')).toBe('nothing here');
+  });
+
+  it('scrubTextFile treats invalid UTF-8 as binary and returns an unchanged file as is', () => {
+    const scrub = (t: string) => t.replace('x', 'y');
+    const invalid = Buffer.from([0xff, 0xfe, 0x78]);
+    expect(scrubTextFile(invalid, scrub)).toBe(invalid);
+    const plain = Buffer.from('no match');
+    expect(scrubTextFile(plain, scrub)).toBe(plain);
+  });
+
   it('ignores paths outside /outputs', async () => {
     const { d } = deps([{ path: '/etc/passwd', size: 3, mtime: 1 }, { path: '/outputs/../etc/x', size: 3, mtime: 1 }]);
     expect((await collectSandboxOutputs(d)).attachments).toHaveLength(0);
@@ -109,7 +134,7 @@ describe('helpers', () => {
 describe('wire', () => {
   it('maps only agent outputs to output_files and file_path annotations', () => {
     const files = toClientOutputFiles('conv1', [att('r.pdf', 9), { fileId: 'u1', name: 'upload.txt', mimeType: 'text/plain', size: 1 }]);
-    expect(files).toEqual([{ id: 'f_r.pdf', name: 'r.pdf', mime_type: 'text/plain', size: 9, download_url: '/client/v1/agents/sessions/conv1/files/f_r.pdf/content' }]);
+    expect(files).toEqual([{ id: 'f_r.pdf', name: 'r.pdf', mime_type: 'text/plain', size: 9, download_url: '/api/client/v1/agents/sessions/conv1/files/f_r.pdf/content' }]);
     expect(toFileAnnotations(files)).toEqual([{ type: 'file_path', file_id: 'f_r.pdf', filename: 'r.pdf' }]);
     expect(toClientOutputFiles('c', undefined)).toEqual([]);
   });

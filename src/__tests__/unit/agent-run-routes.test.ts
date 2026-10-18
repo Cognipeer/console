@@ -1,9 +1,9 @@
 /**
- * Group D/E route-layer wiring (docs/guide/agent-background-execution.md
- * §13) — proves `client-agents.ts`'s responses handler and the new
- * `client-agent-runs.ts` endpoints wire the background signal, conflict/
- * timeout outcomes, and idempotency-key rejection to the right HTTP status
- * and envelope. Service-level behavior (claim/finalize CAS, the race
+ * Route-layer wiring of the OpenAI Responses dialect (§5.3) and the runs
+ * routes: `client-agents.ts`'s responses handler starts every agent turn
+ * through `startAgentRun` and answers with the run's Response object (200
+ * finished, 202 still going), `GET/POST /responses/:id(/cancel)` read and
+ * cancel it, and the runs API's get/cancel are scoped to the token's project. Service-level behavior (claim/finalize CAS, the race
  * itself) is already covered by `agent-run-sync-ceiling.test.ts` and
  * `agent-run-background-execution.test.ts` — this file replaces every
  * DB/queue-touching function of `agentRunService.ts` (keeping its pure
@@ -16,15 +16,18 @@ const hoisted = vi.hoisted(() => ({
   getAgentByKey: vi.fn(),
   getConversationById: vi.fn(),
   createConversation: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
+  startAgentRun: vi.fn(),
+  waitForAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
-  requestAgentRunCancellation: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  getModelByKey: vi.fn(),
+  resolveAgentConfig: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
   lookupIdempotentAgentRun: vi.fn(),
-  resolveAgentExecutionLimits: vi.fn(),
+  resolveAgentRunLimits: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  handleChatCompletion: vi.fn(),
 }));
 
 // The permission gate reads the caller inside a tenant scope: serve it from the same stubbed database.
@@ -58,7 +61,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   publishAgent: vi.fn(),
   getAgentVersion: vi.fn(),
   listAgentVersions: vi.fn(),
-  resolveAgentConfig: vi.fn(),
+  resolveAgentConfig: hoisted.resolveAgentConfig,
   createConversation: hoisted.createConversation,
   getConversationById: hoisted.getConversationById,
   listConversations: vi.fn(),
@@ -75,15 +78,27 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
   return {
     ...actual,
-    runSyncAgentTurn: hoisted.runSyncAgentTurn,
-    createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
+    startAgentRun: hoisted.startAgentRun,
+    waitForAgentRun: hoisted.waitForAgentRun,
     getAgentRunStatus: hoisted.getAgentRunStatus,
-    requestAgentRunCancellation: hoisted.requestAgentRunCancellation,
+    cancelAgentRun: hoisted.cancelAgentRun,
     lookupIdempotentAgentRun: hoisted.lookupIdempotentAgentRun,
-    resolveAgentExecutionLimits: hoisted.resolveAgentExecutionLimits,
+    resolveAgentRunLimits: hoisted.resolveAgentRunLimits,
     validateCallbackRequest: hoisted.validateCallbackRequest,
   };
 });
+
+// `/responses` resolves a bare name as a model first (§1.2).
+vi.mock('@/lib/services/models/modelService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/models/modelService')>()),
+  getModelByKey: hoisted.getModelByKey,
+}));
+
+// A model target is a gateway call; the gateway itself is stood in for.
+vi.mock('@/lib/services/models/inferenceService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/models/inferenceService')>()),
+  handleChatCompletion: hoisted.handleChatCompletion,
+}));
 
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 import { createMockDb } from '../helpers/db.mock';
@@ -117,12 +132,10 @@ function activeAgent() {
 }
 
 const DEFAULT_LIMITS = {
-  syncTimeoutMs: 60_000,
-  backgroundEnabled: true,
-  backgroundMaxDurationMs: 1_800_000,
-  defaultMode: 'sync' as const,
-  maxConcurrentRunsPerTenant: 10,
-  maxConcurrentRunsPerProject: 0,
+  syncWaitMs: 60_000,
+  maxDurationMs: 1_800_000,
+  maxActivePerTenant: 10,
+  maxActivePerProject: 0,
 };
 
 let client: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
@@ -135,8 +148,11 @@ beforeEach(async () => {
   hoisted.requireApiTokenFromHeader.mockResolvedValue(AUTH_CTX);
   hoisted.getAgentByKey.mockResolvedValue(activeAgent());
   hoisted.createConversation.mockResolvedValue({ _id: 'conv-1' });
-  hoisted.resolveAgentExecutionLimits.mockResolvedValue(DEFAULT_LIMITS);
+  hoisted.resolveAgentRunLimits.mockResolvedValue(DEFAULT_LIMITS);
   hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'none' });
+  hoisted.getModelByKey.mockResolvedValue(null);
+  hoisted.getAgentRunStatus.mockResolvedValue(null);
+  hoisted.waitForAgentRun.mockImplementation(async () => null);
   hoisted.validateCallbackRequest.mockImplementation(async (url: unknown, secret: unknown) => (
     url ? { ok: true, url, secret } : { ok: true }
   ));
@@ -150,508 +166,545 @@ afterEach(async () => {
   await runsApp.close();
 });
 
-describe('POST /responses — background signal (§4) and idempotency (§9/§12.15)', () => {
-  it('X-Cognipeer-Background: true creates a background run and returns 202 with a pollable id', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({
-      kind: 'created',
-      run: { _id: 'run-1', status: 'queued', createdAt: new Date('2024-01-01T00:00:00Z') },
+const RESPONSE = { id: 'resp_x', object: 'response', model: 'support-agent', output: [
+  { id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hi there' }] },
+], status: 'completed', usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 }, created_at: 1_700_000_000, previous_response_id: null, version: null };
+
+const run = (overrides: Record<string, unknown> = {}) => ({
+  _id: 'run-1', mode: 'inline', status: 'succeeded', agentKey: 'support-agent', conversationId: 'conv-1',
+  runClass: 'default', metadata: null, responseFormat: null, createdAt: new Date('2024-01-01T00:00:00Z'), ...overrides,
+});
+
+const post = (payload: Record<string, unknown>, headers: Record<string, string> = {}, url = '/api/client/v1/responses') =>
+  client.inject({ method: 'POST', url, headers: { ...TOKEN_HEADERS, ...headers }, payload });
+
+const startInput = (index = 0) => hoisted.startAgentRun.mock.calls[index]![0] as Record<string, unknown>;
+
+describe('POST /responses — an agent turn is a run, answered as its Response object (§5.3)', () => {
+  it('a plain call that finishes in the window: 200 with a run-scoped id and the Response fields', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+
+    const res = await post({ model: 'support-agent', input: 'hello' });
+
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+      id: 'resp_run-1',
+      object: 'response',
+      status: 'completed',
+      model: 'support-agent',
+      output_text: 'hi there',
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+      error: null,
+      metadata: {},
+      text: { format: { type: 'text' } },
+      service_tier: 'default',
+      background: false,
+      previous_response_id: null,
+      conversation: { id: 'conv-1' },
+      cognipeer: { run_id: 'run_run-1', session_id: 'conv-1' },
+    });
+    expect(startInput()).toMatchObject({
+      channel: 'responses',
+      runClass: 'default',
+      usePublished: true,
+      limits: DEFAULT_LIMITS,
+      execution: { kind: 'inline', waitMs: DEFAULT_LIMITS.syncWaitMs, cancelOnDisconnect: false },
+    });
+  });
+
+  it('the window ends with the run still going: 202 in_progress with Location and Retry-After (it keeps going)', async () => {
+    hoisted.startAgentRun.mockResolvedValue({
+      kind: 'detached',
+      run: run({ _id: 'run-8', status: 'running', result: null, detachedAt: new Date() }),
     });
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
+    const res = await post({ model: 'support-agent', input: 'hello' });
 
     expect(res.statusCode).toBe(202);
-    const body = parseJsonBody<{ id: string; object: string; status: string }>(res.body);
-    expect(body.id).toBe('run_run-1');
-    expect(body.object).toBe('agent.run');
-    expect(body.status).toBe('queued');
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(res.headers.location).toBe('/api/client/v1/agents/runs/run_run-8');
+    expect(res.headers['retry-after']).toBe('2');
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+      id: 'resp_run-8', object: 'response', status: 'in_progress', output: [], output_text: '', cognipeer: { run_id: 'run_run-8' },
+    });
   });
 
-  it('"background": true in the body works the same as the header (OpenAI SDK compatibility)', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({
-      kind: 'created',
-      run: { _id: 'run-2', status: 'queued', createdAt: new Date('2024-01-01T00:00:00Z') },
-    });
+  it.each([
+    ['the X-Cognipeer-Background header', { 'x-cognipeer-background': 'true' }, {}],
+    ['"background": true in the body (OpenAI SDK)', {}, { background: true }],
+  ])('%s queues the run: 202 queued, background true', async (_label, headers, extra) => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ mode: 'background', status: 'queued', result: null }) });
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', background: true },
-    });
+    const res = await post({ model: 'support-agent', input: 'hello', ...extra }, headers);
 
     expect(res.statusCode).toBe(202);
+    expect(res.headers.location).toBe('/api/client/v1/agents/runs/run_run-1');
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ id: 'resp_run-1', status: 'queued', background: true });
+    expect(startInput().execution).toEqual({ kind: 'queued' });
+    expect(hoisted.waitForAgentRun).not.toHaveBeenCalled();
   });
 
-  it('a background request against a conversation with an active run gets 409', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'conflict' });
+  it('service_tier "flex" is a deferred run the call waits on like a plain one (200 once it finished)', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ mode: 'background', status: 'queued', runClass: 'deferred', result: null }) });
+    hoisted.waitForAgentRun.mockResolvedValue(run({ mode: 'background', status: 'succeeded', runClass: 'deferred', result: { ...RESPONSE, id: 'resp_run-1' } }));
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
+    const res = await post({ model: 'support-agent', input: 'hello', service_tier: 'flex' });
 
-    expect(res.statusCode).toBe(409);
-    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('agent_run_conflict');
+    expect(res.statusCode).toBe(200);
+    expect(startInput()).toMatchObject({ runClass: 'deferred', execution: { kind: 'queued' } });
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', projectId: 'proj-1' }), DEFAULT_LIMITS.syncWaitMs, expect.any(AbortSignal));
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ status: 'completed', service_tier: 'flex', output_text: 'hi there' });
   });
 
-  it('a background request past the tenant concurrency cap gets 429 (§12.8)', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10, scope: 'tenant' });
+  it('service_tier "flex" still queued when the window ends: 202 queued; with background it never waits', async () => {
+    const queued = run({ mode: 'background', status: 'queued', runClass: 'deferred', result: null });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'accepted', run: queued });
+    hoisted.waitForAgentRun.mockResolvedValue(queued);
+    expect((await post({ model: 'support-agent', input: 'hello', service_tier: 'flex' })).statusCode).toBe(202);
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(429);
-    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('rate_limit_error');
-  });
-
-  it('a background request past the PROJECT cap gets 429 naming the project scope', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 2, scope: 'project' });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(429);
-    const body = parseJsonBody<{ error: { code: string; message: string } }>(res.body);
-    expect(body.error.code).toBe('agent_run_concurrency_limit');
-    expect(body.error.message).toContain('project');
-    expect(body.error.message).toContain('2');
-  });
-
-  it('passes the resolved limits, callback and idempotency scope to createBackgroundAgentRun', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({
-      kind: 'created',
-      run: { _id: 'run-1', mode: 'background', status: 'queued', createdAt: new Date() },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-9' },
-      payload: {
-        model: 'support-agent',
-        input: 'hello',
-        callback_url: 'https://hooks.example.com/run',
-        callback_secret: 'a-very-long-secret-value',
-      },
-    });
-
+    hoisted.waitForAgentRun.mockClear();
+    const res = await post({ model: 'support-agent', input: 'hello', service_tier: 'flex', background: true });
     expect(res.statusCode).toBe(202);
-    expect(hoisted.validateCallbackRequest).toHaveBeenCalledWith('https://hooks.example.com/run', 'a-very-long-secret-value');
-    const [input] = hoisted.createBackgroundAgentRun.mock.calls[0] as [Record<string, unknown>];
-    expect(input.limits).toEqual(DEFAULT_LIMITS);
-    expect(input.callbackUrl).toBe('https://hooks.example.com/run');
-    expect(input.callbackSecret).toBe('a-very-long-secret-value');
-    expect(input.idempotencyKey).toBe('idem-9');
-    // A new conversation: the hash must not depend on the fresh id.
-    expect(input.idempotencyConversationScope).toBeNull();
-    // 202 body is the single §8 shape — never the sealed secret.
+    expect(hoisted.waitForAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('any other service_tier runs in the default class', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+    await post({ model: 'support-agent', input: 'hello', service_tier: 'priority' });
+    expect(startInput().runClass).toBe('default');
+  });
+
+  it('metadata is stored on the run and echoed; more than 16 keys is a 400', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run({ metadata: { ticket: 'OPS-12' } }), response: RESPONSE });
+    const res = await post({ model: 'support-agent', input: 'hello', metadata: { ticket: 'OPS-12' } });
+    expect(res.statusCode).toBe(200);
+    expect(startInput().metadata).toEqual({ ticket: 'OPS-12' });
+    expect(parseJsonBody<{ metadata: unknown }>(res.body).metadata).toEqual({ ticket: 'OPS-12' });
+
+    const tooMany = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, 'v']));
+    const refused = await post({ model: 'support-agent', input: 'hello', metadata: tooMany });
+    expect(refused.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(refused.body).error).toMatchObject({ code: 'invalid_metadata', param: 'metadata', type: 'invalid_request_error' });
+  });
+
+  it('text.format is the run\'s structured output and comes back as text.format', async () => {
+    const format = { type: 'json_schema', name: 'ticket', schema: { type: 'object', properties: { id: { type: 'string' } } }, strict: true };
+    hoisted.startAgentRun.mockImplementation(async (input: Record<string, unknown>) => ({
+      kind: 'completed', run: run({ responseFormat: input.responseFormat }), response: RESPONSE,
+    }));
+    const res = await post({ model: 'support-agent', input: 'hello', text: { format } });
+    expect(startInput().responseFormat).toEqual({ type: 'json_schema', name: 'ticket', schema: format.schema, strict: true });
+    expect(parseJsonBody<{ text: unknown }>(res.body).text).toEqual({ format });
+  });
+
+  it('a callback is accepted on a plain call too (it fires only if the run ends up async)', async () => {
+    hoisted.validateCallbackRequest.mockResolvedValue({ ok: true, url: 'https://hooks.example.com/run', secret: 'a-very-long-secret-value' });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+
+    const res = await post({ model: 'support-agent', input: 'hello', callback_url: 'https://hooks.example.com/run', callback_secret: 'a-very-long-secret-value' });
+
+    expect(res.statusCode).toBe(200);
+    expect(startInput().callback).toEqual({ url: 'https://hooks.example.com/run', secret: 'a-very-long-secret-value' });
     expect(res.body).not.toContain('a-very-long-secret-value');
   });
 
   it('an invalid callback is rejected at submit time with 400 invalid_callback, before anything is created', async () => {
     hoisted.validateCallbackRequest.mockResolvedValue({ ok: false, message: 'callback_url must resolve to a public address' });
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello', callback_url: 'http://169.254.169.254/latest' },
-    });
+    const res = await post({ model: 'support-agent', input: 'hello', callback_url: 'http://169.254.169.254/latest' }, { 'x-cognipeer-background': 'true' });
 
     expect(res.statusCode).toBe(400);
     expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('invalid_callback');
     expect(hoisted.createConversation).not.toHaveBeenCalled();
-    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 
-  it('background on an agent with background disabled gets 400 agent_background_disabled', async () => {
-    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, backgroundEnabled: false });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(400);
-    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('agent_background_disabled');
-    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
-  });
-
-  it("an agent whose defaultMode is 'background' runs a call that says neither in the background", async () => {
-    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, defaultMode: 'background' });
-    hoisted.createBackgroundAgentRun.mockResolvedValue({
-      kind: 'created',
-      run: { _id: 'run-3', mode: 'background', status: 'queued', createdAt: new Date() },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(202);
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
-  });
-
-  it('the sync path gets the resolved (min) ceiling, not the env default', async () => {
-    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, syncTimeoutMs: 12_000 });
-    hoisted.runSyncAgentTurn.mockResolvedValue({
-      kind: 'ok',
-      response: { id: 'resp_conv-1', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(200);
-    const [arg] = hoisted.runSyncAgentTurn.mock.calls[0] as [{ syncTimeoutMs: number }];
-    expect(arg.syncTimeoutMs).toBe(12_000);
-  });
-
-  it('a background request reusing an Idempotency-Key with a different body gets 409 idempotency_key_conflict (§12.15)', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'idempotency_conflict' });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
+  it('refusals use the OpenAI envelope: a busy conversation 409, a cap 429', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'conflict' });
+    let res = await post({ model: 'support-agent', input: 'hello' });
     expect(res.statusCode).toBe(409);
-    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('idempotency_key_conflict');
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({ type: 'agent_run_conflict', code: 'agent_run_conflict', param: null });
+
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 2, scope: 'project', runClass: 'default' });
+    res = await post({ model: 'support-agent', input: 'hello' });
+    expect(res.statusCode).toBe(429);
+    const error = parseJsonBody<{ error: { code: string; message: string; scope: string } }>(res.body).error;
+    expect(error).toMatchObject({ code: 'agent_run_concurrency_limit', scope: 'project' });
+    expect(error.message).toContain('project');
   });
 
-  it('a background request replaying an Idempotency-Key with the SAME body gets 200 with the existing run (§12.15)', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({
-      kind: 'idempotent_replay',
-      run: { _id: 'run-1', mode: 'background', status: 'succeeded', createdAt: new Date('2024-01-01T00:00:00Z') },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(200);
-    const body = parseJsonBody<{ id: string; status: string }>(res.body);
-    expect(body.id).toBe('run_run-1');
-    expect(body.status).toBe('succeeded');
-  });
-  it('REGRESSION: a replayed Idempotency-Key is answered BEFORE a conversation is created (no orphan per retry)', async () => {
-    hoisted.lookupIdempotentAgentRun.mockResolvedValue({
-      kind: 'replay',
-      run: { _id: 'run-1', mode: 'background', status: 'running', conversationId: 'conv-original', createdAt: new Date() },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(200);
-    const body = parseJsonBody<{ id: string; conversation_id: string }>(res.body);
-    expect(body.id).toBe('run_run-1');
-    expect(body.conversation_id).toBe('conv-original');
-    expect(hoisted.lookupIdempotentAgentRun).toHaveBeenCalledWith(expect.objectContaining({
-      idempotencyKey: 'idem-1',
-      idempotencyConversationScope: null,
-      userMessage: 'hello',
-    }));
-    expect(hoisted.createConversation).not.toHaveBeenCalled();
-    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
-  });
-
-  it('REGRESSION: a pre-conversation idempotency conflict gets 409 without creating a conversation', async () => {
-    hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'conflict' });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
-      payload: { model: 'support-agent', input: 'something else' },
-    });
-
-    expect(res.statusCode).toBe(409);
-    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('idempotency_key_conflict');
-    expect(hoisted.createConversation).not.toHaveBeenCalled();
-  });
-
-
-  it('Idempotency-Key on a synchronous (non-background) request is rejected with 400', async () => {
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: { ...TOKEN_HEADERS, 'idempotency-key': 'idem-1' },
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(400);
-    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('invalid_request_error');
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
-    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
-  });
-
-  it('a synchronous request timing out returns 504 with the side-effects disclosure', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'timeout' });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(504);
-    const body = parseJsonBody<{ error: { type: string; side_effects_possible: boolean; retryable: boolean } }>(res.body);
-    expect(body.error.type).toBe('timeout');
-    expect(body.error.side_effects_possible).toBe(true);
-    expect(body.error.retryable).toBe(false);
-  });
-
-  it('a synchronous request against a conversation with an active run gets 409, never runs inline', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({ kind: 'conflict' });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(409);
-  });
-
-  it('a normal synchronous request still returns 200 with the turn result (unchanged behavior)', async () => {
-    hoisted.runSyncAgentTurn.mockResolvedValue({
-      kind: 'ok',
-      response: { id: 'resp_conv-1', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello' },
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(parseJsonBody<{ id: string }>(res.body).id).toBe('resp_conv-1');
+  it('agent parameters it does not take are listed back in X-Cognipeer-Ignored-Params', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+    const res = await post({ model: 'support-agent', input: 'hello', temperature: 0.2, instructions: 'be brief' });
+    expect(res.headers['x-cognipeer-ignored-params']).toBe('instructions,temperature');
   });
 });
 
-describe('previous_response_id dual-mode resolution (§8, §12.3)', () => {
-  it('resolves a resp_<runId> previous_response_id via the AgentRun lookup first', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue({ _id: 'run-9', conversationId: 'conv-from-run' });
-    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-from-run', agentKey: 'support-agent', projectId: 'proj-1' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({
-      kind: 'ok',
-      response: { id: 'resp_conv-from-run', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
-    });
-
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', previous_response_id: 'resp_run-9' },
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-9');
-    const [{ request: sentRequest }] = hoisted.runSyncAgentTurn.mock.calls[0] as [{ request: { conversationId: string } }];
-    expect(sentRequest.conversationId).toBe('conv-from-run');
+describe('POST /responses — target and version (§1.2)', () => {
+  beforeEach(() => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
   });
 
-  it('falls back to raw-conversationId behavior when no AgentRun matches (unchanged sync scheme)', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue(null);
-    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-legacy', agentKey: 'support-agent', projectId: 'proj-1' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({
-      kind: 'ok',
-      response: { id: 'resp_conv-legacy', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
-    });
+  it('both routes run the published version by default; version "draft" runs the draft, version N pins', async () => {
+    await post({ model: 'support-agent', input: 'hello' });
+    await post({ model: 'support-agent', input: 'hello' }, {}, '/api/client/v1/agents/responses');
+    expect(startInput(0).usePublished).toBe(true);
+    expect(startInput(1).usePublished).toBe(true);
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', previous_response_id: 'resp_conv-legacy' },
-    });
+    await post({ model: 'support-agent', input: 'hello', version: 'draft' });
+    expect(startInput(2).usePublished).toBe(false);
 
-    expect(res.statusCode).toBe(200);
-    const [{ request: sentRequest }] = hoisted.runSyncAgentTurn.mock.calls[0] as [{ request: { conversationId: string } }];
-    expect(sentRequest.conversationId).toBe('conv-legacy');
+    hoisted.resolveAgentConfig.mockResolvedValue({ config: { modelKey: 'gpt-4o' }, version: 3 });
+    await post({ model: 'support-agent', input: 'hello', version: 3 });
+    expect(startInput(3)).toMatchObject({ version: 3, usePublished: true });
+
+    const bad = await post({ model: 'support-agent', input: 'hello', version: 'latest' });
+    expect(bad.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { code: string } }>(bad.body).error.code).toBe('invalid_version');
   });
 
-  it('accepts a run_<runId> previous_response_id — the run-status envelope id a caller most naturally copies back', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue({ _id: 'run-9', conversationId: 'conv-from-run' });
-    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-from-run', agentKey: 'support-agent', projectId: 'proj-1' });
-    hoisted.runSyncAgentTurn.mockResolvedValue({
-      kind: 'ok',
-      response: { id: 'resp_conv-from-run', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
+  it('a model key wins a bare-name collision on /responses (a model call, not a run), agent:<key> always means the agent', async () => {
+    hoisted.getModelByKey.mockResolvedValue({ key: 'support-agent' });
+    hoisted.handleChatCompletion.mockResolvedValue({
+      requestId: 'req-1',
+      response: { id: 'chatcmpl-1', object: 'chat.completion', model: 'support-agent', choices: [{ index: 0, message: { role: 'assistant', content: 'from the model' }, finish_reason: 'stop' }] },
     });
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', previous_response_id: 'run_run-9' },
-    });
+    const model = await post({ model: 'support-agent', input: 'hello' });
+    expect(model.statusCode).toBe(200);
+    expect(parseJsonBody<{ object: string; output_text: string }>(model.body)).toMatchObject({ object: 'response', output_text: 'from the model' });
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
 
-    expect(res.statusCode).toBe(200);
-    expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-9');
+    const agent = await post({ model: 'agent:support-agent', input: 'hello' });
+    expect(agent.statusCode).toBe(200);
+    expect(startInput().agentKey).toBe('support-agent');
+    expect(parseJsonBody<{ model: string }>(agent.body).model).toBe('agent:support-agent');
+    expect(hoisted.handleChatCompletion).toHaveBeenCalledTimes(1);
   });
 
-  it('a run_<runId> that does not resolve to any AgentRun gets 404 — no raw-conversationId fallback for this scheme', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue(null);
+  it('/agents/responses is agents only: no model lookup', async () => {
+    hoisted.getModelByKey.mockResolvedValue({ key: 'support-agent' });
+    const res = await post({ model: 'support-agent', input: 'hello' }, {}, '/api/client/v1/agents/responses');
+    expect(res.statusCode).toBe(200);
+    expect(hoisted.getModelByKey).not.toHaveBeenCalled();
+  });
 
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', previous_response_id: 'run_does-not-exist' },
-    });
-
+  it('a name that is neither a model nor an agent: 404 model_not_found', async () => {
+    hoisted.getAgentByKey.mockResolvedValue(null);
+    const res = await post({ model: 'nothing-here', input: 'hello' });
     expect(res.statusCode).toBe(404);
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({ code: 'model_not_found', param: 'model', type: 'invalid_request_error' });
   });
+});
 
-  it('an unrecognized previous_response_id prefix gets 404 — never silently starts a new conversation', async () => {
-    const res = await client.inject({
-      method: 'POST',
-      url: '/api/client/v1/responses',
-      headers: TOKEN_HEADERS,
-      payload: { model: 'support-agent', input: 'hello', previous_response_id: 'garbage-id-no-prefix' },
+describe('POST /responses — Idempotency-Key on every mode (§4.6)', () => {
+  it('a finished run is replayed (200, its stored answer), before a conversation is created', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({
+      kind: 'replay',
+      run: run({ _id: 'run-7', result: { ...RESPONSE, id: 'resp_run-7' } }),
     });
 
-    expect(res.statusCode).toBe(404);
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    const res = await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'idem-1' });
+
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ id: 'resp_run-7', status: 'completed', output_text: 'hi there' });
+    expect(hoisted.lookupIdempotentAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'idem-1', idempotencyConversationScope: null, userMessage: 'hello',
+    }));
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
     expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+
+  it('a key with a reserved prefix (trigger runs) is refused in the OpenAI envelope, before anything is looked up', async () => {
+    const res = await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'trigger:r1:slot' });
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { type: string; code: string; param: unknown } }>(res.body).error).toMatchObject({
+      type: 'invalid_request_error', code: 'idempotency_key_reserved', param: null,
+    });
+    expect(hoisted.lookupIdempotentAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('a run still going is waited on like a new call, then 202 when it is still going', async () => {
+    const running = run({ _id: 'run-5', status: 'running', result: null });
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'replay', run: running });
+    hoisted.waitForAgentRun.mockResolvedValue(running);
+
+    const res = await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'idem-1' });
+
+    expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-5' }), DEFAULT_LIMITS.syncWaitMs, expect.any(AbortSignal));
+    expect(res.statusCode).toBe(202);
+    expect(parseJsonBody<{ status: string }>(res.body).status).toBe('in_progress');
+  });
+
+  it('a background replay of a queued run answers at once (202 queued)', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'replay', run: run({ mode: 'background', status: 'queued', result: null }) });
+    const res = await post({ model: 'support-agent', input: 'hello', background: true }, { 'idempotency-key': 'idem-1' });
+    expect(res.statusCode).toBe(202);
+    expect(hoisted.waitForAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('the key with a different request is a 409 idempotency_key_conflict, before a conversation is created', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'conflict' });
+    const res = await post({ model: 'support-agent', input: 'something else' }, { 'idempotency-key': 'idem-1' });
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('idempotency_key_conflict');
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+
+  it('the key and the request reach the run (a race between two first attempts is settled there)', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+    await post({ model: 'support-agent', input: 'hello' }, { 'idempotency-key': 'idem-sync' });
+    expect(startInput()).toMatchObject({ idempotencyKey: 'idem-sync', idempotencyConversationScope: null });
+  });
+});
+
+describe('previous_response_id resolution', () => {
+  beforeEach(() => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run({ conversationId: 'conv-from-run' }), response: RESPONSE });
+  });
+
+  it.each([['resp_run-9'], ['run_run-9']])('%s resolves through the run to its session', async (previous) => {
+    hoisted.getAgentRunStatus.mockResolvedValue({ _id: 'run-9', conversationId: 'conv-from-run' });
+    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-from-run', agentKey: 'support-agent', projectId: 'proj-1' });
+
+    const res = await post({ model: 'support-agent', input: 'hello', previous_response_id: previous });
+
+    expect(res.statusCode).toBe(200);
+    expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-9');
+    expect(startInput().conversationId).toBe('conv-from-run');
+    expect(startInput().idempotencyConversationScope).toBe('conv-from-run');
+    expect(parseJsonBody<{ previous_response_id: string }>(res.body).previous_response_id).toBe(previous);
+  });
+
+  it('a legacy resp_<conversationId> still names its session when no run matches', async () => {
+    hoisted.getConversationById.mockResolvedValue({ _id: 'conv-legacy', agentKey: 'support-agent', projectId: 'proj-1' });
+    const res = await post({ model: 'support-agent', input: 'hello', previous_response_id: 'resp_conv-legacy' });
+    expect(res.statusCode).toBe(200);
+    expect(startInput().conversationId).toBe('conv-legacy');
+  });
+
+  it.each([['run_does-not-exist'], ['garbage-id-no-prefix']])('%s is a 404, never a new conversation', async (previous) => {
+    const res = await post({ model: 'support-agent', input: 'hello', previous_response_id: previous });
+    expect(res.statusCode).toBe(404);
+    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('previous_response_not_found');
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /responses/:id and POST /responses/:id/cancel', () => {
+  it.each([
+    ['/api/client/v1/responses/resp_run-1'],
+    ['/api/client/v1/agents/responses/resp_run-1'],
+    ['/api/client/v1/responses/run_run-1'],
+  ])('GET %s reads the run as its Response object', async (url) => {
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ mode: 'background', status: 'running', result: null, metadata: { a: 'b' } }));
+
+    const res = await runsApp.inject({ method: 'GET', url, headers: TOKEN_HEADERS });
+
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+      id: 'resp_run-1', object: 'response', status: 'in_progress', background: true, metadata: { a: 'b' }, conversation: { id: 'conv-1' },
+    });
+  });
+
+  it.each([
+    ['queued', 'queued'], ['scheduled', 'queued'], ['requires_action', 'requires_action'], ['failed', 'failed'], ['canceled', 'cancelled'],
+  ])('a %s run reads as status %s', async (status, expected) => {
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ status, result: null, errorReason: status === 'failed' ? 'agent_error' : null, errorMessage: 'boom' }));
+    const res = await runsApp.inject({ method: 'GET', url: '/api/client/v1/responses/resp_run-1', headers: TOKEN_HEADERS });
+    const body = parseJsonBody<{ status: string; error: unknown }>(res.body);
+    expect(body.status).toBe(expected);
+    expect(body.error).toEqual(status === 'failed' ? { code: 'agent_error', message: 'boom' } : null);
+  });
+
+  it('an unknown id, a reservation row or an unprefixed id: 404 in the OpenAI envelope', async () => {
+    for (const [url, row] of [
+      ['/api/client/v1/responses/resp_nope', null],
+      ['/api/client/v1/responses/resp_run-1', run({ mode: 'sync', status: 'running' })],
+      ['/api/client/v1/responses/run-1', run()],
+    ] as const) {
+      hoisted.getAgentRunStatus.mockResolvedValue(row);
+      const res = await runsApp.inject({ method: 'GET', url, headers: TOKEN_HEADERS });
+      expect(res.statusCode, url).toBe(404);
+      expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({ code: 'response_not_found', type: 'invalid_request_error', param: null });
+    }
+  });
+
+  it('cancel goes through cancelAgentRun and answers the Response object (in_progress while the stop lands)', async () => {
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ status: 'running', result: null }));
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ status: 'running', result: null, cancelRequestedAt: new Date() }) });
+
+    const res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/responses/resp_run-1/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
+
+    expect(res.statusCode).toBe(200);
+    expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run-1' });
+    expect(parseJsonBody<{ id: string; status: string }>(res.body)).toMatchObject({ id: 'resp_run-1', status: 'in_progress' });
+  });
+
+  it('cancel of a queued run: cancelled; of a finished one: 200 with its final object (OpenAI behaviour)', async () => {
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ mode: 'background', status: 'queued', result: null }));
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ mode: 'background', status: 'canceled', result: null }) });
+    let res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/agents/responses/resp_run-1/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ status: string }>(res.body).status).toBe('cancelled');
+
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ result: { ...RESPONSE, id: 'resp_run-1' } }));
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'already_terminal', run: run({ result: { ...RESPONSE, id: 'resp_run-1' } }) });
+    res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/responses/resp_run-1/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ status: string; output_text: string }>(res.body)).toMatchObject({ status: 'completed', output_text: 'hi there' });
   });
 });
 
 describe('GET/POST /client/v1/agents/runs/:runId — tenant+project scoping (§12.11)', () => {
   it('GET returns the serialized run status', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue({
-      _id: 'run-1',
-      mode: 'background',
-      agentKey: 'support-agent',
-      conversationId: 'conv-1',
-      status: 'running',
-      result: null,
-      errorReason: null,
-      errorMessage: null,
-      createdAt: new Date('2024-01-01T00:00:00Z'),
-      startedAt: new Date('2024-01-01T00:00:01Z'),
-      completedAt: null,
-    });
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ mode: 'background', status: 'running', result: null }));
 
-    const res = await runsApp.inject({
-      method: 'GET',
-      url: '/api/client/v1/agents/runs/run-1',
-      headers: TOKEN_HEADERS,
-    });
+    const res = await runsApp.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run-1', headers: TOKEN_HEADERS });
 
     expect(res.statusCode).toBe(200);
     expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
-    const body = parseJsonBody<{ id: string; object: string; status: string }>(res.body);
-    expect(body.id).toBe('run_run-1');
-    expect(body.object).toBe('agent.run');
-    expect(body.status).toBe('running');
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ id: 'run_run-1', object: 'agent.run', status: 'running' });
   });
 
   it('GET returns 404 when the run does not belong to this tenant+project', async () => {
-    hoisted.getAgentRunStatus.mockResolvedValue(null);
-
-    const res = await runsApp.inject({
-      method: 'GET',
-      url: '/api/client/v1/agents/runs/someone-elses-run',
-      headers: TOKEN_HEADERS,
-    });
-
+    const res = await runsApp.inject({ method: 'GET', url: '/api/client/v1/agents/runs/someone-elses-run', headers: TOKEN_HEADERS });
     expect(res.statusCode).toBe(404);
   });
 
-  it('POST cancel requests cancellation scoped by tenantId+projectId', async () => {
-    hoisted.requestAgentRunCancellation.mockResolvedValue({
-      kind: 'accepted',
-      run: {
-        _id: 'run-1',
-        agentKey: 'support-agent',
-        conversationId: 'conv-1',
-        status: 'running',
-        cancelRequestedAt: new Date(),
-        result: null,
-        errorReason: null,
-        errorMessage: null,
-        createdAt: new Date(),
-        startedAt: new Date(),
-        completedAt: null,
-      },
-    });
+  it('POST cancel goes through cancelAgentRun scoped by tenantId+projectId', async () => {
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ status: 'running', result: null, cancelRequestedAt: new Date() }) });
 
-    const res = await runsApp.inject({
-      method: 'POST',
-      url: '/api/client/v1/agents/runs/run-1/cancel',
-      headers: { authorization: TOKEN_HEADERS.authorization },
-    });
+    const res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/agents/runs/run-1/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
 
     expect(res.statusCode).toBe(200);
-    expect(hoisted.requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
+    expect(hoisted.cancelAgentRun).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', runId: 'run-1' });
   });
 
   it('POST cancel on an already-terminal run gets 409, distinct from 404 not-found', async () => {
-    hoisted.requestAgentRunCancellation.mockResolvedValue({
-      kind: 'already_terminal',
-      run: { _id: 'run-1', status: 'succeeded' },
-    });
-
-    const res = await runsApp.inject({
-      method: 'POST',
-      url: '/api/client/v1/agents/runs/run-1/cancel',
-      headers: { authorization: TOKEN_HEADERS.authorization },
-    });
-
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'already_terminal', run: run() });
+    const res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/agents/runs/run-1/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
     expect(res.statusCode).toBe(409);
     expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('agent_run_already_terminal');
   });
 
   it('POST cancel on a nonexistent run gets 404', async () => {
-    hoisted.requestAgentRunCancellation.mockResolvedValue({ kind: 'not_found' });
+    hoisted.cancelAgentRun.mockResolvedValue({ kind: 'not_found' });
+    const res = await runsApp.inject({ method: 'POST', url: '/api/client/v1/agents/runs/does-not-exist/cancel', headers: { authorization: TOKEN_HEADERS.authorization } });
+    expect(res.statusCode).toBe(404);
+  });
+});
 
-    const res = await runsApp.inject({
-      method: 'POST',
-      url: '/api/client/v1/agents/runs/does-not-exist/cancel',
-      headers: { authorization: TOKEN_HEADERS.authorization },
+describe('POST /responses — structured output and variables (§6)', () => {
+  const TRIAGE = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] };
+  const declare = (config: Record<string, unknown>) => {
+    const declared = { ...activeAgent(), config: { modelKey: 'gpt-4o', ...config } };
+    hoisted.getAgentByKey.mockResolvedValue(declared);
+    hoisted.resolveAgentConfig.mockResolvedValue({ agent: declared, config: declared.config, resolvedVersion: 2 });
+  };
+  const error = (body: string) => parseJsonBody<{ error: Record<string, unknown> }>(body).error;
+
+  it('text.format json_schema becomes the run\'s responseFormat; the answer carries output_parsed and the format', async () => {
+    hoisted.startAgentRun.mockResolvedValue({
+      kind: 'completed',
+      run: run({ responseFormat: { type: 'json_schema', name: 'triage', schema: TRIAGE } }),
+      response: { ...RESPONSE, output_parsed: { label: 'bug' } },
     });
 
-    expect(res.statusCode).toBe(404);
+    const res = await post({ model: 'support-agent', input: 'hello', text: { format: { type: 'json_schema', name: 'triage', schema: TRIAGE, strict: true } } });
+
+    expect(res.statusCode).toBe(200);
+    expect(startInput().responseFormat).toEqual({ type: 'json_schema', name: 'triage', schema: TRIAGE, strict: true });
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+      output_parsed: { label: 'bug' },
+      text: { format: { type: 'json_schema', name: 'triage' } },
+    });
+  });
+
+  it('a contract the agent could not meet comes back as output_error, not as a failure', async () => {
+    hoisted.startAgentRun.mockResolvedValue({
+      kind: 'completed', run: run(), response: { ...RESPONSE, output_error: 'label is required' },
+    });
+    const res = await post({ model: 'support-agent', input: 'hello', text: { format: { type: 'json_object' } } });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ output_error: 'label is required' });
+    expect(startInput().responseFormat).toEqual({ type: 'json_object' });
+  });
+
+  it('text.format "text" (or none) asks for no structured output', async () => {
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+    await post({ model: 'support-agent', input: 'hello', text: { format: { type: 'text' } } });
+    expect(startInput().responseFormat).toBeNull();
+  });
+
+  it('refuses a schema that is not an object contract: 400 invalid_response_format in the OpenAI envelope, nothing starts', async () => {
+    for (const schema of [{ type: 'weird' }, { type: 'string' }, { type: 'object' }]) {
+      const res = await post({ model: 'support-agent', input: 'hello', text: { format: { type: 'json_schema', name: 'x', schema } } });
+      expect(res.statusCode, JSON.stringify(schema)).toBe(400);
+      expect(error(res.body)).toMatchObject({ code: 'invalid_response_format', param: 'text.format', type: 'invalid_request_error' });
+    }
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('variables are validated against the agent declaration and delivered validated, defaults applied', async () => {
+    declare({ variables: [{ name: 'customer_id', type: 'string', required: true }, { name: 'priority', type: 'string', default: 'low' }] });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+
+    const bad = await post({ model: 'support-agent', input: 'hello', variables: {} });
+    expect(bad.statusCode).toBe(400);
+    expect(error(bad.body)).toMatchObject({
+      code: 'invalid_variables', param: 'variables', errors: [{ field: 'customer_id', message: 'Required' }],
+    });
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+
+    const ok = await post({ model: 'support-agent', input: 'hello', variables: { customer_id: 'c-1' } });
+    expect(ok.statusCode).toBe(200);
+    expect(startInput().variables).toEqual({ customer_id: 'c-1', priority: 'low' });
+  });
+
+  it('a request with only variables (an empty message) is accepted', async () => {
+    declare({ variables: [{ name: 'topic', type: 'string' }] });
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'completed', run: run(), response: RESPONSE });
+    const res = await post({ model: 'support-agent', input: '', variables: { topic: 'billing' } });
+    expect(res.statusCode).toBe(200);
+    expect(startInput().variables).toEqual({ topic: 'billing' });
+  });
+
+  it('GET /agents/:key publishes variables_schema and output_schema (the agent as a typed function)', async () => {
+    declare({
+      variables: [{ name: 'customer_id', type: 'string', required: true, description: 'Who to look up' }],
+      structuredOutput: { enabled: true, schema: TRIAGE },
+    });
+    const res = await client.inject({ method: 'GET', url: '/api/client/v1/agents/support-agent', headers: TOKEN_HEADERS });
+    expect(res.statusCode).toBe(200);
+    expect(parseJsonBody<{ agent: Record<string, unknown> }>(res.body).agent).toMatchObject({
+      variables_schema: {
+        type: 'object',
+        properties: { customer_id: { type: 'string', description: 'Who to look up' } },
+        required: ['customer_id'],
+        additionalProperties: false,
+      },
+      output_schema: TRIAGE,
+    });
+
+    declare({});
+    const plain = await client.inject({ method: 'GET', url: '/api/client/v1/agents/support-agent', headers: TOKEN_HEADERS });
+    expect(parseJsonBody<{ agent: Record<string, unknown> }>(plain.body).agent).toMatchObject({ variables_schema: null, output_schema: null });
+  });
+});
+
+describe('the runs API object carries the structured answer', () => {
+  it('lifts output_parsed and output_error from the run result', async () => {
+    hoisted.getAgentRunStatus.mockResolvedValue(run({
+      status: 'succeeded',
+      result: { ...RESPONSE, output_parsed: { label: 'bug' } },
+    }));
+    const ok = await runsApp.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run_run-1', headers: TOKEN_HEADERS });
+    expect(parseJsonBody<Record<string, unknown>>(ok.body)).toMatchObject({ output_parsed: { label: 'bug' }, output_error: null });
+
+    hoisted.getAgentRunStatus.mockResolvedValue(run({ status: 'succeeded', result: { ...RESPONSE, output_error: 'label is required' } }));
+    const failed = await runsApp.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run_run-1', headers: TOKEN_HEADERS });
+    expect(parseJsonBody<Record<string, unknown>>(failed.body)).toMatchObject({ output_parsed: null, output_error: 'label is required' });
   });
 });

@@ -25,7 +25,7 @@ import {
     toolInputSchemaToZod,
     resolveAgentRuntimeOptions,
     resolveAgentSkillPolicy,
-    resolveStructuredOutputSchema,
+    resolveTurnOutputSchema,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption, buildMountedMemoryStores } from './agentMemoryAdapter';
@@ -36,6 +36,7 @@ import {
     renderPromptTemplate,
     shouldRenderInlinePrompt,
     type RenderedPrompt,
+    type ResolvedPromptVariables,
 } from './promptVariables';
 import type { IAgentKnowledgeBinding } from '@/lib/database/provider/types.domain';
 import {
@@ -47,7 +48,7 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
     getRagDocument,
@@ -118,7 +119,7 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
-import { normalizePlaygroundUsage } from './playgroundUsage';
+import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from './playgroundUsage';
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
@@ -170,7 +171,11 @@ import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './age
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
+import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
+import { inspectFileBucket } from './sessionFilesBucket';
+import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { stripLegacyExecutionConfig } from './agentCallbackConfig';
 import {
     buildCostEstimator,
     buildTurnInputState,
@@ -187,6 +192,9 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
+import { delegatedSubagentName, delegationFailure, isSubagentEvent, nameSubagentOnApprovalStep } from './subagentEvents';
+import { resolveAgentConfig } from './agentConfigResolution';
+import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
     buildClientTools,
     checkEmbeddedClientTools,
@@ -204,9 +212,13 @@ import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     denyUnattendedTools,
+    gateChildTools,
     resolveHitlConfig,
     resolveHitlRunMode,
     sessionAllowedTools,
+    type ChildApprovalSide,
+    type HitlRunMode,
+    type ResolvedHitlConfig,
 } from './agentHumanInTheLoop';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
 import {
@@ -230,10 +242,33 @@ import {
     toPublicPendingAction,
     toSdkAnswerSet,
     type OpenedPause,
+    type PausedTurnOptions,
     type PublicPendingAction,
 } from './agentPendingActions';
+import { composeUserMessageWithVariables, delegatedVariableValues } from './agentVariables';
 
 const logger = createLogger('agents');
+
+/**
+ * A new message dropped the session's pause (`cancel_pending`): the run that
+ * waited on it ends `canceled`, with its notifications, instead of staying
+ * `requires_action` for good. Never fails the turn.
+ */
+async function endRunsOfDroppedPause(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    scope: { tenantId: string; projectId: string; conversationId: string },
+): Promise<void> {
+    try {
+        // Loaded here: agentRunService imports this module.
+        const { cancelPausedAgentRuns } = await import('./agentRunService');
+        await cancelPausedAgentRuns(db, scope);
+    } catch (error) {
+        logger.warn('Could not end the paused run of a dropped pause', {
+            conversationId: scope.conversationId,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+}
 
 /** How many replaced answers a regenerated message remembers. */
 const MAX_PREVIOUS_VERSIONS = 5;
@@ -386,12 +421,17 @@ interface AgentToolSpec {
  * resolves to a STRING — the policy message, delivered to the model as the tool
  * RESULT — instead of rejecting; see `blockedToolResult` for why that is not the
  * same as throwing.
+ *
+ * Whatever the SDK passes after the arguments reaches the executor unchanged:
+ * from agent-sdk 0.15 that is the call's context (`toolCallId`, the
+ * cancellation token and the abort signal), which a long-running tool reads to
+ * stop when the run is cancelled.
  */
 interface AgentToolGuard {
     protect<A extends Record<string, unknown>, R>(
         spec: AgentToolSpec,
-        execute: (safeArgs: A) => Promise<R>,
-    ): (args: A) => Promise<R | string>;
+        execute: (safeArgs: A, ...rest: unknown[]) => Promise<R>,
+    ): (args: A, ...rest: unknown[]) => Promise<R | string>;
 }
 
 /**
@@ -512,9 +552,9 @@ export function createAgentToolGuard(input: {
         // types the subject builders erase.
         protect<A extends Record<string, unknown>, R>(
             spec: AgentToolSpec,
-            execute: (safeArgs: A) => Promise<R>,
-        ): (args: A) => Promise<R | string> {
-            return async (args: A) => {
+            execute: (safeArgs: A, ...rest: unknown[]) => Promise<R>,
+        ): (args: A, ...rest: unknown[]) => Promise<R | string> {
+            return async (args: A, ...rest: unknown[]) => {
                 const scope = scopeForCall();
                 try {
                     let safeArgs = args;
@@ -548,7 +588,7 @@ export function createAgentToolGuard(input: {
                         }
                     }
 
-                    const result = await execute(safeArgs);
+                    const result = await execute(safeArgs, ...rest);
                     if (postKeys.length === 0) return result;
 
                     const post = await runHook({
@@ -615,7 +655,7 @@ function protectBuiltTool(
     // would otherwise hand these back as `any`.
     const aliases: unknown[] = [tool.invoke, tool.call, tool.func, tool.run];
     const original = aliases.find(
-        (alias): alias is (input: Record<string, unknown>) => Promise<unknown> =>
+        (alias): alias is (input: Record<string, unknown>, ...rest: unknown[]) => Promise<unknown> =>
             typeof alias === 'function',
     );
     if (!original) {
@@ -623,9 +663,11 @@ function protectBuiltTool(
         return tool;
     }
 
+    // The SDK's second argument (the call's context) goes on to the tool: a
+    // guarded tool that stops on the run's abort signal must still see it.
     const guarded = guard.protect<Record<string, unknown>, unknown>(
         spec,
-        async (safeArgs) => original(safeArgs),
+        async (safeArgs, ...rest) => original(safeArgs, ...rest),
     );
     // Spread, not mutate: the record belongs to its builder, and the agent may
     // hold the original elsewhere (the trace definitions read `tool.name` off
@@ -1571,10 +1613,13 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
         ? deniedBy.slice(GUARDRAIL_PLUGIN_PREFIX.length)
         : undefined;
 
-    return new AgentGuardrailBlockedError(`Agent response blocked by guardrail: ${reason}`, {
+    const hook = consoleHookFor(incident?.hook ?? markerPlugin?.hook);
+    // Which side was refused: the prompt (`input.*`) or the answer.
+    const side = hook?.startsWith('input.') ? 'input' : 'response';
+    return new AgentGuardrailBlockedError(`Agent ${side} blocked by guardrail: ${reason}`, {
         guardrailKey,
         reason,
-        hook: consoleHookFor(incident?.hook ?? markerPlugin?.hook),
+        hook,
     });
 }
 
@@ -1585,6 +1630,8 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
  * and a real model.
  */
 export const __testables = {
+    textStreamOptions,
+    noteTurnCompaction,
     guardrailDenial,
     guardrailBlockedError,
     buildAgentGuardrailPlugins,
@@ -1595,30 +1642,36 @@ export const __testables = {
 
 /**
  * `limits.maxCostUsd` is enforced by the SDK only through a `costEstimator`;
- * without one the limit did nothing at all. Built only when the limit is set —
- * or the session has a spend budget, which rides on the same SDK limit — from
- * the pricing of the agent's model and of every sub-agent model override: a
- * delegated call spends from the same budget.
+ * without one the limit did nothing at all. Built when the limit is set — or
+ * the session has a spend budget, which rides on the same SDK limit — and also
+ * whenever a sub-agent runs on a model of its own: the SDK's per-request usage
+ * carries the delegated calls too (each tagged with its sub-agent), and pricing
+ * them takes their model's rates, not the parent's. Priced from the agent's
+ * model and every model a sub-agent was given, so a delegated call spends from
+ * the same budget at its own price.
  */
 async function buildAgentCostEstimator(
-    tenantDbName: string,
-    projectId: string,
     config: IAgentConfig,
-    primary: { key?: string; modelId?: string; pricing?: IModelPricing | null },
+    primary: PricedModel,
+    subagentModels: PricedModel[],
     sessionBudgetActive = false,
+    onWarning?: (message: string) => void,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
-    if (!sessionBudgetActive && !(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
+    const limited = sessionBudgetActive || Number(config.runtime?.limits?.maxCostUsd) > 0;
+    if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
-    const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
+    const models: Parameters<typeof buildCostEstimator>[0] = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
     ];
-    for (const entry of config.subagents ?? []) {
-        if (!entry.modelKey || entry.modelKey === primary.key) continue;
-        const child = await getModelByKey(tenantDbName, entry.modelKey, projectId).catch(() => null);
-        if (child) models.push({ names: [child.key, child.modelId], pricing: child.pricing });
+    for (const child of subagentModels) {
+        if (child.key && child.key === primary.key) continue;
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
+        if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
+            onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
+        }
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
-    if (!estimator) {
+    if (!estimator && limited) {
         logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
         });
@@ -1684,6 +1737,10 @@ export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undef
         out.via = runtimeContext.via.kind;
         out.viaIssuer = runtimeContext.via.issuer;
     }
+    if (runtimeContext.trigger) {
+        out.triggerId = runtimeContext.trigger.id;
+        out.trigger = runtimeContext.trigger.type;
+    }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
         const value = meta?.[key];
@@ -1718,6 +1775,40 @@ function reportPromptVariables(
     }
 }
 
+/**
+ * The system prompt an agent runs with: its own text (or the one the caller
+ * hands in), else the Prompts-module template its `promptKey` names, rendered
+ * with the run's prompt variables. An inline prompt is rendered only when the
+ * agent opted in or the text references a built-in (`shouldRenderInlinePrompt`),
+ * so a literal `{{` in an existing prompt is left alone. Used for the agent's own
+ * run and, with the referenced agent's own config, for a sub-agent that is
+ * another agent: the same text it would run with on its own.
+ */
+async function resolveAgentPrompt(input: {
+    db: Pick<Awaited<ReturnType<typeof getDatabase>>, 'findPromptByKey'>;
+    projectId: string;
+    agentKey: string;
+    config: IAgentConfig;
+    systemPrompt: string | undefined;
+    variables: ResolvedPromptVariables;
+}): Promise<string | undefined> {
+    const { config, agentKey } = input;
+    let systemPrompt = input.systemPrompt;
+    if (!systemPrompt && config.promptKey) {
+        const prompt = await input.db.findPromptByKey(config.promptKey, input.projectId);
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, input.variables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
+        const rendered = renderPromptTemplate(systemPrompt, input.variables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
+    }
+    return systemPrompt;
+}
+
 // ── Sub-agent registry ──────────────────────────────────────────────
 
 /** Who a model call is made for: rides on its usage row and its Dynamic LLM caller conditions. */
@@ -1729,10 +1820,12 @@ export interface AgentModelCaller {
 }
 
 type BuildSubagentsInput = {
+    db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
     tenantId: string;
     projectId: string;
-    subagents: IAgentSubagent[] | undefined;
+    /** The entries that can run (`activeSubagentEntries`): a roster switched off is never built. */
+    subagents: IAgentSubagent[];
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
@@ -1748,6 +1841,27 @@ type BuildSubagentsInput = {
      * model (when it is one the parent picked), then Model Hub, then the request.
      */
     reasoning?: { config: IAgentConfig; request?: NormalizedReasoning };
+    /** What a child's system prompt is rendered from. */
+    prompt: {
+        /** The parent's config and prompt variables: a prompt written in its config (an inline child's) renders as the parent's own does. */
+        parent: { config: IAgentConfig; variables: ResolvedPromptVariables };
+        /** The parent run's validated agent variables: a referenced agent's variables of the same name take their values. */
+        variables?: Record<string, unknown>;
+        variablesInPrompt?: boolean;
+        userId?: string;
+    };
+    /** Reports, once, a child that was skipped or runs short of what its author set up. */
+    onWarning?: (message: string) => void;
+    /**
+     * How the delegating run answers tool approvals, so a child's tools are gated like the parent's own:
+     * the parent's settings and mode, and (for a `ref` child) its agent's settings under the same run.
+     */
+    approvals?: {
+        hitl: ResolvedHitlConfig;
+        mode: HitlRunMode;
+        run: { unattended?: boolean; canPause?: boolean };
+        allowedTools: ReadonlySet<string>;
+    };
 };
 
 /**
@@ -1765,63 +1879,59 @@ type BuildSubagentsInput = {
  */
 async function buildAgentSubagents(
     input: BuildSubagentsInput,
-): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>> }> {
-    const entries = (input.subagents ?? []).filter((entry) => entry.enabled !== false);
-    if (entries.length === 0) return { subagents: [], cleanupTasks: [] };
+): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
+    const entries = input.subagents;
+    if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
 
     const subagents: AgentSdkSubagentDef[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
+    // The models the children were given, as the turn's cost estimator needs them.
+    const models: PricedModel[] = [];
     const seen = new Set<string>();
 
     for (const entry of entries) {
         if (!entry.name || seen.has(entry.name)) {
-            logger.warn('Skipping sub-agent with missing or duplicate name', { name: entry.name });
+            const message = entry.name
+                ? `Sub-agent name "${entry.name}" is used more than once: only the first one is available.`
+                : 'A sub-agent has no name, so it was skipped.';
+            logger.warn(message, { name: entry.name });
+            input.onWarning?.(message);
             continue;
         }
-        seen.add(entry.name);
 
-        let systemPrompt = entry.systemPrompt;
+        let systemPrompt: string | undefined;
         let toolBindings = entry.toolBindings;
         let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
+        let targetHitl: ResolvedHitlConfig | undefined;
 
         if (entry.kind === 'ref') {
-            if (!entry.agentKey) {
-                logger.warn('Skipping sub-agent reference with no agentKey', { name: entry.name });
+            const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
+            if (!target.ok) {
+                logger.warn(target.message, { name: entry.name, agentKey: entry.agentKey, reason: target.reason });
+                input.onWarning?.(target.message);
                 continue;
             }
-            try {
-                const resolved = await resolveAgentConfig(
-                    input.tenantDbName,
-                    entry.agentKey,
-                    input.projectId,
-                    entry.agentVersion,
-                );
-                if (resolved.config.kind === 'external') {
-                    // An external agent is an HTTP endpoint, not a set of tools —
-                    // it cannot be flattened into a child of this process.
-                    logger.warn('Skipping connected agent used as sub-agent', {
-                        name: entry.name,
-                        agentKey: entry.agentKey,
-                    });
-                    continue;
-                }
-                systemPrompt = entry.systemPrompt ?? resolved.config.systemPrompt;
-                toolBindings = resolved.config.toolBindings;
-                knowledgeSource = {
-                    knowledgeEngineKey: resolved.config.knowledgeEngineKey,
-                    knowledgeBindings: resolved.config.knowledgeBindings,
-                    knowledgeToolMode: resolved.config.knowledgeToolMode,
-                };
-                modelKey = entry.modelKey ?? resolved.config.modelKey;
-            } catch (error) {
-                logger.warn('Sub-agent reference could not be resolved; skipping', {
-                    name: entry.name,
-                    agentKey: entry.agentKey,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-                continue;
-            }
+            systemPrompt = await resolveChildPrompt(input, entry, target);
+            toolBindings = target.config.toolBindings;
+            knowledgeSource = {
+                knowledgeEngineKey: target.config.knowledgeEngineKey,
+                knowledgeBindings: target.config.knowledgeBindings,
+                knowledgeToolMode: target.config.knowledgeToolMode,
+            };
+            modelKey = entry.modelKey ?? target.config.modelKey;
+            targetHitl = resolveHitlConfig(target.config.humanInTheLoop);
+        }
+
+        if (entry.kind !== 'ref') systemPrompt = await resolveChildPrompt(input, entry);
+
+        // A child nobody gave instructions runs as its name and header say, which is what the SDK
+        // would make of it too (older SDKs left it the generic base prompt), and the owner is told.
+        if (!systemPrompt?.trim()) {
+            systemPrompt = `You are ${entry.title || entry.name}. ${entry.header || entry.title || entry.name}`;
+            input.onWarning?.(`Sub-agent "${entry.name}" has no instructions of its own${
+                entry.kind === 'ref' ? ` ("${entry.agentKey}" has no system prompt, or its prompt could not be found)` : ''
+            }, so it runs on its name and header alone.`);
         }
 
         const childTools: AgentSdkToolInterface[] = [];
@@ -1850,16 +1960,32 @@ async function buildAgentSubagents(
             cleanupTasks.push(...bound.cleanupTasks);
         }
 
-        let childModel: unknown;
-        if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
+        if (input.approvals && childTools.length > 0) {
+            const { hitl, mode, run, allowedTools } = input.approvals;
+            const sides: ChildApprovalSide[] = [{ hitl, mode }];
+            if (targetHitl) sides.push({ hitl: targetHitl, mode: resolveHitlRunMode(targetHitl, run) });
+            childTools.splice(0, childTools.length, ...gateChildTools(childTools, sides, allowedTools));
         }
 
+        let childModel: unknown;
+        if (modelKey) {
+            const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
+            if (built.ok) {
+                childModel = built.chatModel;
+                models.push(built.model);
+            } else {
+                input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
+            }
+        }
+
+        // Taken only now that the entry will be built: a reference that could not run must not
+        // make a later, working one of the same name look like the duplicate.
+        seen.add(entry.name);
         subagents.push({
             name: entry.name,
             ...(entry.title ? { title: entry.title } : {}),
             header: entry.header || entry.title || entry.name,
-            ...(systemPrompt ? { systemPrompt } : {}),
+            systemPrompt,
             ...(childTools.length > 0 ? { tools: childTools } : {}),
             ...(childModel ? { model: childModel } : {}),
             ...(entry.limits ? { limits: entry.limits } : {}),
@@ -1871,13 +1997,60 @@ async function buildAgentSubagents(
         });
     }
 
-    return { subagents, cleanupTasks };
+    return { subagents, cleanupTasks, models };
 }
 
 /**
- * Builds the gateway chat model for a sub-agent's model override. Returns
- * undefined when the key no longer resolves, which makes the child fall back to
- * the parent's model rather than failing the whole run.
+ * The system prompt a sub-agent runs with, resolved the way its own agent's run
+ * would resolve it. A `ref` entry that sets no prompt of its own runs the prompt
+ * of the agent it points at: that agent's `promptKey` template, or its inline
+ * text, rendered with ITS prompt variables (identity, defaults, and the delegating
+ * run's values for the variables it declares). A prompt written in the delegating
+ * agent's own config — an inline child's, or a `ref` entry's override — renders the
+ * way that agent's own prompt does. Undefined when there is none.
+ */
+async function resolveChildPrompt(
+    input: BuildSubagentsInput,
+    entry: IAgentSubagent,
+    target?: Extract<Awaited<ReturnType<typeof resolveSubagentTarget>>, { ok: true }>,
+): Promise<string | undefined> {
+    const { parent } = input.prompt;
+    const authored = entry.systemPrompt?.trim() ? entry.systemPrompt : undefined;
+    if (authored || !target) {
+        if (!authored) return undefined;
+        if (!shouldRenderInlinePrompt(parent.config, authored)) return authored;
+        const rendered = renderPromptTemplate(authored, parent.variables);
+        reportPromptVariables(rendered, { agentKey: input.caller?.agentKey ?? '' });
+        return rendered.text;
+    }
+    const agentKey = entry.agentKey ?? '';
+    return resolveAgentPrompt({
+        db: input.db,
+        projectId: input.projectId,
+        agentKey,
+        config: target.config,
+        systemPrompt: target.config.systemPrompt,
+        variables: buildPromptVariables({
+            config: target.config,
+            agentKey,
+            agentName: target.agent.name,
+            version: target.resolvedVersion,
+            runtimeContext: input.runtimeContext,
+            userId: input.prompt.userId,
+            variables: delegatedVariableValues(target.config.variables, input.prompt.variables),
+            variablesInPrompt: input.prompt.variablesInPrompt,
+        }),
+    });
+}
+
+/** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
+type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | null };
+
+/**
+ * Builds the gateway chat model for a sub-agent's model override. Answers why
+ * when the key no longer resolves (or the model cannot be set up), which makes
+ * the child fall back to the parent's model rather than failing the whole run;
+ * the caller reports it.
  *
  * Like every agent model it is a call into the gateway (gatewayChatModel.ts), so the
  * model's own guardrails, cache, pool and routing apply to the child too, and its
@@ -1892,10 +2065,13 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<unknown> {
+): Promise<{ ok: true; chatModel: unknown; model: PricedModel } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
-        if (!model || model.category !== 'llm') return undefined;
+        if (!model || model.category !== 'llm') {
+            logger.warn('Sub-agent model override is not a chat model of this project; falling back to parent model', { modelKey });
+            return { ok: false, message: `model "${modelKey}" does not exist in this project or is not a chat model` };
+        }
         const agentPick = agentReasoningForModel(reasoning?.config, modelKey);
         const chatModel = await buildGatewayChatModel({
             tenantDbName,
@@ -1912,13 +2088,17 @@ async function buildSubagentModel(
             ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
         // A sub-agent can be handed the parent's context, image references included.
-        return images ? withSessionImages(chatModel, images) : chatModel;
+        return {
+            ok: true,
+            chatModel: images ? withSessionImages(chatModel, images) : chatModel,
+            model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+        };
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
             error: error instanceof Error ? error.message : String(error),
         });
-        return undefined;
+        return { ok: false, message: `model "${modelKey}" could not be set up` };
     }
 }
 
@@ -2046,12 +2226,14 @@ export async function buildBoundTools(
                         },
                         async (args: Record<string, unknown>) => {
                             try {
-                                const { result, latencyMs } = await executeToolAction(
+                                const { result, latencyMs, isError } = await executeToolAction(
                                     toolRecord, action.key, args, toolRuntimeHeaders,
                                 );
+                                // An MCP `isError` result is a failed call: logged as one, the text still reaches the model.
                                 log(
-                                    'success', latencyMs, args,
+                                    isError ? 'error' : 'success', latencyMs, args,
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
+                                    isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
                                 );
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {
@@ -2269,6 +2451,41 @@ async function runBoundToolCleanup(
 // ── Internal Tracing Sink ────────────────────────────────────────────
 
 /**
+ * Raises a trace session's token totals to the turn's usage. The SDK sums the
+ * trace's own model-call events, which leave out the calls a sub-agent made
+ * (they sit in the turn's usage ledger, tagged `subagent`, but add no trace
+ * steps), so a turn that delegated would otherwise show less than it used.
+ * Totals only grow here: a session already at or above the turn's usage is kept.
+ */
+export async function reconcileTraceTotals(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string | undefined,
+    usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } | undefined,
+): Promise<void> {
+    if (!sessionId || !usage) return;
+    try {
+        const db = await getDatabase();
+        await db.switchToTenant(tenantDbName);
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) return;
+        const patch: Partial<IAgentTracingSession> = {};
+        const fields = [
+            ['totalInputTokens', usage.inputTokens],
+            ['totalOutputTokens', usage.outputTokens],
+            ['totalCachedInputTokens', usage.cachedInputTokens],
+        ] as const;
+        for (const [field, value] of fields) {
+            if (typeof value === 'number' && Number.isFinite(value) && value > (session[field] ?? 0)) patch[field] = Math.ceil(value);
+        }
+        if (Object.keys(patch).length === 0) return;
+        await db.updateAgentTracingSession(sessionId, patch, projectId);
+    } catch (error) {
+        logger.warn('Could not reconcile the trace totals with the turn usage', { sessionId, error: String(error) });
+    }
+}
+
+/**
  * Creates a customSink that saves trace sessions directly to the database,
  * bypassing the HTTP tracing endpoint and its API-token authentication.
  * This is used for internal agent executions (dashboard playground & client API chat).
@@ -2288,6 +2505,10 @@ export async function createInternalTracingSink(
     toolDefinitions?: TraceToolDefinition[],
     /** Stable key of the hosted agent, stamped into the session `metadata.agentKey` (the session's `agentName` is the display name). */
     agentKey?: string,
+    /** Told the id of each session the sink saves, so the turn can reconcile its totals afterwards. */
+    onSessionSaved?: (sessionId: string) => void,
+    /** SDK approval / question id → the sub-agent it came from, learned from the child's forwarded events. */
+    approvalSubagents: ReadonlyMap<string, string> = new Map(),
 ) {
     const { customSink } = await import('@cognipeer/agent-sdk');
     const toolDefinitionsSection = toolDefinitions && toolDefinitions.length > 0
@@ -2352,7 +2573,15 @@ export async function createInternalTracingSink(
                     nonSinkErrors,
                     ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
                 });
+                // A turn the caller stopped ends its session as the SDK sees an ordinary end ("success");
+                // the sink runs inside the invoke, so the turn's own signal says it was cancelled. A run
+                // that failed keeps its error. What the aborted model call used is only known when the
+                // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
+                const cancelledByCaller = currentTurnSignal()?.aborted === true
+                    && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
 
+                const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
+                    && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
                     traceId: session.traceId,
@@ -2360,7 +2589,7 @@ export async function createInternalTracingSink(
                     threadId: session.threadId,
                     tenantId,
                     projectId,
-                    source: 'custom',
+                    source: agentTriggerId ? 'trigger' : 'custom',
                     agent: session.agent ?? {},
                     agentName: session.agent?.name ?? undefined,
                     agentVersion: session.agent?.version ?? undefined,
@@ -2368,9 +2597,9 @@ export async function createInternalTracingSink(
                     config: session.config ?? {},
                     metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
                     summary: session.summary ?? {},
-                    status: sessionStatus,
+                    status: cancelledByCaller ? 'cancelled' : sessionStatus,
                     // An SDK-supplied status is never overridden by a late error event (only a derived one is).
-                    statusExplicit: isExplicitClientStatus(session.status),
+                    statusExplicit: cancelledByCaller || isExplicitClientStatus(session.status),
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
                     durationMs: session.durationMs ?? undefined,
@@ -2398,6 +2627,7 @@ export async function createInternalTracingSink(
                     });
                 }
 
+                onSessionSaved?.(session.sessionId);
                 // Upsert session
                 if (existing) {
                     await db.updateAgentTracingSession(session.sessionId, sessionDoc, projectId);
@@ -2474,6 +2704,10 @@ export async function createInternalTracingSink(
                         delete restMetadata.stop_reason;
                         delete restMetadata.reasoningTokens;
 
+                    const named = nameSubagentOnApprovalStep(
+                        { type: event.type, label: event.label, sequence: event.sequence, metadata: restMetadata, sections },
+                        approvalSubagents,
+                    );
                     const eventDoc: Omit<IAgentTracingEvent, '_id' | 'createdAt'> = {
                         sessionId: session.sessionId,
                         traceId: event.traceId ?? undefined,
@@ -2483,7 +2717,7 @@ export async function createInternalTracingSink(
                         projectId,
                         id: event.id ?? undefined,
                         type: event.type ?? undefined,
-                        label: event.label ?? undefined,
+                        label: named.label ?? undefined,
                         sequence: event.sequence ?? 0,
                         timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
                         status: event.status ?? undefined,
@@ -2495,7 +2729,7 @@ export async function createInternalTracingSink(
                         // the console would be the only source missing them,
                         // which is the worst place for a gap: it is the path we
                         // control end to end.
-                        metadata: restMetadata,
+                        metadata: named.metadata,
                         sections,
                         modelNames: event.modelNames ?? [],
                         model: event.model ?? undefined,
@@ -2624,12 +2858,16 @@ export async function createAgentRecord(
         description?: string;
         config: IAgent['config'];
         status?: IAgent['status'];
+        /** A key chosen by the caller (checked for uniqueness below). Default: the name as a slug plus a random suffix. */
+        key?: string;
+        /** Where the agent came from (`metadata.template` for an agent made from a template). */
+        metadata?: IAgent['metadata'];
     },
 ): Promise<IAgent> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    const key = generateAgentKey(data.name);
+    const key = data.key ?? generateAgentKey(data.name);
 
     // Verify uniqueness
     const existing = await db.findAgentByKey(key, projectId);
@@ -2644,9 +2882,10 @@ export async function createAgentRecord(
         name: data.name,
         description: data.description,
         // Sandbox secrets are sealed here, the one write path every creator
-        // (dashboard, client API, Assistants) goes through.
+        // (dashboard, client API) goes through.
         config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
         status: data.status || 'active',
+        ...(data.metadata ? { metadata: data.metadata } : {}),
         createdBy: userId,
     });
 
@@ -2664,13 +2903,17 @@ export async function updateAgentRecord(
     await db.switchToTenant(tenantDbName);
     // Old Advanced-tab reasoning moves next to the model on every save.
     if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.execution) {
+    if (data.config?.sandbox || data.config?.callback !== undefined) {
         // `config` replaces the stored one wholesale; masked secret values
         // must resolve against what is stored, not be saved as the mask —
-        // and a plaintext secret (sandbox secrets, the execution callback
-        // secret) must be sealed before it is written.
+        // and a plaintext secret (sandbox secrets, the callback secret) must
+        // be sealed before it is written. A callback sent without a URL (or
+        // as `null`) is the way to remove it: the field is dropped here.
         const current = await db.findAgentById(agentId);
         data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
+    } else if (data.config) {
+        // The removed Execution settings a stored config may still carry go on save.
+        data = { ...data, config: stripLegacyExecutionConfig(data.config) };
     }
     return db.updateAgent(agentId, { ...data, updatedBy: userId });
 }
@@ -2679,9 +2922,17 @@ export async function deleteAgentRecord(
     tenantDbName: string,
     agentId: string,
 ): Promise<boolean> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.deleteAgent(agentId);
+    return runWithTenantScope(tenantDbName, async (db) => {
+        const agent = await db.findAgentById(agentId);
+        const deleted = await db.deleteAgent(agentId);
+        // Its triggers (and their webhook delivery logs) go with it: nothing could fire them any more.
+        if (deleted && agent) {
+            const triggers = await db.listAgentTriggers({ tenantId: agent.tenantId, projectId: agent.projectId, agentKey: agent.key });
+            for (const trigger of triggers) await db.deleteAgentTriggerDeliveries(String(trigger._id));
+            await db.deleteAgentTriggersForAgent(agent.tenantId, agent.projectId, agent.key);
+        }
+        return deleted;
+    });
 }
 
 export async function getAgentById(
@@ -2799,42 +3050,9 @@ export async function listAgentVersions(
     return db.listAgentVersions(agentId, options);
 }
 
-/**
- * Resolves the agent config to use for execution.
- * - If a specific version is requested, returns that version's config.
- * - For API/SDK calls (not playground), uses the published version.
- * - Falls back to current agent config if no version is published (backward compat).
- */
-export async function resolveAgentConfig(
-    tenantDbName: string,
-    agentKey: string,
-    projectId?: string,
-    requestedVersion?: number,
-): Promise<{ agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
-    const agent = await db.findAgentByKey(agentKey, projectId);
-    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
-
-    // If a specific version is requested
-    if (requestedVersion !== undefined && requestedVersion !== null) {
-        const version = await db.findAgentVersion(String(agent._id), requestedVersion);
-        if (!version) {
-            throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
-        }
-        return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
-
-    // Use published version if available
-    if (agent.publishedVersion) {
-        const version = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
-        if (version) return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
-
-    // Fallback to current config (never published or version data missing)
-    return { agent, config: agent.config, resolvedVersion: null };
-}
+// Lives in agentConfigResolution.ts (the spend pre-flight and the sub-agent roster need it without
+// importing this module); the name stays here for every caller.
+export { resolveAgentConfig } from './agentConfigResolution';
 
 /**
  * Which version of an agent a realtime (voice) session should run, as the
@@ -2963,7 +3181,7 @@ export async function checkAgentModel(
  * existed carry no source. `portal` is end-user traffic through an enterprise
  * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam' | 'portal';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,
@@ -2976,7 +3194,7 @@ export async function createConversation(
     metadata?: Record<string, unknown>,
     /**
      * The session's spend budget. Absent = the agent's own default
-     * (`execution.sessionBudget`); `null` = none, whatever the agent's default.
+     * (`config.budget`); `null` = none, whatever the agent's default.
      */
     budget?: IAgentSessionBudget | null,
 ): Promise<IAgentConversation> {
@@ -3148,11 +3366,16 @@ export interface AgentChatRequest {
     /** Ids of the conversation's files this message attaches (uploaded to the session first). */
     attachments?: string[];
     userId: string;
+    /**
+     * Whose spend limits the turn counts against when `userId` is a synthetic
+     * owner (a trigger run): the trigger's accountable person.
+     */
+    accountableUserId?: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
     /**
      * No interactive user on this turn (a schedule, an eval or red-team case, an
-     * OpenAI-shaped or Assistants client). An approval-gated tool call or a
+     * OpenAI-shaped client). An approval-gated tool call or a
      * question then follows the agent's `humanInTheLoop.unattended` setting —
      * `deny` (default: the call fails, the run goes on), `pause` (waits for
      * Studio, like an attended run) or `allow` (runs without approval) — rather
@@ -3194,6 +3417,32 @@ export interface AgentChatRequest {
      * `runtimeContext.source`, the API token from `runtimeContext.tokenId`.
      */
     callerContext?: RoutingCallerContext;
+    /**
+     * Per-request structured output and validated agent variables. The run engine
+     * carries them on the run row (so a queued run and a resume see the same
+     * values) and passes them here; how the turn applies them is §6 of the run
+     * engine spec.
+     */
+    responseFormat?: AgentResponseFormat;
+    variables?: Record<string, unknown>;
+    /**
+     * Whether `variables` also fill the `{{variables.<name>}}` prompt variables (default
+     * true). Off for variables that came from outside the platform's own callers: they
+     * then reach the model only inside the user message, never the system prompt. The
+     * prompt still reads the declared defaults and the values named in `literalVariables`.
+     */
+    variablesInPrompt?: boolean;
+    /**
+     * With `variablesInPrompt: false`: the names in `variables` whose value did not come
+     * from the external content (a trigger's own fixed values). Only these, besides the
+     * declared defaults, fill `{{variables.<name>}}` in the system prompt.
+     */
+    literalVariables?: string[];
+    /**
+     * The message / variables came from an external payload (a webhook): the Variables
+     * block is closed with a line saying where the external data ends.
+     */
+    externalContent?: boolean;
     /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so
@@ -3387,6 +3636,10 @@ export interface ResponseUsage {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    /** The cached slice of `input_tokens` (0 when the run did not report one). */
+    input_tokens_details: { cached_tokens: number };
+    /** The reasoning slice of `output_tokens` (0 when the run did not report one). */
+    output_tokens_details: { reasoning_tokens: number };
 }
 
 /** OpenAI Responses API–compatible response shape */
@@ -3421,8 +3674,10 @@ export interface AgentChatResponse {
     output_parsed?: unknown;
     /** Why the structured contract failed (parse/validation); mutually exclusive with `output_parsed`. */
     output_error?: string;
-    /** Files the agent wrote to its sandbox's `/outputs/` this turn, saved as session files. Additive; absent when none. */
+    /** Files the agent produced this turn (its sandbox's `/outputs/`, or `session_files_create`), saved as session files. Additive; absent when none. */
     output_files?: ClientOutputFile[];
+    /** Things the turn could not do as configured (a sub-agent skipped or empty, files not delivered, a tool not offered). Additive; absent when none. */
+    warnings?: string[];
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
@@ -3699,6 +3954,13 @@ async function buildLocalAgentRun(input: {
      * calls the model (reading a tool's schema).
      */
     spend?: AgentSpendScope;
+    /** Per-request structured output: replaces `config.structuredOutput` for this turn. */
+    responseFormat?: AgentResponseFormat;
+    /** Validated agent variables of the turn, exposed as `{{variables.<name>}}` (see `variablesInPrompt`). */
+    variables?: Record<string, unknown>;
+    variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
+    literalVariables?: string[];
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
@@ -3739,7 +4001,6 @@ async function buildLocalAgentRun(input: {
     });
 
     // System prompt
-    let systemPrompt = config.systemPrompt;
     const promptVariables = buildPromptVariables({
         config,
         agentKey,
@@ -3747,19 +4008,11 @@ async function buildLocalAgentRun(input: {
         version: input.version,
         runtimeContext,
         userId: input.userId,
+        variables: input.variables,
+        variablesInPrompt: input.variablesInPrompt,
+        literalVariables: input.literalVariables,
     });
-    if (!systemPrompt && config.promptKey) {
-        const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) {
-            const rendered = renderPromptTemplate(prompt.template, promptVariables);
-            systemPrompt = rendered.text;
-            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
-        }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
-        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
-        systemPrompt = rendered.text;
-        reportPromptVariables(rendered, { agentKey });
-    }
+    let systemPrompt = await resolveAgentPrompt({ db, projectId, agentKey, config, systemPrompt: config.systemPrompt, variables: promptVariables });
 
     // Guardrails. One guard for the whole run — resolving the bindings once
     // keeps every tool this agent gets under the same policy, and a legacy
@@ -3866,16 +4119,18 @@ async function buildLocalAgentRun(input: {
 
     // Files attached to the session: the agent can list them and read them page
     // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file. While it holds an
+    // uploads. Offered whenever the conversation holds a file and the agent takes uploads
+    // or writes files (then they are its own outputs). While it holds an
     // image and the model takes images, the agent can also look at the image
     // again (`session_files_view_image`).
     const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
     const filesCfg = resolveAttachmentsConfig(config.attachments);
     const sessionFilesScope = { tenantDbName, tenantId, projectId };
+    const outputsOn = outputsAvailability(config);
     let sessionImages: SessionImagesOptions | undefined;
     if (input.conversation) {
         const conversationId = String(input.conversation._id);
-        const facts = agentTakesAttachments(config)
+        const facts = agentTakesAttachments(config) || outputsOn.available
             ? await conversationFileFacts(db, conversationId)
             : { any: false, images: false };
         const viewImage = facts.images && modelTakesImages;
@@ -3901,6 +4156,32 @@ async function buildLocalAgentRun(input: {
         };
     }
 
+    // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
+    // session to attach them to and a files bucket that works. Built before the client tools so their name
+    // reservation (`taken`, below) covers these too.
+    let fileOutputs: FileOutputTools | undefined;
+    if (input.conversation && outputsOn.available) {
+        const bucket = await inspectFileBucket(db, tenantId, projectId, outputsOn.cfg.bucketKey).catch(() => null);
+        if (bucket?.usable) {
+            fileOutputs = buildFileOutputTools({
+                createToolFn: createTool,
+                zod: z,
+                guard: toolGuard,
+                scope: sessionFilesScope,
+                conversation: { _id: input.conversation._id, agentKey },
+                agentConfig: config,
+                actorId,
+                ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
+                limits: outputsOn.outputs,
+            });
+            tools.push(...fileOutputs.tools);
+            toolDefinitions.push(...fileOutputs.definitions);
+            systemPrompt = systemPrompt
+                ? `${systemPrompt}\n\n${fileOutputsPrompt(outputsOn.outputs)}`
+                : fileOutputsPrompt(outputsOn.outputs);
+        }
+    }
+
     // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
     // the other bound tools once the run is over. A conversation keeps a
     // persistent sandbox across its turns, a stateless call gets a throwaway one.
@@ -3915,7 +4196,7 @@ async function buildLocalAgentRun(input: {
         zod: z,
         protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
         onWarning: (message) => warnings.add(message),
-        outputs: { agentConfig: config, actorId },
+        outputs: { agentConfig: config, actorId, ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}) },
     });
     // Files the agent writes to /outputs/ are delivered after the turn; that needs a session to attach them to and a bucket.
     if (sandboxTools.tools.length > 0 && input.conversation && resolveAttachmentsConfig(config.attachments).bucketKey) {
@@ -4002,13 +4283,18 @@ async function buildLocalAgentRun(input: {
     // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
     // own rules are the gateway's business, not this layer's.
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions, agentKey);
+    let traceSessionId: string | undefined;
+    const approvalSubagents = new Map<string, string>();
+    const tracingSink = await createInternalTracingSink(
+        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; }, approvalSubagents,
+    );
 
-    const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
+    const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
+        db,
         tenantDbName,
         tenantId,
         projectId,
-        subagents: config.subagents,
+        subagents: activeSubagentEntries(config),
         createToolFn: createTool,
         zod: z,
         guard: toolGuard,
@@ -4021,17 +4307,25 @@ async function buildLocalAgentRun(input: {
             ...(input.userId ? { userId: input.userId } : {}),
         },
         reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
+        prompt: {
+            parent: { config, variables: promptVariables },
+            ...(input.variables ? { variables: input.variables } : {}),
+            ...(input.variablesInPrompt !== undefined ? { variablesInPrompt: input.variablesInPrompt } : {}),
+            ...(input.userId ? { userId: input.userId } : {}),
+        },
+        onWarning: (message) => warnings.add(message),
+        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools },
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
     const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
-    const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
+    const outputSchema = resolveTurnOutputSchema(config, input.responseFormat);
     const skillPolicy = resolveAgentSkillPolicy(config);
     const tracingMetadata = input.modelChoice
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
         : buildTracingMetadata(runtimeContext);
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model, sessionBudgetActive);
+    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message));
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
@@ -4086,9 +4380,19 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
-        collectOutputs: sandboxTools.collectOutputs,
+        // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
+        collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
         routedModel: () => routedModelKey,
+        /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
+        /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
+        noteSdkEvent: (event: AgentSdkEvent) => {
+            const e = event as { type?: string; id?: unknown; subagentName?: unknown };
+            if ((e.type === 'tool_approval' || e.type === 'user_question') && typeof e.id === 'string' && typeof e.subagentName === 'string') {
+                approvalSubagents.set(e.id, e.subagentName);
+            }
+        },
+        reconcileTrace: (usage: Parameters<typeof reconcileTraceTotals>[3]) => reconcileTraceTotals(tenantDbName, projectId, traceSessionId, usage),
     };
 }
 
@@ -4111,7 +4415,10 @@ function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, ag
     return {
         stream: true,
         onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-            if (chunk.isFinal || !chunk.text) return;
+            // The SDK passes a sub-agent's deltas up only when asked to (the console never asks), stamped
+            // with the sub-agent. They are its text, not this answer's: appended, they would read as the
+            // parent's words and end up in the partial answer of an aborted turn.
+            if (chunk.isFinal || !chunk.text || isSubagentEvent(chunk)) return;
             try {
                 onTextChunk(chunk.text);
             } catch (callbackError) {
@@ -4147,6 +4454,9 @@ export function createReasoningTap(
         listening: Boolean(onReasoningChunk) && enabled,
         onEvent: (event) => {
             if (!enabled) return;
+            // A sub-agent's thinking, tool calls and text reach this tap too, stamped with the sub-agent:
+            // none of it is this turn's thinking or a boundary between this turn's model steps.
+            if (isSubagentEvent(event)) return;
             if (event.type === 'tool_call' || event.type === 'stream') {
                 if (collected) boundary = true;
                 return;
@@ -4177,6 +4487,33 @@ function liveStreamOptions(
 ) {
     const text = textStreamOptions(onTextChunk, agentKey);
     return reasoningTap.listening ? { ...text, stream: true } : text;
+}
+
+/**
+ * Records a `summarization` event as a compaction of this turn: kept on the turn's
+ * record, announced on the session log and handed to the caller when it listens.
+ * A compaction a delegated child made of its OWN context is none of that: it did
+ * not touch this turn's messages, and counting it would show the parent's
+ * transcript as shortened (and name tool results as compacted) when it was not.
+ */
+function noteTurnCompaction(
+    event: Parameters<typeof compactionFromEvent>[0],
+    turn: {
+        compactions: IAgentTurnCompaction[];
+        turnEvents: Pick<SessionTurnEvents, 'onCompaction'> | undefined;
+        onCompaction?: (compaction: IAgentTurnCompaction) => void;
+        agentKey: string;
+    },
+): void {
+    if (isSubagentEvent(event)) return;
+    const compaction = compactionFromEvent(event);
+    turn.compactions.push(compaction);
+    turn.turnEvents?.onCompaction(compaction);
+    try {
+        turn.onCompaction?.(compaction);
+    } catch (callbackError) {
+        logger.warn('onCompaction callback failed', { agentKey: turn.agentKey, error: callbackError });
+    }
 }
 
 /** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
@@ -4361,6 +4698,19 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
+/** What a continuation must apply again: the turn's own structured output and variables. */
+function pausedTurnOptions(
+    request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt' | 'literalVariables'>,
+): PausedTurnOptions | undefined {
+    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
+    return {
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.variablesInPrompt === false && request.literalVariables?.length ? { literalVariables: request.literalVariables } : {}),
+    };
+}
+
 function toAgentChatResponse(input: {
     conversationId: string;
     priorMessageCount: number;
@@ -4370,9 +4720,10 @@ function toAgentChatResponse(input: {
     messages: IAgentConversation['messages'];
     reasoning?: string;
     outcome?: { stopReason: AgentStopReason | 'budget_reached'; stopDetail?: string };
-    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
+    warnings?: ReadonlySet<string>;
     /** The approvals / questions the turn paused on — makes the response `requires_action`. */
     pendingActions?: PublicPendingAction[];
 }): AgentChatResponse {
@@ -4416,6 +4767,8 @@ function toAgentChatResponse(input: {
             input_tokens: usage?.inputTokens ?? 0,
             output_tokens: usage?.outputTokens ?? 0,
             total_tokens: usage?.totalTokens ?? ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)),
+            input_tokens_details: { cached_tokens: usage?.cachedInputTokens ?? 0 },
+            output_tokens_details: { reasoning_tokens: usage?.reasoningTokens ?? 0 },
         },
         created_at: Math.floor(Date.now() / 1000),
         previous_response_id: input.priorMessageCount > 0 ? responseId : null,
@@ -4423,6 +4776,7 @@ function toAgentChatResponse(input: {
         ...(input.outputParsed !== undefined ? { output_parsed: input.outputParsed } : {}),
         ...(input.outputError ? { output_error: input.outputError } : {}),
         ...(outputFiles.length > 0 ? { output_files: outputFiles } : {}),
+        ...(input.warnings && input.warnings.size > 0 ? { warnings: [...input.warnings] } : {}),
         _conversation_messages: input.messages,
     };
 }
@@ -4473,7 +4827,12 @@ async function runAgentChatTurn(
     // The block that separates the person's words from what the turn adds for
     // attached files must not be something the person can type: the transcript
     // is cut at it (`persistedUserTurn`).
-    const userMessage = neutralizeAttachmentMarker(request.userMessage);
+    // The Variables block (and, for external content, its closing line) belongs to the
+    // user turn like the words themselves: it is what the model reads, what the
+    // transcript stores and what a resume replays.
+    const userMessage = neutralizeAttachmentMarker(
+        composeUserMessageWithVariables(request.userMessage, request.variables, { externalContent: request.externalContent }),
+    );
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4547,7 +4906,7 @@ async function runAgentChatTurn(
     // Every turn adds its spend to the session's total — with a budget or without one.
     const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
     const spend = callsModel && config.modelKey
-        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.userId })
+        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? request.userId })
         : undefined;
     if (spend) await assertAgentTurnSpendAllowed(spend, config);
 
@@ -4569,8 +4928,9 @@ async function runAgentChatTurn(
         superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
-    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
+        await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
     }
     // Text deltas ride the caller's own stream callback: a caller that did not
     // ask for text must not switch the model call into streaming mode.
@@ -4651,7 +5011,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4674,6 +5034,10 @@ async function runAgentChatTurn(
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -4708,12 +5072,11 @@ async function runAgentChatTurn(
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') {
-                    const compaction = compactionFromEvent(event);
-                    compactions.push(compaction);
-                    turnEvents.onCompaction(compaction);
+                    noteTurnCompaction(event, { compactions, turnEvents, agentKey });
                     return;
                 }
                 reasoningTap.onEvent(event);
+                noteSdkEvent(event);
                 turnEvents.onSdkEvent(event);
             },
             ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
@@ -4791,6 +5154,7 @@ async function runAgentChatTurn(
         // outcome carries why, and the last text the agent did write.
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        await reconcileTrace(usage);
         // What the turn cost: kept on the message (the session's running total
         // is the sum of these) and, with a session budget, checked against it.
         const turnCostUsd = usage
@@ -4835,6 +5199,7 @@ async function runAgentChatTurn(
                 hitl,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
+                turn: pausedTurnOptions(request),
                 createdBy: request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
@@ -4924,6 +5289,7 @@ async function runAgentChatTurn(
             usage,
             outputParsed,
             outputError,
+            warnings,
             ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
@@ -5051,7 +5417,8 @@ export function extractPlaygroundSteps(
         const record = output !== null && typeof output === 'object'
             ? output as Record<string, unknown>
             : undefined;
-        const sniffedError = Boolean(record?.error) || record?.ok === false;
+        const delegationError = delegationFailure(typeof entry.toolName === 'string' ? entry.toolName : undefined, output);
+        const sniffedError = Boolean(record?.error) || record?.ok === false || Boolean(delegationError);
         const deniedByUser = status === 'rejected' && (
             (typeof entry.tool_call_id === 'string' && deniedCallIds.has(entry.tool_call_id))
             // The SDK words a reviewer's refusal `Rejected: <comment>`; a policy block carries its own reason.
@@ -5061,8 +5428,14 @@ export function extractPlaygroundSteps(
         const errorText = failed
             ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
                 ?? (record?.error ? String(record.error) : undefined)
+                ?? delegationError
                 ?? 'The tool call failed.'
             : undefined;
+
+        // The history entry names no child; the delegation call's own result does.
+        const subagentOf = typeof entry.subagent === 'string'
+            ? entry.subagent
+            : delegatedSubagentName(typeof entry.toolName === 'string' ? entry.toolName : undefined, entry.args, output);
 
         const rawOutput = entry.rawOutput;
         const rawDiffers = rawOutput !== undefined && rawOutput !== output;
@@ -5074,7 +5447,7 @@ export function extractPlaygroundSteps(
             output,
             ...(rawDiffers ? { rawOutput } : {}),
             ...(errorText ? { error: errorText } : {}),
-            ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
+            ...(subagentOf ? { subagent: subagentOf } : {}),
             // Reported as an error even when the SDK called it a success,
             // so the transcript, the Events tab and the per-tool failure
             // count all agree with the error text above.
@@ -5118,11 +5491,15 @@ async function priceTurn(
 }
 
 /**
- * What a turn cost, for the session budget. With a budget in force this is the
- * SDK's own per-request usage priced by the cost estimator — the figure the
- * budget was enforced against, sub-agent models at their own prices — and
- * otherwise (or when the SDK reported no per-request usage) the turn's total
- * usage at the primary model's price.
+ * What a turn cost. With a budget in force this is the SDK's own per-request
+ * usage priced by the cost estimator — the figure the budget was enforced
+ * against, sub-agent models at their own prices. A turn that delegated is priced
+ * the same way even without a budget: the SDK's ledger holds the sub-agents'
+ * model calls next to the parent's (each tagged `subagent`, with the model it
+ * ran on), so the turn's total at the primary model's price would charge a
+ * cheaper or dearer child at the wrong rate. Otherwise (or when the SDK
+ * reported no per-request usage) it is the turn's total usage at the primary
+ * model's price.
  */
 async function priceAgentTurn(input: {
     plan: SessionBudgetPlan | null;
@@ -5135,6 +5512,7 @@ async function priceAgentTurn(input: {
         usage?: {
             perRequest?: Array<{
                 modelName?: string;
+                subagent?: { name?: string };
                 usage?: {
                     prompt_tokens?: number;
                     completion_tokens?: number;
@@ -5144,10 +5522,16 @@ async function priceAgentTurn(input: {
             }>;
         };
     } | undefined)?.usage?.perRequest;
-    if (input.plan && input.costEstimator && Array.isArray(perRequest) && perRequest.length > 0) {
+    // A turn whose own model has no price stays unpriced however its children are priced:
+    // a cost that left the parent's calls out would read as the whole bill.
+    const estimate = input.costEstimator;
+    if (
+        estimate && Array.isArray(perRequest) && perRequest.length > 0
+        && (input.plan || (input.pricing && perRequest.some((request) => request.subagent)))
+    ) {
         let cost = 0;
         for (const request of perRequest) {
-            cost += input.costEstimator({
+            cost += estimate({
                 modelName: request.modelName,
                 inputTokens: Number(request.usage?.prompt_tokens) || 0,
                 outputTokens: Number(request.usage?.completion_tokens) || 0,
@@ -5292,8 +5676,10 @@ async function runPlaygroundChatTurn(
         })
         : undefined;
     scope.events = turnEvents;
-    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
+        && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
+        await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId: String(sessionConversation._id) });
     }
     // Text deltas ride the caller's own stream callback (see `runAgentChatTurn`).
     const onTextChunk = turnEvents && request.onTextChunk
@@ -5361,7 +5747,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5419,18 +5805,12 @@ async function runPlaygroundChatTurn(
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
             reasoningTap.onEvent(event);
+            noteSdkEvent(event);
             turnEvents?.onSdkEvent(event);
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
                 // so a session shows the compaction as it happens.
-                const compaction = compactionFromEvent(event);
-                compactions.push(compaction);
-                turnEvents?.onCompaction(compaction);
-                try {
-                    onCompaction?.(compaction);
-                } catch (callbackError) {
-                    logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
-                }
+                noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
                 return;
             }
             if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
@@ -5521,6 +5901,7 @@ async function runPlaygroundChatTurn(
         const outputFiles = sessionConversation ? await collectOutputs() : { attachments: [], warnings: [] };
         for (const warning of outputFiles.warnings) warnings.add(warning);
 
+        await reconcileTrace(normalizePlaygroundUsage(result.metadata?.usage)?.usage);
         const playgroundResult: AgentPlaygroundChatResult = {
             content: outcome.content,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
@@ -5700,10 +6081,22 @@ export interface AgentResumeRequest {
     conversationId: string;
     /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
     userId: string;
+    /** Whose spend limits the continuation counts against when the turn's owner is synthetic (a trigger run). */
+    accountableUserId?: string;
     trigger: 'resume' | 'timeout';
     /** The background run executing this continuation, when there is one. */
     runId?: string;
     runtimeContext?: AgentRuntimeContext;
+    /**
+     * The turn's per-request structured output / variables (the run row's, for a queued
+     * continuation). A paused turn carries its own with the paused state, which
+     * wins when this is absent; a budget continuation has only these.
+     */
+    responseFormat?: AgentResponseFormat;
+    variables?: Record<string, unknown>;
+    variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (see `AgentChatRequest`). */
+    literalVariables?: string[];
     cancellationCell?: AgentRunCancellationCell;
     signal?: AbortSignal;
     onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -5981,6 +6374,14 @@ async function runAgentResumeTurn(
     const questions = pausedRun?.questions ?? [];
     const bySdkId = pausedRun?.bySdkId ?? new Map<string, IAgentPendingAction>();
     const source: 'agent' | 'agent-playground' = paused?.source ?? request.continuation!.source;
+    // The turn's own structured output and variables: the request's, else the ones the pause stored.
+    const turnOptions: PausedTurnOptions = {
+        ...(paused?.turn ?? {}),
+        ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
+        ...(request.variables ? { variables: request.variables } : {}),
+        ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
+    };
     const startedAt = Date.now();
 
     // The session's own budget and the tenant's spend limit, before the model is
@@ -5992,7 +6393,7 @@ async function runAgentResumeTurn(
     const anchorAction = bySdkId.get(approvals[0]?.id ?? questions[0]?.id ?? '');
     const spend = config.modelKey
         ? await resolveAgentSpendScope({
-            tenantDbName, tenantId, projectId, userId: anchorAction?.createdBy ?? request.userId,
+            tenantDbName, tenantId, projectId, userId: request.accountableUserId ?? anchorAction?.createdBy ?? request.userId,
         })
         : undefined;
     if (spend) await assertAgentTurnSpendAllowed(spend, config);
@@ -6000,7 +6401,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6021,6 +6422,10 @@ async function runAgentResumeTurn(
         memoryConversationId: conversationId,
         threadId: conversationId,
         ...(spend ? { spend } : {}),
+        ...(turnOptions.responseFormat ? { responseFormat: turnOptions.responseFormat } : {}),
+        ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
+        ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
+        ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
     });
 
     try {
@@ -6111,16 +6516,10 @@ async function runAgentResumeTurn(
         const invokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 reasoningTap.onEvent(event);
+                noteSdkEvent(event);
                 turnEvents.onSdkEvent(event);
                 if (event.type === 'summarization') {
-                    const compaction = compactionFromEvent(event);
-                    compactions.push(compaction);
-                    turnEvents.onCompaction(compaction);
-                    try {
-                        request.onCompaction?.(compaction);
-                    } catch (callbackError) {
-                        logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
-                    }
+                    noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
                     return;
                 }
                 if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
@@ -6194,6 +6593,12 @@ async function runAgentResumeTurn(
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+        // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
+        // the SDK counts only the leg it just ran. The stored message keeps its own leg.
+        const earlierLegs = pausedRun ? pausedLegsUsage(conversation.messages ?? []) : undefined;
+        const turnUsage = earlierLegs ? (usage ? addPlaygroundUsage(earlierLegs, usage) : earlierLegs) : usage;
+        // The trace session spans every leg of the turn, so it is reconciled with all of them.
+        await reconcileTrace(turnUsage);
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
@@ -6214,6 +6619,7 @@ async function runAgentResumeTurn(
                 hitl,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
+                ...(Object.keys(turnOptions).length > 0 ? { turn: turnOptions } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
@@ -6273,7 +6679,7 @@ async function runAgentResumeTurn(
             ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
             content: outcome.content,
             messageIndex: messages.length - 1,
-            ...(usage ? { usage: { ...usage } } : {}),
+            ...(turnUsage ? { usage: { ...turnUsage } } : {}),
             ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
             ...(budget && !superseded ? { budget } : {}),
         });
@@ -6291,9 +6697,10 @@ async function runAgentResumeTurn(
                 messages,
                 reasoning: assistantReasoning,
                 outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
-                usage,
+                usage: turnUsage,
                 outputParsed: result.output,
                 outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
+                warnings,
                 ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
             }),
             stopReason,

@@ -62,6 +62,11 @@ export function normalizePlaygroundUsage(usage: unknown): { usage: PlaygroundUsa
  * Summed across models on purpose: the turn's cost is what every model it
  * touched cost together, and showing only the main model would under-report a
  * run that summarized or delegated.
+ *
+ * A delegated turn is counted once here. The SDK (0.15) merges the sub-agents'
+ * model calls into the parent's ledger — each `perRequest` entry tagged with its
+ * `subagent` — so these totals already are the whole turn; nothing adds the
+ * sub-agents' usage on top of them.
  */
 export function normalizeUsageLedger(totals: unknown): PlaygroundUsage | undefined {
     if (!totals || typeof totals !== 'object') return undefined;
@@ -81,4 +86,37 @@ export function normalizeUsageLedger(totals: unknown): PlaygroundUsage | undefin
 
     if (inputTokens === 0 && outputTokens === 0 && totalTokens === 0) return undefined;
     return { inputTokens, outputTokens, cachedInputTokens, totalTokens };
+}
+
+/** Sums two usages field by field; a field neither has stays absent, and a cost is kept only when both legs priced theirs. */
+export function addPlaygroundUsage(a: PlaygroundUsage, b: PlaygroundUsage): PlaygroundUsage {
+    const sum = (x?: number, y?: number): number | undefined => (x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0));
+    const costUsd = a.costUsd !== undefined && b.costUsd !== undefined ? a.costUsd + b.costUsd : undefined;
+    const merged: PlaygroundUsage = {
+        inputTokens: sum(a.inputTokens, b.inputTokens),
+        outputTokens: sum(a.outputTokens, b.outputTokens),
+        cachedInputTokens: sum(a.cachedInputTokens, b.cachedInputTokens),
+        totalTokens: sum(a.totalTokens, b.totalTokens),
+    };
+    if (costUsd !== undefined) merged.costUsd = costUsd;
+    return merged;
+}
+
+/**
+ * What the earlier legs of a paused turn already spent: the trailing run of
+ * assistant messages that paused (each leg of a turn that pauses and resumes is
+ * its own stored message, with its own usage). A continuation reports this plus
+ * its own leg as the turn's usage; the stored messages stay per-leg so a session's
+ * totals (the sum over messages) are not counted twice.
+ */
+export function pausedLegsUsage(
+    messages: ReadonlyArray<Pick<IAgentConversationMessage, 'role' | 'usage' | 'pendingActions'>>,
+): PlaygroundUsage | undefined {
+    let total: PlaygroundUsage | undefined;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i]!;
+        if (message.role !== 'assistant' || !message.pendingActions?.length) break;
+        if (message.usage) total = total ? addPlaygroundUsage(message.usage, total) : { ...message.usage };
+    }
+    return total;
 }

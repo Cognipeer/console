@@ -62,11 +62,11 @@ import {
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import {
-  createBackgroundAgentRun,
   queueAgentRunContinue,
   runAgentJobLocal,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 import { getBudgetUsage, settleUsageBudget, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { destroyCache } from '@/lib/core/cache';
 
@@ -464,11 +464,11 @@ describe('a turn that crosses the budget while finishing normally', () => {
     await createAgent();
     scriptModel(() => finalAnswer('background answer'));
     const id = String((await newConversation({ budget: TINY }))._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'go', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
 
     await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
@@ -617,7 +617,7 @@ describe('the budget is a setting of the session', () => {
   });
 
   it('starts from the agent default and can be overridden or switched off at creation', async () => {
-    await createAgent({ execution: { sessionBudget: { maxCostUsd: 2, onReach: 'stop' } } });
+    await createAgent({ budget: { maxCostUsd: 2, onReach: 'stop' } });
     const inherited = await createConversation(DB_NAME, tenantId, PROJECT_ID, OWNER, AGENT_KEY);
     expect(inherited.budget).toEqual({ maxCostUsd: 2, onReach: 'stop' });
     const own = await createConversation(DB_NAME, tenantId, PROJECT_ID, OWNER, AGENT_KEY, undefined, undefined, { maxCostUsd: 5, onReach: 'pause' });

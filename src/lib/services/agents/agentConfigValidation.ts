@@ -26,11 +26,14 @@ import {
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
 import { validateSeedFiles } from './agentSandboxSeedFiles';
+import { unsuppliableRequiredVariables, validateVariableDeclaration } from './agentVariables';
+import { resolveSubagentTarget } from './subagentRoster';
+import { subagentConfigIssues } from './subagentConfigRules';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
 import { checkEmbeddedClientTools } from './agentClientTools';
-import { normalizeAttachmentsFolder } from './sessionFilesConfig';
+import { normalizeAttachmentsFolder, SESSION_FILE_OUTPUTS_LIMITS } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { reasoningConfigIssues } from './agentReasoning';
 import { MAX_MEMORY_MOUNTS } from './agentMemoryMounts';
@@ -90,6 +93,20 @@ function checkEnum(issues: Issues, field: string, value: unknown, allowed: Set<s
     }
 }
 
+/** Whether the agent can call anything that returns a tool result (tools, knowledge, sub-agents, skills, memory, sandbox, client tools). */
+function agentHasTools(config: IAgentConfig): boolean {
+    return Boolean(
+        config.toolBindings?.length
+        || config.knowledgeBindings?.length
+        || config.knowledgeEngineKey
+        || config.subagents?.length
+        || config.skills?.length
+        || config.clientTools?.length
+        || config.memory?.enabled
+        || config.sandbox?.enabled,
+    );
+}
+
 /**
  * The checks that need nothing but the config itself — no database lookups.
  * validateAgentConfig runs these first.
@@ -100,6 +117,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
     checkAdditionalModelsShape(issues, config);
+    checkSkillPolicyShape(issues, config);
     issues.errors.push(...reasoningConfigIssues(config));
     if (config.systemPrompt && config.promptKey) {
         issues.warnings.push({
@@ -154,6 +172,22 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         });
     }
 
+    // The SDK summarizes only tool results. With nothing that produces them, summarization never runs and
+    // the `hybrid` policy simply drops turns older than `lastTurnsToKeep`: facts from them are lost silently.
+    const summarizationConfigured = (runtime.summarization !== undefined && summarization.enable !== false)
+        || context.policy === 'summary_only' || context.policy === 'hybrid';
+    if (summarizationConfigured && !agentHasTools(config)) {
+        issues.warnings.push({
+            field: 'runtime.summarization',
+            message: 'Summarization only compresses tool results, and this agent has no tools, so it never summarizes. '
+                + (context.policy === 'summary_only'
+                    ? 'With "summary_only" the agent keeps only the current turn.'
+                    : context.policy === 'raw'
+                        ? 'Older turns are kept as they are until the context limit.'
+                        : `With the "hybrid" context policy, turns older than the last ${isNumber(context.lastTurnsToKeep) ? context.lastTurnsToKeep : 'few'} are dropped without a summary.`),
+        });
+    }
+
     const toolResponses = runtime.toolResponses ?? {};
     checkEnum(issues, 'runtime.toolResponses.defaultPolicy', toolResponses.defaultPolicy, TOOL_RESPONSE_POLICIES);
     for (const [tool, policy] of Object.entries(toolResponses.retentionByTool ?? {})) {
@@ -182,51 +216,49 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
-    const execution = config.execution;
-    if (execution) {
-        const env = getConfig().agent;
-        const syncMaxSeconds = Math.floor(env.syncTimeoutMs / 1000);
-        const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
-        checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
-        checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
-        const sessionBudget = execution.sessionBudget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
-        if (sessionBudget !== undefined && sessionBudget !== null) {
-            if (typeof sessionBudget !== 'object' || Array.isArray(sessionBudget)) {
-                issues.errors.push({ field: 'execution.sessionBudget', message: 'must be an object: { maxCostUsd, onReach }' });
+    // Declared variables: names, types, enums, defaults.
+    for (const issue of validateVariableDeclaration(config.variables)) issues.errors.push({ field: issue.field, message: issue.message });
+
+    const budget = config.budget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
+    if (budget !== undefined && budget !== null) {
+        if (typeof budget !== 'object' || Array.isArray(budget)) {
+            issues.errors.push({ field: 'budget', message: 'must be an object: { maxCostUsd, onReach }' });
+        } else {
+            if (!isNumber(budget.maxCostUsd)) {
+                issues.errors.push({ field: 'budget.maxCostUsd', message: 'is required and must be a number' });
             } else {
-                if (!isNumber(sessionBudget.maxCostUsd)) {
-                    issues.errors.push({ field: 'execution.sessionBudget.maxCostUsd', message: 'is required and must be a number' });
-                } else {
-                    checkNumber(issues, 'execution.sessionBudget.maxCostUsd', sessionBudget.maxCostUsd, { min: 0, exclusiveMin: true });
-                }
-                if (sessionBudget.onReach !== 'pause' && sessionBudget.onReach !== 'stop') {
-                    issues.errors.push({ field: 'execution.sessionBudget.onReach', message: 'must be one of: pause, stop' });
-                }
-                if (sessionBudget.allowClientOverride !== undefined && typeof sessionBudget.allowClientOverride !== 'boolean') {
-                    issues.errors.push({ field: 'execution.sessionBudget.allowClientOverride', message: 'must be a boolean' });
-                }
+                checkNumber(issues, 'budget.maxCostUsd', budget.maxCostUsd, { min: 0, exclusiveMin: true });
+            }
+            if (budget.onReach !== 'pause' && budget.onReach !== 'stop') {
+                issues.errors.push({ field: 'budget.onReach', message: 'must be one of: pause, stop' });
+            }
+            if (budget.allowClientOverride !== undefined && typeof budget.allowClientOverride !== 'boolean') {
+                issues.errors.push({ field: 'budget.allowClientOverride', message: 'must be a boolean' });
             }
         }
-        if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
-            issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
-        }
-        if (execution.defaultMode === 'background' && execution.backgroundEnabled === false) {
-            issues.errors.push({ field: 'execution.defaultMode', message: 'cannot be background while background execution is disabled' });
-        }
-        if (execution.callbackUrl !== undefined && execution.callbackUrl !== '') {
-            const parsed = URL.canParse(execution.callbackUrl) ? new URL(execution.callbackUrl) : null;
-            if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || execution.callbackUrl.length > 2048) {
-                issues.errors.push({ field: 'execution.callbackUrl', message: 'must be an http(s) URL of at most 2048 characters' });
+    }
+
+    const callback = config.callback;
+    if (callback) {
+        if (callback.url !== undefined && callback.url !== '') {
+            const parsed = URL.canParse(callback.url) ? new URL(callback.url) : null;
+            if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || callback.url.length > 2048) {
+                issues.errors.push({ field: 'callback.url', message: 'must be an http(s) URL of at most 2048 characters' });
             } else if (parsed.protocol === 'http:') {
-                issues.warnings.push({ field: 'execution.callbackUrl', message: 'Callbacks over plain http can be read in transit; prefer https.' });
+                issues.warnings.push({ field: 'callback.url', message: 'Callbacks over plain http can be read in transit; prefer https.' });
             }
         }
-        if (typeof execution.callbackSecret === 'string' && execution.callbackSecret !== '' && execution.callbackSecret !== AGENT_SANDBOX_SECRET_MASK
-            && (execution.callbackSecret.length < 16 || execution.callbackSecret.length > 256)) {
-            issues.errors.push({ field: 'execution.callbackSecret', message: 'must be 16–256 characters' });
+        if (typeof callback.secret === 'string' && callback.secret !== '' && callback.secret !== AGENT_SANDBOX_SECRET_MASK
+            && (callback.url === undefined || callback.url === null || callback.url === '')) {
+            // Saved as-is, the secret would be dropped together with the URL-less callback and nothing would ever be signed.
+            issues.errors.push({ field: 'callback.secret', message: 'needs callback.url — a secret signs the calls to that URL' });
         }
-        if (execution.callbackSecret && !execution.callbackUrl) {
-            issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        if (typeof callback.secret === 'string' && callback.secret !== '' && callback.secret !== AGENT_SANDBOX_SECRET_MASK
+            && (callback.secret.length < 16 || callback.secret.length > 256)) {
+            issues.errors.push({ field: 'callback.secret', message: 'must be 16–256 characters' });
+        }
+        if (callback.secret && callback.secret !== AGENT_SANDBOX_SECRET_MASK && !callback.url) {
+            issues.errors.push({ field: 'callback.secret', message: 'needs a callback URL' });
         }
     }
 
@@ -268,12 +300,24 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
                 issues.errors.push({ field: `attachments.${flag}`, message: 'must be true or false' });
             }
         }
+        const outputs = attachments.outputs;
+        if (outputs !== undefined && outputs !== null) {
+            if (typeof outputs !== 'object' || Array.isArray(outputs)) {
+                issues.errors.push({ field: 'attachments.outputs', message: 'must be an object' });
+            } else {
+                if (outputs.enabled !== undefined && typeof outputs.enabled !== 'boolean') {
+                    issues.errors.push({ field: 'attachments.outputs.enabled', message: 'must be true or false' });
+                }
+                checkNumber(issues, 'attachments.outputs.maxFilesPerTurn', outputs.maxFilesPerTurn, { min: 1, max: SESSION_FILE_OUTPUTS_LIMITS.maxFilesPerTurn, integer: true });
+                checkNumber(issues, 'attachments.outputs.maxFileSizeMb', outputs.maxFileSizeMb, { min: 0, exclusiveMin: true, max: Math.min(SESSION_FILE_OUTPUTS_LIMITS.maxFileSizeMb, getConfig().limits.fileUploadMaxMb) });
+            }
+        }
         const folder = normalizeAttachmentsFolder(attachments.folder);
         if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
         if (attachments.bucketKey !== undefined && typeof attachments.bucketKey !== 'string') {
             issues.errors.push({ field: 'attachments.bucketKey', message: 'must be a bucket key' });
-        } else if (attachments.enabled === true && !attachments.bucketKey?.trim()) {
-            // Files are kept in a bucket of the project; there is no built-in storage to fall back to.
+        } else if ((attachments.enabled === true || attachments.outputs?.enabled === true) && !attachments.bucketKey?.trim()) {
+            // Files (uploads or the agent's own outputs) are kept in a bucket of the project; there is no built-in storage to fall back to.
             issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
         }
     }
@@ -348,6 +392,11 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         const field = `subagents[${index}]`;
         if (!entry.name) {
             issues.errors.push({ field: `${field}.name`, message: 'A sub-agent needs a name' });
+        } else if (!SUBAGENT_NAME_PATTERN.test(entry.name)) {
+            // A warning, not an error: the Studio form slugs names to this shape, but agents written through the API or an
+            // import may carry others (hyphens, capitals) and re-saving them must keep working.
+            issues.warnings.push({ field: `${field}.name`, message: 'Use lowercase letters, digits and underscores for a sub-agent name' });
+            names.add(entry.name);
         } else if (names.has(entry.name)) {
             issues.errors.push({ field: `${field}.name`, message: `Duplicate sub-agent name "${entry.name}"` });
         } else {
@@ -365,8 +414,29 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         (entry.toolBindings ?? []).forEach((binding, bindingIndex) =>
             checkBindingShape(issues, `${field}.toolBindings[${bindingIndex}]`, binding));
     });
+    issues.errors.push(...subagentConfigIssues(config));
 
     return issues;
+}
+
+/** The shape the Studio form gives a sub-agent name (lowercase letters, digits, underscores). */
+const SUBAGENT_NAME_PATTERN = /^[a-z0-9_]{1,48}$/;
+
+/** Bounds of the skill policy limits; the Studio form already refuses below 1. */
+export const SKILL_POLICY_LIMIT_MAX = 100;
+
+function checkSkillPolicyShape(issues: Issues, config: IAgentConfig): void {
+    const policy = config.skillPolicy as unknown;
+    if (policy === undefined || policy === null) return;
+    if (typeof policy !== 'object' || Array.isArray(policy)) {
+        issues.errors.push({ field: 'skillPolicy', message: 'must be an object' });
+        return;
+    }
+    const record = policy as Record<string, unknown>;
+    for (const name of ['maxOpenSkills', 'maxBoundToolsPerSkill', 'maxBoundToolsTotal']) {
+        checkNumber(issues, `skillPolicy.${name}`, record[name], { min: 1, max: SKILL_POLICY_LIMIT_MAX, integer: true });
+    }
+    checkEnum(issues, 'skillPolicy.disclosure', record.disclosure, new Set(['catalog', 'search']));
 }
 
 export const MAX_ADDITIONAL_MODELS = 10;
@@ -496,7 +566,7 @@ export async function validateAgentConfig(input: {
 
     // Session files need a bucket that can take a file: it exists in this project, is
     // active, and its provider exists, is assigned here and is active.
-    const filesBucketKey = config.attachments?.enabled === true && typeof config.attachments.bucketKey === 'string'
+    const filesBucketKey = (config.attachments?.enabled === true || config.attachments?.outputs?.enabled === true) && typeof config.attachments.bucketKey === 'string'
         ? config.attachments.bucketKey.trim()
         : '';
     if (filesBucketKey && input.tenantId) {
@@ -588,6 +658,26 @@ export async function validateAgentConfig(input: {
                 issues.errors.push({ field: `${field}.agentKey`, message: `Agent "${entry.agentKey}" has no published version to delegate to` });
             } else if (input.agentKey && (target.config?.subagents ?? []).some((child) => child.kind === 'ref' && child.agentKey === input.agentKey)) {
                 issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" already delegates back to this agent (a cycle)` });
+            } else if (target.status && target.status !== 'active') {
+                // Nothing else on the platform runs an agent that is not active, and delegation is no exception:
+                // a run skips this entry (and says so) until the agent is active again.
+                issues.warnings.push({
+                    field: `${field}.agentKey`,
+                    message: `Agent "${entry.agentKey}" is not active (${target.status}), so this agent skips it when it delegates`,
+                });
+            } else {
+                // A sub-agent is handed free text, never a set of values: a variable the referenced agent
+                // requires can only come from a variable of the same name here. Read from the version a run
+                // loads (the published one), not the draft being edited.
+                const loaded = await resolveSubagentTarget(input.tenantDbName, projectId, entry);
+                const missing = loaded.ok ? unsuppliableRequiredVariables(loaded.config.variables, config.variables) : [];
+                if (missing.length > 0) {
+                    const names = missing.map((name) => `"${name}"`).join(', ');
+                    issues.warnings.push({
+                        field: `${field}.agentKey`,
+                        message: `Agent "${entry.agentKey}" requires the variable${missing.length > 1 ? 's' : ''} ${names}, which this agent does not declare: ${missing.length > 1 ? 'they stay' : 'it stays'} empty when it runs as a sub-agent`,
+                    });
+                }
             }
         }
         if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);
@@ -658,5 +748,9 @@ async function checkBindingReferences(
 export function invalidConfigBody(result: AgentConfigValidation) {
     const [first, ...rest] = result.errors;
     const summary = first ? `${first.field}: ${first.message}${rest.length > 0 ? ` (and ${rest.length} more)` : ''}` : '';
-    return { error: `Invalid agent config — ${summary}`, validation: result };
+    return {
+        error: `Invalid agent config — ${summary}`,
+        ...(first?.field.startsWith('callback') ? { type: 'invalid_callback', code: 'invalid_callback' } : {}),
+        validation: result,
+    };
 }

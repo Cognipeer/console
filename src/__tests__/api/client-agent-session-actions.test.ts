@@ -32,7 +32,7 @@ const hoisted = vi.hoisted(() => ({
   resolve: vi.fn(),
   blocking: vi.fn(),
   limits: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
+  startAgentRun: vi.fn(),
   cancelPending: vi.fn(),
 }));
 
@@ -51,14 +51,10 @@ vi.mock('@/lib/services/agents', () => ({
   deleteAgentRecord: vi.fn(),
   listAgents: vi.fn(),
   updateAgentRecord: vi.fn(),
-  runSyncAgentTurn: hoisted.runSyncAgentTurn,
-  createBackgroundAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
   agentRunConflictErrorBody: () => ({ error: 'conflict' }),
-  agentSyncTimeoutErrorBody: () => ({ error: 'timeout' }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({ error: 'idem' }),
   idempotencyKeyConflictErrorBody: () => ({ error: 'idem' }),
   agentRunConcurrencyLimitErrorBody: () => ({ error: 'cap' }),
 }));
@@ -69,12 +65,17 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   backgroundDisabledErrorBody: () => ({ error: { type: 'invalid_request_error', code: 'background_disabled' } }),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
-  resolveAgentExecutionLimits: hoisted.limits,
+  resolveAgentRunLimits: hoisted.limits,
   serializeAgentRun: (run: { _id: string; status: string }) => ({ id: `run_${run._id}`, object: 'agent.run', status: run.status }),
   MAX_IDEMPOTENCY_KEY_LENGTH: 255,
   agentDefaultCallback: () => ({}),
   lookupIdempotentAgentRun: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  startAgentRun: hoisted.startAgentRun,
+  waitForAgentRun: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  isAgentRunActive: (run: { status: string }) => ['scheduled', 'queued', 'running'].includes(run.status),
+  publicAgentRunId: (run: { _id: string }) => `run_${run._id}`,
 }));
 
 vi.mock('@/lib/services/agents/agentActionResolution', () => ({
@@ -118,7 +119,7 @@ describe('client: answering a pending action', () => {
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant } as never));
     hoisted.getConversationById.mockResolvedValue(conversation);
     hoisted.getAgentByKey.mockResolvedValue({ key: 'support-agent', status: 'active', config: { modelKey: 'm' } });
-    hoisted.limits.mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
+    hoisted.limits.mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
     hoisted.blocking.mockResolvedValue(null);
     hoisted.cancelPending.mockResolvedValue(null);
     app = await createFastifyApiTestApp(async (instance) => {
@@ -199,13 +200,6 @@ describe('client: answering a pending action', () => {
     expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ id: 'run_r1', object: 'agent.run', status: 'queued' });
     expect(hoisted.resolve.mock.calls[0][0].mode).toBe('background');
     expect(hoisted.resolve.mock.calls[0][0].cancellationCell).toBeUndefined();
-  });
-
-  it('background is refused when the agent switched background execution off', async () => {
-    hoisted.limits.mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: false, defaultMode: 'sync' });
-    const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow', background: true } });
-    expect(res.statusCode).toBe(400);
-    expect(hoisted.resolve).not.toHaveBeenCalled();
   });
 
   it('while other requests of the pause are open, answers requires_action with them', async () => {
@@ -289,7 +283,7 @@ describe('client: answering a pending action', () => {
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
       type: 'pending_action', pending_action_ids: ['act_1'],
     });
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 
   it('a Responses call that would cancel the open request (cancel_pending) is 403 for a token the engine does not let answer it', async () => {
@@ -306,6 +300,6 @@ describe('client: answering a pending action', () => {
       expect.anything(),
       expect.objectContaining({ tenantDbName: 'tenant_acme', conversation, agent: expect.objectContaining({ key: 'support-agent' }) }),
     );
-    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 });

@@ -29,7 +29,7 @@ import { removeDeletedProjectAlerts } from '@/lib/services/alerts/alertService';
 import { seedDefaultAlertRules } from '@/lib/services/alerts/alertTemplates';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
-import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { readJsonBody, readJsonObjectBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-projects');
 
@@ -214,7 +214,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId } = request.params as { projectId: string };
       const { db, project } = await loadProjectForAdmin(auth, projectId);
       if (!project) return reply.code(404).send({ error: 'Project not found' });
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const target = typeof body.userId === 'string'
         ? await db.findUserById(body.userId)
         : typeof body.email === 'string' ? await db.findUserByEmail(body.email) : null;
@@ -229,6 +229,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (result === 'failed') return reply.code(500).send({ error: 'Failed to update membership' });
       return reply.code(200).send({ success: true });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Client remove project member error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }

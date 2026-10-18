@@ -68,6 +68,9 @@ export const TABLES = {
   alertEvents: 'alert_events',
   alertDeliveries: 'alert_deliveries',
   alertStates: 'alert_states',
+  schedulerClaims: 'scheduler_claims',
+  agentTriggers: 'agent_triggers',
+  agentTriggerDeliveries: 'agent_trigger_deliveries',
   prescriptionReports: 'prescription_reports',
   incidents: 'incidents',
   ragModules: 'rag_modules',
@@ -654,6 +657,12 @@ export class SQLiteProviderBase {
     // mirror the instance-level columns above but on the template itself.
     this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateKey', 'studioTemplateKey TEXT');
     this.ensureTableColumn(db, 'sandbox_templates', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
+    // Template/instance env is sealed at rest (EE sandbox services); the legacy
+    // plaintext `env` column stays for rows that predate sealing.
+    for (const table of ['sandbox_templates', 'sandbox_instances']) {
+      this.ensureTableColumn(db, table, 'envSealed', 'envSealed TEXT');
+      this.ensureTableColumn(db, table, 'envKeys', 'envKeys TEXT');
+    }
     this.ensureTableColumn(
       db,
       'sandbox_snapshots',
@@ -1117,6 +1126,32 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentRuns, 'resumeActionIds', 'resumeActionIds TEXT');
     // Conversation files that ride the message of a (background) run.
     this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
+    // Run engine: class (absent = default), scheduled start, detached inline runs,
+    // caller labels, origin surface, trigger link, per-request structured output,
+    // validated variables, queue generation (job dedup) and last publish time. All
+    // nullable; old rows read back as absent. (`runTrigger` because TRIGGER is an SQL keyword.)
+    for (const [column, type] of [
+      ['runClass', 'TEXT'], ['notBefore', 'TEXT'], ['detachedAt', 'TEXT'], ['metadata', 'TEXT'],
+      ['channel', 'TEXT'], ['triggerId', 'TEXT'], ['runTrigger', 'TEXT'], ['responseFormat', 'TEXT'],
+      ['variables', 'TEXT'], ['queueGeneration', 'INTEGER'], ['lastPublishedAt', 'TEXT'],
+      // Trigger runs: unattended (no one to ask), external content (event values stay out of the system
+      // prompt) and the variable names whose values did not come from the event (JSON list).
+      ['unattended', 'INTEGER'], ['externalContent', 'INTEGER'], ['literalVariables', 'TEXT'],
+      // The request's `background: true` on a run that streams inline.
+      ['background', 'INTEGER'],
+      // The event the callback bookkeeping belongs to; what continues a paused turn and who
+      // answered; the principal a trigger run counts against.
+      ['callbackEventId', 'TEXT'], ['resumeTrigger', 'TEXT'], ['resumeUserId', 'TEXT'], ['resumeApiTokenId', 'TEXT'],
+      ['accountableUserId', 'TEXT'], ['accountableTokenId', 'TEXT'],
+    ] as const) {
+      this.ensureTableColumn(db, TABLES.agentRuns, column, `${column} ${type}`);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status_class_created ON ${TABLES.agentRuns}(tenantId, status, runClass, createdAt)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_status_notBefore ON ${TABLES.agentRuns}(status, notBefore)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_trigger_created ON ${TABLES.agentRuns}(tenantId, triggerId, createdAt)`);
+    // An incoming webhook finds its trigger by the URL's hook id (copied out of the `webhook` JSON).
+    this.ensureTableColumn(db, TABLES.agentTriggers, 'hookId', 'hookId TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_triggers_hook ON ${TABLES.agentTriggers}(hookId)`);
     // Session files: ordinary file records tagged with the conversation they belong
     // to. Indexed here (not in the schema SQL) because an older table has no such
     // column until the lines above add it.
@@ -1141,12 +1176,17 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
+    // Digest of the transcript a chat-completions client holds, to match a resent transcript back to its session.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'transcriptHash', 'transcriptHash TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // A client tool call a host page has to answer: its timeout (JSON).
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
+    // The sub-agent a surfaced child pause belongs to.
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'subagent', 'subagent TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_transcript ON ${TABLES.agentConversations}(projectId, agentKey, createdBy, transcriptHash, updatedAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).

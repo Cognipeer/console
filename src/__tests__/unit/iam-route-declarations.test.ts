@@ -48,6 +48,7 @@ describe('route authorization declarations', () => {
       ['GET', '/api/public/mcp/:tenantId/:endpointSlug/sse', 'self'],
       ['GET', '/api/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json', 'self'],
       ['POST', '/api/public/a2a/:tenantId/:endpointSlug', 'self'],
+      ['POST', '/api/public/hooks/:tenantId/:hookId', 'self'],
       ['GET', '/api/health/live', 'public'],
       ['GET', '/api/health/ready', 'public'],
       ['GET', '/api/support/status', 'authenticated'],
@@ -160,6 +161,11 @@ describe('authz declaration helpers', () => {
     expect(() => authz.service('nope' as never)).toThrow(/unknown permission service/);
     expect(() => authz.service('agents', 'none' as never)).toThrow();
     expect(() => authz.service('members', 'write')).toThrow(/admin service/);
+    // a route serving several services' resources: the first is its owner
+    expect(authz.serviceAnyOf(['models', 'agents'])).toEqual({ authz: { kind: 'service', service: 'models', anyOf: ['agents'] } });
+    expect(authz.serviceAnyOf(['models', 'agents'], 'read')).toEqual({ authz: { kind: 'service', service: 'models', level: 'read', anyOf: ['agents'] } });
+    expect(() => authz.serviceAnyOf(['models', 'models'])).toThrow(/named twice/);
+    expect(() => authz.serviceAnyOf(['models', 'nope' as never])).toThrow(/unknown permission service/);
   });
 
   it('a malformed declaration reads as undeclared (fails closed)', () => {
@@ -167,6 +173,9 @@ describe('authz declaration helpers', () => {
     expect(readRouteAuthz({ authz: { kind: 'self' } })).toBeUndefined();
     expect(readRouteAuthz({ authz: { kind: 'root' } })).toBeUndefined();
     expect(readRouteAuthz(undefined)).toBeUndefined();
+    for (const anyOf of [[], ['nope'], ['models'], ['agents', 'agents'], 'agents']) {
+      expect(readRouteAuthz({ authz: { kind: 'service', service: 'models', anyOf } }), JSON.stringify(anyOf)).toBeUndefined();
+    }
     expect(resolveRouteAuthz({ authz: { kind: 'service', service: 'nope' } }, '/api/unmapped-thing').effective).toEqual({ kind: 'undeclared' });
   });
 
@@ -188,5 +197,8 @@ describe('authz declaration helpers', () => {
     expect(resolveRouteAuthz(authz.authenticated(), '/api/zzz').effective).toEqual({ kind: 'authenticated', declared: true });
     // an explicit level travels with the declaration
     expect(resolveRouteAuthz(authz.service('agents', 'admin'), '/api/zzz').effective).toEqual({ kind: 'service', declared: true, service: 'agents', level: 'admin' });
+    // so do the other services of a route open to several
+    expect(resolveRouteAuthz(authz.serviceAnyOf(['models', 'agents']), '/api/client/v1/responses').effective)
+      .toEqual({ kind: 'service', declared: true, service: 'models', anyOf: ['agents'] });
   });
 });

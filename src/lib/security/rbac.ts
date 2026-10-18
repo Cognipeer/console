@@ -244,7 +244,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // entry. A prior comment in client-reranker.ts incorrectly assumed the
   // `/rerank` prefix above already covered it; it never matched.
   { prefix: '/api/client/v1/rerankers', service: 'reranker' },
-  { prefix: '/api/client/v1/tools', service: 'tools' },
   { prefix: '/api/client/v1/tracing', service: 'tracing' },
   { prefix: '/api/client/v1/traces', service: 'tracing' },
   { prefix: '/api/client/v1/vector', service: 'vector' },
@@ -253,14 +252,12 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // path as /api/client/v1/agents — gate it identically so a token's 'agents'
   // scope (or lack of it) applies here too.
   { prefix: '/api/client/v1/a2a', service: 'agents' },
-  // OpenAI Assistants API dialect: an "assistant" is an agent (assistantId is
-  // derived from agentKey) and a "thread" is that agent's conversation — same
-  // underlying resource as /api/client/v1/agents, gate it identically.
-  { prefix: '/api/client/v1/assistants', service: 'agents' },
-  { prefix: '/api/client/v1/threads', service: 'agents' },
   { prefix: '/api/client/v1/batches', service: 'models' },
   { prefix: '/api/client/v1/spend', service: 'models' },
   { prefix: '/api/client/v1/budgets', service: 'models' },
+  // /chat/completions and /responses also serve agents: their routes declare
+  // `authz.serviceAnyOf(['models', 'agents'])` and the handler asks for the
+  // service of the target it resolved (agent-invocation.ts authorizeInvocationTarget).
   { prefix: '/api/client/v1/chat', service: 'models' },
   // Anthropic Messages dialect over the same Model Hub — same permission as
   // chat/completions, because it is the same capability with a different wire.
@@ -268,7 +265,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/realtime', service: 'realtime' },
   { prefix: '/api/client/v1/responses', service: 'models' },
   { prefix: '/api/client/v1/embeddings', service: 'models' },
-  { prefix: '/api/models/v1', service: 'models' },
   { prefix: '/api/audit', service: 'audit' },
   { prefix: '/api/users', service: 'members' },
   { prefix: '/api/groups', service: 'members' },

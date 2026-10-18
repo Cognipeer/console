@@ -1,6 +1,6 @@
 # Agent sessions
 
-A **session** is a conversation with an agent: its messages, its files, what it has spent, and what it is doing now. The Responses API starts one for you on the first message (`resp_{id}`: the `{id}` is the session id). The sessions API lets you start one **without a message** — to upload files to it first, give it a budget, or tag it — list the project's sessions, and delete one.
+A **session** is a conversation with an agent: its messages, its files, what it has spent, and what it is doing now. The Responses API, chat completions and the runs API start one for you on the first message (its id is `cognipeer.session_id` on a response, `conversation_id` on chat completions, `session_id` on a run). The sessions API lets you start one **without a message** — to upload files to it first, give it a budget, or tag it — list the project's sessions, and delete one.
 
 All calls take the same bearer token as the rest of `/api/client/v1` and see only the token's project.
 
@@ -95,6 +95,7 @@ A row is the session without its transcript (`message_count` instead) and withou
 GET    /api/client/v1/agents/sessions/{id}      # the session resource (runtime state, pending requests, budget)
 PATCH  /api/client/v1/agents/sessions/{id}      # change the budget — see Session budgets
 DELETE /api/client/v1/agents/sessions/{id}
+POST   /api/client/v1/agents/sessions/{id}/cancel   # stop what the session is doing
 ```
 
 ```json
@@ -103,7 +104,9 @@ DELETE /api/client/v1/agents/sessions/{id}
 
 Deleting removes the session with its files (object, markdown and record), its event log and any open approvals. It is refused with `409 agent_run_conflict` while a run (synchronous or background) is queued or running on it — cancel or wait for it first.
 
-The other calls on a session: [events](/guide/agent-session-events), [approvals and questions](/guide/agent-approvals), [files](/guide/session-files), [budget](/guide/agent-session-budgets) and [background runs](/guide/agent-background-execution).
+`POST …/cancel` stops the session's running run and settles a run that is paused on an approval; it answers `{ "object": "agent.session.cancel", "cancelled": true, "run_ids": ["run_…"] }`, and `cancelled: false` when nothing was running ([cancel](/guide/agent-background-execution#cancel)). A session's runs are listed with `GET /agents/runs?session_id=…`.
+
+The other calls on a session: [events](/guide/agent-session-events), [approvals and questions](/guide/agent-approvals), [files](/guide/session-files), [budget](/guide/agent-session-budgets) and [runs](/guide/agent-background-execution).
 
 ## Who sees a session
 

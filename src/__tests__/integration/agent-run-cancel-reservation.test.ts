@@ -59,11 +59,11 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import { executeAgentChatLocal } from '@/lib/services/agents/agentService';
 import {
-  createBackgroundAgentRun,
   requestAgentRunCancellation,
   reserveConversationForSyncTurn,
   runAgentJobLocal,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
 import { describeSessionRuntime } from '@/server/api/plugins/agent-session-events';
 
 const DB_NAME = 'tenant_cancel_reservation';
@@ -176,11 +176,11 @@ afterEach(async () => {
 describe('cancelling a background run that is inside a tool call', () => {
   it('keeps the conversation reserved until the cancelled turn has settled; nothing it writes lands on a newer turn, and no spend is lost', async () => {
     const id = String((await newSession())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     await toolStarted;
@@ -201,7 +201,7 @@ describe('cancelling a background run that is inside a tool call', () => {
     expect(waiting.status).toBe('running');
     expect(waiting.cancelRequestedAt).toBeTruthy();
     // A new message meanwhile gets the usual conflict — a background run and a synchronous turn alike.
-    expect((await createBackgroundAgentRun({
+    expect((await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'too soon', userId: OWNER,
     })).kind).toBe('conflict');
@@ -248,12 +248,12 @@ describe('cancelling a background run that is inside a tool call', () => {
 
   it('a hung call cannot hold the conversation past the run\'s own ceiling', async () => {
     const id = String((await newSession())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
-      limits: { backgroundMaxDurationMs: 2_500, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 2_500, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     const startedAt = Date.now();
     const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
@@ -271,12 +271,12 @@ describe('cancelling a background run that is inside a tool call', () => {
 
   it('a turn abandoned at the ceiling that ends late writes nothing over the turn that followed it', async () => {
     const id = String((await newSession())._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
-      limits: { backgroundMaxDurationMs: 2_500, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 2_500, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     await toolStarted;
@@ -308,11 +308,11 @@ describe('cancelling a background run that is inside a tool call', () => {
 
   it('a cancelled turn\'s spend is on the session even when the session has no budget', async () => {
     const id = String((await newSession(false))._id);
-    const created = await createBackgroundAgentRun({
+    const created = await queueAgentRun({
       tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
       conversationId: id, userMessage: 'first', userId: OWNER,
     });
-    if (created.kind !== 'created') throw new Error(created.kind);
+    if (created.kind !== 'accepted') throw new Error(created.kind);
     const runId = String(created.run._id);
     const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
     await toolStarted;

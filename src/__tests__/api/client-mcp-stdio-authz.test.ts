@@ -368,3 +368,13 @@ describe('the dashboard and the token API give the same answer for the same pers
     }
   });
 });
+
+describe('upstreamAuth default', () => {
+  it('a remote server created without upstreamAuth is stored with type none; other sources still need it', async () => {
+    const remote = await post('tok-owner', { name: 'Remote', sourceType: 'remote', remoteConfig: { url: 'https://mcp.example.com/mcp' } });
+    expect(remote.status).toBe(201);
+    expect(hoisted.createMcpServer.mock.calls[0][4]).toMatchObject({ upstreamAuth: { type: 'none' } });
+    const openapi = await post('tok-owner', { name: 'Api', sourceType: 'openapi', openApiSpec: 'openapi: 3.0.0' });
+    expect(openapi.status).toBe(400);
+  });
+});

@@ -170,9 +170,7 @@ src/
 │   ├── index.ts            # Entry point (npm start / npm run dev)
 │   ├── app.ts              # Fastify + Next.js wiring
 │   ├── bootstrap.ts        # Startup bootstrap (core init, schedulers)
-│   └── api/routes/         # Client + dashboard API routes
-│       ├── client/v1/      # Client-facing API (API token auth)
-│       └── health/         # Health check endpoints (live/ready)
+│   └── api/plugins/        # Client + dashboard API (one Fastify plugin per surface)
 ├── components/             # React components (Mantine UI)
 ├── config/                 # Feature policies, plan limits
 ├── lib/

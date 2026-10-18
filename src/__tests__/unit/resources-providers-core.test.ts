@@ -62,7 +62,7 @@ describe('core providers never expose secret fields', () => {
         kind: 'external', modelKey: 'm', systemPrompt: `prompt ${SECRET}`,
         connection: { apiKeyEnc: SECRET, url: `https://x/${SECRET}` },
         sandbox: { secrets: { A: SECRET }, secretsSealed: SECRET },
-        execution: { callbackSecret: SECRET, callbackSecretSealed: SECRET },
+        callback: { url: 'https://hooks.example.com', secret: SECRET, secretSealed: SECRET },
         toolBindings: [{}, {}],
       },
       metadata: { schedules: SECRET },

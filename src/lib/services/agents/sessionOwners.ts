@@ -3,7 +3,7 @@
  *
  * `conversation.createdBy` is a free string (agentService.ts `createConversation`): a console user's id for a
  * session started in Studio, the token OWNER's id for API traffic, and - for traffic that no person started -
- * `a2a-public`, `system:agent-scheduler`, `evaluation`, `redteam`. A person gets their name; the rest get a
+ * `a2a-public`, `system:trigger:<triggerId>`, `evaluation`, `redteam`. A person gets their name; the rest get a
  * kind the table words itself (so it can be localized), never a made-up name.
  *
  * Session ownership is a permission (`agent.session_view_others` / `agent.session_manage_others`); the owner is
@@ -12,7 +12,7 @@
 
 import { getDatabase } from '@/lib/database';
 
-export type SessionOwnerKind = 'user' | 'schedule' | 'public_a2a' | 'evaluation' | 'redteam' | 'system' | 'unknown';
+export type SessionOwnerKind = 'user' | 'trigger' | 'public_a2a' | 'evaluation' | 'redteam' | 'system' | 'unknown';
 
 export interface SessionOwner {
   /** The stored `createdBy`. */
@@ -26,7 +26,7 @@ export interface SessionOwner {
 /** The kind of owner an id stands for when it is not a person (null: it should be a person's id). */
 export function nonUserOwnerKind(id: string): SessionOwnerKind | null {
   if (id === 'a2a-public') return 'public_a2a';
-  if (id === 'system:agent-scheduler') return 'schedule';
+  if (id.startsWith('system:trigger:')) return 'trigger';
   if (id === 'evaluation') return 'evaluation';
   if (id === 'redteam') return 'redteam';
   if (id.startsWith('system:')) return 'system';

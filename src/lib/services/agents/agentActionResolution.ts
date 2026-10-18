@@ -43,6 +43,9 @@ import {
 } from './agentService';
 import {
     RESUME_TIMEOUT_ACTOR,
+    cancelPausedAgentRuns,
+    findPausedOwnerRun,
+    normalizeAgentRunId,
     queueAgentRunResume,
     reserveConversationForSyncTurn,
     runWithTenantDb,
@@ -166,10 +169,13 @@ export type ResolveOutcome =
     | { kind: 'unavailable'; decisionId?: string }
     | { kind: 'invalid'; message: string }
     | { kind: 'busy' }
-    /** Recorded; other requests of the same pause are still open. */
-    | { kind: 'pending'; pendingActions: PublicPendingAction[] }
-    /** Recorded, and the turn continued inline. */
-    | { kind: 'resumed'; result: AgentPlaygroundChatResult; response: AgentChatResponse; stopReason: SessionStopReason }
+    /** Recorded; other requests of the same pause are still open. `runId`: the paused run that owns the pause. */
+    | { kind: 'pending'; pendingActions: PublicPendingAction[]; runId?: string }
+    /**
+     * Recorded, and the turn continued inline. `runId`: the paused run it continued (its
+     * events carry that id and `response.id` is `resp_<runId>`); absent for a pause no run owns.
+     */
+    | { kind: 'resumed'; result: AgentPlaygroundChatResult; response: AgentChatResponse; stopReason: SessionStopReason; runId?: string }
     /** Recorded, and the continuation is queued as a background run. */
     | { kind: 'queued'; run: IAgentRun };
 
@@ -326,16 +332,30 @@ export async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendin
     return resolveHitlConfig(config?.humanInTheLoop);
 }
 
-/** Writes events to the conversation's log and waits until they are stored (and published). */
+/**
+ * Writes events to the conversation's log and waits until they are stored (and published). With `runId` they
+ * are the run's events: the answer to a pause belongs to the run that paused, so that run's stream reads
+ * `action.required`, `action.resolved`, then its continuation, with nothing missing in between.
+ */
 async function writeSessionEvents(
     db: DatabaseProvider,
-    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string },
+    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string; runId?: string },
     events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }>,
 ): Promise<void> {
     if (events.length === 0) return;
     const writer = createSessionEventWriter({ db, ...scope });
     for (const event of events) writer.emit(event.type, event.data);
     await writer.close();
+}
+
+/**
+ * The run that raised these requests, as its events carry the id (bare). Nothing when no run did (a dashboard
+ * turn) or when they name more than one: an event is then left outside every run rather than given to a wrong one.
+ */
+function raisingRunId(actions: ReadonlyArray<Pick<IAgentPendingAction, 'runId'>>): string | undefined {
+    const ids = new Set(actions.map((action) => (action.runId ? normalizeAgentRunId(action.runId) : '')));
+    const [only] = ids;
+    return ids.size === 1 && only ? only : undefined;
 }
 
 function auditResolution(
@@ -612,7 +632,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             const messages = updateMessageSnapshots(conversation.messages ?? [], snapshots);
             await db.updateAgentConversation(conversationId, { messages, ...(metadata ? { metadata } : {}) });
 
-            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId }, [
+            const raisedBy = raisingRunId([action]);
+            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId, ...(raisedBy ? { runId: raisedBy } : {}) }, [
                 ...(action.kind === 'client_tool' ? [clientToolResultEvent(action, resolution)] : []),
                 {
                     type: 'action.resolved' as const,
@@ -629,13 +650,17 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             ]);
             auditResolution(input, action, resolution, edited);
 
+            // The run that raised this pause, while it is still paused on it.
+            const pausedRun = await findPausedOwnerRun(db, { tenantId, projectId, conversationId }, action.runId).catch(() => null);
+            const pausedRunId = pausedRun ? String(pausedRun._id) : undefined;
+
             // 6. Other requests of the same pause still open: wait for them.
             const open = await db.listAgentPendingActions(conversationId, { status: 'pending' });
             if (open.length > 0) {
                 await db.updateAgentConversationRuntime(conversationId, {
                     pendingActionIds: open.map((entry) => String(entry._id)),
                 }).catch(() => undefined);
-                return { kind: 'pending', pendingActions: open.map(toPublicPendingAction) };
+                return { kind: 'pending', pendingActions: open.map(toPublicPendingAction), ...(pausedRunId ? { runId: pausedRunId } : {}) };
             }
 
             // 7. Everything is answered: continue the turn.
@@ -650,6 +675,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     resumeActionIds: await answeredActionIds(db, conversationId),
                     ...(actor.apiTokenId ? { apiTokenId: actor.apiTokenId } : {}),
                     actorType: actor.apiTokenId ? 'api_token' : 'user',
+                    ownerRunId: action.runId ?? null,
+                    trigger: 'resume',
                 });
                 if (queued.kind === 'conflict') {
                     await undoResolution(db, action, { ...conversation, messages });
@@ -663,6 +690,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             // so the reviewer can retry instead of getting 409 not_pending.
             let invoking = false;
             let resumed: AgentResumeResult;
+            // A person answered, so the continuation runs attended — but variables that came
+            // from an external payload stay out of the system prompt (§2.4a).
             // A Stop on the conversation ends the continuation like any other turn.
             const watch = reservation
                 ? watchTurnCancellation({
@@ -680,10 +709,14 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     conversationId,
                     userId: actor.userId,
                     trigger: 'resume',
+                    // The continuation of a paused run is that run's: its events carry its id.
+                    ...(pausedRunId ? { runId: pausedRunId } : {}),
                     runtimeContext: input.runtimeContext,
                     ...(input.embedded ? { embedded: input.embedded } : {}),
                     ...(input.unattended ? { unattended: true } : {}),
                     ...(input.answersClientTools ? { answersClientTools: true } : {}),
+                    ...(pausedRun?.externalContent ? { variablesInPrompt: false } : {}),
+                    ...(pausedRun?.externalContent && pausedRun.literalVariables?.length ? { literalVariables: pausedRun.literalVariables } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
@@ -699,15 +732,22 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             } finally {
                 watch?.stop();
             }
-            // A background run that was paused on this turn is settled by it.
-            await settlePausedAgentRuns(tenantDbName, { tenantId, projectId, conversationId }, resumed.response)
+            // The run that was paused on this turn is settled by it.
+            await settlePausedAgentRuns(tenantDbName, { tenantId, projectId, conversationId }, resumed.response, pausedRunId)
                 .catch((error) => {
                     logger.warn('Could not settle the paused run after an inline continuation', {
                         conversationId,
                         error: error instanceof Error ? error.message : String(error),
                     });
                 });
-            return { kind: 'resumed', result: resumed.result, response: resumed.response, stopReason: resumed.stopReason };
+            return {
+                kind: 'resumed',
+                result: resumed.result,
+                // The answer of a paused run is that run's response (`GET /responses/resp_<runId>` reads it).
+                response: pausedRunId ? { ...resumed.response, id: `resp_${pausedRunId}` } : resumed.response,
+                stopReason: resumed.stopReason,
+                ...(pausedRunId ? { runId: pausedRunId } : {}),
+            };
         } finally {
             await reservation?.release();
         }
@@ -779,7 +819,11 @@ export async function sweepExpiredPendingActions(
                 continue;
             }
             const hitl = await hitlSettingsFor(db, first);
-            const scope = { tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
+            const raisedBy = raisingRunId(actions);
+            const scope = {
+                tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId,
+                ...(raisedBy ? { runId: raisedBy } : {}),
+            };
             const events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }> = [];
             const snapshots = new Map<string, { status: IAgentPendingAction['status']; resolution?: IAgentPendingActionResolution }>();
             // A page that never answered is a failed tool call the model reads and goes on from, whatever
@@ -871,6 +915,8 @@ export async function sweepExpiredPendingActions(
                 userId: RESUME_TIMEOUT_ACTOR,
                 resumeActionIds: await answeredActionIds(db, conversationId),
                 actorType: 'system',
+                ownerRunId: first.runId ?? null,
+                trigger: 'timeout',
             });
             if (queued.kind === 'queued') result.continued += 1;
             else logger.warn('Could not continue a timed-out turn: the conversation is busy', { conversationId });
@@ -884,22 +930,7 @@ export async function sweepExpiredPendingActions(
     return result;
 }
 
-/** A timeout cancelled the request: a background run waiting on it ends as cancelled. */
+/** A timeout cancelled the request: a run waiting on it ends as cancelled, with its callback and webhook event. */
 async function closePausedRuns(db: DatabaseProvider, action: IAgentPendingAction): Promise<void> {
-    const paused = await db.listAgentRuns({
-        tenantId: action.tenantId,
-        projectId: action.projectId,
-        conversationId: action.conversationId,
-        status: ['requires_action'],
-        limit: 5,
-    });
-    for (const run of paused) {
-        await db.finalizeAgentRun(String(run._id), action.tenantId, {
-            status: 'canceled',
-            errorReason: 'canceled_by_caller',
-            stopReason: 'cancelled',
-            completedAt: new Date(),
-            runtimeContext: null,
-        });
-    }
+    await cancelPausedAgentRuns(db, { tenantId: action.tenantId, projectId: action.projectId, conversationId: action.conversationId });
 }

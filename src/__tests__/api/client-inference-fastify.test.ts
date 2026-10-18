@@ -169,6 +169,63 @@ describe('Fastify client inference errors', () => {
   });
 });
 
+describe('Fastify client inference — request bodies', () => {
+  let raw: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
+    // The server keeps a JSON body as the raw string (registerBodyParsers), so a malformed one reaches the route.
+    raw = await createFastifyApiTestApp(async (instance) => {
+      instance.removeContentTypeParser('application/json');
+      instance.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => done(null, body));
+      await instance.register(clientInferenceApiPlugin);
+    });
+  });
+
+  afterEach(async () => {
+    await raw.close();
+  });
+
+  const post = (url: string, payload: string) => raw.inject({
+    method: 'POST',
+    url,
+    headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+    payload,
+  });
+
+  it.each([
+    '/api/client/v1/chat/completions',
+    '/api/client/v1/embeddings',
+    '/api/client/v1/images/generations',
+  ])('%s: a body that is not JSON, empty, or not an object is a 400 invalid_json in the OpenAI envelope', async (url) => {
+    const cases: Array<[string, string]> = [
+      ['{"model": "m", "messages": [', 'The body is not valid JSON'],
+      ['', 'The body is not valid JSON'],
+      ['[1, 2]', 'The body must be a JSON object'],
+      ['"text"', 'The body must be a JSON object'],
+      ['null', 'The body must be a JSON object'],
+    ];
+    for (const [payload, message] of cases) {
+      const response = await post(url, payload);
+      expect(response.statusCode, `${url} ${JSON.stringify(payload)}`).toBe(400);
+      expect(parseJsonBody<{ error: Record<string, unknown> }>(response.body).error, `${url} ${JSON.stringify(payload)}`).toEqual({
+        message, type: 'invalid_request_error', param: null, code: 'invalid_json',
+      });
+    }
+    expect(handleChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('an object body goes on as before: a missing model is still its own refusal', async () => {
+    const response = await post('/api/client/v1/chat/completions', '{}');
+    expect(response.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(response.body).error).toMatchObject({
+      message: '`model` is required', type: 'invalid_request_error',
+    });
+  });
+});
+
 describe('Fastify client inference — streaming budget settlement (F-05)', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 

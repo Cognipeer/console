@@ -100,6 +100,11 @@ export interface EnforceGateInput {
   skipProjectNarrowing?: boolean;
   /** Bulk callers (the impact preview): read the principal cache but do not fill it. */
   noStore?: boolean;
+  /**
+   * A route open to holders of ANY of several services asks once per service: a denial is returned without
+   * being counted or logged, and the gate records the one it answers with (`recordEnforcedDenial`).
+   */
+  quiet?: boolean;
 }
 
 /** Why no decision could be made. Coarse on purpose: the detailed error goes to the server log only. */
@@ -450,7 +455,6 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
     return { allowed: true, source: 'engine' };
   }
 
-  bump(input.tenantDbName, 'engineDenies');
   const denial: EnforceDenial = {
     allowed: false,
     source: 'engine',
@@ -462,6 +466,13 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
     reasons: result.reasons.slice(0, 10),
     policyIds: customPolicyIdsOf(result.reasons).slice(0, 10),
   };
+  if (!input.quiet) recordEnforcedDenial(input, denial, result.errors);
+  return denial;
+}
+
+/** Count and log a denial of the engine (decideEnforced does it, unless the caller asked `quiet`). */
+export function recordEnforcedDenial(input: EnforceGateInput, denial: EnforceDenial, errors: string[] = []): void {
+  bump(input.tenantDbName, 'engineDenies');
   logger.info('IAM: request denied', {
     tenantDbName: input.tenantDbName,
     decisionId: denial.decisionId,
@@ -469,12 +480,11 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
     userId: input.userId,
     subject: input.subject,
     tokenId: input.tokenId,
-    service: input.service,
-    required,
+    service: denial.service,
+    required: denial.required,
     method: input.method,
     route: input.route,
-    reasons: result.reasons,
-    errors: result.errors.length ? result.errors : undefined,
+    reasons: denial.reasons,
+    errors: errors.length ? errors : undefined,
   });
-  return denial;
 }

@@ -48,7 +48,7 @@ mistake here, so decide before you build.
 | PII category set | 15 categories, ids like `nationalId`, `tckn`, `address` | 18 categories, ids like `ssn_us`, `tc_kimlik`, `address_en` |
 | Evasion handling | Normalises zero-width and fullwidth characters and rewrites `user (at) mail (dot) com`; the secret detector also knows Stripe, AWS, GitHub, Slack, `cpeer_`, JWT and PEM shapes | Plain regex over the text as supplied |
 | Transformations | Block, redact, warn, flag | Detect, redact, mask, tokenize (reversible), block |
-| Redaction marker | `[REDACTED:email]` | `[REDACTED_EMAIL]` |
+| Redaction marker | `[REDACTED_EMAIL]` for PII findings (`[REDACTED:category]` for word-filter and regex findings) | `[REDACTED_EMAIL]` |
 | Reversible masking | No | Yes — `tokenize` returns a vault, `detokenize` restores |
 | Logging | Every evaluation is persisted, charted and alertable | None. No evaluation log, no usage event |
 | Typical use | Guard a customer-facing chat endpoint | Scrub an ingestion pipeline, an ETL job, or a prompt before it leaves your process |
@@ -392,7 +392,7 @@ curl -X POST https://your-host/api/client/v1/guardrails/evaluate \
   "guardrail_key": "support-intake",
   "guardrail_name": "Support intake",
   "message": null,
-  "redacted_text": "my email is [REDACTED:email]"
+  "redacted_text": "my email is [REDACTED_EMAIL]"
 }
 ```
 

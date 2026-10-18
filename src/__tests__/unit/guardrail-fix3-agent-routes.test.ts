@@ -360,6 +360,7 @@ describe('#10 a guardrail block is a 4xx policy answer, not a 500', () => {
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toEqual({
       message: 'The agent run failed.',
       type: 'server_error',
+      param: null,
       code: 'agent_run_failed',
     });
   });

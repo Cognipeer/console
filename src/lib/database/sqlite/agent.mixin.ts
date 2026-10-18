@@ -270,7 +270,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId' | 'transcriptHash'>>,
       options?: { onlyIfTurn?: string },
     ): Promise<boolean> {
       const sets: string[] = [];
@@ -282,6 +282,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (patch.budget !== undefined) { sets.push('budget = @budget'); params.budget = patch.budget ? this.toJson(patch.budget) : null; }
       if (patch.spentUsd !== undefined) { sets.push('spentUsd = @spentUsd'); params.spentUsd = patch.spentUsd; }
       if (patch.runtimeTurnId !== undefined) { sets.push('runtimeTurnId = @runtimeTurnId'); params.runtimeTurnId = patch.runtimeTurnId; }
+      if (patch.transcriptHash !== undefined) { sets.push('transcriptHash = @transcriptHash'); params.transcriptHash = patch.transcriptHash; }
       if (sets.length === 0) return true;
       // One statement, so "is it still my turn?" and the write cannot be separated by another writer.
       let where = 'id = @id';
@@ -375,6 +376,20 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const db = this.getTenantDb();
       const row = db.prepare(`SELECT * FROM ${TABLES.agentConversations} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
       return row ? this.mapConversation(row) : null;
+    }
+
+    async findAgentConversationsByTranscriptHash(filter: {
+      projectId: string;
+      agentKey: string;
+      createdBy: string;
+      transcriptHash: string;
+    }, limit: number): Promise<IAgentConversation[]> {
+      const rows = this.getTenantDb().prepare(
+        `SELECT * FROM ${TABLES.agentConversations}
+         WHERE projectId = @projectId AND agentKey = @agentKey AND createdBy = @createdBy AND transcriptHash = @transcriptHash
+         ORDER BY updatedAt DESC LIMIT @limit`,
+      ).all({ ...filter, limit: Math.max(1, Math.floor(limit)) }) as SqliteRow[];
+      return rows.map((row) => this.mapConversation(row));
     }
 
     async listAgentConversations(
@@ -531,11 +546,15 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async listAgentSessionEvents(
       conversationId: string,
-      options?: { afterSeq?: number; types?: string[]; limit?: number },
+      options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
     ): Promise<IAgentSessionEvent[]> {
       const db = this.getTenantDb();
       const conditions = ['conversationId = @conversationId'];
       const params: Record<string, unknown> = { conversationId };
+      if (options?.runId) {
+        conditions.push('runId = @runId');
+        params.runId = options.runId;
+      }
       if (options?.afterSeq !== undefined && options.afterSeq > 0) {
         conditions.push('seq > @afterSeq');
         params.afterSeq = options.afterSeq;
@@ -597,10 +616,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.agentPendingActions}
         (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
          allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy,
-         clientTool)
+         clientTool, subagent)
         VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
          @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
-         @usePublished, @createdBy, @clientTool)
+         @usePublished, @createdBy, @clientTool, @subagent)
       `);
       const created: IAgentPendingAction[] = actions.map((action) => ({
         ...action,
@@ -632,6 +651,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             usePublished: action.usePublished === undefined ? null : action.usePublished ? 1 : 0,
             createdBy: action.createdBy ?? null,
             clientTool: action.clientTool ? this.toJson(action.clientTool) : null,
+            subagent: action.subagent ?? null,
           });
         }
       })();
@@ -912,6 +932,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.usePublished !== null && row.usePublished !== undefined ? { usePublished: Number(row.usePublished) === 1 } : {}),
         ...(row.createdBy ? { createdBy: String(row.createdBy) } : {}),
         ...(row.clientTool ? { clientTool: this.parseJson<NonNullable<IAgentPendingAction['clientTool']>>(row.clientTool, { timeoutSeconds: 60 }) } : {}),
+        ...(row.subagent ? { subagent: String(row.subagent) } : {}),
       };
     }
 
@@ -930,6 +951,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.lastEventSeq !== null && row.lastEventSeq !== undefined ? { lastEventSeq: Number(row.lastEventSeq) } : {}),
         ...(row.budget ? { budget: this.parseJson<IAgentConversation['budget']>(row.budget, null) } : {}),
         ...(row.spentUsd !== null && row.spentUsd !== undefined ? { spentUsd: Number(row.spentUsd) } : {}),
+        ...(row.transcriptHash ? { transcriptHash: String(row.transcriptHash) } : {}),
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
         updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,

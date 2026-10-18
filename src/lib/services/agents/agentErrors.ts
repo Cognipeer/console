@@ -15,6 +15,7 @@
 
 import { MODEL_PARAMETER_UNSUPPORTED_CODE, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
+import { formatUsd } from '@/lib/utils/formatUsd';
 
 export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
 
@@ -73,6 +74,9 @@ export interface AgentRunErrorBody {
     /** `budget_reached` only: what the session has spent and what its budget is (USD). */
     spentUsd?: number;
     maxCostUsd?: number;
+    /** `timeout` only: tool calls already in flight may have had effects; not retried. */
+    side_effects_possible?: boolean;
+    retryable?: boolean;
 }
 
 /**
@@ -108,10 +112,6 @@ export class AgentBudgetReachedError extends Error {
     }
 }
 
-function formatUsd(value: number): string {
-    return value >= 1 ? value.toFixed(2) : value.toFixed(4);
-}
-
 /**
  * A refused upload or attachment: too large, too many, a type the agent does not
  * take, a file that is not part of the session, or attachments switched off.
@@ -128,6 +128,40 @@ export class AgentAttachmentError extends Error {
         this.name = 'AgentAttachmentError';
         this.status = status;
         this.code = code;
+    }
+}
+
+/**
+ * A run that hit its wall-clock ceiling (`maxDurationMs`) while the caller was
+ * still receiving it (a stream has no wait window to detach at). The run row
+ * is already failed as `max_duration_exceeded`.
+ */
+export class AgentRunTimeoutError extends Error {
+    readonly status = 504;
+    readonly code = 'agent_run_max_duration_exceeded';
+
+    constructor(message = 'The agent run exceeded its maximum duration and was stopped. Side effects from tool calls already in flight may have occurred.') {
+        super(message);
+        this.name = 'AgentRunTimeoutError';
+    }
+}
+
+/**
+ * An inline run whose row was ended elsewhere while the caller was still
+ * waiting on it: the shutdown drain (`interrupted`), the reconciler
+ * (`worker_lost`), or a cancel. The caller gets the row's outcome, never the
+ * partial answer the turn had produced (it was not stored).
+ */
+export class AgentRunInterruptedError extends Error {
+    readonly status = 503;
+    readonly code = 'agent_run_interrupted';
+    /** The row's `errorReason` (`interrupted`, `worker_lost`, `canceled_by_caller`, …). */
+    readonly reason: string;
+
+    constructor(reason: string, message?: string | null) {
+        super(message || 'The agent run was stopped before it finished. It was not completed; retry it.');
+        this.name = 'AgentRunInterruptedError';
+        this.reason = reason;
     }
 }
 
@@ -179,6 +213,32 @@ export function annotateAgentRunError<E>(error: E, context: { modelKey?: string;
     return error;
 }
 
+/** What a client reads of a run that failed on the platform's or the model provider's side: the detail stays in the log and the run trace. */
+export const GENERIC_RUN_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
+
+/**
+ * The message a client reads for a failed run - the one the run row records, so every surface that reports the
+ * run says the same. A failure the caller can act on keeps its message (a usage limit, a prompt that does not fit
+ * the model, a pending approval). An internal one - the provider's own fault, whose text can carry its endpoint,
+ * a deployment name or a request id, or a bug - is the generic line. A run the platform itself ended (the time
+ * limit, a hand-over on shutdown) says so in words of its own and keeps them.
+ */
+export function publicRunFailureMessage(
+    error: unknown,
+    classified: ClassifiedAgentRunError = classifyAgentRunError(error),
+): string {
+    if (error instanceof AgentRunTimeoutError || error instanceof AgentRunInterruptedError) return classified.error.message;
+    // A retryable refusal with a message written for the caller (the access engine could not decide): say it.
+    if (classified.error.code === 'authorization_unavailable') return classified.error.message;
+    const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
+    return internal ? GENERIC_RUN_FAILURE_MESSAGE : classified.error.message;
+}
+
+/** The `errorReason` a failed run is recorded with: a guardrail refusal is its own reason, anything else `agent_error`. */
+export function runFailureReason(error: unknown): 'agent_error' | 'guardrail_block' {
+    return error instanceof Error && error.name === 'AgentGuardrailBlockedError' ? 'guardrail_block' : 'agent_error';
+}
+
 export function classifyAgentRunError(
     error: unknown,
     options?: {
@@ -210,6 +270,20 @@ export function classifyAgentRunError(
                 code: 'pending_action',
                 pendingActionIds: error.pendingActionIds,
             },
+        };
+    }
+
+    if (error instanceof AgentRunTimeoutError) {
+        return {
+            status: 504,
+            error: { message: error.message, type: 'timeout', code: error.code, side_effects_possible: true, retryable: false },
+        };
+    }
+
+    if (error instanceof AgentRunInterruptedError) {
+        return {
+            status: 503,
+            error: { message: error.message, type: 'server_error', code: error.code, side_effects_possible: true, retryable: true },
         };
     }
 

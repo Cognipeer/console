@@ -6,7 +6,7 @@
  * Answers "is this agent healthy, how much is it used, and how do I call it"
  * in one screen. The numbers come from the agent's TRACES, not its dashboard
  * sessions: every run on every channel — API, OpenAI-compatible, A2A,
- * Assistants, schedules, the playground — writes a trace, whereas a session
+ * triggers, the playground — writes a trace, whereas a session
  * list only knows about conversations started from this page. Showing the
  * session list here made an agent serving thousands of API calls look idle.
  */
@@ -42,7 +42,9 @@ import {
     IconTool,
 } from '@tabler/icons-react';
 import SectionCard from '@/components/common/SectionCard';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
+import { chatCompletionsCurl, sampleVariables } from '../agentUsageSnippets';
 import { formatCompactTokens } from '../session/sessionUsage';
 import classes from './AgentOverviewPanel.module.css';
 
@@ -82,6 +84,10 @@ interface TracingOverview {
 
 export interface AgentOverviewPanelProps {
     agent: OverviewAgent;
+    /** The variables a call has to supply: the published snapshot's, the draft's only while nothing is published. */
+    variables?: ReadonlyArray<IAgentVariable> | null;
+    /** The published snapshot is still being fetched, so the variables are not known yet: the quick start waits. */
+    variablesLoading?: boolean;
     isConnected: boolean;
     sessionCount: number;
     onStartSession: () => void;
@@ -133,6 +139,8 @@ function fillDays(daily: TracingOverview['analytics']['daily'], days: number) {
 
 export default function AgentOverviewPanel({
     agent,
+    variables,
+    variablesLoading,
     isConnected,
     sessionCount,
     onStartSession,
@@ -172,16 +180,19 @@ export default function AgentOverviewPanel({
 
     const boundTools = (agent.config?.toolBindings ?? []).reduce((sum, b) => sum + (b.toolNames?.length ?? 0), 0);
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
-    const quickCurl = `curl ${origin}/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}]}'`;
+    // The same call the Usage tab shows (`agent:<key>`, the variables the agent declares), here answered as one JSON.
+    const quickCurl = chatCompletionsCurl({
+        baseUrl: `${origin}/api/client/v1`,
+        agentKey: agent.key,
+        variables: sampleVariables(variables),
+        stream: false,
+    });
 
     return (
         <Stack gap="lg">
             <Group justify="space-between">
                 <Text size="sm" c="dimmed">
-                    Every run on every channel — API, OpenAI-compatible, A2A, schedules and sessions.
+                    Every run on every channel — API, OpenAI-compatible, A2A, triggers and sessions.
                 </Text>
                 <SegmentedControl
                     size="xs"
@@ -270,18 +281,22 @@ export default function AgentOverviewPanel({
                     }
                 >
                     <Stack gap="xs">
-                        <Box className={classes.snippet}>
-                            <Code block className={classes.snippetCode}>{quickCurl}</Code>
-                            <CopyButton value={quickCurl}>
-                                {({ copied, copy }) => (
-                                    <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                                        <ActionIcon size="sm" variant="subtle" className={classes.copy} onClick={copy}>
-                                            {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                                        </ActionIcon>
-                                    </Tooltip>
-                                )}
-                            </CopyButton>
-                        </Box>
+                        {variablesLoading ? (
+                            <Skeleton height={96} />
+                        ) : (
+                            <Box className={classes.snippet}>
+                                <Code block className={classes.snippetCode}>{quickCurl}</Code>
+                                <CopyButton value={quickCurl}>
+                                    {({ copied, copy }) => (
+                                        <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" className={classes.copy} onClick={copy}>
+                                                {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    )}
+                                </CopyButton>
+                            </Box>
+                        )}
                         <Group gap="xs">
                             <Button size="compact-xs" variant="subtle" onClick={() => onGoToTab('usage')}>
                                 All channels & SDK examples

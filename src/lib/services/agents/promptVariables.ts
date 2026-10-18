@@ -6,11 +6,15 @@
  * to an empty string. The prompt looked fine in the Prompts module, ran hollow
  * under an agent, and nothing anywhere said so.
  *
- * Values come from three places, lowest precedence first:
+ * Values come from these places, lowest precedence first:
  *
  *   1. `config.promptVariables` — static defaults set on the agent
  *   2. `runtimeContext.metadata` — per-call values from the caller
- *   3. built-ins (`agent`, `now`, `user`) — written last, so a caller cannot
+ *   3. `variables` — the validated agent variables (`config.variables`), as
+ *      `{{variables.<name>}}`; a metadata object of the same name (a realtime
+ *      session forwards its variables that way) is read through the same root,
+ *      the agent's own values winning where a name appears in both
+ *   4. built-ins (`agent`, `now`, `user`) — written last, so a caller cannot
  *      forge the agent's own identity into the prompt
  *
  * A caller can only fill placeholders the prompt author wrote: Mustache renders
@@ -18,12 +22,22 @@
  * That is the boundary that keeps this from being an open prompt-injection
  * surface — it is still caller text entering the system prompt, which is why
  * every resolved variable is reported back for tracing.
+ *
+ * External content (a webhook delivery, a public A2A caller) is the exception to
+ * "the agent's variables fill the prompt": a value taken from outside must not
+ * reach the system prompt, where it would read as the author's own words. What
+ * `{{variables.<name>}}` still reads there is what the platform itself supplied —
+ * the declared defaults and the values the fire marked as literal
+ * (`literalVariables`: a trigger's fixed values, not the ones rendered from the
+ * event). Everything taken from the content stays in the user message's Variables block.
  */
 
 import Mustache from 'mustache';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
+import { renderPromptText } from '@/lib/shared/promptText';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
+import { variablePromptValues } from './agentVariables';
 
 /** Reserved top-level names the caller cannot override. */
 export const BUILT_IN_PROMPT_VARIABLES = ['agent', 'now', 'user'] as const;
@@ -37,6 +51,21 @@ export interface PromptVariableInput {
     version?: number | null;
     runtimeContext?: AgentRuntimeContext;
     userId?: string;
+    /** Validated agent variables of this turn, exposed as `{{variables.<name>}}`. */
+    variables?: Record<string, unknown> | null;
+    /**
+     * False keeps the turn's variables out of the prompt template (they came from
+     * outside the platform's own callers and are delivered in the user message).
+     * The prompt then reads only the declared defaults and the values named in
+     * `literalVariables`. Default true.
+     */
+    variablesInPrompt?: boolean;
+    /**
+     * With `variablesInPrompt: false`: the names of `variables` whose values did not
+     * come from the external content (see `IAgentRun.literalVariables`). Ignored
+     * otherwise.
+     */
+    literalVariables?: ReadonlyArray<string> | null;
 }
 
 export interface ResolvedPromptVariables {
@@ -72,6 +101,19 @@ export function collectTemplateVariables(template: string): string[] {
     return [...names];
 }
 
+/** The entries of `source` named in `names`, or null when there are none. */
+function pickNames(
+    source: Record<string, unknown> | null | undefined,
+    names: ReadonlyArray<string> | null | undefined,
+): Record<string, unknown> | null {
+    if (!source || !names || names.length === 0) return null;
+    const picked: Record<string, unknown> = {};
+    for (const name of names) {
+        if (Object.prototype.hasOwnProperty.call(source, name)) picked[name] = source[name];
+    }
+    return Object.keys(picked).length > 0 ? picked : null;
+}
+
 export function buildPromptVariables(input: PromptVariableInput): ResolvedPromptVariables {
     const defaults = input.config.promptVariables ?? {};
     const metadata = input.runtimeContext?.metadata ?? {};
@@ -83,6 +125,29 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
         if (BUILT_INS.has(key)) continue;
         values[key] = value;
         fromCaller.push(key);
+    }
+
+    // `variables` is the agent's own declared namespace: a caller's metadata key of
+    // the same name does not get to shape it for external content, whose values never
+    // fill the prompt (they reach the model in the user message only). What the prompt
+    // of such a turn does read is what did not come from outside: the declared defaults
+    // and the values the fire marked as literal. Defaults come from the declaration, so
+    // a turn that supplied nothing still renders them. For any other turn a metadata
+    // object of the same name (a realtime session forwards its variables that way)
+    // stays readable next to them; the agent's own values win, name by name.
+    if (input.variablesInPrompt === false) {
+        const own = variablePromptValues(input.config.variables, pickNames(input.variables, input.literalVariables));
+        if (own) values.variables = own;
+        else delete values.variables;
+    } else {
+        const variableValues = variablePromptValues(input.config.variables, input.variables);
+        if (variableValues) {
+            const fromMetadata = values.variables;
+            values.variables = {
+                ...(typeof fromMetadata === 'object' && fromMetadata !== null && !Array.isArray(fromMetadata) ? fromMetadata : {}),
+                ...variableValues,
+            };
+        }
     }
 
     const now = new Date();
@@ -116,6 +181,9 @@ export interface RenderedPrompt {
  * changing it would break prompts that rely on an optional variable — but they
  * are returned so the caller can log them. Silently hollow is the bug this
  * module exists to fix; empty-and-reported is a decision.
+ *
+ * Values are inserted as they are: the text goes to a model, not to a browser,
+ * so nothing is HTML-escaped (see `renderPromptText`).
  */
 export function renderPromptTemplate(
     template: string,
@@ -128,7 +196,7 @@ export function renderPromptTemplate(
     });
 
     return {
-        text: Mustache.render(template, resolved.values),
+        text: renderPromptText(template, resolved.values),
         unresolved,
         fromCaller: resolved.fromCaller.filter((name) => referenced.includes(name)),
     };
@@ -152,6 +220,8 @@ export function renderPromptTemplate(
  */
 export function shouldRenderInlinePrompt(config: IAgentConfig, template?: string): boolean {
     if (Object.keys(config.promptVariables ?? {}).length > 0) return true;
+    // Declared variables are `{{variables.<name>}}` placeholders.
+    if ((config.variables?.length ?? 0) > 0) return true;
     if (!template) return false;
     const referenced = collectTemplateVariables(template);
     return referenced.some((name) => BUILT_INS.has(name));

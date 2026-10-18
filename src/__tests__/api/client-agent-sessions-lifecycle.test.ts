@@ -154,7 +154,7 @@ describe('client agent session lifecycle routes', () => {
     });
 
     it('an agent whose admin set a session budget binds the client: removing or raising it is 403', async () => {
-      hoisted.getAgentByKey.mockResolvedValue({ ...AGENT, config: { modelKey: 'm', execution: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' } } } });
+      hoisted.getAgentByKey.mockResolvedValue({ ...AGENT, config: { modelKey: 'm', budget: { maxCostUsd: 5, onReach: 'pause' } } });
       for (const budget of [null, { max_cost_usd: 50 }]) {
         const res = await post({ agent: 'support-agent', budget });
         expect(res.statusCode).toBe(403);

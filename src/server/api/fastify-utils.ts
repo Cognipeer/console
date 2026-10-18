@@ -18,15 +18,18 @@ import {
   decideEnforced,
   forbiddenBody,
   recordAuthorizationUnavailable,
+  recordEnforcedDenial,
   recordUndeclaredDenial,
   undeclaredRouteBody,
   unavailableBody,
+  type EnforceDecision,
   type EnforceDenial,
+  type EnforceGateInput,
   type EnforceUnavailable,
   type EnforceUnavailableReason,
 } from '@/lib/iam/enforce';
 import { fetchGroupsByIds, grantsOf, listUserGroupIds } from '@/lib/iam/groupGrants';
-import { markGated, resolveRouteAuthz, type RouteAuthzLevel, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
+import { markGated, resolveRouteAuthz, type EffectiveRouteAuthz, type RouteAuthzLevel, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
 import { authorizeServiceAccess, buildServicePrincipal, quietServiceAllows, quietServiceLevel, type ServiceAuthzOptions, type ServiceAuthzPrincipal, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
 import type { EffectiveLevel } from '@/lib/iam/effective';
 import { authorizeResourceForPrincipal, type ResourceAuthzAction, type ResourceAuthzResult, type ResourceAuthzSubject } from '@/lib/iam/resourceAuthz';
@@ -116,6 +119,19 @@ export function readJsonBody<T>(request: FastifyRequest): T {
   }
 
   return body as T;
+}
+
+/**
+ * readJsonBody for a handler that reads fields off the body: a literal `null`
+ * (or a bare string, number or boolean) is valid JSON but no body, so it throws
+ * the same SyntaxError an empty body does and the route answers 400.
+ */
+export function readJsonObjectBody<T extends object = Record<string, unknown>>(request: FastifyRequest): T {
+  const parsed: unknown = readJsonBody<unknown>(request);
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new SyntaxError('Request body must be a JSON object');
+  }
+  return parsed as T;
 }
 
 /**
@@ -682,6 +698,17 @@ export function resourceRefusalError(request: FastifyRequest, input: ResourceRef
 }
 
 /**
+ * What a handler throws when the engine refused a SERVICE it asked about itself (`authorizeServiceForRequest`
+ * resolved `allowed: false`): the gate's 403, so the dialect mappers answer it as they answer the gate.
+ */
+export function serviceRefusalError(request: FastifyRequest, refusal: ServiceAuthzResult): RbacAuthorizationError {
+  const decisionId = refusal.decisionId ?? randomUUID();
+  request.iamDecisionId = decisionId;
+  const body = forbiddenBody({ service: refusal.service, required: refusal.required, decisionId });
+  return new RbacAuthorizationError(String(body.message), 403, body);
+}
+
+/**
  * The project a route is ABOUT when its path names one (`/projects/:projectId/...`).
  * Policies that name a project must see that project, not whichever one the
  * caller's `active_project_id` cookie happens to hold - the cookie is chosen by
@@ -805,6 +832,32 @@ function applyGateLoadedRole(request: FastifyRequest, session: ApiSessionContext
 
 // ── the gates ────────────────────────────────────────────────────────────
 
+/**
+ * The gate's decision for a service route. A route declared for several services (`anyOf`, routeAuthz.ts) admits
+ * a holder of any of them, asked in order with the owner first; only the denial it answers with is counted and
+ * logged. An engine that cannot decide refuses at once (503), whichever service it was asked about.
+ */
+async function decideRouteService(
+  request: FastifyRequest,
+  input: Omit<EnforceGateInput, 'service' | 'level' | 'quiet'>,
+  target: Extract<EffectiveRouteAuthz, { kind: 'service' }>,
+): Promise<EnforceDecision> {
+  const services = [target.service, ...(target.anyOf ?? [])];
+  let refused: { verdict: EnforceDenial; asked: EnforceGateInput } | undefined;
+  for (const service of services) {
+    const asked: EnforceGateInput = { ...input, service, level: target.level, quiet: services.length > 1 };
+    const verdict = await decideEnforced(asked);
+    if (verdict.allowed) {
+      request.iamGateService = service;
+      return verdict;
+    }
+    if (verdict.unavailable) return verdict;
+    refused ??= { verdict, asked };
+  }
+  if (services.length > 1) recordEnforcedDenial(refused!.asked, refused!.verdict);
+  return refused!.verdict;
+}
+
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
   const pathname = getRequestPathname(request);
   const resolution = resolveRequestAuthz(request, pathname);
@@ -834,7 +887,7 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
   const { user, groups, groupGrants } = loaded;
   request.rbacUser = user;
 
-  const verdict = await decideEnforced({
+  const verdict = await decideRouteService(request, {
     subject: 'session',
     tenantDbName: session.tenantDbName,
     tenantId: session.tenantId,
@@ -847,11 +900,9 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
     groups,
     requestedProjectId: sessionProject(request).projectId,
     projectFromPath: sessionProject(request).fromPath,
-    service: target.service,
-    level: target.level,
     ip: getAuthzClientIp(request),
     path: pathname,
-  });
+  }, target);
   if (!verdict.allowed) throw refusalError(request, verdict);
 }
 
@@ -880,7 +931,7 @@ async function enforceApiTokenRbac(
 
   request.rbacUser = context.user;
   const owner = context.user;
-  const verdict = await decideEnforced({
+  const verdict = await decideRouteService(request, {
     subject: 'token',
     tenantDbName: context.tenantDbName,
     tenantId: context.tenantId,
@@ -896,11 +947,9 @@ async function enforceApiTokenRbac(
     tokenScope: context.tokenRecord.servicePermissions,
     // The project the handler will run in (the token's own, else the default one).
     requestedProjectId: context.projectId ? String(context.projectId) : null,
-    service: target.service,
-    level: target.level,
     ip: getAuthzClientIp(request),
     path: pathname,
-  });
+  }, target);
   if (!verdict.allowed) throw refusalError(request, verdict);
 }
 

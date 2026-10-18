@@ -90,16 +90,20 @@ describe('handing requests to Next', () => {
     expect(response.body).toBe('next saw: ');
   });
 
-  it('hands over a path under /api that no route claims, with its body, too', async () => {
+  it('answers a path under /api that no route claims (or claims for another method) with a JSON 404, not a Next page', async () => {
     await build();
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/not-a-route',
-      headers: { 'content-type': 'application/json' },
-      payload: '{"c":3}',
-    });
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toBe('next saw: {"c":3}');
+    for (const [method, url] of [['POST', '/api/not-a-route'], ['PUT', '/api/echo'], ['GET', '/api']] as const) {
+      const response = await app.inject({
+        method,
+        url: `${url}?x=1`,
+        headers: { 'content-type': 'application/json' },
+        payload: method === 'GET' ? undefined : '{"c":3}',
+      });
+      expect(response.statusCode, `${method} ${url}`).toBe(404);
+      expect(response.headers['x-handled-by']).toBeUndefined();
+      expect(response.headers['content-type']).toContain('application/json');
+      expect(response.json()).toMatchObject({ code: 'route_not_found' });
+    }
   });
 
   it('leaves the API on the parsers registered for it', async () => {

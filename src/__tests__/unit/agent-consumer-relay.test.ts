@@ -12,6 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   handlers: new Map<string, (ctx: { name: string; data: Record<string, unknown> }) => Promise<unknown>>(),
+  concurrency: new Map<string, number | undefined>(),
+  workers: new Map<string, { queueName: string; pause: ReturnType<typeof vi.fn> }>(),
+  shutdown: new Map<string, () => Promise<void>>(),
+  runAgentJobLocal: vi.fn(),
+  deliverAgentRunCallbackJob: vi.fn(),
+  drainLocalAgentRuns: vi.fn(),
   executePlaygroundChatLocal: vi.fn(),
   executeAgentChatLocal: vi.fn(),
 }));
@@ -21,17 +27,31 @@ vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/core/queue', () => ({
   getQueue: async () => ({
     name: 'bullmq',
-    consume: (queueName: string, handler: (ctx: { name: string; data: Record<string, unknown> }) => Promise<unknown>) => {
+    consume: (
+      queueName: string,
+      handler: (ctx: { name: string; data: Record<string, unknown> }) => Promise<unknown>,
+      opts?: { concurrency?: number },
+    ) => {
       hoisted.handlers.set(queueName, handler);
-      return { queueName, pause: vi.fn(), resume: vi.fn(), close: vi.fn() };
+      hoisted.concurrency.set(queueName, opts?.concurrency);
+      const worker = { queueName, pause: vi.fn(async () => undefined), resume: vi.fn(), close: vi.fn() };
+      hoisted.workers.set(queueName, worker);
+      return worker;
     },
   }),
 }));
 
 vi.mock('@/lib/services/agents/agentRunService', () => ({
   AGENT_RUN_QUEUE: 'agent-runs',
-  runAgentJobLocal: vi.fn(),
-  deliverAgentRunCallbackJob: vi.fn(),
+  AGENT_RUN_DEFERRED_QUEUE: 'agent-runs-deferred',
+  AGENT_RUN_CALLBACK_QUEUE: 'agent-run-callbacks',
+  runAgentJobLocal: hoisted.runAgentJobLocal,
+  deliverAgentRunCallbackJob: hoisted.deliverAgentRunCallbackJob,
+  drainLocalAgentRuns: hoisted.drainLocalAgentRuns,
+}));
+
+vi.mock('@/lib/core/lifecycle', () => ({
+  registerShutdownHandler: (name: string, fn: () => Promise<void>) => { hoisted.shutdown.set(name, fn); },
 }));
 
 vi.mock('@/lib/services/agents/agentService', async (importOriginal) => {
@@ -44,6 +64,7 @@ vi.mock('@/lib/services/agents/agentService', async (importOriginal) => {
 });
 
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { getConfig } from '@/lib/core/config';
 import {
   STREAM_RELAY_PAYLOAD_KEY,
   openCallerRelay,
@@ -157,5 +178,44 @@ describe('agent queue consumer + stream relay', () => {
 
   it('unknown jobs still fail loudly', async () => {
     await expect(handler()({ name: 'nope', data: {} })).rejects.toThrow(/Unknown agent job/);
+  });
+});
+
+describe('agent run queues', () => {
+  const run = (queueName: string) => hoisted.handlers.get(queueName)!;
+
+  it('registers the default, deferred and callback queues with their own concurrency', () => {
+    const agent = getConfig().agent;
+    expect(hoisted.concurrency.get('agent-runs')).toBe(agent.runConcurrency);
+    expect(hoisted.concurrency.get('agent-runs-deferred')).toBe(agent.deferredConcurrency);
+    expect(hoisted.concurrency.get('agent-run-callbacks')).toBe(agent.runCallbackConcurrency);
+  });
+
+  it('a deferred-queue job reaches the worker marked deferred (its claim guard); a default one does not', async () => {
+    const payload = { runId: 'r1', tenantId: 't', tenantDbName: 'tenant_t' };
+    await run('agent-runs-deferred')({ name: 'run', data: payload });
+    expect(hoisted.runAgentJobLocal).toHaveBeenLastCalledWith({ ...payload, runClass: 'deferred' });
+    await run('agent-runs')({ name: 'resume', data: payload });
+    expect(hoisted.runAgentJobLocal).toHaveBeenLastCalledWith(payload);
+  });
+
+  it('callbacks are delivered from their own queue (and from the run queue for jobs queued before the move)', async () => {
+    await run('agent-run-callbacks')({ name: 'callback', data: { runId: 'r1' } });
+    await run('agent-runs')({ name: 'callback', data: { runId: 'r2' } });
+    expect(hoisted.deliverAgentRunCallbackJob).toHaveBeenCalledTimes(2);
+    await expect(run('agent-run-callbacks')({ name: 'run', data: {} })).rejects.toThrow(/Unknown agent-run-callbacks job/);
+  });
+
+  it('the shutdown drain pauses both run consumers before it waits for the runs executing here', async () => {
+    const order: string[] = [];
+    hoisted.workers.get('agent-runs')!.pause.mockImplementation(async () => { order.push('pause:agent-runs'); });
+    hoisted.workers.get('agent-runs-deferred')!.pause.mockImplementation(async () => { order.push('pause:agent-runs-deferred'); });
+    hoisted.drainLocalAgentRuns.mockImplementation(async () => { order.push('drain'); return { settled: 0, interrupted: 0 }; });
+    const drain = hoisted.shutdown.get('agent-runs');
+    expect(drain).toBeTypeOf('function');
+    await drain!();
+    expect(order.slice(-1)).toEqual(['drain']);
+    expect(order).toEqual(expect.arrayContaining(['pause:agent-runs', 'pause:agent-runs-deferred']));
+    expect(hoisted.drainLocalAgentRuns).toHaveBeenCalledWith(getConfig().agent.runDrainTimeoutMs);
   });
 });

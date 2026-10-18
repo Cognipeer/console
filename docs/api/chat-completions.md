@@ -28,7 +28,7 @@ POST /api/client/v1/chat/completions
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `model` | string | Yes | Model key configured in the dashboard |
+| `model` | string | Yes | Model key configured in the dashboard, or `agent:<key>` ([below](#agents)) |
 | `messages` | array | Yes | Array of message objects |
 | `temperature` | number | No | Sampling temperature (0-2) |
 | `max_tokens` | number | No | Maximum tokens in response |
@@ -86,14 +86,18 @@ data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"delta":
 data: [DONE]
 ```
 
+## Agents
+
+`model` may also name an agent: `agent:<key>` (a bare agent key works when no model has that key). The call runs the agent's published version as a [run](/guide/agent-background-execution), takes `response_format` for [structured output](/api/agents#structured-output) and `variables` for the agent's declared [variables](/api/agents#variables) (chat clients cannot send them: give a variable that chat also needs a default), and answers `202` with a `Location` header when it is still running after the wait window. Details: [Calling an agent on chat completions](/guide/inference#calling-an-agent-on-chat-completions).
+
 ## Files the agent produced
 
-When `model` is an agent with a sandbox and the turn left files in the sandbox's `/outputs/` folder, the reply also carries them (additive; absent otherwise, see [Session files](/guide/session-files#files-the-agent-produces)):
+When `model` is an agent and the turn produced files (left in its sandbox's `/outputs/` folder, or written with `session_files_create`), the reply also carries them (additive; absent otherwise, see [Session files](/guide/session-files#files-the-agent-produces)):
 
 - non-streaming: `output_files: [{ id, name, mime_type, size, download_url }]` on the body and `file_path` annotations (`{ type, file_id, filename }`) on `choices[0].message.annotations`;
 - streaming: the same `output_files`-shaped list as `files` on the closing chunk (the one with `finish_reason`).
 
-`download_url` is relative to the API root (the server serves it under `/api`); fetch it with the same credentials.
+`download_url` is relative to the server origin and already includes `/api`; fetch it with the same credentials.
 
 ## Guardrail Blocking
 
@@ -119,7 +123,7 @@ If a guardrail blocks the request:
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing `model` or `messages`, guardrail block |
+| 400 | A body that is not a JSON object (`invalid_json`: malformed, empty, an array or a string), missing `model` or `messages`, guardrail block |
 | 401 | Invalid API token |
 | 500 | Model not found |
 | 500 | Model is not configured for chat completions |

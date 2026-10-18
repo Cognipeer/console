@@ -17,8 +17,11 @@ export function toSnakeKey(key: string): string {
     return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
 }
 
-/** Keys whose value is somebody else's data (tool arguments, free-form answers): never re-keyed. */
-const OPAQUE_KEYS = new Set(['args', 'answers']);
+/**
+ * Keys whose value is somebody else's data (tool arguments, free-form answers): never re-keyed.
+ * `directiveSources` is a record keyed by the text of a directive, so its keys are data too.
+ */
+const OPAQUE_KEYS = new Set(['args', 'answers', 'directiveSources', 'directive_sources']);
 
 /** Every object key snake_cased, depth first; values of {@link OPAQUE_KEYS} are left as they are. */
 export function toSnakeCaseDeep<T = unknown>(value: unknown): T {
@@ -47,6 +50,7 @@ export interface ClientPendingAction {
     id: string;
     kind: string;
     tool_name?: string;
+    subagent?: string;
     args?: unknown;
     questions?: unknown[];
     allow_free_text?: boolean;
@@ -61,6 +65,7 @@ export interface PendingActionLike {
     id: string;
     kind: string;
     toolName?: string;
+    subagent?: string;
     args?: unknown;
     questions?: unknown[];
     allowFreeText?: boolean;
@@ -77,6 +82,7 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
         // A question is not a tool call: the stored `toolName` of one (the SDK's
         // ask-user tool) is an internal detail and stays off the wire.
         ...(action.toolName && action.kind !== 'user_question' ? { tool_name: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: toSnakeCaseDeep<unknown[]>(action.questions) } : {}),
         ...(action.allowFreeText !== undefined ? { allow_free_text: action.allowFreeText } : {}),
@@ -149,14 +155,19 @@ export function toClientErrorBody(error: AgentRunErrorBody): Record<string, unkn
 
 // ── Files the agent produced ─────────────────────────────────────────────
 
-/** A file the agent wrote to its sandbox's `/outputs/`, as a client sees it. */
+/** A file the agent produced (sandbox `/outputs/` or `session_files_create`), as a client sees it. */
 export interface ClientOutputFile {
     id: string;
     name: string;
     mime_type: string;
     size: number;
-    /** Relative to the API origin: the session file content route. */
+    /** Relative to the server origin, `/api` included: the session file content route. */
     download_url: string;
+}
+
+/** Where a session file's bytes are served (the URL every client surface and the agent's tools report). */
+export function sessionFileDownloadUrl(conversationId: string, fileId: string): string {
+    return `/api/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(fileId)}/content`;
 }
 
 /** An `output_text` annotation pointing at an output file (OpenAI `container_file_citation` / `file_path` compatible). */
@@ -183,7 +194,7 @@ export function toClientOutputFiles(conversationId: string, attachments: Readonl
             name: file.name,
             mime_type: file.mimeType,
             size: file.size,
-            download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+            download_url: sessionFileDownloadUrl(conversationId, file.fileId),
         }));
 }
 
@@ -212,7 +223,7 @@ export function toClientMessageAttachments(
         mime_type: file.mimeType,
         size: file.size,
         origin: file.origin === 'agent_output' ? 'agent_output' : 'user_upload',
-        download_url: `/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.fileId)}/content`,
+        download_url: sessionFileDownloadUrl(conversationId, file.fileId),
     }));
 }
 
@@ -220,7 +231,7 @@ export function toClientMessageAttachments(
 export function toClientTranscriptMessage(
     conversationId: string,
     index: number,
-    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike> },
+    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike>; warnings?: string[] },
     id: string,
 ) {
     const files = toClientMessageAttachments(conversationId, message.attachments);
@@ -233,6 +244,7 @@ export function toClientTranscriptMessage(
         content: message.content,
         created_at: Number.isNaN(at.getTime()) ? null : at.toISOString(),
         attachments: files,
+        ...(message.warnings?.length ? { warnings: message.warnings } : {}),
         ...(files.some((f) => f.origin === 'agent_output') ? { output_files: files.filter((f) => f.origin === 'agent_output') } : {}),
     };
 }

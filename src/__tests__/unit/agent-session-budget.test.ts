@@ -39,9 +39,9 @@ describe('reading a budget', () => {
   });
 
   it('the agent default and the session budget are read from their stored shapes; null / junk is "no budget"', () => {
-    expect(agentSessionBudget({ execution: { sessionBudget: { maxCostUsd: 3, onReach: 'stop' } } })).toEqual({ maxCostUsd: 3, onReach: 'stop' });
+    expect(agentSessionBudget({ budget: { maxCostUsd: 3, onReach: 'stop' } })).toEqual({ maxCostUsd: 3, onReach: 'stop' });
     expect(agentSessionBudget({})).toBeUndefined();
-    expect(agentSessionBudget({ execution: { sessionBudget: { maxCostUsd: -3, onReach: 'stop' } } })).toBeUndefined();
+    expect(agentSessionBudget({ budget: { maxCostUsd: -3, onReach: 'stop' } })).toBeUndefined();
     expect(activeSessionBudget(session({ budget: null }))).toBeNull();
     expect(activeSessionBudget(session())).toBeNull();
     expect(activeSessionBudget(session({ budget: { maxCostUsd: 1, onReach: 'pause' } }))).toEqual({ maxCostUsd: 1, onReach: 'pause' });
@@ -175,9 +175,9 @@ describe('how the two refusals are answered', () => {
   });
 });
 
-describe('agent default session budget (execution.sessionBudget) validation', () => {
+describe('agent default session budget (config.budget) validation', () => {
   const validate = (sessionBudget: unknown) => validateAgentConfigShape({
-    modelKey: 'gpt-4o', execution: { sessionBudget },
+    modelKey: 'gpt-4o', budget: sessionBudget,
   } as never);
 
   it('accepts a positive amount with pause or stop, and nothing at all', () => {
@@ -188,16 +188,16 @@ describe('agent default session budget (execution.sessionBudget) validation', ()
 
   it('names the field when the amount or the behaviour is wrong', () => {
     const fields = (value: unknown) => validate(value).errors.map((e: { field: string }) => e.field);
-    expect(fields({ maxCostUsd: 0, onReach: 'pause' })).toContain('execution.sessionBudget.maxCostUsd');
-    expect(fields({ maxCostUsd: 'x', onReach: 'pause' })).toContain('execution.sessionBudget.maxCostUsd');
-    expect(fields({ maxCostUsd: 1, onReach: 'later' })).toContain('execution.sessionBudget.onReach');
-    expect(fields('cheap')).toContain('execution.sessionBudget');
+    expect(fields({ maxCostUsd: 0, onReach: 'pause' })).toContain('budget.maxCostUsd');
+    expect(fields({ maxCostUsd: 'x', onReach: 'pause' })).toContain('budget.maxCostUsd');
+    expect(fields({ maxCostUsd: 1, onReach: 'later' })).toContain('budget.onReach');
+    expect(fields('cheap')).toContain('budget');
   });
 });
 
 
 describe('what an API client may do to an agent-set budget', () => {
-  const bound = { execution: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' as const } } };
+  const bound = { budget: { maxCostUsd: 5, onReach: 'pause' as const } };
 
   it('an agent without a default budget binds nobody', () => {
     expect(clientBudgetViolation({}, null)).toBeNull();
@@ -218,7 +218,7 @@ describe('what an API client may do to an agent-set budget', () => {
   });
 
   it('allowClientOverride lifts the restriction', () => {
-    const open = { execution: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' as const, allowClientOverride: true } } };
+    const open = { budget: { maxCostUsd: 5, onReach: 'pause' as const, allowClientOverride: true } };
     expect(clientBudgetViolation(open, null)).toBeNull();
     expect(clientBudgetViolation(open, { maxCostUsd: 500, onReach: 'pause' })).toBeNull();
     // ...and the flag is not copied into a session's own budget.
@@ -226,10 +226,10 @@ describe('what an API client may do to an agent-set budget', () => {
   });
 
   it('config validation takes a boolean flag only', () => {
-    const ok = validateAgentConfigShape({ execution: { sessionBudget: { maxCostUsd: 1, onReach: 'pause', allowClientOverride: true } } } as never);
+    const ok = validateAgentConfigShape({ budget: { maxCostUsd: 1, onReach: 'pause', allowClientOverride: true } } as never);
     expect(ok.errors.filter((e) => e.field.includes('allowClientOverride'))).toEqual([]);
-    const bad = validateAgentConfigShape({ execution: { sessionBudget: { maxCostUsd: 1, onReach: 'pause', allowClientOverride: 'yes' } } } as never);
-    expect(bad.errors.some((e) => e.field === 'execution.sessionBudget.allowClientOverride')).toBe(true);
+    const bad = validateAgentConfigShape({ budget: { maxCostUsd: 1, onReach: 'pause', allowClientOverride: 'yes' } } as never);
+    expect(bad.errors.some((e) => e.field === 'budget.allowClientOverride')).toBe(true);
   });
 });
 

@@ -576,10 +576,21 @@ export function describeTurnOutcome(
 export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTurnCompaction {
     const structured = event.structuredSummary as (AgentSdkSummarizationEvent['structuredSummary'] & {
         user_directives?: string[];
+        user_directive_sources?: Record<string, string>;
     }) | undefined;
     const notes = event.integrity?.notes ?? [];
+    // agent-sdk ≥ 0.15 reports the model and the directives it refused to keep.
+    const extra = event as AgentSdkSummarizationEvent & {
+        model?: string;
+        droppedDirectives?: Array<{ directive: string; reason: string; sourceQuote?: string }>;
+    };
+    const directiveSources = structured?.user_directive_sources;
     return {
         at: new Date().toISOString(),
+        ...(typeof extra.model === 'string' && extra.model ? { model: extra.model } : {}),
+        ...(Array.isArray(extra.droppedDirectives) && extra.droppedDirectives.length > 0
+            ? { droppedDirectives: extra.droppedDirectives }
+            : {}),
         ...(typeof event.messagesCompressed === 'number' ? { messagesCompressed: event.messagesCompressed } : {}),
         ...(typeof event.tokenCountBefore === 'number' ? { tokensBefore: event.tokenCountBefore } : {}),
         ...(typeof event.tokenCountAfter === 'number' ? { tokensAfter: event.tokenCountAfter } : {}),
@@ -590,6 +601,7 @@ export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTu
             ? {
                 summary: {
                     ...(structured.user_directives?.length ? { userDirectives: structured.user_directives } : {}),
+                    ...(directiveSources && Object.keys(directiveSources).length > 0 ? { directiveSources } : {}),
                     ...(structured.stable_facts?.length
                         ? { facts: structured.stable_facts.map((fact) => ({ key: fact.key, value: fact.value })) }
                         : {}),
@@ -638,7 +650,7 @@ export function compactedToolResults(
  * own model, which makes the cap err on the side of stopping.
  */
 export function buildCostEstimator(
-    models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }>,
+    models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null; /** A model with no price of its own that must not be priced at the fallback rate (a sub-agent's). */ noFallback?: boolean }>,
     fallback: IModelPricing | null | undefined,
     calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }) => { totalCost: number },
 ): CostEstimator | undefined {
@@ -648,13 +660,20 @@ export function buildCostEstimator(
         !!pricing && ((pricing.inputTokenPer1M ?? 0) > 0 || (pricing.outputTokenPer1M ?? 0) > 0);
     const fallbackPricing = priced(fallback) ? fallback : undefined;
     const byName = new Map<string, IModelPricing>();
+    const unpriced = new Set<string>();
     for (const entry of models) {
-        if (!priced(entry.pricing)) continue;
+        if (!priced(entry.pricing)) {
+            if (entry.noFallback) for (const name of entry.names) if (name) unpriced.add(name.toLowerCase());
+            continue;
+        }
         for (const name of entry.names) if (name) byName.set(name.toLowerCase(), entry.pricing);
     }
     if (byName.size === 0 && !fallbackPricing) return undefined;
     return (args) => {
-        const pricing = (args.modelName ? byName.get(args.modelName.toLowerCase()) : undefined) ?? fallbackPricing;
+        const name = args.modelName?.toLowerCase();
+        // A sub-agent's model nobody priced counts as free here (the owner is warned) rather than at the parent's rate.
+        if (name && !byName.has(name) && unpriced.has(name)) return 0;
+        const pricing = (name ? byName.get(name) : undefined) ?? fallbackPricing;
         if (!pricing) return 0;
         return calculate(pricing, {
             inputTokens: args.inputTokens,

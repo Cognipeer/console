@@ -22,6 +22,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
 import type {
+    AgentResponseFormat,
     DatabaseProvider,
     IAgentConversation,
     IAgentMessagePendingAction,
@@ -45,6 +46,8 @@ export interface PublicPendingAction {
     id: string;
     kind: IAgentPendingAction['kind'];
     toolName?: string;
+    /** The sub-agent whose tool call or question this is; absent for the agent's own. */
+    subagent?: string;
     args?: unknown;
     questions?: IAgentPendingAction['questions'];
     allowFreeText?: boolean;
@@ -60,6 +63,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         id: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -76,6 +80,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         id: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -91,6 +96,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         actionId: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -118,10 +124,26 @@ const RESUME_CTX_KEYS = [
     '__traceContinuation',
 ] as const;
 
+/**
+ * What the turn was asked for beyond the agent's own config: the per-request
+ * structured output and the validated variables. They ride with the paused state
+ * so the continuation rebuilds the SAME turn (same schema, same prompt values)
+ * whoever answers the pause.
+ */
+export interface PausedTurnOptions {
+    responseFormat?: AgentResponseFormat;
+    variables?: Record<string, unknown>;
+    /** False when the variables taken from outside were kept out of the system prompt (external content). */
+    variablesInPrompt?: boolean;
+    /** With `variablesInPrompt: false`: the names of `variables` that still fill the system prompt. */
+    literalVariables?: string[];
+}
+
 interface PausedEnvelope {
     v: 1;
     source: PauseSource;
     state: Record<string, unknown>;
+    turn?: PausedTurnOptions;
 }
 
 /**
@@ -150,6 +172,7 @@ export function serializePausedState(
     state: AgentSdkSmartState | undefined,
     source: PauseSource,
     maxBytes: number = MAX_STATE_BYTES,
+    turn?: PausedTurnOptions,
 ): string | null {
     if (!state) return null;
     const raw = state as unknown as Record<string, unknown>;
@@ -169,17 +192,19 @@ export function serializePausedState(
     }
     stored.ctx = resumeCtx;
 
-    const text = JSON.stringify({ v: 1, source, state: stored } satisfies PausedEnvelope);
+    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false));
+    const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
     return text.length <= maxBytes ? text : null;
 }
 
-export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState } | null {
+export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState; turn?: PausedTurnOptions } | null {
     try {
         const parsed = JSON.parse(text) as PausedEnvelope;
         if (!parsed || parsed.v !== 1 || typeof parsed.state !== 'object' || !parsed.state) return null;
         return {
             source: parsed.source === 'agent-playground' ? 'agent-playground' : 'agent',
             state: parsed.state as unknown as AgentSdkSmartState,
+            ...(parsed.turn && typeof parsed.turn === 'object' ? { turn: parsed.turn } : {}),
         };
     } catch {
         return null;
@@ -193,11 +218,19 @@ interface PauseEntry {
     sdkId: string;
     toolCallId?: string;
     toolName?: string;
+    /** The sub-agent that asked, when the SDK surfaced a child's pause. */
+    subagent?: string;
     args?: unknown;
     questions?: IAgentUserQuestion[];
     allowFreeText?: boolean;
     /** `client_tool`: how long the host page may take. */
     timeoutSeconds?: number;
+}
+
+/** The sub-agent the SDK tagged a surfaced child pause with. */
+function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string } {
+    const tag = entry.metadata?.__subagent as { name?: unknown } | undefined;
+    return typeof tag?.name === 'string' && tag.name ? { subagent: tag.name } : {};
 }
 
 /** The approvals, questions and client tool calls the SDK state is waiting on. */
@@ -210,6 +243,7 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
             sdkId: approval.id,
             toolCallId: approval.toolCallId,
             toolName: approval.toolName,
+            ...subagentField(approval),
             args: approval.args,
         });
     }
@@ -233,6 +267,7 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
             sdkId: question.id,
             toolCallId: question.toolCallId,
             toolName: question.toolName,
+            ...subagentField(question as { metadata?: Record<string, unknown> }),
             questions: question.questions as unknown as IAgentUserQuestion[],
             allowFreeText: question.allowFreeText,
         });
@@ -254,6 +289,8 @@ export interface OpenPauseInput {
     /** The version the paused turn ran (null = the draft), so the continuation rebuilds the same agent. */
     agentVersion: number | null;
     usePublished: boolean;
+    /** The request-level structured output / variables the continuation must apply again. */
+    turn?: PausedTurnOptions;
     /** Who started the turn. */
     createdBy: string;
 }
@@ -284,7 +321,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
     const normal = serializeCarriedState(input.state);
     const snapshot = normal === null
         ? null
-        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length);
+        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length, input.turn);
     if (!snapshot) {
         logger.warn('Paused run state is too large to store; not pausing', { conversationId: input.conversationId });
         return null;
@@ -303,6 +340,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         sdkId: entry.sdkId,
         ...(entry.toolCallId ? { toolCallId: entry.toolCallId } : {}),
         ...(entry.toolName ? { toolName: entry.toolName } : {}),
+        ...(entry.subagent ? { subagent: entry.subagent } : {}),
         ...(entry.args !== undefined ? { args: entry.args } : {}),
         ...(entry.questions ? { questions: entry.questions } : {}),
         ...(entry.allowFreeText !== undefined ? { allowFreeText: entry.allowFreeText } : {}),

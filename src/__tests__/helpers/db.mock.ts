@@ -222,6 +222,8 @@ function buildPrimers(): Record<string, Mock> {
     countActiveAlerts: vi.fn().mockResolvedValue(0),
     cleanupAgentTracingRetention: vi.fn().mockResolvedValue({ sessionsDeleted: 0, eventsDeleted: 0 }),
     agentTracingAgentExists: vi.fn().mockResolvedValue(false),
+    // A transcript lookup answers the sessions it matched (never null).
+    findAgentConversationsByTranscriptHash: vi.fn().mockResolvedValue([]),
 
     // Entity health rollup, alert state and stale-session finalizer
     // (`list*` / `find*` already default to [] / null; these have shaped returns).
@@ -257,6 +259,32 @@ function buildPrimers(): Record<string, Mock> {
     // already get `[]` / `0` / `true` from `defaultReturnFor`.
     getAgentRunById: vi.fn().mockResolvedValue(null),
     getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
+    // Shapes the name-based default would get wrong (a record, not a number / undefined).
+    countAgentRunsByStatus: vi.fn().mockResolvedValue({}),
+    promoteScheduledAgentRun: vi.fn().mockResolvedValue(null),
+    markAgentRunDetached: vi.fn().mockResolvedValue(null),
+    expireWaitingAgentRun: vi.fn().mockResolvedValue(null),
+    markAgentRunPublished: vi.fn().mockResolvedValue(null),
+
+    // Agent triggers: a real provider answers a miss with `null` / `false` / a count.
+    createAgentTrigger: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+      _id: `mock-trigger-${Math.random().toString(36).slice(2, 10)}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...record,
+    })),
+    getAgentTrigger: vi.fn().mockResolvedValue(null),
+    updateAgentTrigger: vi.fn().mockResolvedValue(null),
+    deleteAgentTriggersForAgent: vi.fn().mockResolvedValue(0),
+    advanceTriggerNextFire: vi.fn().mockResolvedValue(false),
+    setTriggerFireResult: vi.fn().mockResolvedValue(false),
+    // The webhook delivery log: a recorded row, a count, the retention result.
+    recordAgentTriggerDelivery: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+      _id: `mock-delivery-${Math.random().toString(36).slice(2, 10)}`,
+      ...record,
+    })),
+    cleanupAgentTriggerDeliveryRetention: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    deleteAgentTriggerDeliveries: vi.fn().mockResolvedValue(0),
   };
 }
 

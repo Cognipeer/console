@@ -6,7 +6,7 @@ Use it to generate typed SDK clients, import the API into Postman/Insomnia, driv
 
 <div class="tip custom-block" style="padding-top: 8px">
 
-**Download:** [openapi.yaml](/openapi.yaml)
+**Download:** [openapi.yaml](https://docs.cognipeer.com/console/openapi.yaml) · source: [`openapi.yaml`](https://github.com/Cognipeer/cgate/blob/main/openapi.yaml) in the repository root
 
 </div>
 

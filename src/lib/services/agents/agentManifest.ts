@@ -17,8 +17,11 @@ import YAML from 'yaml';
 
 import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
+import { subagentConfigIssues } from './subagentConfigRules';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
+import { maskAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
+import { validateVariableDeclaration } from './agentVariables';
 import { assertMayNameBucket, type CanNameBucket } from './attachmentsBucketAccess';
 import type { ManifestResources } from './manifestResources';
 
@@ -74,7 +77,12 @@ function sanitizeConfig(config: IAgentConfig): IAgentConfig {
         // sees which secrets to fill in), the sealed values never do.
         spec.sandbox = maskAgentSandboxConfig(spec.sandbox);
     }
-    return spec;
+    if (spec.callback) {
+        // The callback URL travels; its sealed secret never does (masked, so an
+        // importer sees one is expected and an import over this agent keeps its own).
+        spec.callback = maskAgentCallbackConfig(spec.callback);
+    }
+    return stripLegacyExecutionConfig(spec);
 }
 
 function collectBindingDependencies(
@@ -119,6 +127,8 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
         const where = `spec.subagents[${subagent.name}]`;
         if (subagent.kind === 'ref' && subagent.agentKey) {
             out.push({ type: 'agent', key: subagent.agentKey, usedBy: where });
+            // A reference may override the model its agent runs on: the importing project needs that model too.
+            if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
             continue;
         }
         if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
@@ -174,11 +184,21 @@ export function serializeAgentManifest(manifest: AgentManifest, format: AgentMan
 
 export class AgentManifestError extends Error {
     readonly issues: string[];
-    constructor(message: string, issues: string[] = []) {
+    /** Set when the failure has its own HTTP meaning: `agent_key_conflict` (409), `agent_not_found` (404). */
+    readonly code?: 'agent_key_conflict' | 'agent_not_found';
+    constructor(message: string, issues: string[] = [], code?: 'agent_key_conflict' | 'agent_not_found') {
         super(message);
         this.name = 'AgentManifestError';
         this.issues = issues;
+        this.code = code;
     }
+}
+
+/** The HTTP status an import route answers for a manifest error: 409 key clash, 404 update of a missing key, else 400. */
+export function manifestErrorStatus(error: AgentManifestError): 400 | 404 | 409 {
+    if (error.code === 'agent_key_conflict') return 409;
+    if (error.code === 'agent_not_found') return 404;
+    return 400;
 }
 
 /**
@@ -251,9 +271,14 @@ export function validateAgentManifest(input: unknown): string[] {
         }
     }
 
+    for (const issue of subagentConfigIssues(spec)) issues.push(`spec.${issue.field} ${issue.message}`);
+
     if (spec.structuredOutput?.enabled && !spec.structuredOutput.schema) {
         issues.push('spec.structuredOutput.enabled is true but no schema is set');
     }
+
+    // The declared variables travel with the agent: a malformed list is refused on import like on save.
+    for (const issue of validateVariableDeclaration(spec.variables)) issues.push(`spec.${issue.field}: ${issue.message}`);
 
     return issues;
 }
@@ -402,7 +427,7 @@ export async function applyAgentManifest(
     const existing = await db.findAgentByKey(key, projectId);
 
     if (existing) {
-        if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`);
+        if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`, [], 'agent_key_conflict');
         const incoming = sanitizeConfig(manifest.spec);
         await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
         const updated = await db.updateAgent(String(existing._id), {
@@ -417,7 +442,7 @@ export async function applyAgentManifest(
         return { agent: updated, action: 'updated', missing: preview.missing };
     }
 
-    if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`);
+    if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`, [], 'agent_not_found');
 
     const incoming = sanitizeConfig(manifest.spec);
     await assertMayNameBucket(incoming, undefined, options.canNameBucket);

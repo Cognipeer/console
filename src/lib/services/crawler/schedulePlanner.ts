@@ -3,6 +3,7 @@
  *
  * - `computeNextRun(schedule, from)`     – next fire time, honouring window
  * - `isDue(schedule, now)`               – is the schedule ready to fire?
+ * - `dueSlot(schedule, now)`              – the due slot id (claim-key suffix) or null
  * - `validateSchedule(schedule)`         – returns an error message or null
  *
  * Kept side-effect free so unit tests can exercise edge cases without
@@ -94,12 +95,68 @@ export function computeNextRun(
   return candidate;
 }
 
+/**
+ * The slot that is due right now, as a stable identifier, or `null`.
+ *
+ * - cron: the latest slot at or before `now` (`prev()`), due when it is after
+ *   the last run (else `startAt`, else `since` — the crawler's creation; with
+ *   none of the three nothing is due) and inside the startAt/endAt window. `computeNextRun` is strictly
+ *   after `now`, so it can never express "due"; that is why cron never fired.
+ * - interval: due once `lastRunAt + interval` has passed (or never ran). The
+ *   id is derived from `lastRunAt`, so replicas deciding from the same
+ *   persisted state compute the same id.
+ *
+ * The id is the claim-key suffix (`claimSchedulerSlot`) that makes dispatch
+ * exactly-once across replicas.
+ */
+export function dueSlot(
+  schedule: ICrawlerSchedule | undefined | null,
+  now: Date = new Date(),
+  since?: Date | string,
+): string | null {
+  if (!schedule || !schedule.enabled) return null;
+  if (validateSchedule(schedule)) return null;
+
+  const startAt = asDate(schedule.startAt);
+  const endAt = asDate(schedule.endAt);
+  const lastRun = asDate(schedule.lastRunAt);
+
+  if (schedule.mode === 'interval') {
+    const next = computeNextRun(schedule, now);
+    if (!next || next.getTime() > now.getTime()) return null;
+    return lastRun ? `after-${lastRun.toISOString()}` : 'first';
+  }
+
+  let slot: Date;
+  try {
+    slot = cronParser
+      // +1 ms: prev() is strictly before currentDate, so a tick landing exactly on a slot would otherwise see the previous one.
+      .parseExpression(schedule.cron ?? '', { utc: true, currentDate: new Date(now.getTime() + 1) })
+      .prev()
+      .toDate();
+  } catch {
+    return null;
+  }
+  if (slot.getTime() > now.getTime()) return null;
+  if (startAt && slot.getTime() < startAt.getTime()) return null;
+  if (endAt && slot.getTime() > endAt.getTime()) return null;
+  // Without any baseline we cannot tell a new slot from one that predates the
+  // schedule, so it is not due (callers pass `since`, the crawler's creation).
+  const floor = lastRun ?? startAt ?? asDate(since);
+  if (!floor) return null;
+  if (slot.getTime() <= floor.getTime()) {
+    // startAt is inclusive: a slot exactly at startAt with no run yet is due.
+    const startSlotUnrun = !lastRun && startAt !== null && slot.getTime() === startAt.getTime();
+    if (!startSlotUnrun) return null;
+  }
+  return slot.toISOString();
+}
+
 /** Convenience: is the schedule due to fire right now? */
 export function isDue(
   schedule: ICrawlerSchedule | undefined | null,
   now: Date = new Date(),
+  since?: Date | string,
 ): boolean {
-  const next = computeNextRun(schedule, now);
-  if (!next) return false;
-  return next.getTime() <= now.getTime();
+  return dueSlot(schedule, now, since) !== null;
 }

@@ -37,6 +37,20 @@ describe('createReasoningTap', () => {
     expect(seen[1]).toBe('\n\nSecond.');
   });
 
+  it('ignores what a sub-agent forwarded: its thinking, its tool calls and its text', () => {
+    const child = { subagentName: 'helper', subagentId: 'sa_1' };
+    const seen: string[] = [];
+    const tap = createReasoningTap((text) => seen.push(text), 'a1');
+    tap.onEvent(reasoningEvent('Plan.'));
+    tap.onEvent({ type: 'reasoning', text: 'child thought', ...child } as never);
+    tap.onEvent({ type: 'tool_call', phase: 'start', name: 'lookup', ...child } as never);
+    tap.onEvent({ type: 'stream', text: 'child text', ...child } as never);
+    tap.onEvent(reasoningEvent('Done.'));
+    // The child's tool call was no boundary of this turn's steps: the two pieces join.
+    expect(seen).toEqual(['Plan.', 'Done.']);
+    expect(tap.text()).toBe('Plan.Done.');
+  });
+
   it('a hidden reasoning (enabled=false) swallows everything and asks for no stream', () => {
     const cb = vi.fn();
     const tap = createReasoningTap(cb, 'a1', false);

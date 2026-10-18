@@ -1,7 +1,7 @@
 /**
- * Pure policy helpers of `agentRunService.ts` (PR #326 hardening):
- *  - `resolveAgentExecutionLimits`: effective = min(env ceiling, tenant
- *    quota, agent `config.execution`), where 0/unset means "no tighter bound";
+ * Pure policy helpers of `agentRunService.ts`:
+ *  - `resolveAgentRunLimits`: effective = min(env ceiling, tenant quota),
+ *    where 0/unset means "no tighter bound" (agents have no say any more);
  *  - `validateCallbackRequest`: submit-time 400 for a callback that could
  *    never be delivered (or would reach an internal address);
  *  - the id / serialization helpers the client API and dashboard share.
@@ -33,10 +33,12 @@ import type { IAgentConfig, IAgentRun } from '@/lib/database';
 import { encryptObject } from '@/lib/utils/crypto';
 import {
   agentDefaultCallback,
+  agentRunJobDedupKey,
   isAbandonedSyncReservation,
+  isAsyncAgentRun,
   isBackgroundModeRequested,
   normalizeAgentRunId,
-  resolveAgentExecutionLimits,
+  resolveAgentRunLimits,
   serializeAgentRun,
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
@@ -48,16 +50,16 @@ const QUOTA_CONTEXT = {
   licenseType: 'ENTERPRISE' as const,
 };
 
-function agent(execution: IAgentConfig['execution']): IAgentConfig {
-  return { modelKey: 'gpt-4o', execution };
+function agent(callback: IAgentConfig['callback']): IAgentConfig {
+  return { modelKey: 'gpt-4o', callback };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   process.env.AGENT_SYNC_TIMEOUT_MS = '120000'; // 120s
   process.env.AGENT_BACKGROUND_MAX_DURATION_MS = '1800000'; // 30min
-  process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT = '10';
-  process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT = '0';
+  process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT = '10';
+  process.env.AGENT_RUN_MAX_ACTIVE_PER_PROJECT = '0';
   reloadConfig();
   hoisted.resolveEffectiveLimits.mockResolvedValue({ quotas: {} });
   hoisted.assertPublicUrl.mockImplementation(async (url: string) => new URL(url));
@@ -66,130 +68,94 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.AGENT_SYNC_TIMEOUT_MS;
   delete process.env.AGENT_BACKGROUND_MAX_DURATION_MS;
-  delete process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT;
-  delete process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT;
+  delete process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT;
+  delete process.env.AGENT_RUN_MAX_ACTIVE_PER_PROJECT;
   reloadConfig();
 });
 
-describe('resolveAgentExecutionLimits — min(env, quota, agent)', () => {
-  it('with no quota and no agent settings, the env values apply', async () => {
-    const limits = await resolveAgentExecutionLimits({ agentConfig: agent(undefined), quotaContext: QUOTA_CONTEXT });
-    expect(limits).toEqual({
-      syncTimeoutMs: 120_000,
-      backgroundEnabled: true,
-      backgroundMaxDurationMs: 1_800_000,
-      defaultMode: 'sync',
-      maxConcurrentRunsPerTenant: 10,
-      maxConcurrentRunsPerProject: 0,
+describe('resolveAgentRunLimits — min(env, tenant quota)', () => {
+  it('with no quota, the env values apply', async () => {
+    expect(await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT })).toEqual({
+      syncWaitMs: 120_000,
+      maxDurationMs: 1_800_000,
+      maxActivePerTenant: 10,
+      maxActivePerProject: 0,
     });
   });
 
-  it('takes the tightest of env, tenant quota and agent setting for each knob', async () => {
+  it('takes the tightest of env and tenant quota for each knob', async () => {
     hoisted.resolveEffectiveLimits.mockResolvedValue({
-      quotas: { maxAgentSyncTimeoutSeconds: 90, maxAgentBackgroundDurationMinutes: 20, maxConcurrentAgentRuns: 4 },
+      quotas: { maxAgentSyncTimeoutSeconds: 60, maxAgentBackgroundDurationMinutes: 10, maxConcurrentAgentRuns: 3 },
     });
-
-    // Agent tighter than quota for sync, looser for background.
-    const a = await resolveAgentExecutionLimits({
-      agentConfig: agent({ syncTimeoutSeconds: 30, backgroundMaxDurationMinutes: 25 }),
-      quotaContext: QUOTA_CONTEXT,
+    expect(await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT })).toEqual({
+      syncWaitMs: 60_000,
+      maxDurationMs: 600_000,
+      maxActivePerTenant: 3,
+      maxActivePerProject: 0,
     });
-    expect(a.syncTimeoutMs).toBe(30_000);
-    expect(a.backgroundMaxDurationMs).toBe(20 * 60_000);
-    expect(a.maxConcurrentRunsPerTenant).toBe(4);
-
-    // Quota tighter for sync, agent tighter for background.
-    const b = await resolveAgentExecutionLimits({
-      agentConfig: agent({ syncTimeoutSeconds: 100, backgroundMaxDurationMinutes: 5 }),
-      quotaContext: QUOTA_CONTEXT,
-    });
-    expect(b.syncTimeoutMs).toBe(90_000);
-    expect(b.backgroundMaxDurationMs).toBe(5 * 60_000);
   });
 
-  it('nothing can RAISE the env ceiling — an agent or quota above it is ignored', async () => {
+  it('nothing can RAISE the env ceiling — a quota above it is ignored', async () => {
     hoisted.resolveEffectiveLimits.mockResolvedValue({
-      quotas: { maxAgentSyncTimeoutSeconds: 3600, maxAgentBackgroundDurationMinutes: 600, maxConcurrentAgentRuns: 500 },
+      quotas: { maxAgentSyncTimeoutSeconds: 10_000, maxAgentBackgroundDurationMinutes: 10_000, maxConcurrentAgentRuns: 500 },
     });
-    const limits = await resolveAgentExecutionLimits({
-      agentConfig: agent({ syncTimeoutSeconds: 7200, backgroundMaxDurationMinutes: 999 }),
-      quotaContext: QUOTA_CONTEXT,
-    });
-    expect(limits.syncTimeoutMs).toBe(120_000);
-    expect(limits.backgroundMaxDurationMs).toBe(1_800_000);
-    expect(limits.maxConcurrentRunsPerTenant).toBe(10);
+    const limits = await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT });
+    expect(limits.syncWaitMs).toBe(120_000);
+    expect(limits.maxDurationMs).toBe(1_800_000);
+    expect(limits.maxActivePerTenant).toBe(10);
   });
 
-  it('0 or unset in the quota/agent means "no tighter bound", never "zero"', async () => {
+  it('0 or unset in the quota means "no tighter bound", never "zero"', async () => {
     hoisted.resolveEffectiveLimits.mockResolvedValue({
       quotas: { maxAgentSyncTimeoutSeconds: 0, maxAgentBackgroundDurationMinutes: 0, maxConcurrentAgentRuns: 0 },
     });
-    const limits = await resolveAgentExecutionLimits({
-      agentConfig: agent({ syncTimeoutSeconds: 0, backgroundMaxDurationMinutes: undefined }),
-      quotaContext: QUOTA_CONTEXT,
-    });
-    expect(limits.syncTimeoutMs).toBe(120_000);
-    expect(limits.backgroundMaxDurationMs).toBe(1_800_000);
-    expect(limits.maxConcurrentRunsPerTenant).toBe(10);
+    const limits = await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT });
+    expect(limits.syncWaitMs).toBe(120_000);
+    expect(limits.maxDurationMs).toBe(1_800_000);
+    expect(limits.maxActivePerTenant).toBe(10);
   });
 
   it('an env tenant cap of 0 (uncapped) still honours a quota cap; both 0 = no cap', async () => {
-    process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT = '0';
+    process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT = '0';
     reloadConfig();
-
-    hoisted.resolveEffectiveLimits.mockResolvedValue({ quotas: { maxConcurrentAgentRuns: 3 } });
-    expect((await resolveAgentExecutionLimits({ quotaContext: QUOTA_CONTEXT })).maxConcurrentRunsPerTenant).toBe(3);
-
+    hoisted.resolveEffectiveLimits.mockResolvedValue({ quotas: { maxConcurrentAgentRuns: 4 } });
+    expect((await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT })).maxActivePerTenant).toBe(4);
     hoisted.resolveEffectiveLimits.mockResolvedValue({ quotas: {} });
-    expect((await resolveAgentExecutionLimits({ quotaContext: QUOTA_CONTEXT })).maxConcurrentRunsPerTenant).toBe(0);
+    expect((await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT })).maxActivePerTenant).toBe(0);
   });
 
-  it('the per-project cap comes from env', async () => {
-    process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT = '2';
+  it('the per-project cap comes from env; the tenant default is 250', async () => {
+    process.env.AGENT_RUN_MAX_ACTIVE_PER_PROJECT = '2';
+    delete process.env.AGENT_RUN_MAX_ACTIVE_PER_TENANT;
     reloadConfig();
-    expect((await resolveAgentExecutionLimits({})).maxConcurrentRunsPerProject).toBe(2);
+    const limits = await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT });
+    expect(limits.maxActivePerProject).toBe(2);
+    expect(limits.maxActivePerTenant).toBe(250);
   });
 
   it('asks the quota layer for the global domain of the caller', async () => {
-    await resolveAgentExecutionLimits({ quotaContext: QUOTA_CONTEXT });
+    await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT });
     expect(hoisted.resolveEffectiveLimits).toHaveBeenCalledWith({ ...QUOTA_CONTEXT, domain: 'global' });
   });
 
   it('a quota lookup failure falls back to the env ceilings instead of failing the request', async () => {
-    hoisted.resolveEffectiveLimits.mockRejectedValue(new Error('db down'));
-    const limits = await resolveAgentExecutionLimits({
-      agentConfig: agent({ syncTimeoutSeconds: 45 }),
-      quotaContext: QUOTA_CONTEXT,
-    });
-    expect(limits.syncTimeoutMs).toBe(45_000);
-    expect(limits.backgroundMaxDurationMs).toBe(1_800_000);
+    hoisted.resolveEffectiveLimits.mockRejectedValue(new Error('quota store down'));
+    expect((await resolveAgentRunLimits({ quotaContext: QUOTA_CONTEXT })).syncWaitMs).toBe(120_000);
   });
 
   it('without a quota context, no quota lookup is made', async () => {
-    await resolveAgentExecutionLimits({ agentConfig: agent(undefined) });
+    await resolveAgentRunLimits({});
     expect(hoisted.resolveEffectiveLimits).not.toHaveBeenCalled();
-  });
-
-  it('backgroundEnabled defaults to true; false disables it and forces defaultMode back to sync', async () => {
-    expect((await resolveAgentExecutionLimits({ agentConfig: agent({}) })).backgroundEnabled).toBe(true);
-
-    const disabled = await resolveAgentExecutionLimits({ agentConfig: agent({ backgroundEnabled: false, defaultMode: 'background' }) });
-    expect(disabled.backgroundEnabled).toBe(false);
-    expect(disabled.defaultMode).toBe('sync');
-
-    const bg = await resolveAgentExecutionLimits({ agentConfig: agent({ defaultMode: 'background' }) });
-    expect(bg.defaultMode).toBe('background');
   });
 });
 
-describe('isBackgroundModeRequested — header > body > agent default', () => {
-  it('uses the agent default only when the call says neither', () => {
-    expect(isBackgroundModeRequested(undefined, {}, 'background')).toBe(true);
-    expect(isBackgroundModeRequested(undefined, {}, 'sync')).toBe(false);
-    expect(isBackgroundModeRequested(undefined, { background: false }, 'background')).toBe(false);
-    expect(isBackgroundModeRequested('false', { background: true }, 'background')).toBe(false);
-    expect(isBackgroundModeRequested('TRUE', {}, 'sync')).toBe(true);
+describe('isBackgroundModeRequested — header > body, default synchronous', () => {
+  it('header wins over the body; saying neither is synchronous', () => {
+    expect(isBackgroundModeRequested(undefined, {})).toBe(false);
     expect(isBackgroundModeRequested(undefined, { background: true })).toBe(true);
+    expect(isBackgroundModeRequested('false', { background: true })).toBe(false);
+    expect(isBackgroundModeRequested('TRUE', { background: false })).toBe(true);
+    expect(isBackgroundModeRequested('maybe', { background: false })).toBe(false);
   });
 });
 
@@ -246,11 +212,25 @@ describe('validateCallbackRequest — submit-time 400 instead of a silently fail
 describe('agentDefaultCallback', () => {
   it('opens the agent\'s sealed secret; no URL means no default callback', () => {
     expect(agentDefaultCallback(agent(undefined))).toEqual({});
-    expect(agentDefaultCallback(agent({ callbackSecretSealed: encryptObject('x'.repeat(20)) }))).toEqual({});
+    expect(agentDefaultCallback(agent({ secretSealed: encryptObject('x'.repeat(20)) }))).toEqual({});
     expect(agentDefaultCallback(agent({
-      callbackUrl: 'https://hooks.example.com/agent',
-      callbackSecretSealed: encryptObject('agent-level-secret-1'),
+      url: 'https://hooks.example.com/agent',
+      secretSealed: encryptObject('agent-level-secret-1'),
     }))).toEqual({ url: 'https://hooks.example.com/agent', secret: 'agent-level-secret-1' });
+  });
+});
+
+describe('notifications rule and job keys', () => {
+  it('only async runs notify: queued ones, and inline ones whose caller stopped waiting', () => {
+    expect(isAsyncAgentRun({ mode: 'background' })).toBe(true);
+    expect(isAsyncAgentRun({ mode: 'inline', detachedAt: null })).toBe(false);
+    expect(isAsyncAgentRun({ mode: 'inline', detachedAt: new Date() })).toBe(true);
+    expect(isAsyncAgentRun({ mode: 'sync' })).toBe(false);
+  });
+
+  it('the job dedup key is per run and queue generation, with no ":"', () => {
+    expect(agentRunJobDedupKey({ _id: 'r1', queueGeneration: 3 })).toBe('ar_r1_3');
+    expect(agentRunJobDedupKey({ _id: 'r1' })).toBe('ar_r1_1');
   });
 });
 
@@ -291,14 +271,26 @@ describe('ids and serialization', () => {
       id: 'run_r1',
       object: 'agent.run',
       status: 'failed',
-      stop_reason: null,
+      class: 'default',
       agent: 'support-agent',
+      version: null,
+      session_id: 'conv-1',
       conversation_id: 'conv-1',
+      channel: null,
+      trigger: null,
+      trigger_id: null,
+      metadata: {},
+      stop_reason: null,
       result: null,
+      output_text: null,
+      output_parsed: null,
+      output_error: null,
       error: { type: 'max_duration_exceeded', message: 'too long' },
+      scheduled_for: null,
       created_at: 1704067200,
       started_at: 1704067210,
       completed_at: 1704067270,
+      detached_at: null,
       cancel_requested_at: null,
       max_duration_ms: 60_000,
       callback: { url: 'https://hooks.example.com/run', status: 'delivered', attempts: 2, signed: true },
@@ -307,6 +299,36 @@ describe('ids and serialization', () => {
     expect(json).not.toContain('sealed-secret-blob');
     expect(json).not.toContain('ciphertext');
     expect(json).not.toContain('tenant-1');
+  });
+
+  it('serializeAgentRun lifts output_text / output_parsed and carries the engine fields', () => {
+    const run = {
+      _id: 'r2', mode: 'inline', agentKey: 'a', conversationId: 'c', status: 'succeeded', runClass: 'deferred',
+      version: 3, channel: 'trigger', trigger: 'schedule', triggerId: 'trg1', metadata: { team: 'ops' },
+      notBefore: new Date('2024-01-01T00:00:00Z'), detachedAt: new Date('2024-01-01T00:00:05Z'),
+      result: {
+        id: 'resp_r2',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hel' }, { type: 'output_text', text: 'lo' }] }],
+        output_parsed: { ok: true },
+      },
+    } as unknown as IAgentRun;
+    expect(serializeAgentRun(run)).toMatchObject({
+      class: 'deferred', version: 3, channel: 'trigger', trigger: 'schedule', trigger_id: 'trg1', metadata: { team: 'ops' },
+      output_text: 'Hello', output_parsed: { ok: true }, scheduled_for: 1704067200, detached_at: 1704067205,
+    });
+    expect(serializeAgentRun({ ...run, status: 'scheduled', result: null } as IAgentRun)).toMatchObject({
+      status: 'scheduled', output_text: null, scheduled_for: 1704067200,
+    });
+  });
+
+  it('serializeAgentRun has no top-level usage: the figures are result.usage (the schema documents none)', () => {
+    const usage = { input_tokens: 5, output_tokens: 2, total_tokens: 7 };
+    const run = {
+      _id: 'r3', mode: 'inline', agentKey: 'a', conversationId: 'c', status: 'succeeded', result: { id: 'resp_r3', output: [], usage },
+    } as unknown as IAgentRun;
+    const body = serializeAgentRun(run);
+    expect('usage' in body).toBe(false);
+    expect((body.result as { usage: unknown }).usage).toEqual(usage);
   });
 
   it('isAbandonedSyncReservation: only sync rows past the env ceiling + grace', () => {
@@ -323,7 +345,7 @@ describe('agent run env knobs are clamped to values that cannot wedge the system
   const KEYS = [
     'AGENT_SYNC_TIMEOUT_MS', 'AGENT_BACKGROUND_MAX_DURATION_MS', 'AGENT_RUN_HEARTBEAT_INTERVAL_MS',
     'AGENT_RUN_HEARTBEAT_STALE_MS', 'AGENT_RUN_CONCURRENCY', 'AGENT_RUN_REQUEUE_AFTER_MS',
-    'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT',
+    'AGENT_RUN_MAX_ACTIVE_PER_PROJECT',
   ];
   afterEach(() => {
     for (const key of KEYS) delete process.env[key];
@@ -332,7 +354,7 @@ describe('agent run env knobs are clamped to values that cannot wedge the system
 
   it('zero / negative values are raised to their floors', () => {
     for (const key of KEYS) process.env[key] = '0';
-    process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT = '-3';
+    process.env.AGENT_RUN_MAX_ACTIVE_PER_PROJECT = '-3';
     reloadConfig();
     const agentCfg = getConfig().agent;
     expect(agentCfg.syncTimeoutMs).toBe(5_000);
@@ -342,7 +364,7 @@ describe('agent run env knobs are clamped to values that cannot wedge the system
     expect(agentCfg.runHeartbeatStaleMs).toBeGreaterThanOrEqual(3 * agentCfg.runHeartbeatIntervalMs);
     expect(agentCfg.runConcurrency).toBe(1);
     expect(agentCfg.runRequeueAfterMs).toBe(10_000);
-    expect(agentCfg.backgroundMaxConcurrentRunsPerProject).toBe(0);
+    expect(agentCfg.runMaxActivePerProject).toBe(0);
   });
 
   it('the stale threshold follows a raised heartbeat interval', () => {

@@ -3,18 +3,26 @@
  * masked value sent back keeps what is stored.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+const log = vi.hoisted(() => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() }));
+vi.mock('@/lib/core/logger', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/lib/core/logger')>()),
+    createLogger: () => log,
+}));
 import {
     AGENT_SANDBOX_SECRET_MASK as MASK,
     maskAgentSandboxConfig,
     maskAgentSandboxSecrets,
-    openAgentCallbackSecret,
     openAgentSandboxSecrets,
+    readAgentSandboxSecrets,
     sealAgentConfigSecrets,
-    sealAgentExecutionConfig,
     scrubSecretValues,
     sealAgentSandboxConfig,
+    sandboxSecretsConflict,
 } from '@/lib/services/agents/agentSandboxSecrets';
+import { openAgentCallbackSecret, sealAgentCallbackConfig } from '@/lib/services/agents/agentCallbackConfig';
+import type { IAgentConfig } from '@/lib/database';
 import { buildAgentManifest } from '@/lib/services/agents/agentManifest';
 
 describe('sandbox secrets', () => {
@@ -54,6 +62,10 @@ describe('sandbox secrets', () => {
         expect(scrubSecretValues('key=alpha-1 other=ok', { A: 'alpha-1', short: 'ok' })).toBe(`key=${MASK} other=ok`);
     });
 
+    it('masks the longer value whole when one secret contains another', () => {
+        expect(scrubSecretValues('v=abcd-efgh', { SHORT: 'abcd', LONG: 'abcd-efgh' })).toBe(`v=${MASK}`);
+    });
+
     it('an exported manifest carries the secret keys, never the sealed values', () => {
         const manifest = buildAgentManifest(
             { key: 'builder', name: 'Builder', status: 'active' } as never,
@@ -65,47 +77,169 @@ describe('sandbox secrets', () => {
     });
 });
 
-describe('execution callback secret', () => {
+describe('secrets that cannot be decrypted (the encryption key changed)', () => {
+    const unreadable = { enabled: true, secretsSealed: 'not-a-valid-ciphertext' };
+
+    it('opening reports it and logs an error instead of silently returning none', () => {
+        log.error.mockClear();
+        expect(readAgentSandboxSecrets(unreadable)).toEqual({ secrets: {}, unreadable: true });
+        expect(openAgentSandboxSecrets(unreadable)).toEqual({});
+        expect(log.error).toHaveBeenCalledTimes(2);
+        log.error.mockClear();
+        expect(readAgentSandboxSecrets(sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined)).unreadable).toBe(false);
+        expect(readAgentSandboxSecrets({ enabled: true }).unreadable).toBe(false);
+        expect(log.error).not.toHaveBeenCalled();
+    });
+
+    it('a masked re-save keeps the existing ciphertext, never drops it', () => {
+        const next = sealAgentSandboxConfig({ enabled: true, secrets: { A: MASK, B: MASK } }, unreadable)!;
+        expect(next.secretsSealed).toBe('not-a-valid-ciphertext');
+    });
+
+    it('a re-save without a `secrets` field keeps it too, and reads stay masked without leaking it', () => {
+        expect(sealAgentSandboxConfig({ enabled: false }, unreadable)!.secretsSealed).toBe('not-a-valid-ciphertext');
+        const masked = maskAgentSandboxConfig(unreadable)!;
+        expect(masked.secretsSealed).toBeUndefined();
+        expect(masked.secrets).toBeUndefined();
+    });
+
+    it('a read says so: secretsUnreadable on the agent, never on a sandbox that can be opened, never in a manifest', () => {
+        const agent = { config: { modelKey: 'm', sandbox: unreadable } } as { config: IAgentConfig };
+        expect(maskAgentSandboxSecrets(agent).config.sandbox).toEqual({ enabled: true, secretsUnreadable: true });
+        const readable = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined);
+        expect(maskAgentSandboxSecrets({ config: { modelKey: 'm', sandbox: readable } } as { config: IAgentConfig }).config.sandbox)
+            .toEqual({ enabled: true, secrets: { A: MASK } });
+        expect(maskAgentSandboxConfig(unreadable)).not.toHaveProperty('secretsUnreadable');
+    });
+
+    it('a save conflicts only when masks are mixed with other values over ciphertext that cannot be opened', () => {
+        const mixed = { enabled: true, secrets: { A: MASK, B: 'fresh-value' } };
+        expect(sandboxSecretsConflict(mixed, unreadable)).toBe(true);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: MASK, B: '' } }, unreadable)).toBe(true);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: MASK, B: MASK } }, unreadable)).toBe(false);
+        expect(sandboxSecretsConflict({ enabled: true, secrets: { A: 'fresh-value' } }, unreadable)).toBe(false);
+        expect(sandboxSecretsConflict({ enabled: true }, unreadable)).toBe(false);
+        // Readable or absent ciphertext merges as before.
+        const readable = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'alpha-1' } }, undefined);
+        expect(sandboxSecretsConflict(mixed, readable)).toBe(false);
+        expect(sandboxSecretsConflict(mixed, { enabled: true })).toBe(false);
+        expect(sandboxSecretsConflict(mixed, undefined)).toBe(false);
+    });
+
+    it('entering values without any mask replaces them (a deliberate re-entry)', () => {
+        const next = sealAgentSandboxConfig({ enabled: true, secrets: { A: 'fresh-value' } }, unreadable)!;
+        expect(openAgentSandboxSecrets(next)).toEqual({ A: 'fresh-value' });
+    });
+});
+
+describe('agent callback secret (config.callback)', () => {
     const URL_ = 'https://hooks.example.com/agent';
-    const stored = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: 'agent-callback-secret-1' }, undefined)!;
+    const stored = sealAgentCallbackConfig({ url: URL_, secret: 'agent-callback-secret-1' }, undefined)!;
 
     it('seals on save and never keeps the plaintext', () => {
-        expect(stored.callbackSecret).toBeUndefined();
-        expect(stored.callbackSecretSealed).toBeTruthy();
+        expect(stored.secret).toBeUndefined();
+        expect(stored.secretSealed).toBeTruthy();
         expect(JSON.stringify(stored)).not.toContain('agent-callback-secret-1');
         expect(openAgentCallbackSecret(stored)).toBe('agent-callback-secret-1');
     });
 
     it('masks on read, with no ciphertext', () => {
-        const agent = maskAgentSandboxSecrets({ config: { modelKey: 'm', execution: stored } });
-        expect(agent.config.execution?.callbackSecret).toBe(MASK);
-        expect(agent.config.execution?.callbackSecretSealed).toBeUndefined();
-        expect(JSON.stringify(agent)).not.toContain(stored.callbackSecretSealed!);
+        const agent = maskAgentSandboxSecrets({ config: { modelKey: 'm', callback: stored } });
+        expect(agent.config.callback?.secret).toBe(MASK);
+        expect(agent.config.callback?.secretSealed).toBeUndefined();
+        expect(JSON.stringify(agent)).not.toContain(stored.secretSealed!);
         // No secret stored → nothing to mask.
-        const plain = maskAgentSandboxSecrets({ config: { modelKey: 'm', execution: { callbackUrl: URL_ } } });
-        expect(plain.config.execution).toEqual({ callbackUrl: URL_ });
+        const plain = maskAgentSandboxSecrets({ config: { modelKey: 'm', callback: { url: URL_ } } });
+        expect(plain.config.callback).toEqual({ url: URL_ });
     });
 
     it('update: mask or omission keeps, a new value replaces, empty string removes', () => {
-        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: MASK }, stored))).toBe('agent-callback-secret-1');
-        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_ }, stored))).toBe('agent-callback-secret-1');
-        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: 'rotated-secret-value-2' }, stored))).toBe('rotated-secret-value-2');
-        const removed = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: '' }, stored)!;
-        expect(removed.callbackSecretSealed).toBeUndefined();
+        expect(openAgentCallbackSecret(sealAgentCallbackConfig({ url: URL_, secret: MASK }, stored))).toBe('agent-callback-secret-1');
+        expect(openAgentCallbackSecret(sealAgentCallbackConfig({ url: URL_ }, stored))).toBe('agent-callback-secret-1');
+        expect(openAgentCallbackSecret(sealAgentCallbackConfig({ url: URL_, secret: 'rotated-secret-value-2' }, stored))).toBe('rotated-secret-value-2');
+        const removed = sealAgentCallbackConfig({ url: URL_, secret: '' }, stored)!;
+        expect(removed.secretSealed).toBeUndefined();
         expect(openAgentCallbackSecret(removed)).toBeUndefined();
     });
 
-    it('a client cannot inject its own ciphertext through callbackSecretSealed', () => {
-        const forged = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecretSealed: 'attacker-blob' }, undefined)!;
-        expect(forged.callbackSecretSealed).toBeUndefined();
+    it('a masked secret without a URL drops the stored secret instead of keeping it', () => {
+        const dropped = sealAgentCallbackConfig({ secret: MASK }, stored);
+        // Nothing is left of the callback: no URL, no orphan secret.
+        expect(dropped).toBeUndefined();
+        expect(openAgentCallbackSecret(dropped)).toBeUndefined();
     });
 
-    it('sealAgentConfigSecrets seals execution alongside sandbox', () => {
+    it('a callback without a URL is no callback: the seal answers nothing, not an empty object', () => {
+        // The ways a client says "remove it": an empty object, a cleared URL, a URL cleared next to the mask or an empty secret.
+        for (const incoming of [{}, { url: '' }, { url: '', secret: '' }, { url: '', secret: MASK }, { secret: MASK }, { secret: '' }]) {
+            expect(sealAgentCallbackConfig(incoming, stored), JSON.stringify(incoming)).toBeUndefined();
+            expect(sealAgentCallbackConfig(incoming, undefined), JSON.stringify(incoming)).toBeUndefined();
+        }
+        expect(sealAgentCallbackConfig(undefined, stored)).toBeUndefined();
+        expect(sealAgentCallbackConfig(null as never, stored)).toBeUndefined();
+    });
+
+    it('a client cannot supply its own ciphertext through secretSealed', () => {
+        const supplied = sealAgentCallbackConfig({ url: URL_, secretSealed: 'client-blob' }, undefined)!;
+        expect(supplied.secretSealed).toBeUndefined();
+    });
+
+    it('sealAgentConfigSecrets seals the callback alongside sandbox and drops a legacy execution blob', () => {
         const next = sealAgentConfigSecrets(
-            { modelKey: 'm', execution: { callbackUrl: URL_, callbackSecret: 'agent-callback-secret-1' } },
+            { modelKey: 'm', callback: { url: URL_, secret: 'agent-callback-secret-1' }, execution: { defaultMode: 'background' } } as IAgentConfig,
             undefined,
         );
-        expect(next.execution?.callbackSecret).toBeUndefined();
-        expect(openAgentCallbackSecret(next.execution)).toBe('agent-callback-secret-1');
+        expect(next.callback?.secret).toBeUndefined();
+        expect(openAgentCallbackSecret(next.callback)).toBe('agent-callback-secret-1');
+        expect('execution' in next).toBe(false);
+    });
+
+    it('sealAgentConfigSecrets clears the field when the callback has no URL, and leaves everything else alone', () => {
+        const withStored = { modelKey: 'm', systemPrompt: 'keep me', callback: stored } as IAgentConfig;
+        for (const callback of [{}, { url: '' }, { url: '', secret: MASK }, { secret: MASK }, null]) {
+            const next = sealAgentConfigSecrets({ modelKey: 'm', systemPrompt: 'keep me', callback } as unknown as IAgentConfig, withStored);
+            expect('callback' in next, JSON.stringify(callback)).toBe(false);
+            expect(JSON.stringify(next)).not.toContain('secretSealed');
+            expect(next).toEqual({ modelKey: 'm', systemPrompt: 'keep me' });
+        }
+        // No callback key at all stays no callback key (the stored one is not carried over: `config` replaces).
+        expect('callback' in sealAgentConfigSecrets({ modelKey: 'm' }, withStored)).toBe(false);
+        // A callback with a URL is still sealed and kept.
+        const kept = sealAgentConfigSecrets({ modelKey: 'm', callback: { url: URL_, secret: MASK } }, withStored);
+        expect(kept.callback?.url).toBe(URL_);
+        expect(openAgentCallbackSecret(kept.callback)).toBe('agent-callback-secret-1');
+    });
+
+    it('a read never returns a legacy execution blob (its sealed secret included)', () => {
+        const legacy = { modelKey: 'm', execution: { callbackSecretSealed: 'sealed-legacy-value' } } as unknown as IAgentConfig;
+        const agent = maskAgentSandboxSecrets({ config: legacy });
+        expect(JSON.stringify(agent)).not.toContain('sealed-legacy-value');
+    });
+
+    it('a masked re-save keeps a callback ciphertext that cannot be opened', () => {
+        const broken = { url: URL_, secretSealed: 'not-a-valid-ciphertext' };
+        expect(sealAgentCallbackConfig({ url: URL_, secret: MASK }, broken)!.secretSealed).toBe('not-a-valid-ciphertext');
+        expect(openAgentCallbackSecret(broken)).toBeUndefined();
+    });
+
+    it('a manifest export carries the URL and a mask, never the sealed secret', () => {
+        const manifest = buildAgentManifest(
+            { key: 'builder', name: 'Builder', status: 'active' } as never,
+            { modelKey: 'm', callback: stored },
+        );
+        const text = JSON.stringify(manifest);
+        expect(text).not.toContain(stored.secretSealed!);
+        expect(manifest.spec.callback).toEqual({ url: URL_, secret: MASK });
+    });
+});
+
+describe('manifest export of a connected agent', () => {
+    it('drops the encrypted connection key even without a sandbox block', () => {
+        const manifest = buildAgentManifest(
+            { key: 'ext', name: 'Ext', status: 'active' } as never,
+            { kind: 'external', connection: { protocol: 'openai', url: 'https://agent.example.com', apiKeyEnc: 'sealed-key-blob' } } as never,
+        );
+        expect(JSON.stringify(manifest)).not.toContain('sealed-key-blob');
+        expect(JSON.stringify(manifest)).not.toContain('apiKeyEnc');
     });
 });

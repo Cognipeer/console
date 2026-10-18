@@ -5,6 +5,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { onIamInvalidation } from '@/lib/iam/events';
+import { formatUsd } from '@/lib/utils/formatUsd';
 
 const logger = createLogger('quota-guard');
 import {
@@ -922,6 +923,12 @@ export async function checkRateLimit(
  */
 const MICROS_PER_USD = 1_000_000;
 
+/** "Budget exceeded: $0.026 of the $0.02 daily spend limit": the counters are micro-dollars, the message is not. */
+function budgetExceededMessage(windowName: 'perDay' | 'perMonth', spentMicros: number, limitMicros: number): string {
+  const label = windowName === 'perDay' ? 'daily' : 'monthly';
+  return `Budget exceeded: $${formatUsd(spentMicros / MICROS_PER_USD)} of the $${formatUsd(limitMicros / MICROS_PER_USD)} ${label} spend limit`;
+}
+
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) return 0;
   return Math.max(0, Math.round(usd * MICROS_PER_USD));
@@ -985,7 +992,7 @@ export async function checkBudget(
       // Read current value without incrementing.
       const current = await db.incrementRateLimit(key, windowSeconds, 0);
       if (current.count >= limitMicros) {
-        errors.push(`Budget exceeded for ${windowName} (${current.count}/${limitMicros} micros)`);
+        errors.push(budgetExceededMessage(windowName, current.count, limitMicros));
         return;
       }
 
@@ -996,7 +1003,7 @@ export async function checkBudget(
           incrementByMicros,
         );
         if (updated.count > limitMicros) {
-          errors.push(`Budget exceeded for ${windowName} (${updated.count}/${limitMicros} micros)`);
+          errors.push(budgetExceededMessage(windowName, updated.count, limitMicros));
         }
       }
     } catch (error) {

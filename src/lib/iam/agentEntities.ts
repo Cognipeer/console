@@ -19,7 +19,7 @@
  * without a project is tenant-wide and would otherwise have no Project parent, and
  * `resource in principal.projects` is how the rule asks "is this person on the project".
  *
- * `createdBy` is not always a user: `a2a-public`, `system:agent-scheduler`, `evaluation`,
+ * `createdBy` is not always a user: `a2a-public`, `system:trigger:<id>`, `evaluation`,
  * `redteam` ... are written there too. They become references to Users that do not exist,
  * which no real person ever equals - sessions of that traffic are everybody else's. Cedar
  * accepts such dangling references (the portal's `allowedUsers` are the same).

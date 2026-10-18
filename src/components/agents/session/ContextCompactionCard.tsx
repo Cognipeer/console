@@ -61,6 +61,7 @@ export default function ContextCompactionCard({
     const hasDetail = Boolean(
         summary.userDirectives?.length || summary.facts?.length || summary.goals?.length
         || summary.openQuestions?.length || summary.discarded?.length
+        || compaction.droppedDirectives?.length
         || compaction.integrityNotes?.length || compactedTools?.length,
     );
     const tone = compaction.failed ? 'orange' : 'indigo';
@@ -134,13 +135,50 @@ export default function ContextCompactionCard({
                         </Group>
                     ) : null}
 
-                    <CompactionSection
-                        icon={<IconBookmark size={12} />}
-                        title="Standing instructions"
-                        hint="Kept verbatim — they apply to every later turn"
-                        items={summary.userDirectives}
-                        emphasis
-                    />
+                    {summary.userDirectives?.length ? (
+                        <Box>
+                            <SectionTitle
+                                icon={<IconBookmark size={12} />}
+                                title="Standing instructions"
+                                count={summary.userDirectives.length}
+                                hint="Kept verbatim — they apply to every later turn"
+                            />
+                            <Stack gap={3} mt={4}>
+                                {summary.userDirectives.map((directive) => (
+                                    <Box key={directive}>
+                                        <Text size="xs" className={classes.compactionDirective}>{directive}</Text>
+                                        {summary.directiveSources?.[directive] ? (
+                                            <Text size="10px" c="dimmed" className={classes.preWrap}>
+                                                User said: “{summary.directiveSources[directive]}”
+                                            </Text>
+                                        ) : null}
+                                    </Box>
+                                ))}
+                            </Stack>
+                        </Box>
+                    ) : null}
+                    {compaction.droppedDirectives?.length ? (
+                        <Box>
+                            <SectionTitle
+                                icon={<IconAlertTriangle size={12} />}
+                                title="Instructions not kept"
+                                count={compaction.droppedDirectives.length}
+                                hint="The summarizer listed them, but no user message says so"
+                            />
+                            <Stack gap={3} mt={4}>
+                                {compaction.droppedDirectives.map((dropped) => (
+                                    <Box key={dropped.directive}>
+                                        <Text size="xs" c="dimmed" td="line-through" className={classes.preWrap}>{dropped.directive}</Text>
+                                        {dropped.sourceQuote ? (
+                                            <Text size="10px" c="dimmed" className={classes.preWrap}>
+                                                Claimed source not found: “{dropped.sourceQuote}”
+                                            </Text>
+                                        ) : null}
+                                    </Box>
+                                ))}
+                            </Stack>
+                        </Box>
+                    ) : null}
                     {summary.facts?.length ? (
                         <Box>
                             <SectionTitle icon={<IconListCheck size={12} />} title="What the agent remembers" count={summary.facts.length} />
@@ -196,7 +234,7 @@ export default function ContextCompactionCard({
 
                     {compaction.inputTokens || compaction.outputTokens ? (
                         <Text size="10px" c="dimmed">
-                            Summarizer call: {compaction.inputTokens ?? 0} in / {compaction.outputTokens ?? 0} out tokens
+                            Summarizer call{compaction.model ? ` (${compaction.model})` : ''}: {compaction.inputTokens ?? 0} in / {compaction.outputTokens ?? 0} out tokens
                             (included in this turn’s usage)
                         </Text>
                     ) : null}

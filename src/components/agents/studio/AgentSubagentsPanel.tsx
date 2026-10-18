@@ -21,7 +21,6 @@ import {
     Checkbox,
     Group,
     Menu,
-    Modal,
     NumberInput,
     Select,
     Stack,
@@ -42,6 +41,9 @@ import {
     IconUsers,
 } from '@tabler/icons-react';
 
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
+import { useTranslations } from '@/lib/i18n';
+import { SUBAGENT_POLICY_LIMITS } from '@/lib/services/agents/subagentConfigRules';
 import type {
     AgentChildContextPolicy,
     AgentSubagentMode,
@@ -90,6 +92,7 @@ export default function AgentSubagentsPanel({
     models,
     currentAgentKey,
 }: AgentSubagentsPanelProps) {
+    const t = useTranslations('agents.subagents');
     const [editing, setEditing] = useState<{ index: number; draft: IAgentSubagent } | null>(null);
 
     const refOptions = useMemo(
@@ -98,9 +101,11 @@ export default function AgentSubagentsPanel({
                 .filter((agent) => agent.key !== currentAgentKey)
                 .map((agent) => ({
                     value: agent.key,
-                    label: agent.publishedVersion ? `${agent.name} (v${agent.publishedVersion})` : `${agent.name} (draft only)`,
+                    label: agent.publishedVersion
+                        ? t('agentVersioned', { name: agent.name, version: agent.publishedVersion })
+                        : t('agentDraftOnly', { name: agent.name }),
                 })),
-        [agents, currentAgentKey],
+        [agents, currentAgentKey, t],
     );
 
     const modelOptions = useMemo(
@@ -149,11 +154,8 @@ export default function AgentSubagentsPanel({
         <Stack gap="md">
             <Group justify="space-between" align="flex-start">
                 <Stack gap={2}>
-                    <Text size="sm" fw={600}>Sub-agents</Text>
-                    <Text size="xs" c="dimmed">
-                        Roles this agent can hand a task to. The orchestrator picks one by name from the
-                        header you write, so write the header as &quot;what it does + when to use it&quot;.
-                    </Text>
+                    <Text size="sm" fw={600}>{t('title')}</Text>
+                    <Text size="xs" c="dimmed">{t('intro')}</Text>
                 </Stack>
                 <Menu position="bottom-end">
                     <Menu.Target>
@@ -163,7 +165,7 @@ export default function AgentSubagentsPanel({
                             leftSection={<IconPlus size={14} />}
                             rightSection={<IconChevronDown size={12} />}
                         >
-                            Add sub-agent
+                            {t('addButton')}
                         </Button>
                     </Menu.Target>
                     <Menu.Dropdown>
@@ -171,17 +173,17 @@ export default function AgentSubagentsPanel({
                             leftSection={<IconUsers size={14} />}
                             onClick={() => setEditing({ index: -1, draft: { ...EMPTY_INLINE } })}
                         >
-                            Define inline
-                            <Text size="xs" c="dimmed">A role that lives only in this agent</Text>
+                            {t('defineInline')}
+                            <Text size="xs" c="dimmed">{t('defineInlineHint')}</Text>
                         </Menu.Item>
                         <Menu.Item
                             leftSection={<IconLink size={14} />}
                             disabled={refOptions.length === 0}
                             onClick={() => setEditing({ index: -1, draft: { kind: 'ref', name: '', header: '' } })}
                         >
-                            Use an existing agent
+                            {t('useExisting')}
                             <Text size="xs" c="dimmed">
-                                {refOptions.length === 0 ? 'No other agents in this project' : 'Borrow its prompt, model and tools'}
+                                {refOptions.length === 0 ? t('noOtherAgents') : t('useExistingHint')}
                             </Text>
                         </Menu.Item>
                     </Menu.Dropdown>
@@ -191,8 +193,8 @@ export default function AgentSubagentsPanel({
             <Card withBorder padding="sm" radius="md">
                 <Stack gap="xs">
                     <Switch
-                        label="Enable sub-agents"
-                        description="Lets this agent hand tasks to other agents. Off = it answers everything itself."
+                        label={t('enableLabel')}
+                        description={t('enableDescription')}
                         checked={enabled}
                         onChange={(event) =>
                             patchPolicy({
@@ -205,8 +207,8 @@ export default function AgentSubagentsPanel({
                         }
                     />
                     <Checkbox
-                        label="Can define its own agents"
-                        description="At run time the agent may create short-lived sub-agents on the fly (role, instructions, task), in addition to the ones listed below."
+                        label={t('adhocLabel')}
+                        description={t('adhocDescription')}
                         checked={adhoc}
                         disabled={!enabled}
                         onChange={(event) =>
@@ -218,14 +220,7 @@ export default function AgentSubagentsPanel({
 
             {subagents.length === 0 ? (
                 <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
-                    <Text size="sm">
-                        {adhoc
-                            ? 'No predefined sub-agents — the agent defines its own at run time. Add one here when'
-                            : 'No sub-agents. The agent answers everything itself. Add one when'}{' '}
-                         a task needs its own
-                        prompt, its own tool surface, or its own context budget — a research pass whose 50
-                        tool results should not land in the main transcript is the usual case.
-                    </Text>
+                    <Text size="sm">{adhoc ? t('emptyAdhoc') : t('emptyNone')}</Text>
                 </Alert>
             ) : (
                 <Stack gap="xs">
@@ -234,20 +229,20 @@ export default function AgentSubagentsPanel({
                             <Group justify="space-between" wrap="nowrap" align="flex-start">
                                 <Stack gap={4} style={{ minWidth: 0 }}>
                                     <Group gap="xs">
-                                        <Text size="sm" fw={600} ff="monospace">{entry.name || '(unnamed)'}</Text>
+                                        <Text size="sm" fw={600} ff="monospace">{entry.name || t('unnamed')}</Text>
                                         <Badge
                                             size="xs"
                                             variant="light"
                                             color={entry.kind === 'ref' ? 'violet' : 'blue'}
                                             leftSection={entry.kind === 'ref' ? <IconLink size={9} /> : <IconUsers size={9} />}
                                         >
-                                            {entry.kind === 'ref' ? entry.agentKey : 'inline'}
+                                            {entry.kind === 'ref' ? entry.agentKey : t('inlineBadge')}
                                         </Badge>
                                         {entry.enabled === false ? (
-                                            <Badge size="xs" variant="light" color="gray">disabled</Badge>
+                                            <Badge size="xs" variant="light" color="gray">{t('disabledBadge')}</Badge>
                                         ) : null}
                                         {entry.modelKey ? (
-                                            <Tooltip label="Model override">
+                                            <Tooltip label={t('modelOverrideTip')}>
                                                 <Badge size="xs" variant="outline" color="gray">{entry.modelKey}</Badge>
                                             </Tooltip>
                                         ) : null}
@@ -276,10 +271,10 @@ export default function AgentSubagentsPanel({
                                                     onChange(next, policy);
                                                 }}
                                             >
-                                                {entry.enabled === false ? 'Enable' : 'Disable'}
+                                                {entry.enabled === false ? t('enable') : t('disable')}
                                             </Menu.Item>
                                             <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={() => remove(index)}>
-                                                Remove
+                                                {t('remove')}
                                             </Menu.Item>
                                         </Menu.Dropdown>
                                     </Menu>
@@ -293,15 +288,15 @@ export default function AgentSubagentsPanel({
             {enabled ? (
                 <Card withBorder padding="sm" radius="md">
                     <Stack gap="sm">
-                        <Text size="sm" fw={600}>Delegation guards</Text>
+                        <Text size="sm" fw={600}>{t('guardsTitle')}</Text>
                         <Group grow>
                             <Select
-                                label="Child context"
-                                description="How much of the parent's transcript a child starts with."
+                                label={t('childContextLabel')}
+                                description={t('childContextDescription')}
                                 data={[
-                                    { value: 'minimal', label: 'minimal — the task only' },
-                                    { value: 'scoped', label: 'scoped — task plus relevant history' },
-                                    { value: 'full', label: 'full — the whole transcript' },
+                                    { value: 'minimal', label: t('contextMinimal') },
+                                    { value: 'scoped', label: t('contextScoped') },
+                                    { value: 'full', label: t('contextFull') },
                                 ]}
                                 value={policy?.childContextPolicy ?? 'scoped'}
                                 onChange={(next) =>
@@ -312,50 +307,69 @@ export default function AgentSubagentsPanel({
                         </Group>
                         <Group grow>
                             <NumberInput
-                                label="Max depth"
+                                label={t('maxDepth')}
+                                description={t('maxDepthDescription')}
                                 placeholder="2"
-                                min={1}
-                                max={5}
+                                min={SUBAGENT_POLICY_LIMITS.maxDepth.min}
+                                max={SUBAGENT_POLICY_LIMITS.maxDepth.max}
+                                allowDecimal={false}
                                 value={policy?.maxDepth ?? ''}
                                 onChange={(next) => patchPolicy({ maxDepth: next === '' ? undefined : Number(next) })}
                             />
                             <NumberInput
-                                label="Max child calls per run"
+                                label={t('maxChildCalls')}
+                                description={t('maxChildCallsDescription')}
                                 placeholder="8"
-                                min={1}
+                                min={SUBAGENT_POLICY_LIMITS.maxChildCalls.min}
+                                max={SUBAGENT_POLICY_LIMITS.maxChildCalls.max}
+                                allowDecimal={false}
                                 value={policy?.maxChildCalls ?? ''}
                                 onChange={(next) => patchPolicy({ maxChildCalls: next === '' ? undefined : Number(next) })}
                             />
                             <NumberInput
-                                label="Max parallel"
-                                placeholder="3"
-                                min={1}
+                                label={t('maxParallel')}
+                                description={t('maxParallelDescription')}
+                                placeholder="4"
+                                min={SUBAGENT_POLICY_LIMITS.maxParallel.min}
+                                max={SUBAGENT_POLICY_LIMITS.maxParallel.max}
+                                allowDecimal={false}
                                 value={policy?.maxParallel ?? ''}
                                 onChange={(next) => patchPolicy({ maxParallel: next === '' ? undefined : Number(next) })}
                             />
                         </Group>
                         <Switch
-                            label="Ad-hoc children may use the parent's tools"
+                            label={t('adhocToolsLabel')}
                             checked={policy?.allowAdhocTools ?? false}
                             onChange={(event) => patchPolicy({ allowAdhocTools: event.currentTarget.checked })}
                             disabled={!adhoc}
                         />
+                        <Alert variant="light" color="blue" icon={<IconInfoCircle size={16} />} p="sm">
+                            <Text size="xs">{t('approvalsNote')}</Text>
+                        </Alert>
                     </Stack>
                 </Card>
             ) : null}
 
-            <Modal
-                opened={editing !== null}
-                onClose={() => setEditing(null)}
-                title={editing?.index === -1 ? 'Add sub-agent' : 'Edit sub-agent'}
-                size="lg"
-            >
-                {draft ? (
-                    <Stack gap="md">
+            {draft ? (
+                <FormShell
+                    open
+                    onClose={() => setEditing(null)}
+                    icon={<IconUsers size={16} />}
+                    title={editing?.index === -1 ? t('modalAdd') : t('modalEdit')}
+                    primaryAction={{
+                        label: editing?.index === -1 ? t('add') : t('save'),
+                        color: 'teal',
+                        disabled: draftInvalid,
+                        onClick: commitDraft,
+                    }}
+                    secondaryAction={{ label: t('cancel'), onClick: () => setEditing(null) }}
+                >
+                    <FormSection number={1} title={t('sectionBasics')}>
+                        <Stack gap="md">
                         {draft.kind === 'ref' ? (
                             <Select
-                                label="Agent"
-                                description="Loaded from its published version at run time, so a draft edit there cannot change this agent mid-run."
+                                label={t('agentLabel')}
+                                description={t('agentDescription')}
                                 data={refOptions}
                                 value={draft.agentKey ?? null}
                                 onChange={(next) => {
@@ -363,7 +377,7 @@ export default function AgentSubagentsPanel({
                                     patchDraft({
                                         agentKey: next ?? undefined,
                                         name: draft.name || slugName(picked?.name ?? next ?? ''),
-                                        header: draft.header || `Delegates to the ${picked?.name ?? next} agent.`,
+                                        header: draft.header || t('defaultHeader', { name: picked?.name ?? next ?? '' }),
                                     });
                                 }}
                                 searchable
@@ -372,23 +386,23 @@ export default function AgentSubagentsPanel({
                         ) : null}
 
                         <TextInput
-                            label="Name"
-                            description="What the orchestrator calls. Lowercase, underscores."
-                            placeholder="log_reader"
+                            label={t('nameLabel')}
+                            description={t('nameDescription')}
+                            placeholder={t('namePlaceholder')}
                             value={draft.name}
                             onChange={(event) => patchDraft({ name: event.currentTarget.value })}
                             error={
                                 draft.name && nameTaken(slugName(draft.name), editing!.index)
-                                    ? 'Another sub-agent already uses this name'
+                                    ? t('nameTaken')
                                     : null
                             }
                             required
                         />
 
                         <Textarea
-                            label="Header"
-                            description="One line: what it does and when to use it. This is the only thing the orchestrator reads when choosing."
-                            placeholder="Searches application logs for a time window and returns the matching lines with timestamps."
+                            label={t('headerLabel')}
+                            description={t('headerDescription')}
+                            placeholder={t('headerPlaceholder')}
                             value={draft.header}
                             onChange={(event) => patchDraft({ header: event.currentTarget.value })}
                             autosize
@@ -396,39 +410,43 @@ export default function AgentSubagentsPanel({
                             required
                         />
 
-                        {draft.kind === 'inline' ? (
-                            <>
-                                <Textarea
-                                    label="System prompt"
-                                    description="The child's role. Leave empty to inherit nothing — the header alone is often enough."
-                                    value={draft.systemPrompt ?? ''}
-                                    onChange={(event) => patchDraft({ systemPrompt: event.currentTarget.value || undefined })}
-                                    autosize
-                                    minRows={4}
-                                    maxRows={12}
-                                />
-                                <Select
-                                    label="Model override"
-                                    description="Falls back to the parent's model. A cheap model here is the usual reason to have a sub-agent at all."
-                                    data={modelOptions}
-                                    value={draft.modelKey ?? null}
-                                    onChange={(next) => patchDraft({ modelKey: next ?? undefined })}
-                                    searchable
-                                    clearable
-                                />
-                            </>
-                        ) : (
-                            <Alert variant="light" color="violet" icon={<IconInfoCircle size={16} />}>
-                                <Text size="xs">
-                                    The referenced agent&apos;s prompt, model, tools and knowledge engine are used as-is.
-                                    Override the name and header here only — everything else stays owned by that agent.
-                                </Text>
-                            </Alert>
-                        )}
+                        </Stack>
+                    </FormSection>
 
+                    <FormSection number={2} title={t('sectionBehaviour')}>
+                        <Stack gap="md">
+                        <Textarea
+                            label={draft.kind === 'ref' ? t('promptRefLabel') : t('promptLabel')}
+                            description={draft.kind === 'ref' ? t('promptRefDescription') : t('promptInlineDescription')}
+                            value={draft.systemPrompt ?? ''}
+                            onChange={(event) => patchDraft({ systemPrompt: event.currentTarget.value || undefined })}
+                            autosize
+                            minRows={draft.kind === 'ref' ? 2 : 4}
+                            maxRows={12}
+                        />
                         <Select
-                            label="Child context override"
-                            description="Overrides the roster-wide setting for this one sub-agent."
+                            label={t('modelLabel')}
+                            description={draft.kind === 'ref' ? t('modelRefDescription') : t('modelInlineDescription')}
+                            data={modelOptions}
+                            value={draft.modelKey ?? null}
+                            onChange={(next) => patchDraft({ modelKey: next ?? undefined })}
+                            searchable
+                            clearable
+                        />
+                        {draft.kind === 'ref' ? (
+                            <Alert variant="light" color="violet" icon={<IconInfoCircle size={16} />}>
+                                <Text size="xs">{t('refNote')}</Text>
+                            </Alert>
+                        ) : null}
+
+                        </Stack>
+                    </FormSection>
+
+                    <FormSection number={3} title={t('sectionLimits')}>
+                        <Stack gap="md">
+                        <Select
+                            label={t('contextOverrideLabel')}
+                            description={t('contextOverrideDescription')}
                             data={['minimal', 'scoped', 'full']}
                             value={draft.childContextPolicy ?? null}
                             onChange={(next) => patchDraft({ childContextPolicy: (next as AgentChildContextPolicy) ?? undefined })}
@@ -437,31 +455,28 @@ export default function AgentSubagentsPanel({
 
                         <Group grow>
                             <NumberInput
-                                label="Max tool calls"
-                                placeholder="inherit"
+                                label={t('maxToolCalls')}
+                                placeholder={t('inheritPlaceholder')}
                                 min={1}
+                                max={500}
+                                allowDecimal={false}
                                 value={draft.limits?.maxToolCalls ?? ''}
                                 onChange={(next) => patchDraftLimits({ maxToolCalls: next === '' ? undefined : Number(next) })}
                             />
                             <NumberInput
-                                label="Max context tokens"
-                                placeholder="inherit"
+                                label={t('maxContextTokens')}
+                                placeholder={t('inheritPlaceholder')}
                                 min={1000}
                                 step={1000}
+                                allowDecimal={false}
                                 value={draft.limits?.maxContextTokens ?? ''}
                                 onChange={(next) => patchDraftLimits({ maxContextTokens: next === '' ? undefined : Number(next) })}
                             />
                         </Group>
-
-                        <Group justify="flex-end">
-                            <Button variant="default" onClick={() => setEditing(null)}>Cancel</Button>
-                            <Button onClick={commitDraft} disabled={draftInvalid}>
-                                {editing?.index === -1 ? 'Add' : 'Save'}
-                            </Button>
-                        </Group>
-                    </Stack>
-                ) : null}
-            </Modal>
+                        </Stack>
+                    </FormSection>
+                </FormShell>
+            ) : null}
         </Stack>
     );
 }

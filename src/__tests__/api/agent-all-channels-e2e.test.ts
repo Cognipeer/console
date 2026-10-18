@@ -1,7 +1,7 @@
 /**
  * One agent, reached through every channel that can reach it.
  *
- * The agent surface grew one channel at a time — Responses, Assistants, A2A,
+ * The agent surface grew one channel at a time — Responses, A2A,
  * the dashboard's own routes, and now OpenAI chat/completions — and each was
  * tested where it was written. That leaves the question nobody was asking:
  * does the SAME agent, with the same config, behave the same whichever door
@@ -44,6 +44,19 @@ vi.mock('@/lib/database', async () => {
 
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 
+// The caller's wait window: the real limits unless a test shortens it.
+const windowOverride = vi.hoisted(() => ({ syncWaitMs: null as number | null }));
+vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
+    return {
+        ...actual,
+        resolveAgentRunLimits: async () => ({
+            ...(await actual.resolveAgentRunLimits()),
+            ...(windowOverride.syncWaitMs !== null ? { syncWaitMs: windowOverride.syncWaitMs } : {}),
+        }),
+    };
+});
+
 // The chat/completions route asks this first, to decide whether `model` names
 // a model before it considers an agent. Returning null is "no such model",
 // which is what lets the agent branch run at all.
@@ -85,25 +98,10 @@ vi.mock('@/lib/services/agents', () => {
         prepareConnectionForStorage: vi.fn(),
         publishAgent: vi.fn(),
         updateAgentRecord: vi.fn(),
-        // Background execution (docs/guide/agent-background-execution.md):
-        // `runSyncAgentTurn` delegates to the SAME `executeAgentChat` mock
-        // above so `runCalls()` (which reads `executeAgentChat.mock.calls`)
-        // keeps observing exactly what each channel asked the runtime to do
-        // — these tests are about the CHANNEL wiring, not the sync-ceiling
-        // orchestration itself (covered by agent-run-sync-ceiling.test.ts).
-        runSyncAgentTurn: vi.fn(async ({ request }: { request: unknown }) => ({
-            kind: 'ok',
-            response: await executeAgentChat(request),
-        })),
-        createBackgroundAgentRun: vi.fn(),
         getAgentRunStatus: vi.fn(),
         requestAgentRunCancellation: vi.fn(),
         isBackgroundModeRequested: vi.fn().mockReturnValue(false),
         agentRunConflictErrorBody: vi.fn(() => ({ error: { type: 'agent_run_conflict', message: 'conflict' } })),
-        agentSyncTimeoutErrorBody: vi.fn(() => ({ error: { type: 'timeout', message: 'timed out' } })),
-        idempotencyKeyRequiresBackgroundErrorBody: vi.fn(() => ({
-            error: { type: 'invalid_request_error', message: 'Idempotency-Key requires background: true' },
-        })),
     };
 });
 
@@ -176,6 +174,8 @@ const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 const agentRunReservation = {
   create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
   remove: vi.fn(async () => true),
+  // The provider answers the row it finalized; null would mean another writer ended it first.
+  finalize: vi.fn(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({ _id: 'reservation-1', ...patch })),
 };
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
@@ -212,11 +212,12 @@ function runCalls() {
 
 beforeEach(() => {
     vi.clearAllMocks();
+    windowOverride.syncWaitMs = null;
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
     mockFn(getDatabase).mockResolvedValue(createMockDb({
         runWithTenant,
         createAgentRun: agentRunReservation.create,
-        deleteAgentRun: agentRunReservation.remove,
+        deleteAgentRun: agentRunReservation.remove, finalizeAgentRun: agentRunReservation.finalize,
     } as never));
     mockFn(getModelByKey).mockResolvedValue(null);
     setAgentLookup(AGENT);
@@ -256,8 +257,44 @@ describe('channel: Responses API', () => {
         expect(body._conversation_messages).toBeUndefined();
     });
 
-    it('/agents/responses runs the PUBLISHED version, /responses does not', async () => {
-        // Deliberately different defaults, and the kind of thing that silently
+    it('a turn slower than the wait window: 202 in_progress with its run, and the run is finalized when it ends', async () => {
+        windowOverride.syncWaitMs = 30;
+        const finalizeAgentRun = vi.fn(async (_id: string, _tenant: string, patch: Record<string, unknown>) => ({ _id: 'reservation-1', ...patch }));
+        mockFn(getDatabase).mockResolvedValue(createMockDb({
+            runWithTenant,
+            createAgentRun: agentRunReservation.create,
+            deleteAgentRun: agentRunReservation.remove,
+            finalizeAgentRun,
+            markAgentRunDetached: vi.fn(async () => ({
+                _id: 'reservation-1', mode: 'inline', status: 'running', agentKey: AGENT.key, conversationId: 'conv-1', detachedAt: new Date(),
+            })),
+        } as never));
+        let finish!: () => void;
+        const slow = () => new Promise((resolve) => { finish = () => resolve(ANSWER); });
+        mockFn(agentsBarrel.executeAgentChat).mockImplementation(slow);
+        mockFn(agentServiceModule.executeAgentChat).mockImplementation(slow);
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/responses',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', input: 'slow one' },
+        });
+
+        expect(res.statusCode).toBe(202);
+        expect(res.headers.location).toBe('/api/client/v1/agents/runs/run_reservation-1');
+        expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({
+            id: 'resp_reservation-1', object: 'response', status: 'in_progress', conversation: { id: 'conv-1' },
+        });
+        expect(agentRunReservation.create).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'responses' }));
+        expect(finalizeAgentRun).not.toHaveBeenCalled();
+        finish();
+        await vi.waitFor(() => expect(finalizeAgentRun).toHaveBeenCalledWith('reservation-1', expect.any(String), expect.objectContaining({ status: 'succeeded' })));
+    });
+
+    it('/agents/responses and /responses both run the PUBLISHED version; version "draft" runs the draft', async () => {
+        // The same default on both routes, and the kind of thing that silently
         // swaps if either handler is refactored in isolation.
         const app = await build();
         await app.inject({
@@ -281,7 +318,15 @@ describe('channel: Responses API', () => {
             headers: { authorization: 'Bearer tok' },
             payload: { model: 'field-ops', input: 'hi' },
         });
-        expect(runCalls()[0][0].usePublished).toBe(false);
+        expect(runCalls()[0][0].usePublished).toBe(true);
+
+        await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/responses',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', input: 'hi', version: 'draft' },
+        });
+        expect(runCalls()[1][0].usePublished).toBe(false);
     });
 
     it('refuses a draft agent rather than running it', async () => {
@@ -411,6 +456,20 @@ describe('channel: OpenAI chat/completions', () => {
         expect(res.statusCode).toBe(409);
         expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('agent_run_conflict');
         expect(runCalls()).toHaveLength(0);
+    });
+
+    it('is a recorded inline run (channel chat_completions) that cannot answer approvals but runs client tools', async () => {
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/chat/completions',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', messages: [{ role: 'user', content: 'hi' }] },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(agentRunReservation.create).toHaveBeenCalledWith(expect.objectContaining({ mode: 'inline', channel: 'chat_completions', status: 'running' }));
+        expect(runCalls()[0][0]).toMatchObject({ unattended: true, answersClientTools: true });
+        expect(res.headers['x-cognipeer-session-id']).toBe(parseJsonBody<{ conversation_id: string }>(res.body).conversation_id);
     });
 
     it('API traffic runs the published version', async () => {

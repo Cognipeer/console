@@ -12,7 +12,8 @@
  * `GET /agents/attachments/buckets` is the Configure → Files bucket picker.
  *
  * An upload is a raw body: `Content-Type: <the file's mime type>` and
- * `?name=<filename>` — no multipart dependency. A JSON body
+ * `?name=<filename>`. A `multipart/form-data` body works too (its first file part: that part's
+ * name and type, `?name=` taking precedence for the name). A JSON body
  * `{ name, content_type, data: <base64> }` (`contentType` too) is accepted for small files; for that
  * reason a file of type `application/json` is uploaded as `application/octet-stream`
  * (the name still decides how it is read).
@@ -31,7 +32,7 @@ import { getConfig } from '@/lib/core/config';
 import { getAgentByKey } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
-import { toClientErrorBody } from '@/lib/services/agents/clientWire';
+import { sessionFileDownloadUrl, toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { parseByteRange } from '@/lib/services/agents/byteRange';
 import { listAttachmentBuckets } from '@/lib/services/agents/sessionFilesBucket';
 import {
@@ -53,6 +54,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { requireScopedAgent, requireScopedSession } from './agents';
+import { createGatewayRequest } from '../http';
 import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { loadSessionForPrincipal, sendClientSessionRefusal, type SessionNeed } from './agent-session-access';
 import { FILES_READ_REQUIRED_MESSAGE, requestBucketOptions, requestHasFilesRead } from './files-permission';
@@ -73,13 +75,36 @@ interface UploadPayload {
 
 const JSON_CONTENT_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i;
 
+const MULTIPART_CONTENT_TYPE = /^multipart\/form-data\b/i;
+
+/** The first file part of a multipart body; a string is the refusal. */
+async function readMultipartFile(request: FastifyRequest, nameFromQuery: string): Promise<UploadPayload | string> {
+  if (!Buffer.isBuffer(request.body) || request.body.length === 0) return 'The body is empty: send the file as a form part.';
+  let form: FormData;
+  try {
+    form = await createGatewayRequest(request).formData();
+  } catch {
+    return 'The body is not valid multipart/form-data.';
+  }
+  const part = [...form.values()].find((value): value is File => typeof value !== 'string');
+  if (!part) return 'The form has no file part.';
+  const fileName = nameFromQuery || part.name;
+  if (!fileName) return 'The file has no name: send it as the part\'s filename or as ?name=<filename>.';
+  return { fileName, ...(part.type ? { contentType: part.type } : {}), data: Buffer.from(await part.arrayBuffer()) };
+}
+
 /**
- * The file from either body shape; a string is the refusal. Raw: the body is
- * the file, `?name=` its name, the content type its type. JSON: base64 `data`.
+ * The file from any body shape; a string is the refusal. Raw: the body is
+ * the file, `?name=` its name, the content type its type. Multipart: its first file part.
+ * JSON: base64 `data`.
  */
-function readUploadPayload(request: FastifyRequest): UploadPayload | string {
+async function readUploadPayload(request: FastifyRequest): Promise<UploadPayload | string> {
   const header = String(request.headers['content-type'] ?? '');
   const query = (request.query ?? {}) as Record<string, unknown>;
+
+  if (MULTIPART_CONTENT_TYPE.test(header)) {
+    return readMultipartFile(request, typeof query.name === 'string' ? query.name.trim() : '');
+  }
 
   if (JSON_CONTENT_TYPE.test(header)) {
     let body: Record<string, unknown>;
@@ -164,7 +189,7 @@ function clientFile(file: SessionFileView, conversationId: string) {
     ...(file.createdAt ? { created_at: new Date(file.createdAt).toISOString() } : {}),
     ...(file.expiresAt ? { expires_at: new Date(file.expiresAt).toISOString() } : {}),
     // The bytes: `?variant=markdown` for the converted text, `?disposition=inline|attachment`.
-    content_url: `/api/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.id)}/content`,
+    content_url: sessionFileDownloadUrl(conversationId, file.id),
   };
 }
 
@@ -214,7 +239,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
-      const payload = readUploadPayload(request);
+      const payload = await readUploadPayload(request);
       if (typeof payload === 'string') return reply.code(400).send({ error: payload });
       const data = typeof payload.data === 'string' ? Buffer.from(payload.data.replace(/^data:[^,]*;base64,/, ''), 'base64') : payload.data;
       const seedFile = await uploadSeedFile({
@@ -260,7 +285,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof source === 'string' && source !== 'console') {
         return reply.code(409).send({ error: `This session came in via ${source} and is read-only. Start a new session to test the agent.` });
       }
-      const payload = readUploadPayload(request);
+      const payload = await readUploadPayload(request);
       if (typeof payload === 'string') return reply.code(400).send({ error: payload });
 
       const file = await uploadSessionFile({
@@ -375,7 +400,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const conversation = await requireClientSession(request, reply, ctx, 'manage');
       if (!conversation) return reply;
-      const payload = readUploadPayload(request);
+      const payload = await readUploadPayload(request);
       if (typeof payload === 'string') {
         return reply.code(400).send(apiErrorBody('invalid_request_error', payload, 'invalid_request'));
       }

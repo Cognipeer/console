@@ -14,6 +14,11 @@ describe('index manifest: agent runtime collections', () => {
     ['webhook_deliveries', [{ status: 1, nextAttemptAt: 1 }, { endpointId: 1, createdAt: -1 }, { tenantId: 1, eventId: 1 }, { status: 1, createdAt: 1 }]],
     ['files', [{ purpose: 1, expiresAt: 1 }, { conversationId: 1 }]],
     ['agent_runs', [{ callbackStatus: 1, updatedAt: 1 }]],
+    // The APIs read triggers by agent; the scheduler tick reads the due ones tenant-wide.
+    ['agent_triggers', [{ tenantId: 1, projectId: 1, agentKey: 1 }, { enabled: 1, nextFireAt: 1 }]],
+    // An incoming webhook finds its trigger by hook id; the delivery log is read per trigger and swept by expiresAt.
+    ['agent_triggers', [{ 'webhook.hookId': 1 }]],
+    ['agent_trigger_deliveries', [{ tenantId: 1, triggerId: 1, receivedAt: -1 }, { expiresAt: 1 }]],
   ])('%s has the indexes its queries need', (collection, wanted) => {
     for (const key of wanted) expect(keysOf(collection)).toContain(JSON.stringify(key));
   });
@@ -26,5 +31,21 @@ describe('index manifest: agent runtime collections', () => {
   it('session events expire on expiresAt (TTL)', () => {
     const ttl = TENANT_DB_INDEXES.agent_session_events.find((index) => JSON.stringify(index.key) === JSON.stringify({ expiresAt: 1 }));
     expect(ttl?.options.expireAfterSeconds).toBe(0);
+  });
+});
+
+describe('index manifest: scheduler claims', () => {
+  it('indexes expiresAt without partial or unique options (_id is the claim key)', () => {
+    const entry = (TENANT_DB_INDEXES.scheduler_claims ?? [])[0];
+    expect(entry?.key).toEqual({ expiresAt: 1 });
+    expect(JSON.stringify(entry?.options)).not.toMatch(/partialFilterExpression|unique/);
+  });
+});
+
+describe('index manifest: agent triggers', () => {
+  it('has no partial or unique indexes (Cosmos DB rejects partial ones)', () => {
+    for (const entry of [...(TENANT_DB_INDEXES.agent_triggers ?? []), ...(TENANT_DB_INDEXES.agent_trigger_deliveries ?? [])]) {
+      expect(JSON.stringify(entry.options)).not.toMatch(/partialFilterExpression|unique/);
+    }
   });
 });

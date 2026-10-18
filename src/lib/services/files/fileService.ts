@@ -389,7 +389,8 @@ function decodeData(payload: Buffer | string): Buffer {
 function deriveMarkdownKey(originalKey: string): string {
     if (originalKey.includes('.')) {
         const ext = path.extname(originalKey);
-        if (ext) {
+        // A markdown original must keep its own object: its text version lives beside it, never over it.
+        if (ext && ext.toLowerCase() !== '.md') {
             return `${originalKey.slice(0, originalKey.length - ext.length)}.md`;
         }
     }
@@ -886,6 +887,54 @@ export async function uploadFile(
     return {
         record: view,
     };
+}
+
+/**
+ * Writes new bytes under an existing file's key (same record, same id) and converts them to
+ * markdown again. For a file that grows after it was stored; the object providers replace an
+ * object written under the same key.
+ */
+export async function replaceFileContent(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    bucketKey: string,
+    key: string,
+    input: { data: Buffer; updatedBy: string; /** false = keep the bytes as the only version (no text copy). Default true. */ convertToMarkdown?: boolean },
+): Promise<FileRecordView> {
+    const { bucket, runtime, record } = await requireFileRecord(tenantDbName, tenantId, projectId, bucketKey, key);
+    const request: UploadFileRequest = {
+        bucketKey,
+        fileName: record.name,
+        contentType: record.contentType,
+        data: input.data,
+        createdBy: input.updatedBy,
+    };
+    assertUploadAllowed(request, input.data);
+
+    const upload = await withResilience(
+        () => runtime.uploadFile({
+            key: composeProviderObjectKey(bucket, record.key),
+            name: record.name,
+            contentType: record.contentType,
+            data: input.data,
+            metadata: record.metadata,
+        }),
+        { key: `file-upload:${bucket.providerKey}` },
+    );
+
+    const db = await withTenantDb(tenantDbName);
+    const conversion: UpdateFileConversionPayload = input.convertToMarkdown === false
+        ? { markdownStatus: 'skipped' }
+        : await applyMarkdownConversion(runtime, bucket, record, request, input.data);
+    const updated = await db.updateFileRecord(record.id, {
+        size: upload.handle.size ?? input.data.length,
+        checksum: upload.handle.checksum,
+        etag: upload.handle.etag,
+        ...conversion,
+        updatedBy: input.updatedBy,
+    });
+    return serializeFileRecord(updated ?? { ...record, size: input.data.length });
 }
 
 async function requireFileRecord(

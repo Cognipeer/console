@@ -20,7 +20,7 @@ This document defines the general development rules for `cognipeer-console` (gat
 - `src/server/api/plugins/*`: native Fastify endpoint registrations for dashboard/internal + client APIs
 - `src/server/api/fastify-utils.ts`: shared Fastify auth, request-context, parsing, cookie helpers
 - `src/server/api/plugin.ts`: API auth, CORS, security headers, request-context hooks
-- `src/server/api/routes/*`: legacy handler modules kept only until tests are migrated; runtime must not depend on them
+- `src/server/api/plugins/*`: every live route is a Fastify plugin registered in `plugin.ts`
 
 ### UI layer
 - `src/components/*`: domain-focused UI components
@@ -274,7 +274,6 @@ Note: fixing unrelated legacy issues is not required, but they should be reporte
 - [ ] Loading/error/empty states are handled
 - [ ] No `process.env` in application code — use `getConfig()`
 - [ ] No `console.*` in server code (`src/lib/`, `src/server/`) — use `createLogger()`
-- [ ] Runtime Fastify code does not depend on `src/server/api/routes/*`
 - [ ] No sensitive data in logs
 - [ ] Every new route has an `authz.*` declaration; handler checks use `authorizeServiceForRequest` / `authorizeResourceAccess`, never `rbac.ts` arithmetic or JWT role strings
 - [ ] Authorization changes are tested allow + deny through the real gates (session and token, SQLite and MongoDB) and documented in `docs/guide/authorization.md`

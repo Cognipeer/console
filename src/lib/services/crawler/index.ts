@@ -30,7 +30,7 @@ export {
   triggerCrawlerSchedulerRun,
   getCrawlerSchedulerStatus,
 } from './crawlerScheduler';
-export { computeNextRun, isDue, validateSchedule } from './schedulePlanner';
+export { computeNextRun, dueSlot, isDue, validateSchedule } from './schedulePlanner';
 export {
   createCrawlerInputSchema,
   updateCrawlerInputSchema,

@@ -26,7 +26,7 @@ import {
     Text,
     Tooltip,
 } from '@mantine/core';
-import { IconAlertTriangle, IconInfoCircle } from '@tabler/icons-react';
+import { IconInfoCircle } from '@tabler/icons-react';
 import type { IAgentClientToolConfig, IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
 import { HITL_DEFAULTS, resolveHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
 import { useTranslations } from '@/lib/i18n';
@@ -189,8 +189,8 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, 
                             </Stack>
 
                             {(toolConfig.subagents?.length ?? 0) > 0 ? (
-                                <Alert variant="light" color="yellow" icon={<IconAlertTriangle size={16} />} p="sm">
-                                    <Text size="xs">{t('subagentWarning')}</Text>
+                                <Alert variant="light" color="blue" icon={<IconInfoCircle size={16} />} p="sm">
+                                    <Text size="xs">{t('subagentNote')}</Text>
                                 </Alert>
                             ) : null}
                         </>

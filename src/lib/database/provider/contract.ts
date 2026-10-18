@@ -48,6 +48,11 @@ import type {
   CrawlJobStatus,
   CrawlerStatus,
   IAgentRun,
+  AgentRunClass,
+  IAgentTrigger,
+  AgentTriggerPatch,
+  NewAgentTrigger,
+  IAgentTriggerDelivery,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1126,6 +1131,63 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Retention: removes rows whose attemptAt is older than `before`; returns the number removed. */
   pruneAlertDeliveries(before: Date): Promise<number>;
 
+  // ── Scheduler claims (tenant-specific; exactly-once primitive) ──
+  /**
+   * Insert-once claim: true only for the single caller that created `key`
+   * (the database arbitrates); false when it was already claimed.
+   */
+  claimSchedulerSlot(key: string, expiresAt: Date): Promise<boolean>;
+  /** Retention: removes claims whose expiresAt is before `olderThan`; returns the number removed. */
+  cleanupSchedulerClaims(olderThan: Date): Promise<number>;
+
+  // ── Agent triggers (tenant-specific) ──
+  createAgentTrigger(record: NewAgentTrigger): Promise<IAgentTrigger>;
+  /** Scoped by tenant AND project: an id of another project's trigger is not found. */
+  getAgentTrigger(id: string, tenantId: string, projectId: string): Promise<IAgentTrigger | null>;
+  /** Oldest first. */
+  listAgentTriggers(filter: { tenantId: string; projectId: string; agentKey?: string }): Promise<IAgentTrigger[]>;
+  /**
+   * The updated trigger, or null when it does not exist in that scope. A patch
+   * with a `type` replaces the trigger's type settings as a whole: the settings
+   * objects of its other types are dropped.
+   */
+  updateAgentTrigger(id: string, tenantId: string, projectId: string, patch: AgentTriggerPatch): Promise<IAgentTrigger | null>;
+  deleteAgentTrigger(id: string, tenantId: string, projectId: string): Promise<boolean>;
+  /** Removes every trigger of an agent (the agent was deleted); returns the number removed. */
+  deleteAgentTriggersForAgent(tenantId: string, projectId: string, agentKey: string): Promise<number>;
+  /** Enabled triggers whose `nextFireAt` is at or before `now`, the most overdue first. */
+  listDueTriggers(now: Date, limit: number): Promise<IAgentTrigger[]>;
+  /**
+   * Moves `nextFireAt` from `from` to `next` (CAS: false when it is no longer
+   * `from` — another scheduler advanced it, or an edit recomputed it).
+   */
+  advanceTriggerNextFire(id: string, from: Date, next: Date | null): Promise<boolean>;
+  /**
+   * Records the outcome of one fire (CAS on `lastFireAt`: an older fire landing
+   * late never overwrites a newer one). False when a newer fire is recorded.
+   */
+  setTriggerFireResult(
+    id: string,
+    result: { fireAt: Date; status: 'started' | 'failed'; runId?: string | null; error?: string | null },
+  ): Promise<boolean>;
+  /** The trigger whose `webhook` has this hook id (tenant DB), or null. */
+  findAgentTriggerByHookId(hookId: string): Promise<IAgentTrigger | null>;
+
+  // ── Agent trigger webhook deliveries (tenant-specific) ──
+  recordAgentTriggerDelivery(record: Omit<IAgentTriggerDelivery, '_id'>): Promise<IAgentTriggerDelivery>;
+  /** Newest first; `before` = a delivery id of the previous page (the rows after it). */
+  listAgentTriggerDeliveries(filter: {
+    tenantId: string;
+    projectId: string;
+    triggerId: string;
+    limit: number;
+    before?: string;
+  }): Promise<IAgentTriggerDelivery[]>;
+  /** Retention: removes up to `batchSize` deliveries whose `expiresAt` is before `olderThan`. */
+  cleanupAgentTriggerDeliveryRetention(options: { olderThan: Date; batchSize: number }): Promise<{ deletedCount: number }>;
+  /** Removes a trigger's delivery log (the trigger, or its agent, was deleted). */
+  deleteAgentTriggerDeliveries(triggerId: string): Promise<number>;
+
   // ── Alert evaluation state (tenant-specific) ──
   listAlertStates(filter: IAlertStateFilter): Promise<IAlertState[]>;
   /** Keyed by the unique (tenantId, ruleId, entityKey). */
@@ -1559,7 +1621,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentConversation | null>;
   /**
    * Writes only the runtime fields (`runtimeStatus`, `stopReason`,
-   * `pendingActionIds`, `lastEventSeq`, and the session `budget` / `spentUsd`;
+   * `pendingActionIds`, `lastEventSeq`, `transcriptHash`, and the session `budget` / `spentUsd`;
    * `budget: null` removes the budget) — no `updatedAt` bump, no re-read. The
    * session event recorder calls this around every turn, so it stays much
    * cheaper than `updateAgentConversation` and cannot be mistaken for a
@@ -1574,7 +1636,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    */
   updateAgentConversationRuntime(
     id: string,
-    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId' | 'transcriptHash'>>,
     options?: { onlyIfTurn?: string },
   ): Promise<boolean | void>;
   /**
@@ -1587,6 +1649,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
+  /**
+   * The sessions `createdBy` started on `agentKey` in `projectId` whose last chat-completions turn left
+   * `transcriptHash`, most recently updated first, at most `limit` (more than one = an ambiguous match).
+   */
+  findAgentConversationsByTranscriptHash(filter: {
+    projectId: string;
+    agentKey: string;
+    createdBy: string;
+    transcriptHash: string;
+  }, limit: number): Promise<IAgentConversation[]>;
   listAgentConversations(
     agentKey: string,
     filters?: {
@@ -1652,7 +1724,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** Events with `seq > afterSeq`, ascending. `types` filters by exact type. */
   listAgentSessionEvents(
     conversationId: string,
-    options?: { afterSeq?: number; types?: string[]; limit?: number },
+    /** `runId`: only the events one run wrote (the runs API's event log of a run). */
+    options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
   ): Promise<IAgentSessionEvent[]>;
   /** Highest `seq` written for the conversation; 0 when there are none. */
   getAgentSessionMaxSeq(conversationId: string): Promise<number>;
@@ -1996,7 +2069,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * queued/running run per conversation" race-free (§6/§12.14): SQLite with a
    * partial unique index, Mongo with agent_run_locks documents, since Cosmos
    * rejects partial indexes — for both `mode: 'sync'` and
-   * `mode: 'background'` rows alike. A violation MUST be caught by the
+   * `mode: 'inline'` and `mode: 'background'` rows alike. A `scheduled` row is
+   * not active and takes no slot (it takes it when promoted, see
+   * `promoteScheduledAgentRun`). A violation MUST be caught by the
    * implementation and re-thrown as `AgentRunConflictError` (see
    * `./errors.ts`), never left as a raw driver error, so callers can map it
    * directly to `409 Conflict` without a TOCTOU check-then-insert.
@@ -2030,8 +2105,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Record a cancellation request, scoped by tenantId + projectId (§12.11).
-   * Mirrors `requestCrawlJobCancel`: a `queued` run transitions straight to
-   * `canceled` (nothing is executing it yet); a `running` run only has
+   * Mirrors `requestCrawlJobCancel`: a `queued` or `scheduled` run transitions
+   * straight to `canceled` (nothing is executing it yet); a `running` run only has
    * `cancelRequestedAt` stamped so the owning worker's own poll loop
    * observes it and performs its own guarded transition (§7 step 6).
    */
@@ -2058,12 +2133,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Puts a paused (`requires_action`) run back in the queue to continue its
    * turn: CAS from `requires_action` to `queued`, taking the conversation's
    * active-run slot again. Null when the run is not paused any more; throws
-   * `AgentRunConflictError` when another run holds the slot.
+   * `AgentRunConflictError` when another run holds the slot. Increments
+   * `queueGeneration` (a resume is a new execution: its job dedup key differs).
+   * `continuation` records what continues the turn and who answered
+   * (`resumeTrigger`, `resumeUserId`, `resumeApiTokenId`).
    */
   requeueAgentRunForResume(
     id: string,
     tenantId: string,
     resumeActionIds: string[],
+    continuation?: { trigger: 'resume' | 'timeout'; userId?: string | null; apiTokenId?: string | null },
   ): Promise<IAgentRun | null>;
   /**
    * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
@@ -2073,11 +2152,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * terminal status. Reusing `finalizeAgentRun`'s CAS here would silently
    * no-op every callback bookkeeping write once the run is no longer
    * `running` — which is always, since finalize runs first.
+   *
+   * `data.callbackEventId` records which event the bookkeeping is for;
+   * `options.onlyIfEventId` applies the write only while the row's
+   * `callbackEventId` is that event (or unset), so the delivery of an older
+   * event never overwrites the bookkeeping of a newer one. Null when it did not apply.
    */
   updateAgentRunCallback(
     id: string,
     tenantId: string,
-    data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
+    data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number; callbackEventId?: string | null },
+    options?: { onlyIfEventId?: string },
   ): Promise<IAgentRun | null>;
   getAgentRunById(
     id: string,
@@ -2092,7 +2177,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Heartbeat-sweep input for the crash-recovery reconciler (§7.1): `running`
-   * rows in this tenant whose `heartbeatAt` is older than `heartbeatBefore`.
+   * rows in this tenant (every mode, `inline` included) whose `heartbeatAt` is
+   * older than `heartbeatBefore`.
    */
   listStaleAgentRuns(
     tenantId: string,
@@ -2101,7 +2187,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /**
    * Boot-time recovery input (§7.1): `queued` rows in this tenant — a
    * message the in-memory queue provider lost on process restart is safe to
-   * republish as-is, since a `queued` run never started executing.
+   * republish as-is, since a `queued` run never started executing. `deferred`
+   * rows are left out (their dispatcher publishes them), and so are
+   * `scheduled` rows (not queued yet).
    */
   listQueuedAgentRuns(
     tenantId: string,
@@ -2118,8 +2206,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options: { updatedBefore: Date; maxAttempts: number; limit?: number },
   ): Promise<IAgentRun[]>;
   /**
-   * Dashboard listing, newest first. Always tenant+project scoped;
-   * `agentKey`/`conversationId`/`status`/`mode` narrow it further.
+   * Run listing, newest first (stable order: `createdAt` then id). Always
+   * tenant+project scoped; everything else narrows it. `cursor` is the id of
+   * the last row of the previous page (rows after it are returned). A caller
+   * that wants `has_more` asks for `limit + 1` rows.
    */
   listAgentRuns(filter: {
     tenantId: string;
@@ -2127,7 +2217,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     agentKey?: string;
     conversationId?: string;
     status?: IAgentRun['status'][];
-    mode?: IAgentRun['mode'];
+    /** One mode or any of several. */
+    mode?: IAgentRun['mode'] | IAgentRun['mode'][];
+    excludeModes?: IAgentRun['mode'][];
+    /** `default` also matches rows with no class. */
+    runClass?: AgentRunClass;
+    triggerId?: string;
+    channel?: NonNullable<IAgentRun['channel']>;
+    trigger?: NonNullable<IAgentRun['trigger']>;
+    /** Exact `key = value` pairs the run's metadata must carry. */
+    metadata?: Record<string, string>;
+    createdAfter?: Date;
+    createdBefore?: Date;
+    cursor?: string;
     /** Only the runs this user queued (the list of a caller who may not see other people's). */
     userId?: string;
     limit?: number;
@@ -2136,12 +2238,64 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Sync-mode cleanup (§6): unconditional delete, not a finalize — a
    * `mode: 'sync'` row is a reservation slot, never a terminal record, and
    * an orphaned one (process crash mid-call) is freed the same way by the
-   * reconciler.
+   * reconciler. Also the undo of a refused (cap overflow) insert.
    */
   deleteAgentRun(id: string): Promise<boolean>;
-  /** §12.8 concurrency-cap input: count of `queued`+`running` rows. */
-  countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number>;
-  /** §12.10 retention, following the `cleanupAgentTracingRetention` precedent. */
+  /**
+   * §12.8 concurrency-cap input: count of `queued`+`running` rows. `runClass`
+   * `default` also counts rows with no class.
+   */
+  countActiveAgentRuns(
+    tenantId: string,
+    projectId?: string,
+    opts?: { mode?: IAgentRun['mode']; runClass?: AgentRunClass },
+  ): Promise<number>;
+  /**
+   * Row counts per status (queue visibility, deferred caps). Every requested
+   * status is present in the result, 0 when there is none.
+   */
+  countAgentRunsByStatus(
+    tenantId: string,
+    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+  ): Promise<Record<string, number>>;
+  /** `scheduled` rows of this tenant whose `notBefore` is due, oldest first. */
+  listDueScheduledAgentRuns(tenantId: string, now: Date, limit: number): Promise<IAgentRun[]>;
+  /**
+   * CAS `scheduled` -> `queued`, taking the conversation's active-run slot.
+   * Null when the row is no longer `scheduled` (another node promoted or
+   * canceled it); throws `AgentRunConflictError` when another run holds the
+   * slot (the row stays `scheduled`, retried on the next tick).
+   */
+  promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null>;
+  /** `deferred` `queued` rows (notBefore absent or <= `dueBefore`), oldest first: the dispatcher's input. */
+  listQueuedDeferredAgentRuns(
+    tenantId: string,
+    options: { limit: number; dueBefore: Date },
+  ): Promise<IAgentRun[]>;
+  /**
+   * Deferred `queued` rows and overdue `scheduled` rows that have waited since
+   * before `dueBefore` (their due time — `notBefore`, else `createdAt`) without
+   * starting. The reconciler fails them as `expired`.
+   */
+  listExpiredWaitingAgentRuns(
+    tenantId: string,
+    options: { dueBefore: Date; limit: number },
+  ): Promise<IAgentRun[]>;
+  /**
+   * CAS `queued` / `scheduled` -> `failed` with `errorReason: 'expired'` (a
+   * deferred or scheduled run that never started in time), freeing the
+   * conversation slot a queued row holds. Null when the row has moved on.
+   * `expiresAt`, when given, is the row's new retention cutoff.
+   */
+  expireWaitingAgentRun(runId: string, tenantId: string, errorMessage: string, expiresAt?: Date): Promise<IAgentRun | null>;
+  /** CAS on `running`: stamps `detachedAt` (the caller of an inline run stopped waiting). */
+  markAgentRunDetached(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
+  /** Stamps `lastPublishedAt` after a queue publish (no status guard). */
+  markAgentRunPublished(runId: string, tenantId: string, at: Date): Promise<IAgentRun | null>;
+  /**
+   * §12.10 retention, following the `cleanupAgentTracingRetention` precedent.
+   * Never deletes `queued`, `running`, `scheduled` or `requires_action` rows.
+   */
   cleanupAgentRunRetention(options: {
     olderThan: Date;
     batchSize?: number;

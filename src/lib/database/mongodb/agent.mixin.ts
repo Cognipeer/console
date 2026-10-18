@@ -213,6 +213,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
         coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
         coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
+        coll.createIndex({ projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, { name: 'idx_transcript_hash' }),
       ]);
       this.conversationListIndexesReady.add(dbName);
     }
@@ -250,14 +251,16 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId' | 'transcriptHash'>>,
       options?: { onlyIfTurn?: string },
     ): Promise<boolean> {
       const set: Record<string, unknown> = {};
-      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd', 'runtimeTurnId'] as const) {
+      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd', 'runtimeTurnId', 'transcriptHash'] as const) {
         if (patch[key] !== undefined) set[key] = patch[key];
       }
       if (Object.keys(set).length === 0) return true;
+      // The lookup by this field is served by an index; it is created on the write path, like the list indexes.
+      if (set.transcriptHash !== undefined) await this.ensureConversationListIndexes(this.getTenantDb()).catch(() => undefined);
       // The condition is part of the filter, so "is it still my turn?" and the write are one atomic step.
       const filter: Record<string, unknown> = { _id: new ObjectId(id) };
       if (options?.onlyIfTurn !== undefined) {
@@ -348,6 +351,21 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         .findOne({ _id: new ObjectId(id) });
       if (!doc) return null;
       return withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation;
+    }
+
+    async findAgentConversationsByTranscriptHash(filter: {
+      projectId: string;
+      agentKey: string;
+      createdBy: string;
+      transcriptHash: string;
+    }, limit: number): Promise<IAgentConversation[]> {
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .find({ projectId: filter.projectId, agentKey: filter.agentKey, createdBy: filter.createdBy, transcriptHash: filter.transcriptHash })
+        .sort({ updatedAt: -1 })
+        .limit(Math.max(1, Math.floor(limit)))
+        .toArray();
+      return docs.map((doc) => withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation);
     }
 
     async listAgentConversations(
@@ -514,10 +532,11 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async listAgentSessionEvents(
       conversationId: string,
-      options?: { afterSeq?: number; types?: string[]; limit?: number },
+      options?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string },
     ): Promise<IAgentSessionEvent[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { conversationId };
+      if (options?.runId) filter.runId = options.runId;
       if (options?.afterSeq !== undefined && options.afterSeq > 0) filter.seq = { $gt: options.afterSeq };
       if (options?.types && options.types.length > 0) filter.type = { $in: options.types };
       let cursor = db.collection(COLLECTIONS.agentSessionEvents).find(filter).sort({ seq: 1 });

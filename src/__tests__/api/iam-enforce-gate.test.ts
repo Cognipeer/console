@@ -105,6 +105,7 @@ import {
   withClientApiRequestContext,
   withOpenAiApiRequestContext,
 } from '@/server/api/fastify-utils';
+import { authorizeInvocationTarget } from '@/server/api/plugins/agent-invocation';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
@@ -188,6 +189,9 @@ beforeAll(async () => {
   hoisted.tokens.set('tok-admin-empty', tokenCtx(users.admin, {}, 'tok-admin-empty'));
   hoisted.tokens.set('tok-plain', tokenCtx(users.plain, null, 'tok-plain'));
   hoisted.tokens.set('tok-owner', tokenCtx(users.owner, null, 'tok-owner'));
+  hoisted.tokens.set('tok-agents-only', tokenCtx(users.plain, { agents: 'write' }, 'tok-agents-only'));
+  hoisted.tokens.set('tok-models-only', tokenCtx(users.plain, { models: 'write' }, 'tok-models-only'));
+  hoisted.tokens.set('tok-neither', tokenCtx(users.plain, { tracing: 'read' }, 'tok-neither'));
   // a token whose project is one its owner does not belong to (removed from it)
   const foreign = await env.db.createProject({ tenantId: env.tenantId, key: 'pj3', name: 'PJ3', createdBy: 'x' });
   hoisted.tokens.set('tok-member-foreign', tokenCtx(users.member, null, 'tok-member-foreign', String(foreign._id)));
@@ -249,6 +253,12 @@ beforeAll(async () => {
     instance.post('/client/v1/agents/anthropic-probe', withAnthropicApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     instance.get('/client/v1/declared/authenticated', { config: authz.authenticated() }, withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     instance.get('/client/v1/undeclared/probe', withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
+    // a route serving two services' resources (/responses): the gate admits either, the handler asks for its target's
+    instance.post('/client/v1/responses/anyof-probe', { config: authz.serviceAnyOf(['models', 'agents']) }, withOpenAiApiRequestContext(async (request, reply) => {
+      const kind = (request.body as { kind?: 'agent' | 'model' } | undefined)?.kind;
+      if (kind) await authorizeInvocationTarget(request, kind);
+      return reply.send({ ok: true, admittedOn: request.iamGateService ?? null });
+    }));
     // the Authorization center's own service, reached by a token
     instance.get('/client/v1/declared/iam', { config: authz.service('iam') }, withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     await instance.register(dashboardApiPlugin);
@@ -358,6 +368,49 @@ describe('a service is decided by the engine', () => {
   it('a real engine deny is not an outage', async () => {
     expect((await call('POST', '/api/agents/probe', users.reader)).status).toBe(403);
     expect(getEnforceStats()).toMatchObject({ unavailable: 0, engineDenies: 1 });
+  });
+});
+
+describe('a route open to several services (authz.serviceAnyOf)', () => {
+  const probe = (token: string, kind?: 'agent' | 'model') =>
+    call('POST', '/api/client/v1/responses/anyof-probe', null, { token, body: kind ? { kind } : {} });
+
+  it('admits a holder of any of them, and counts only the denial it answers with', async () => {
+    expect((await probe('tok-models-only')).body).toEqual({ ok: true, admittedOn: 'models' });
+    // asked about models first: that denial is quiet, the agents grant lets the token in
+    expect((await probe('tok-agents-only')).body).toEqual({ ok: true, admittedOn: 'agents' });
+    expect(getEnforceStats()).toMatchObject({ engineAllows: 2, engineDenies: 0 });
+
+    const neither = await probe('tok-neither');
+    expect(neither.status).toBe(403);
+    expect(neither.body.error).toMatchObject({
+      type: 'permission_error', code: 'forbidden', message: 'Forbidden: models requires write permission', decision_id: expect.any(String),
+    });
+    expect(neither.headers['x-decision-id']).toBe(neither.body.error.decision_id);
+    expect(getEnforceStats()).toMatchObject({ engineDenies: 1 });
+  });
+
+  it('the handler then needs the service of the target it resolved', async () => {
+    expect((await probe('tok-agents-only', 'agent')).body).toEqual({ ok: true, admittedOn: 'agents' });
+    expect((await probe('tok-models-only', 'model')).body).toEqual({ ok: true, admittedOn: 'models' });
+    // a token that holds both is asked once more when the target is not the service that let it in
+    expect((await probe('tok-plain', 'agent')).body).toEqual({ ok: true, admittedOn: 'agents' });
+
+    const noModels = await probe('tok-agents-only', 'model');
+    expect(noModels.status).toBe(403);
+    expect(noModels.body.error).toMatchObject({ type: 'permission_error', code: 'forbidden', message: 'Forbidden: models requires write permission' });
+    expect(noModels.headers['x-decision-id']).toBe(noModels.body.error.decision_id);
+    const noAgents = await probe('tok-models-only', 'agent');
+    expect(noAgents.status).toBe(403);
+    expect(noAgents.body.error.message).toBe('Forbidden: agents requires write permission');
+  });
+
+  it('an engine that cannot decide refuses at once, whichever service it was asked about', async () => {
+    hoisted.gate = failedEvaluation('engine down');
+    const res = await probe('tok-agents-only');
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatchObject({ type: 'server_error', code: 'authorization_unavailable' });
+    expect(getEnforceStats()).toMatchObject({ unavailable: 1, engineAllows: 0 });
   });
 });
 

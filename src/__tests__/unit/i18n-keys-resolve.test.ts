@@ -64,7 +64,7 @@ describe('every literal translation key a component asks for exists in both lang
 
 describe('agents.sessionAccess (who started a session, who may answer it)', () => {
   const KEYS = [
-    'ownerColumn', 'ownerYou', 'ownerSchedule', 'ownerPublicA2a', 'ownerEvaluation', 'ownerRedteam', 'ownerSystem',
+    'ownerColumn', 'ownerYou', 'ownerTrigger', 'ownerPublicA2a', 'ownerEvaluation', 'ownerRedteam', 'ownerSystem',
     'ownOnlyNotice', 'waitingElsewhereBadge', 'waitingElsewhereTooltip',
   ];
 

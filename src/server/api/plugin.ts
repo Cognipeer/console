@@ -25,10 +25,10 @@ import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
+import { agentTriggersApiPlugin } from './plugins/agent-triggers';
 import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
 import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
 import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
-import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
 import { clientMonitoringApiPlugin } from './plugins/client-monitoring';
@@ -52,6 +52,7 @@ import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
 import { publicA2aApiPlugin } from './plugins/public-a2a';
+import { publicHooksApiPlugin } from './plugins/public-hooks';
 import { publicMcpApiPlugin } from './plugins/public-mcp';
 import { clientPiiApiPlugin } from './plugins/client-pii';
 import { clientEvaluationsApiPlugin } from './plugins/client-evaluations';
@@ -72,6 +73,7 @@ import { clientCrawlerApiPlugin } from './plugins/client-crawler';
 import { clientOcrJobsApiPlugin } from './plugins/client-ocr-jobs';
 import { ocrJobsApiPlugin } from './plugins/ocr-jobs';
 import { agentsApiPlugin } from './plugins/agents';
+import { agentTemplatesApiPlugin } from './plugins/agent-templates';
 import { alertsApiPlugin } from './plugins/alerts';
 import { configApiPlugin } from './plugins/config';
 import { modelPriceCatalogApiPlugin } from './plugins/model-price-catalog';
@@ -140,10 +142,12 @@ const PUBLIC_API_PREFIXES = [
   '/api/public/mcp/',
   // Agents exposed over A2A with accessMode 'public' (same slug-URL model).
   '/api/public/a2a/',
+  // Incoming trigger webhooks (random hook id; every delivery proves the trigger secret).
+  '/api/public/hooks/',
   ...enterprisePublicApiPrefixes,
 ];
 
-const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', '/api/internal/gpu-pool/'];
+const CLIENT_API_PREFIXES = ['/api/client/', '/api/metrics', '/api/internal/gpu-pool/'];
 
 /**
  * Endpoints under these prefixes manage their own auth (Bearer agent tokens)
@@ -275,12 +279,14 @@ export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply
 /** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
 export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
-  // The service of the matched route: an explicit `config.authz` service
-  // declaration, else the path map.
+  // The service the request was admitted on (a route open to several services
+  // names the one that let it in), else the matched route's: an explicit
+  // `config.authz` service declaration, else the path map.
   const denial = request.iamDenial;
   // A refusal of the engine is always audited, also when no service is involved
   // (an undeclared route): it is a security event of the authorization engine.
-  const service = serviceForRequest(request.routeOptions?.config, pathname)
+  const service = request.iamGateService
+    ?? serviceForRequest(request.routeOptions?.config, pathname)
     ?? (denial ? 'iam' : null);
   if (!service || pathname.startsWith('/api/audit')) {
     return;
@@ -518,16 +524,17 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   });
 
   await app.register(agentsApiPlugin);
+  await app.register(agentTemplatesApiPlugin);
   await app.register(alertsApiPlugin);
   await app.register(auditApiPlugin);
   await app.register(authApiPlugin);
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(agentTriggersApiPlugin);
   await app.register(clientWebhooksApiPlugin);
   await app.register(clientAgentSessionsApiPlugin);
   await app.register(agentSessionFilesApiPlugin);
-  await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
   await app.register(clientMonitoringApiPlugin);
@@ -558,6 +565,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(publicMcpApiPlugin);
   // Unauthenticated A2A endpoints for agents with accessMode 'public'.
   await app.register(publicA2aApiPlugin);
+  // Incoming trigger webhooks: own body parsers and error handler (encapsulated, not fastify-plugin).
+  await app.register(publicHooksApiPlugin);
   await app.register(clientPiiApiPlugin);
   await app.register(clientEvaluationsApiPlugin);
   await app.register(clientPromptsApiPlugin);

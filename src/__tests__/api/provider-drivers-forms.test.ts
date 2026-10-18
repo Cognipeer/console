@@ -8,7 +8,6 @@ vi.mock('@/lib/database', () => {
     runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
   };
 });
-import { NextRequest } from 'next/server';
 
 const mockListDescriptors = vi.hoisted(() => vi.fn().mockReturnValue([]));
 const mockGetFormSchema = vi.hoisted(() => vi.fn().mockReturnValue({ sections: [] }));
@@ -20,11 +19,6 @@ vi.mock('@/lib/providers', () => ({
   },
 }));
 
-import { GET as providersDriversGET } from '@/server/api/routes/providers/drivers/route';
-import { GET as providerDriverFormGET } from '@/server/api/routes/providers/drivers/[driverId]/form/route';
-import { GET as vectorDriversGET } from '@/server/api/routes/vector/providers/drivers/route';
-import { GET as vectorDriverFormGET } from '@/server/api/routes/vector/providers/drivers/[driverId]/form/route';
-import { GET as filesDriversGET } from '@/server/api/routes/files/providers/drivers/route';
 import { modelsApiPlugin } from '@/server/api/plugins/models';
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
@@ -39,70 +33,7 @@ const mockDrivers = [
 ];
 const mockSchema = { sections: [{ fields: [{ name: 'api_key', type: 'password' }] }] };
 
-function makeReq(path: string, query?: string) {
-  const url = `http://localhost${path}${query ? `?${query}` : ''}`;
-  return new NextRequest(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
-}
-
 describe('provider driver routes', () => {
-  describe('GET /api/providers/drivers', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-      mockListDescriptors.mockReturnValue(mockDrivers);
-    });
-
-    it('returns all provider drivers', async () => {
-      const res = await providersDriversGET(makeReq('/api/providers/drivers'));
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.drivers).toHaveLength(2);
-    });
-  });
-
-  describe('GET /api/providers/drivers/[driverId]/form', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-      mockListDescriptors.mockReturnValue(mockDrivers);
-      mockGetFormSchema.mockReturnValue(mockSchema);
-    });
-
-    it('returns form schema for a driver', async () => {
-      const res = await providerDriverFormGET(
-        makeReq('/api/providers/drivers/pinecone/form'),
-        { params: Promise.resolve({ driverId: 'pinecone' }) },
-      );
-      expect(res.status).toBe(200);
-    });
-  });
-
-  describe('GET /api/vector/providers/drivers', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-      mockListDescriptors.mockReturnValue([mockDrivers[0]]);
-    });
-
-    it('returns vector drivers', async () => {
-      const res = await vectorDriversGET(makeReq('/api/vector/providers/drivers'));
-      expect(res.status).toBe(200);
-    });
-  });
-
-  describe('GET /api/vector/providers/drivers/[driverId]/form', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-      mockListDescriptors.mockReturnValue([mockDrivers[0]]);
-      mockGetFormSchema.mockReturnValue(mockSchema);
-    });
-
-    it('returns form schema for a vector driver', async () => {
-      const res = await vectorDriverFormGET(
-        makeReq('/api/vector/providers/drivers/pinecone/form'),
-        { params: Promise.resolve({ driverId: 'pinecone' }) },
-      );
-      expect(res.status).toBe(200);
-    });
-  });
-
   describe('GET /api/models/providers/drivers*', () => {
     let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 
@@ -163,17 +94,4 @@ describe('provider driver routes', () => {
     });
   });
 
-  describe('GET /api/files/providers/drivers', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-      mockListDescriptors.mockReturnValue([{ id: 's3', label: 'Amazon S3' }]);
-    });
-
-    it('returns file provider drivers', async () => {
-      const res = await filesDriversGET(makeReq('/api/files/providers/drivers'));
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.drivers[0].id).toBe('s3');
-    });
-  });
 });

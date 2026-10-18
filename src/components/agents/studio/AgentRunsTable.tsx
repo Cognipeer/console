@@ -24,9 +24,10 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { IconPlayerStop, IconRefresh } from '@tabler/icons-react';
+import { IconPlayerStop, IconRefresh, IconX } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { serializeAgentRun } from '@/lib/services/agents/agentRunService';
 
@@ -35,6 +36,7 @@ type AgentRunRow = ReturnType<typeof serializeAgentRun>;
 
 const ERROR_LABELS: Record<string, string> = {
     agent_error: 'Agent error',
+    guardrail_block: 'Blocked by guardrail',
     worker_lost: 'Worker lost',
     max_duration_exceeded: 'Max duration exceeded',
     canceled_by_caller: 'Canceled',
@@ -44,7 +46,8 @@ const ERROR_LABELS: Record<string, string> = {
 };
 
 type Filter = 'all' | 'active' | 'failed';
-const ACTIVE = new Set(['queued', 'running']);
+// A scheduled run is not running yet but can still change (it is promoted when due) and can be canceled.
+export const ACTIVE_RUN_STATUSES = new Set(['scheduled', 'queued', 'running']);
 const POLL_MS = 5_000;
 
 export interface AgentRunsTableProps {
@@ -53,6 +56,9 @@ export interface AgentRunsTableProps {
     onOpenConversation: (conversationId: string) => void;
     /** Reports how many runs are queued/running, for a badge elsewhere. */
     onActiveCountChange?: (count: number) => void;
+    /** Only the runs this trigger started (its history), with a way back to all runs. */
+    trigger?: { id: string; name: string } | null;
+    onClearTrigger?: () => void;
 }
 
 function durationOf(run: AgentRunRow): number | null {
@@ -61,25 +67,27 @@ function durationOf(run: AgentRunRow): number | null {
     return Math.max(0, end - run.started_at) * 1000;
 }
 
-export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange }: AgentRunsTableProps) {
+export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, trigger, onClearTrigger }: AgentRunsTableProps) {
+    const tTriggers = useTranslations('agents.triggers');
     const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const res = await fetch(`/api/agents/${agentId}/runs?limit=200`, { cache: 'no-store' });
+            const triggerQuery = trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : '';
+            const res = await fetch(`/api/agents/${agentId}/runs?limit=200${triggerQuery}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json() as { runs: AgentRunRow[] };
             setRuns(data.runs ?? []);
         } catch {
             setRuns((prev) => prev ?? []);
         }
-    }, [agentId]);
+    }, [agentId, trigger]);
 
     useEffect(() => { void load(); }, [load]);
 
-    const activeCount = useMemo(() => (runs ?? []).filter((run) => ACTIVE.has(run.status)).length, [runs]);
+    const activeCount = useMemo(() => (runs ?? []).filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length, [runs]);
     useEffect(() => { onActiveCountChange?.(activeCount); }, [activeCount, onActiveCountChange]);
 
     // Poll only while something can still change.
@@ -95,7 +103,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
             const res = await fetch(`/api/agents/${agentId}/runs/${run.id}/cancel`, { method: 'POST' });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
-            notifications.show({ color: 'teal', message: run.status === 'queued' ? 'Run canceled' : 'Cancel requested — the run stops at its next step' });
+            notifications.show({ color: 'teal', message: run.status === 'queued' || run.status === 'scheduled' ? 'Run canceled' : 'Cancel requested — the run stops at its next step' });
             await load();
         } catch (error) {
             notifications.show({ color: 'red', message: `Could not cancel: ${error instanceof Error ? error.message : String(error)}` });
@@ -105,7 +113,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
     };
 
     const rows = useMemo(() => (runs ?? []).filter((run) => {
-        if (filter === 'active') return ACTIVE.has(run.status);
+        if (filter === 'active') return ACTIVE_RUN_STATUSES.has(run.status);
         if (filter === 'failed') return run.status === 'failed';
         return true;
     }), [runs, filter]);
@@ -114,7 +122,30 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
         return <Stack gap="xs">{[0, 1, 2].map((i) => <Skeleton key={i} h={36} />)}</Stack>;
     }
 
+    const triggerFilter = trigger ? (
+        <Group gap={6}>
+            <Badge
+                variant="light"
+                rightSection={onClearTrigger ? (
+                    <ActionIcon size="xs" variant="transparent" color="gray" aria-label={tTriggers('runsFilterClear')} onClick={onClearTrigger}>
+                        <IconX size={10} />
+                    </ActionIcon>
+                ) : null}
+            >
+                {tTriggers('runsFilter', { name: trigger.name })}
+            </Badge>
+        </Group>
+    ) : null;
+
     if (runs.length === 0) {
+        if (triggerFilter) {
+            return (
+                <Stack gap="sm">
+                    {triggerFilter}
+                    <Text size="sm" c="dimmed" ta="center" py="lg">No runs match this filter.</Text>
+                </Stack>
+            );
+        }
         return (
             <EmptyState
                 title="No background runs yet"
@@ -126,6 +157,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
 
     return (
         <Stack gap="sm">
+            {triggerFilter}
             <Group justify="space-between">
                 <SegmentedControl
                     size="xs"
@@ -170,7 +202,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">
                                             <StatusBadge status={run.status} />
-                                            {run.cancel_requested_at && ACTIVE.has(run.status)
+                                            {run.cancel_requested_at && ACTIVE_RUN_STATUSES.has(run.status)
                                                 ? <Badge size="xs" color="orange" variant="light">canceling</Badge>
                                                 : null}
                                         </Group>
@@ -183,7 +215,9 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                     </Table.Td>
                                     <Table.Td>
                                         <Text size="xs" c="dimmed">
-                                            {run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
+                                            {run.status === 'scheduled' && run.scheduled_for
+                                                ? `Starts ${new Date(run.scheduled_for * 1000).toLocaleString()}`
+                                                : run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
                                         </Text>
                                     </Table.Td>
                                     <Table.Td ta="right">
@@ -213,7 +247,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                         ) : <Text size="xs" c="dimmed">—</Text>}
                                     </Table.Td>
                                     <Table.Td>
-                                        {ACTIVE.has(run.status) && !run.cancel_requested_at ? (
+                                        {ACTIVE_RUN_STATUSES.has(run.status) && !run.cancel_requested_at ? (
                                             <Tooltip label="Cancel run" withArrow>
                                                 <ActionIcon
                                                     size="sm"

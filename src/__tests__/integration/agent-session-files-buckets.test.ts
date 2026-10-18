@@ -174,7 +174,32 @@ describe('what a client is told about an agent’s attachments', () => {
     await model('gpt-6-luna');
     expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', maxFiles: 4, maxFileSizeMb: 5, allowedMimeTypes: ['image/*'] } })).toEqual({
       enabled: true, maxFiles: 4, maxFileSizeMb: 5, allowedMimeTypes: ['image/*'], acceptsImages: true,
+      // The files the agent writes itself: on with a working bucket, the default limits, the text types.
+      outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv', 'txt', 'json', 'html', 'xml', 'yaml', 'yml'] },
     });
+  });
+
+  it('the files the agent writes are reported apart from the uploads: off by default with uploads off, on once switched on, on with uploads, with the author’s limits, bucket not usable', async () => {
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    await bucket('broken', 'ghost-provider');
+    await model('gpt-4o');
+    // Uploads off, a bucket named, the outputs left at the default: off.
+    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads' } })).toMatchObject({
+      enabled: false, outputs: { enabled: false, maxFilesPerTurn: 10, maxFileSizeMb: 2 },
+    });
+    // Uploads off, switched on explicitly: the agent can hand files back without uploads.
+    expect(await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: true } } })).toMatchObject({
+      enabled: false, outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2 },
+    });
+    // Uploads on with a bucket: on by default, unless switched off.
+    expect((await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads' } })).outputs).toMatchObject({ enabled: true });
+    expect((await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads', outputs: { enabled: false } } })).outputs).toMatchObject({ enabled: false });
+    // The author's limits, clamped to what the server allows; limits are shown even while off.
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'uploads', outputs: { enabled: true, maxFilesPerTurn: 4, maxFileSizeMb: 99 } } })).outputs)
+      .toMatchObject({ enabled: true, maxFilesPerTurn: 4, maxFileSizeMb: 10 });
+    expect((await describeFor({ modelKey: 'main', attachments: { bucketKey: 'broken', outputs: { enabled: true } } })).outputs).toMatchObject({ enabled: false, maxFilesPerTurn: 10 });
+    expect((await describeFor({ modelKey: 'main' })).outputs).toMatchObject({ enabled: false });
   });
 
   it('files on but the bucket cannot take a file: not enabled — the paperclip stays hidden', async () => {
@@ -184,20 +209,33 @@ describe('what a client is told about an agent’s attachments', () => {
     expect(await describeFor({ modelKey: 'main', attachments: { enabled: true, bucketKey: 'uploads' } })).toMatchObject({ enabled: false, acceptsImages: false });
   });
 
-  it('off by default, and not set up without a bucket', async () => {
+  it('off by default, and not set up without a bucket; with uploads off no image is accepted, whatever the model reads', async () => {
     await model('gpt-4o');
-    expect(await describeFor({ modelKey: 'main' })).toEqual({ enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: true });
-    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true } })).toMatchObject({ enabled: false });
+    expect(await describeFor({ modelKey: 'main' })).toEqual({
+      enabled: false, maxFiles: 0, maxFileSizeMb: 0, allowedMimeTypes: [], acceptsImages: false,
+      outputs: { enabled: false, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv', 'txt', 'json', 'html', 'xml', 'yaml', 'yml'] },
+    });
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: true } })).toMatchObject({ enabled: false, acceptsImages: false });
+    // Switched off with a working bucket named: still no image.
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    expect(await describeFor({ modelKey: 'main', attachments: { enabled: false, bucketKey: 'uploads' } })).toMatchObject({ enabled: false, acceptsImages: false });
   });
 
+  const UPLOADS_ON = { enabled: true, bucketKey: 'uploads' };
+
   it('an explicit "text only" on the model beats its name', async () => {
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
     await model('gpt-4o', { metadata: { capabilities: { inputModalities: ['text'], inputModalitiesExplicit: true } } });
-    expect((await describeFor({ modelKey: 'main' })).acceptsImages).toBe(false);
+    expect((await describeFor({ modelKey: 'main', attachments: UPLOADS_ON })).acceptsImages).toBe(false);
   });
 
   it('a model that is gone, or a connected agent, accepts no images', async () => {
-    expect((await describeFor({ modelKey: 'nope' })).acceptsImages).toBe(false);
+    await provider('s3-main');
+    await bucket('uploads', 's3-main');
+    expect((await describeFor({ modelKey: 'nope', attachments: UPLOADS_ON })).acceptsImages).toBe(false);
     await model('gpt-4o');
-    expect((await describeFor({ kind: 'external', connection: { protocol: 'a2a', url: 'https://x' } } as never)).acceptsImages).toBe(false);
+    expect((await describeFor({ kind: 'external', connection: { protocol: 'a2a', url: 'https://x' }, attachments: UPLOADS_ON } as never)).acceptsImages).toBe(false);
   });
 });

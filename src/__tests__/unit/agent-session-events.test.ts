@@ -31,9 +31,10 @@ function fakeDb(initial: Row[] = []) {
     }),
     getAgentSessionMaxSeq: vi.fn(async (conversationId: string) =>
       Math.max(0, ...rows.filter((r) => r.conversationId === conversationId).map((r) => r.seq))),
-    listAgentSessionEvents: vi.fn(async (conversationId: string, o?: { afterSeq?: number; types?: string[]; limit?: number }) =>
+    listAgentSessionEvents: vi.fn(async (conversationId: string, o?: { afterSeq?: number; types?: string[]; limit?: number; runId?: string }) =>
       rows
-        .filter((r) => r.conversationId === conversationId && r.seq > (o?.afterSeq ?? 0) && (!o?.types || o.types.includes(r.type)))
+        .filter((r) => r.conversationId === conversationId && r.seq > (o?.afterSeq ?? 0) && (!o?.types || o.types.includes(r.type))
+          && (!o?.runId || r.runId === o.runId))
         .sort((a, b) => a.seq - b.seq)
         .slice(0, o?.limit ?? Infinity)),
     updateAgentConversationRuntime: vi.fn(async (_id: string, _patch: Record<string, unknown>) => undefined),
@@ -272,6 +273,7 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
     db: ReturnType<typeof fakeDb>;
     afterSeq: number;
     types?: string[];
+    runId?: string;
     during?: (bus: ReturnType<typeof createSessionEventBus>) => void | Promise<void>;
     after?: (bus: ReturnType<typeof createSessionEventBus>) => void | Promise<void>;
     pageSize?: number;
@@ -291,6 +293,7 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
       conversationId: 'c1',
       afterSeq: opts.afterSeq,
       ...(opts.types ? { types: opts.types } : {}),
+      ...(opts.runId ? { runId: opts.runId } : {}),
       bus,
       signal: controller.signal,
       write: (f) => written.push(f),
@@ -315,6 +318,22 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
     });
     expect(written.map((f) => f.id)).toEqual([2, 3, 4, 5]);
     expect(new Set(written.map((f) => f.id)).size).toBe(written.length);
+  });
+
+  it('with a run filter replays and follows only that run\'s events', async () => {
+    const db = fakeDb([{ ...row(1), runId: 'r1' }, { ...row(2), runId: 'r2' }, row(3), { ...row(4), runId: 'r1' }]);
+    const written = await run({
+      db,
+      afterSeq: 0,
+      runId: 'r1',
+      after: (bus) => {
+        bus.publish('c1', { ...frame(5), runId: 'r2' });
+        bus.publish('c1', { type: 'agent.message.delta', data: { text: 'a' }, runId: 'r1', createdAt: new Date().toISOString() });
+        bus.publish('c1', { ...frame(6), runId: 'r1' });
+      },
+    });
+    expect(written.map((f) => f.id)).toEqual([1, 4, undefined, 6]);
+    expect(db.listAgentSessionEvents).toHaveBeenCalledWith('c1', expect.objectContaining({ runId: 'r1' }));
   });
 
   it('follows live frames after the replay and gives live-only events no id', async () => {
@@ -390,6 +409,19 @@ describe('session turn recorder', () => {
     expect(db.updateAgentConversationRuntime.mock.invocationCallOrder[statusCall]).toBeLessThan(db.appendAgentSessionEvents.mock.invocationCallOrder.at(-1)!);
   });
 
+  it('names the sub-agent a delegation went to, and marks a delegation whose child failed as a failed call', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'researcher', input: 'x' } } as never);
+    turn.onSdkEvent({
+      type: 'tool_call', phase: 'error', name: 'delegate_to', id: 'd1', args: { subagent: 'researcher' },
+      result: { name: 'researcher', status: 'error', error: 'model unavailable' }, error: { message: 'model unavailable' }, durationMs: 4,
+    } as never);
+    await turn.finish({ stopReason: 'end_turn', content: 'a', messageIndex: 1 });
+    const result = db.rows.find((r) => r.type === 'agent.tool_result');
+    expect(result?.data).toMatchObject({ toolCallId: 'd1', ok: false, error: 'model unavailable', subagent: 'researcher' });
+  });
+
   it('records a thrown turn as session.error + idle(error) and no work_done', async () => {
     const db = fakeDb();
     const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
@@ -408,6 +440,22 @@ describe('session turn recorder', () => {
     expect(db.rows.some((r) => r.type === 'session.work_done')).toBe(false);
     const last = [0, Object.assign({}, ...db.updateAgentConversationRuntime.mock.calls.map((c) => c[1]))] as unknown as [number, Record<string, unknown>];
     expect(last[1]).toMatchObject({ runtimeStatus: 'requires_action', pendingActionIds: ['act_1'] });
+  });
+
+  it('a resumed leg does not repeat the tool_use the paused leg wrote, and keeps the later tool_result', async () => {
+    const db = fakeDb();
+    const first = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    first.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    await first.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
+    const second = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'resume' });
+    second.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'get_weather', id: 'w1', subagentName: 'worker' } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'success', name: 'get_weather', id: 'w1', subagentName: 'worker' } as never);
+    second.onSdkEvent({ type: 'tool_call', phase: 'success', name: 'delegate_to', id: 'd1', args: { subagent: 'worker' } } as never);
+    await second.finish({ stopReason: 'end_turn', content: 'ok' });
+    const uses = db.rows.filter((r) => r.type === 'agent.tool_use').map((r) => r.data.toolCallId);
+    expect(uses).toEqual(['d1', 'w1']);
+    expect(db.rows.filter((r) => r.type === 'agent.tool_result').map((r) => r.data.toolCallId)).toEqual(['w1', 'd1']);
   });
 
   it('a resumed turn starts without a user message', async () => {

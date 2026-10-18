@@ -10,7 +10,7 @@ The paperclip in the session composer attaches files. Each file appears as a chi
 
 ## Settings
 
-**Configure → Files**, per agent. Files are **off** until you switch them on and choose a bucket.
+**Build → Files**, per agent. Files are **off** until you switch them on and choose a bucket.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -27,6 +27,8 @@ The paperclip in the session composer attaches files. Each file appears as a chi
 | Pictures per model request | 6 | How many images one request to the model carries. The newest win; an older one becomes a note that names it (the agent can look again, see below). |
 | Picture bytes per model request | 12000000 | The same limit in bytes (before base64), oldest dropped first. Providers set their own per-image caps (Anthropic's is 5 MB), so set this to the smallest cap among the models the agent uses. |
 | Show earlier pictures again | 2 | When the agent's own context no longer holds the pictures of your last *N* messages that had one, they are shown again with the next message. 0 = never. |
+| Let the agent create files | on when uploads are on and a bucket is set; off otherwise | The agent writes text files for the person with `session_files_create` / `session_files_append`, [no sandbox needed](#without-a-sandbox-session-files-create-and-session-files-append). With uploads off it stays off until you turn it on (it needs the bucket). |
+| Files per turn / Largest file written (MB) | 10 (at most 20) / 2 (at most 10) | The limits of those files. |
 
 An agent saved before files had a bucket setting, or with files switched on but no bucket, **takes no attachments**: the paperclip is hidden and an upload is refused with `403 attachments_disabled` ("Files are not set up for this agent").
 
@@ -54,7 +56,7 @@ Two things to know when you choose: **portal users get the settings of the agent
 - **Images travel by reference, not as bytes.** In the agent's context, its saved state and its traces a picture is a short reference (`session-file://<fileId>`) behind a text handle — `[Attached image: "cat.png" (id …)]` — that the model can call it by. The bytes are read from the bucket only at the moment the model is called, once per run, within *Pictures per model request* and *Picture bytes per model request*. Three things follow: a photo no longer makes a conversation look full to the agent (its size estimate counts an image as an image, about 850 tokens, not as the characters of its bytes), so it is not compacted away for nothing; the saved state stays small however many pictures a session holds; and a picture survives into later messages and into a replay of the conversation. A picture whose file is gone is replaced by `[Image "…" is no longer available]`.
 - **Looking again.** While the session holds an image and the model accepts images, the agent also has `session_files_view_image({ fileId })`: it returns the picture in a message that follows the tool result, for an image the context no longer shows or one that was left out of a crowded request. `session_files_read` on an image points at it.
 - **Files nobody has sent yet.** A file uploaded to the session before the first message, or since the last one, goes with the next message — you do not have to name it. That is how "create a session, upload, ask" works from the API. (The agent's *Attach new uploads to the next message* setting turns this off; the files are then only reachable with the two tools below.)
-- **Earlier uploads.** `session_files_list` and `session_files_read` are offered whenever the session holds a file, so a later message can ask about an earlier upload. All the file tools only read, so tool approvals never ask about them.
+- **Earlier files.** `session_files_list` and `session_files_read` are offered when the session holds a file and the agent takes uploads **or** can write files (both switches are in *Build → Files*), so a later message can ask about an earlier upload or about a file the agent wrote. These tools only read, so tool approvals never ask about them.
 
 ## API
 
@@ -92,7 +94,7 @@ Content-Type: application/pdf
 <bytes>
 ```
 
-A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "text/plain", "data": "<base64 or data URL>" }` (`contentType` is accepted too). (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
+A `multipart/form-data` body works too (for a browser form or `curl -F file=@contract.pdf`): the first file part is stored, with its filename and type (a part without a type is stored as `text/plain`: send one, or use `?name=`); `?name=` overrides the name. A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "text/plain", "data": "<base64 or data URL>" }` (`contentType` is accepted too). (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
 
 | Call | |
 | --- | --- |
@@ -153,11 +155,32 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 - `file_data` and a `data:` image are decoded and uploaded to the session first. An `https` image URL is fetched (private addresses are refused) within the agent's size limit and uploaded, provided the server answers with an `image/*` `Content-Type`; any other answer (JSON, HTML, no type) is refused with `415 unsupported_file_type` and nothing is stored. To give the agent a document, send it as `input_file` instead.
 - With `background: true`, the run carries the attachments. For `Idempotency-Key`, only the file ids you named identify the request: a file sent inline is stored under a new id each time.
 
+### Chat completions and A2A
+
+- **Chat completions.** On a call to an agent, `image_url` parts and `file` parts (`file_data`, `file_id`) of the last user message become files of the session, like the Responses parts above (`403` when the agent takes no attachments); a message of only an image is valid.
+- **A2A.** The `file` parts of a message (`bytes`, base64, or an `http(s)` `uri`, fetched with the same private-address protection) are stored as session files, on `message/send` and `message/stream`; a `uri` has to arrive within the outbound timeout (30 seconds by default, headers and body together), else `-32602` with `attachment_unreachable`; the agent's card lists the file types it accepts. A `data` part carries the agent's [variables](/api/agents#variables) when every key is one the agent declares; any other data is appended to the text as a JSON block.
+
 ## Where you see them
 
 An attached file is shown wherever the message is: in the session page, in the **session detail** drawer's request inspector (a thumbnail for a picture, a chip with type icon and size for anything else; one that has expired is a muted *expired* chip) and in Observability traces for requests that carry pictures. They are one component, so they look the same everywhere. In a trace of an agent session, a picture the request names by reference (`session-file://…`) is drawn as a thumbnail from the session's content route, under the session's own access check; if the route refuses you or the file is gone (retention, deletion), the picture is shown as a chip with its name instead. A trace that is not an agent session's lists such pictures by name only.
 
 ## Files the agent produces
+
+Two ways, and they can be used together: the agent writes a text file with a tool (no sandbox needed), or an agent with a [sandbox](/guide/sandbox) leaves files in `/outputs/`. Either way the files are stored as session files (origin `agent_output`) and delivered on the answer the same way.
+
+### Without a sandbox: `session_files_create` and `session_files_append`
+
+An agent that has an attachments bucket can write text files for the user. The *Let the agent create files* switch in **Build → Files** turns it on and sets two limits. It is **on by default when the agent takes uploads and a bucket is chosen**. With uploads off, choose a bucket and switch it on yourself: outputs do not need uploads, and stay off until you do. Switching outputs on without a bucket is refused (`400`, `field: attachments.bucketKey`).
+
+- **`session_files_create({ filename, content, mime_type? })`** creates a file and returns `{ file_id, filename, mime_type, size_bytes, download_url }`. Allowed types: `.md .csv .txt .json .html .xml .yaml .yml`; the MIME type is derived from the extension, and a `mime_type` that disagrees is refused. The name is sanitized (no directories, no odd characters) and a name already used in the session becomes `name-1.ext`. What the agent writes is stored **byte for byte**: there is no converted text copy of it (its own text is already text), a Markdown file keeps its own object, and an append keeps the line breaks of what was written.
+- **`session_files_append({ file_id, content })`** adds text to the end of a file this agent created in this session (so a long file can be built in parts). It refuses a file the person uploaded, a file of another session, and any file that is not one of the text types.
+- **Limits.** *Files per turn* (default 10, at most 20) and *Largest file* (default 2 MB, at most 10 MB), enforced on save and at run time. The files also go through the same checks an upload does: the project's file quota, total file count and storage limit. They do not count toward the *Max files per session* of the person's uploads.
+- **Approvals.** Both tools follow the agent's *per-tool* approval setting when one is set and are otherwise never asked about.
+- **Delivery.** A file created or appended to in a turn is attached to that turn's answer, and a file the agent wrote never rides along on the person's next message. The agent's prompt gets a short section naming the tools and the limits.
+- **Reading back.** `session_files_list` and `session_files_read` are offered when outputs are on too, so the agent can read a file it wrote earlier. They appear once the session holds a file (from the turn after the first file was written), and with uploads off they see only the session's own files.
+- **Discovery.** `GET /client/v1/agents/{key}` reports `attachments.outputs`: `{ enabled, max_files_per_turn, max_file_size_mb, types }`, true to the rule above (`enabled` is false while uploads are off and outputs were not turned on). `attachments.accepts_images` reports `false` whenever uploads are off or the bucket is unusable, because an image reaches the model only through an upload.
+
+### With a sandbox: `/outputs/`
 
 An agent with a [sandbox](/guide/sandbox) is told to write the files meant for the user to `/outputs/` (the folder is created on demand). At the end of each turn the platform saves the new or changed files there as session files and attaches them to the answer. The agent needs no preview link to hand a file over.
 
@@ -165,11 +188,10 @@ An agent with a [sandbox](/guide/sandbox) is told to write the files meant for t
 - **Limits.** At most 20 files per turn; a file over the size limit is skipped with a warning. A file is delivered again only when its size or modification time changes.
 - **Never fails the turn.** A file that cannot be saved is logged and listed in the message's `warnings`; the answer is returned as usual.
 - **Where you see them.** On the assistant message's `attachments` (each marked `origin: "agent_output"`), and in the file list of the session.
-- **API.** The `/responses` body gets an `output_files` array (`id`, `name`, `mime_type`, `size`, `download_url`) and `file_path` annotations (`file_id`, `filename`) on the `output_text`. `download_url` is the session file content route, `/client/v1/agents/sessions/{id}/files/{fileId}/content`. Both fields are absent when the turn produced no files.
+- **API.** The `/responses` body gets an `output_files` array (`id`, `name`, `mime_type`, `size`, `download_url`) and `file_path` annotations (`file_id`, `filename`) on the `output_text`. `download_url` is the session file content route, `/api/client/v1/agents/sessions/{id}/files/{fileId}/content` (relative to the server origin). Both fields are absent when the turn produced no files.
 - **Other surfaces.** The same files ride on every way to call the agent, additively and only when there are files:
   - *Chat completions:* `output_files` on the body, `file_path` annotations on `message.annotations`; a streamed reply puts them as `files` on the closing chunk.
-  - *Assistants:* the thread message's `attachments` (`[{ file_id, tools: [] }]`) and `file_ids`, plus `file_path` annotations (`text`, `start_index`, `end_index`, `file_path.file_id`) wherever the text names the file.
-  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = absolute download URL under `/api`; fetch it with the same credentials), on `message/send` and `tasks/get`.
+  - *A2A:* each file is an extra artifact with a `file` part (`name`, `mimeType`, `uri` = the absolute download URL; fetch it with the same credentials), on `message/send`, `tasks/get` and `tasks/resubscribe`, and, on `message/stream`, as artifact events just before the final status event.
   - *Resumed turns:* a turn that continues after an approval or client-tool answer collects `/outputs/` too.
   - *Event log:* an `agent.output_file` event per file, just before `agent.message`, so a live stream can show the file chip as the turn ends.
   - *History:* `GET /client/v1/agents/sessions/{id}/messages` (`?limit`, `?after=<index>`) lists the transcript; each message's `attachments` give `id`, `name`, `mime_type`, `size`, `origin` (`user_upload` or `agent_output`) and `download_url`, and `output_files` repeats the agent's. A client that reloads a session still shows the files.

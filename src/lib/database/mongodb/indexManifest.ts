@@ -95,6 +95,22 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { ruleId: 1 }, options: { name: 'idx_alert_states_rule' } },
     { key: { projectId: 1, phase: 1 }, options: { name: 'idx_alert_states_project_phase_notenant' } },
   ],
+  // Exactly-once scheduler claims; `_id` is the claim key. expiresAt serves the explicit cleanup sweep.
+  scheduler_claims: [
+    { key: { expiresAt: 1 }, options: { name: 'idx_scheduler_claims_expiresAt' } },
+  ],
+  // Agent triggers: the APIs list by agent; the scheduler reads due ones tenant-wide.
+  agent_triggers: [
+    { key: { tenantId: 1, projectId: 1, agentKey: 1 }, options: { name: 'idx_tenant_project_agent' } },
+    { key: { enabled: 1, nextFireAt: 1 }, options: { name: 'idx_enabled_nextFireAt' } },
+    // An incoming webhook finds its trigger by the URL's hook id.
+    { key: { 'webhook.hookId': 1 }, options: { name: 'idx_webhook_hookId' } },
+  ],
+  // Webhook delivery log: listed per trigger newest first; expiresAt serves the retention sweep.
+  agent_trigger_deliveries: [
+    { key: { tenantId: 1, triggerId: 1, receivedAt: -1 }, options: { name: 'idx_tenant_trigger_receivedAt' } },
+    { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
+  ],
   browser_session_events: [
     { key: { sessionId: 1, createdAt: 1 }, options: { name: 'idx_session_createdAt' } },
   ],
@@ -129,6 +145,11 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
     // A caller who may not see other people's sessions lists only the runs they queued, newest first.
     { key: { tenantId: 1, projectId: 1, agentKey: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_user_createdAt' } },
+    // Per-class queue visibility, the deferred dispatcher and the expiry sweep.
+    { key: { tenantId: 1, status: 1, runClass: 1, createdAt: 1 }, options: { name: 'idx_tenant_status_class_createdAt' } },
+    // The scheduled-run promotion sweep.
+    { key: { status: 1, notBefore: 1 }, options: { name: 'idx_status_notBefore' } },
+    { key: { tenantId: 1, triggerId: 1, createdAt: -1 }, options: { name: 'idx_tenant_trigger_createdAt' } },
   ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
@@ -207,6 +228,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
     { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },
     { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
+    // A chat-completions client that resends its transcript is matched back to its session by the transcript's digest.
+    { key: { projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, options: { name: 'idx_transcript_hash' } },
   ],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
   // Append-only session event log. The unique pair is the sequence guard; the

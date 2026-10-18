@@ -61,6 +61,8 @@ export interface ToolAggregateView {
 
 export interface CreateToolInput {
   name: string;
+  /** Wanted key (an import keeps the manifest's); made unique within the project. Defaults to one derived from `name`. */
+  key?: string;
   description?: string;
   type: ToolSourceType;
   /** For OpenAPI: spec JSON/YAML, or a Postman collection */
@@ -98,4 +100,6 @@ export interface UpdateToolInput {
 export interface ExecuteToolActionResult {
   result: unknown;
   latencyMs: number;
+  /** The upstream MCP server answered `isError: true`: the call failed, and `result` is its error text. */
+  isError?: boolean;
 }

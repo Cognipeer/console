@@ -20,6 +20,8 @@ import path from 'node:path';
 
 const hoisted = vi.hoisted(() => ({
   executeAgentChatLocal: vi.fn(),
+  executeAgentResumeLocal: vi.fn(),
+  executeAgentContinueLocal: vi.fn(),
   getDatabase: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
@@ -41,6 +43,8 @@ vi.mock('@/lib/core/queue', () => ({
 vi.mock('@/lib/services/agents/agentService', () => ({
   executeAgentChat: vi.fn(),
   executeAgentChatLocal: hoisted.executeAgentChatLocal,
+  executeAgentResumeLocal: hoisted.executeAgentResumeLocal,
+  executeAgentContinueLocal: hoisted.executeAgentContinueLocal,
 }));
 
 vi.mock('@/lib/database', async (importOriginal) => {
@@ -54,12 +58,21 @@ import { reloadConfig } from '@/lib/core/config';
 import { getRequestContext } from '@/lib/core/requestContext';
 import {
   AGENT_RUN_QUEUE,
-  createBackgroundAgentRun,
+  AGENT_RUN_CALLBACK_QUEUE,
   runAgentJobLocal,
   getAgentRunStatus,
   requestAgentRunCancellation,
   serializeAgentRun,
+  AGENT_RUN_DEFERRED_QUEUE,
+  cancelAgentRun,
+  drainLocalAgentRuns,
+  queueAgentRunContinue,
+  queueAgentRunResume,
+  startAgentRun,
+  type StartAgentRunInput,
 } from '@/lib/services/agents/agentRunService';
+import { queueAgentRun } from '../helpers/agent-runs';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,6 +138,8 @@ afterEach(async () => {
   vi.useRealTimers();
   delete process.env.AGENT_BACKGROUND_MAX_DURATION_MS;
   delete process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS;
+  delete process.env.AGENT_DEFERRED_MAX_RUNNING_PER_TENANT;
+  delete process.env.AGENT_DEFERRED_MAX_QUEUED_PER_TENANT;
   reloadConfig();
   await db.disconnect();
   rmSync(tmpDir, { recursive: true, force: true });
@@ -132,9 +147,9 @@ afterEach(async () => {
 
 async function createRun(
   conversationId: string,
-  overrides: Partial<Parameters<typeof createBackgroundAgentRun>[0]> = {},
+  overrides: Partial<Parameters<typeof queueAgentRun>[0]> = {},
 ) {
-  const outcome = await createBackgroundAgentRun({
+  const outcome = await queueAgentRun({
     tenantId,
     tenantDbName: dbName,
     projectId: PROJECT_ID,
@@ -144,7 +159,7 @@ async function createRun(
     userId: 'user-1',
     ...overrides,
   });
-  if (outcome.kind !== 'created') throw new Error(`expected created, got ${outcome.kind}`);
+  if (outcome.kind !== 'accepted') throw new Error(`expected accepted, got ${outcome.kind}`);
   return outcome.run;
 }
 
@@ -172,6 +187,8 @@ describe('background execution core (§7)', () => {
     // §8: background/run responses get a per-run id, distinct from the
     // synchronous scheme's conversation-scoped id.
     expect((finalStatus?.result as { id?: string } | null)?.id).toBe(`resp_${run._id}`);
+    // The agent is named the way every agent surface names it, not by its display name.
+    expect((finalStatus?.result as { model?: string } | null)?.model).toMatch(/^agent:/);
   });
 
   it('records how the turn ended: end_turn, and a limit stop still finalizes succeeded with stopReason limit', async () => {
@@ -205,7 +222,7 @@ describe('background execution core (§7)', () => {
     hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
 
     await createRun('conv-conflict');
-    const second = await createBackgroundAgentRun({
+    const second = await queueAgentRun({
       tenantId,
       tenantDbName: dbName,
       projectId: PROJECT_ID,
@@ -313,7 +330,7 @@ describe('background execution core (§7)', () => {
 
     // The effective ceiling (min of env/quota/agent) is carried on the row.
     const run = await createRun('conv-max-duration', {
-      limits: { backgroundMaxDurationMs: 40, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 40, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
     expect(run.maxDurationMs).toBe(40);
     const startedAt = Date.now();
@@ -348,7 +365,7 @@ describe('background execution core (§7)', () => {
       return Promise.reject(new Error('stop here'));
     });
     const run = await createRun('conv-env-cap', {
-      limits: { backgroundMaxDurationMs: 3_600_000, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+      limits: { syncWaitMs: 60_000, maxDurationMs: 3_600_000, maxActivePerTenant: 0, maxActivePerProject: 0 },
     });
     const before = Date.now();
     await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
@@ -402,7 +419,7 @@ describe('background run ids (§8): the id the API returns is the id the API acc
     expect(outcome.kind).toBe('accepted');
     expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id)))?.status).toBe('canceled');
 
-    const callbackJobs = hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_QUEUE && name === 'callback');
+    const callbackJobs = hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_CALLBACK_QUEUE && name === 'callback');
     expect(callbackJobs).toHaveLength(1);
     expect(callbackJobs[0][2]).toMatchObject({ runId: String(run._id), event: 'canceled' });
   });
@@ -431,7 +448,7 @@ describe('worker hardening', () => {
     expect(heartbeatSpy).not.toHaveBeenCalled();
 
     // ...and the failure is still reported to the caller's webhook.
-    const callbackJobs = hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_QUEUE && name === 'callback');
+    const callbackJobs = hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_CALLBACK_QUEUE && name === 'callback');
     expect(callbackJobs).toHaveLength(1);
     expect(callbackJobs[0][2]).toMatchObject({ runId: String(run._id), event: 'failed', data: { errorReason: 'agent_error' } });
   });
@@ -509,7 +526,7 @@ describe('worker hardening', () => {
     expect(finalStatus?.errorReason).toBe('owner_unverifiable');
   });
 
-  it.each(['system:agent-scheduler', 'a2a-public'])('synthetic actor %s skips the owner lookup entirely', async (actor) => {
+  it.each(['system:trigger:trg1', 'a2a-public'])('synthetic actor %s skips the owner lookup entirely', async (actor) => {
     hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_actor'));
     hoisted.getUserAuthState.mockRejectedValue(new Error('would throw on a non-ObjectId'));
     const run = await createRun(`conv-${actor}`, { userId: actor });
@@ -606,7 +623,7 @@ describe('worker hardening', () => {
 });
 
 describe('structured output through a background run', () => {
-  const callbackJobs = () => hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_QUEUE && name === 'callback');
+  const callbackJobs = () => hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_CALLBACK_QUEUE && name === 'callback');
 
   it('persists output_parsed on the run, serializes it in the status envelope, and carries it in the callback', async () => {
     const run = await createRun('conv-structured-ok', { callbackUrl: 'https://hooks.example.com/run' });
@@ -664,5 +681,261 @@ describe('structured output through a background run', () => {
     expect(envelope.result).not.toHaveProperty('output_parsed');
     expect(envelope.result).not.toHaveProperty('output_error');
     expect(envelope.result).toMatchObject({ output: [], status: 'completed' });
+  });
+});
+
+describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
+  const ref = (run: { _id?: unknown }) => ({ tenantDbName: dbName, tenantId, projectId: PROJECT_ID, runId: String(run._id) });
+  const runJobs = (queue: string) => hoisted.publish.mock.calls.filter(([q, name]) => q === queue && (name === 'run' || name === 'resume'));
+
+  function queuedInput(conversationId: string, overrides: Partial<StartAgentRunInput> = {}): StartAgentRunInput {
+    return {
+      tenantId,
+      tenantDbName: dbName,
+      projectId: PROJECT_ID,
+      agentKey: AGENT_KEY,
+      conversationId,
+      userMessage: 'hello',
+      userId: 'user-1',
+      channel: 'runs',
+      execution: { kind: 'queued' },
+      ...overrides,
+    };
+  }
+
+  async function startQueued(conversationId: string, overrides: Partial<StartAgentRunInput> = {}) {
+    const outcome = await startAgentRun(queuedInput(conversationId, overrides));
+    if (outcome.kind !== 'accepted') throw new Error(`expected accepted, got ${outcome.kind}`);
+    return outcome.run;
+  }
+
+  it('a run starting more than a second ahead is a scheduled row: not published, and cancel ends it at once', async () => {
+    const run = await startQueued('conv-scheduled', { execution: { kind: 'queued', notBefore: new Date(Date.now() + 60_000) } });
+    expect(run.status).toBe('scheduled');
+    expect(runJobs(AGENT_RUN_QUEUE)).toHaveLength(0);
+
+    const outcome = await cancelAgentRun(ref(run));
+    expect(outcome.kind).toBe('accepted');
+    if (outcome.kind !== 'accepted') return;
+    expect(outcome.run).toMatchObject({ status: 'canceled', errorReason: 'canceled_by_caller' });
+  });
+
+  it('a default-class queued run is published on agent-runs with the generation dedup key', async () => {
+    const run = await startQueued('conv-default-queued');
+    expect(run).toMatchObject({ status: 'queued', mode: 'background', runClass: 'default' });
+    const jobs = runJobs(AGENT_RUN_QUEUE);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0][3]).toMatchObject({ dedupKey: `ar_${String(run._id)}_1` });
+  });
+
+  it('deferred runs go to their own queue through the dispatcher and are capped per tenant while waiting', async () => {
+    process.env.AGENT_DEFERRED_MAX_QUEUED_PER_TENANT = '1';
+    reloadConfig();
+    const first = await startQueued('conv-deferred-1', { runClass: 'deferred' });
+    expect(first.runClass).toBe('deferred');
+    expect(runJobs(AGENT_RUN_DEFERRED_QUEUE).map(([, , payload]) => payload)).toEqual([
+      expect.objectContaining({ runId: String(first._id), runClass: 'deferred' }),
+    ]);
+    expect(runJobs(AGENT_RUN_QUEUE)).toHaveLength(0);
+
+    const second = await startAgentRun(queuedInput('conv-deferred-2', { runClass: 'deferred' }));
+    expect(second).toMatchObject({ kind: 'concurrency_limit', limit: 1, scope: 'tenant', runClass: 'deferred' });
+    expect(await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId: 'conv-deferred-2' })).toHaveLength(0);
+  });
+
+  it('the deferred claim guard leaves the run queued while the class is at its running cap', async () => {
+    process.env.AGENT_DEFERRED_MAX_RUNNING_PER_TENANT = '1';
+    reloadConfig();
+    const busy = await startQueued('conv-deferred-busy', { runClass: 'deferred' });
+    await db.claimAgentRun(String(busy._id), tenantId, 'other-node', new Date());
+    const waiting = await startQueued('conv-deferred-waiting', { runClass: 'deferred' });
+
+    await runAgentJobLocal({ runId: String(waiting._id), tenantId, tenantDbName: dbName, runClass: 'deferred' });
+
+    expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(waiting._id)))?.status).toBe('queued');
+  });
+
+  it('cancel of a running run stamps cancelRequestedAt and leaves it running for the executor to stop', async () => {
+    const run = await startQueued('conv-cancel-running');
+    await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+
+    const outcome = await cancelAgentRun(ref(run));
+    expect(outcome.kind).toBe('accepted');
+    if (outcome.kind !== 'accepted') return;
+    expect(outcome.run.status).toBe('running');
+    expect(outcome.run.cancelRequestedAt).toBeInstanceOf(Date);
+  });
+
+  it('cancel of a requires_action run settles it canceled and frees the conversation', async () => {
+    const run = await startQueued('conv-cancel-paused');
+    await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+    await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+
+    const outcome = await cancelAgentRun(ref(run));
+    expect(outcome.kind).toBe('accepted');
+    if (outcome.kind !== 'accepted') return;
+    expect(outcome.run).toMatchObject({ status: 'canceled', errorReason: 'canceled_by_caller' });
+    expect((await startAgentRun(queuedInput('conv-cancel-paused'))).kind).toBe('accepted');
+  });
+
+  it('a finished run cannot be cancelled', async () => {
+    const run = await startQueued('conv-cancel-done');
+    await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+    await db.finalizeAgentRun(String(run._id), tenantId, { status: 'succeeded', completedAt: new Date() });
+    expect((await cancelAgentRun(ref(run))).kind).toBe('already_terminal');
+  });
+
+  it('a conversation Stop goes through cancelAgentRun: a queued run is canceled, a paused one settled', async () => {
+    const queued = await startQueued('conv-stop-queued');
+    const stopQueued = await cancelConversationTurn({ tenantDbName: dbName, tenantId, projectId: PROJECT_ID, conversationId: 'conv-stop-queued' });
+    expect(stopQueued.runIds).toEqual([String(queued._id)]);
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(queued._id)))?.status).toBe('canceled');
+
+    const paused = await startQueued('conv-stop-paused');
+    await db.claimAgentRun(String(paused._id), tenantId, 'other-node', new Date());
+    await db.finalizeAgentRun(String(paused._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+
+    // A caller that may not answer approvals leaves the paused run alone.
+    const limited = await cancelConversationTurn({ tenantDbName: dbName, tenantId, projectId: PROJECT_ID, conversationId: 'conv-stop-paused', cancelActions: false });
+    expect(limited.cancelled).toBe(false);
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(paused._id)))?.status).toBe('requires_action');
+
+    const full = await cancelConversationTurn({ tenantDbName: dbName, tenantId, projectId: PROJECT_ID, conversationId: 'conv-stop-paused' });
+    expect(full).toMatchObject({ cancelled: true, runIds: [String(paused._id)], cancelledActions: true });
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(paused._id)))?.status).toBe('canceled');
+  });
+
+  it('resuming a paused run requeues the same row with its class, channel, metadata, format and variables, under a new generation', async () => {
+    const run = await startQueued('conv-resume', {
+      metadata: { order: '42' },
+      responseFormat: { type: 'json_object' },
+      variables: { locale: 'tr' },
+    });
+    await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+    await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+    hoisted.publish.mockClear();
+
+    const outcome = await queueAgentRunResume({
+      tenantDbName: dbName,
+      tenantId,
+      projectId: PROJECT_ID,
+      agentKey: AGENT_KEY,
+      conversationId: 'conv-resume',
+      userId: 'user-1',
+      resumeActionIds: ['act_1'],
+      ownerRunId: String(run._id),
+    });
+    expect(outcome.kind).toBe('queued');
+    if (outcome.kind !== 'queued') return;
+    expect(String(outcome.run._id)).toBe(String(run._id));
+    expect(outcome.run).toMatchObject({
+      status: 'queued',
+      runClass: 'default',
+      channel: 'runs',
+      metadata: { order: '42' },
+      responseFormat: { type: 'json_object' },
+      variables: { locale: 'tr' },
+      queueGeneration: 2,
+    });
+    const jobs = runJobs(AGENT_RUN_QUEUE);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0][1]).toBe('resume');
+    expect(jobs[0][3]).toMatchObject({ dedupKey: `ar_${String(run._id)}_2` });
+  });
+
+  describe('a trigger run with external content (§2.4a): what came from the event never reaches the system prompt', () => {
+    // `region` is written in the trigger itself (a literal name); `ticket` came out of the event.
+    const triggerRun = {
+      userId: 'system:trigger:trg1', actorType: 'system' as const, channel: 'trigger' as const, triggerId: 'trg1', trigger: 'schedule' as const,
+      unattended: true, externalContent: true, variables: { region: 'eu', ticket: 'T-1' }, literalVariables: ['region'],
+    };
+    const jobOf = (runId: string) => hoisted.publish.mock.calls.find(([, name, payload]) => (name === 'run' || name === 'resume') && (payload as { runId: string }).runId === runId)?.[2] as Parameters<typeof runAgentJobLocal>[0];
+
+    it('the first turn runs unattended; the prompt may read only the literal names, the rest stays in the message', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_first'));
+      const run = await startQueued('conv-ext-first', triggerRun);
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      expect(hoisted.executeAgentChatLocal).toHaveBeenCalledWith(expect.objectContaining({
+        unattended: true, externalContent: true, variablesInPrompt: false, variables: { region: 'eu', ticket: 'T-1' }, literalVariables: ['region'],
+      }));
+    });
+
+    it('a paused one resumed by the worker continues with variablesInPrompt false', async () => {
+      const run = await startQueued('conv-ext-resume', triggerRun);
+      await db.claimAgentRun(String(run._id), tenantId, 'other-node', new Date());
+      await db.finalizeAgentRun(String(run._id), tenantId, { status: 'requires_action', stopReason: 'requires_action' });
+      hoisted.publish.mockClear();
+      hoisted.executeAgentResumeLocal.mockResolvedValue({ response: fakeResponse('resp_resumed') });
+
+      const outcome = await queueAgentRunResume({
+        tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: 'conv-ext-resume',
+        userId: 'system:trigger:trg1', resumeActionIds: ['act_1'], ownerRunId: String(run._id),
+      });
+      expect(outcome.kind).toBe('queued');
+      if (outcome.kind !== 'queued') return;
+      expect(outcome.run).toMatchObject({ unattended: true, externalContent: true, triggerId: 'trg1', literalVariables: ['region'] });
+      await runAgentJobLocal(jobOf(String(run._id)));
+
+      expect(hoisted.executeAgentResumeLocal).toHaveBeenCalledTimes(1);
+      expect(hoisted.executeAgentResumeLocal.mock.calls[0][0]).toMatchObject({
+        variablesInPrompt: false, unattended: true, variables: { region: 'eu', ticket: 'T-1' }, literalVariables: ['region'],
+      });
+    });
+
+    it('a budget continuation (no paused run) copies the trigger, flags and variables from the session\'s last run', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_budget_first'));
+      const run = await startQueued('conv-ext-continue', triggerRun);
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      hoisted.publish.mockClear();
+      hoisted.executeAgentContinueLocal.mockResolvedValue({ response: fakeResponse('resp_continued') });
+
+      const outcome = await queueAgentRunContinue({
+        tenantDbName: dbName, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: 'conv-ext-continue', userId: 'user-1',
+      });
+      expect(outcome.kind).toBe('queued');
+      if (outcome.kind !== 'queued') return;
+      expect(String(outcome.run._id)).not.toBe(String(run._id));
+      expect(outcome.run).toMatchObject({
+        triggerId: 'trg1', channel: 'trigger', trigger: 'schedule', unattended: true, externalContent: true,
+        variables: { region: 'eu', ticket: 'T-1' }, literalVariables: ['region'],
+      });
+      await runAgentJobLocal(jobOf(String(outcome.run._id)));
+
+      expect(hoisted.executeAgentContinueLocal).toHaveBeenCalledTimes(1);
+      expect(hoisted.executeAgentContinueLocal.mock.calls[0][0]).toMatchObject({
+        variablesInPrompt: false, unattended: true, variables: { region: 'eu', ticket: 'T-1' }, literalVariables: ['region'],
+      });
+    });
+
+    it('an ordinary run keeps its variables in the prompt (nothing is turned off by default)', async () => {
+      hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_plain'));
+      const run = await startQueued('conv-plain-variables', { variables: { region: 'eu' } });
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      const request = hoisted.executeAgentChatLocal.mock.calls[0][0];
+      expect(request.variablesInPrompt).toBeUndefined();
+      expect(request.unattended).toBeUndefined();
+      expect(request.literalVariables).toBeUndefined();
+    });
+  });
+
+  it('the shutdown drain waits for local runs, then fails the ones still going as interrupted', async () => {
+    hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
+    const run = await startQueued('conv-drain');
+    const job = runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+    // Executing: claimed, preconditions passed, the turn invoked.
+    await vi.waitFor(() => {
+      expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+    });
+
+    const drained = await drainLocalAgentRuns(50);
+
+    expect(drained).toEqual({ settled: 0, interrupted: 1 });
+    expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
+      status: 'failed',
+      errorReason: 'interrupted',
+      stopReason: 'error',
+    });
+    await job;
   });
 });

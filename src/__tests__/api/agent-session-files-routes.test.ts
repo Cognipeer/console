@@ -57,14 +57,10 @@ vi.mock('@/lib/services/agents', () => ({
   prepareConnectionForStorage: vi.fn(),
   publishAgent: vi.fn(),
   updateAgentRecord: vi.fn(),
-  runSyncAgentTurn: vi.fn(),
-  createBackgroundAgentRun: vi.fn(),
   getAgentRunStatus: vi.fn(),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
   agentRunConflictErrorBody: () => ({ error: 'conflict' }),
-  agentSyncTimeoutErrorBody: () => ({ error: 'timeout' }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({ error: 'idem' }),
   idempotencyKeyConflictErrorBody: () => ({ error: 'idem' }),
   agentRunConcurrencyLimitErrorBody: () => ({ error: 'cap' }),
 }));
@@ -115,7 +111,7 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   backgroundDisabledErrorBody: () => ({ error: { type: 'invalid_request_error', code: 'background_disabled' } }),
   isBackgroundModeRequested: (header: string | null | undefined, body: Record<string, unknown> | undefined) =>
     header === 'true' || body?.background === true,
-  resolveAgentExecutionLimits: vi.fn(),
+  resolveAgentRunLimits: vi.fn(),
   queueAgentRunContinue: vi.fn(),
   serializeAgentRun: (run: { _id: string; status: string }) => ({ id: `run_${run._id}`, object: 'agent.run', status: run.status }),
   reserveConversationForSyncTurn: vi.fn(),
@@ -126,6 +122,11 @@ vi.mock('@/lib/services/agents/agentRunService', () => ({
   agentDefaultCallback: () => ({}),
   lookupIdempotentAgentRun: vi.fn(),
   validateCallbackRequest: vi.fn(),
+  startAgentRun: vi.fn(),
+  waitForAgentRun: vi.fn(),
+  cancelAgentRun: vi.fn(),
+  isAgentRunActive: (run: { status: string }) => ['scheduled', 'queued', 'running'].includes(run.status),
+  publicAgentRunId: (run: { _id: string }) => `run_${run._id}`,
 }));
 
 import { getDatabase } from '@/lib/database';
@@ -133,11 +134,9 @@ import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import {
   createConversation,
-  createBackgroundAgentRun,
   getAgentById,
   getAgentByKey,
   getConversationById,
-  runSyncAgentTurn,
 } from '@/lib/services/agents';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
@@ -145,7 +144,7 @@ import { deleteSessionFile, listSessionFiles, readSessionFileContent, uploadSess
 import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
-import { resolveAgentExecutionLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
+import { resolveAgentRunLimits, startAgentRun, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError } from '@/lib/services/agents/agentErrors';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { agentSessionFilesApiPlugin } from '@/server/api/plugins/agent-session-files';
@@ -286,6 +285,57 @@ describe('dashboard: upload', () => {
     mockFn(getConversationById).mockResolvedValue(conversation({ metadata: { source: 'api' } }));
     res = await app.inject({ method: 'POST', url: `${DASH_URL}?name=a.txt`, headers: { ...dashHeaders, 'content-type': 'text/plain' }, payload: 'x' });
     expect(res.statusCode).toBe(409);
+    expect(uploadSessionFile).not.toHaveBeenCalled();
+  });
+});
+
+/** A multipart/form-data body: the parts are [fieldName, value, { filename?, type? }]. */
+function multipart(parts: Array<[string, string | Buffer, { filename?: string; type?: string }?]>) {
+  const boundary = '----testboundary7MA4YWxkTrZu0gW';
+  const chunks: Buffer[] = [];
+  for (const [field, value, opts] of parts) {
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="${field}"${opts?.filename ? `; filename="${opts.filename}"` : ''}\r\n${opts?.type ? `Content-Type: ${opts.type}\r\n` : ''}\r\n`;
+    chunks.push(Buffer.from(head), Buffer.isBuffer(value) ? value : Buffer.from(value), Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return { payload: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+describe('upload as multipart/form-data', () => {
+  const bytes = Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69, 0x00, 0xff]); // a BOM, a NUL, a byte that is not UTF-8
+
+  it('stores the first file part, not the envelope: its bytes, its name and its type (dashboard and client API)', async () => {
+    for (const [url, headers] of [[DASH_URL, dashHeaders], [CLIENT_URL, clientHeaders]] as const) {
+      mockFn(uploadSessionFile).mockClear();
+      const { payload, contentType } = multipart([['note', 'ignored text field'], ['file', bytes, { filename: 'Q1 report.csv', type: 'text/csv' }], ['other', Buffer.from('second'), { filename: 'b.txt', type: 'text/plain' }]]);
+      const res = await app.inject({ method: 'POST', url, headers: { ...headers, 'content-type': contentType }, payload });
+
+      expect(res.statusCode, url).toBe(201);
+      const call = mockFn(uploadSessionFile).mock.calls[0]![0];
+      expect(call).toMatchObject({ fileName: 'Q1 report.csv', contentType: 'text/csv' });
+      expect(Buffer.compare(call.data, bytes)).toBe(0); // the part's bytes exactly, not the multipart body
+    }
+  });
+
+  it('lets ?name= name the file; a part with no type has the multipart default, text/plain', async () => {
+    const { payload, contentType } = multipart([['file', 'hello', { filename: 'ignored.bin' }]]);
+    const res = await app.inject({ method: 'POST', url: `${CLIENT_URL}?name=${encodeURIComponent('mine.txt')}`, headers: { ...clientHeaders, 'content-type': contentType }, payload });
+    expect(res.statusCode).toBe(201);
+    const call = mockFn(uploadSessionFile).mock.calls[0]![0];
+    expect(call.fileName).toBe('mine.txt');
+    expect(call.data.toString()).toBe('hello');
+    expect(call.contentType).toBe('text/plain');
+  });
+
+  it('answers 400 for a form without a file part, a body that is not multipart, or an empty body', async () => {
+    const noFile = multipart([['note', 'only text']]);
+    const a = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': noFile.contentType }, payload: noFile.payload });
+    expect(a.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { message: string } }>(a.body).error.message).toContain('no file part');
+    const broken = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': 'multipart/form-data; boundary=zzz' }, payload: Buffer.from('this is not a multipart body') });
+    expect(broken.statusCode).toBe(400);
+    const empty = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': 'multipart/form-data; boundary=zzz' } });
+    expect(empty.statusCode).toBe(400);
     expect(uploadSessionFile).not.toHaveBeenCalled();
   });
 });
@@ -635,13 +685,17 @@ describe('dashboard chat bodies', () => {
 
 describe('client Responses: input_file / input_image', () => {
   const responses = async () => createFastifyApiTestApp(clientAgentsApiPlugin);
-  const syncOk = { kind: 'ok', response: { id: 'resp_conv-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] } };
+  const syncOk = {
+    kind: 'completed',
+    run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'field-ops' },
+    response: { id: 'resp_run-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] },
+  };
 
   beforeEach(() => {
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: FILES_ON } });
     mockFn(createConversation).mockResolvedValue(conversation());
-    mockFn(resolveAgentExecutionLimits).mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
-    mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
+    mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
+    mockFn(startAgentRun).mockResolvedValue(syncOk);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['up1', 'up2'], named: [] });
   });
 
@@ -667,7 +721,7 @@ describe('client Responses: input_file / input_image', () => {
       ],
       actor: { userId: 'user-1', licenseType: 'STARTER', tokenId: 'tok-1' },
     }));
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ userMessage: 'compare', attachments: ['up1', 'up2'], conversationId: 'conv-1' });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ userMessage: 'compare', attachments: ['up1', 'up2'], conversationId: 'conv-1' });
     await r.close();
   });
 
@@ -675,7 +729,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     const res = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,QUJD' }] }] });
     expect(res.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request.userMessage).toBe('');
+    expect(mockFn(startAgentRun).mock.calls[0]![0].userMessage).toBe('');
     await r.close();
   });
 
@@ -683,7 +737,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     await post(r, { model: 'field-ops', input: 'hello' });
     expect(storeResponseInputFiles).not.toHaveBeenCalled();
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).not.toHaveProperty('attachments');
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).not.toHaveProperty('attachments');
     await r.close();
   });
 
@@ -730,18 +784,18 @@ describe('client Responses: input_file / input_image', () => {
     }
     expect(createConversation).not.toHaveBeenCalled();
     expect(storeResponseInputFiles).not.toHaveBeenCalled();
-    expect(runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(startAgentRun).not.toHaveBeenCalled();
 
     // A request without file parts is untouched by the change.
     const text = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_text', text: 'just text' }] }] });
     expect(text.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ userMessage: 'just text' });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ userMessage: 'just text' });
     await r.close();
 
     // The change is written down where clients look for it.
     const root = process.cwd();
     expect(readFileSync(join(root, 'docs/guide/session-files.md'), 'utf8')).toContain('now answers a request that carries such a part with `403 attachments_disabled`');
-    expect(readFileSync(join(root, 'docs/public/openapi.yaml'), 'utf8')).toContain('earlier releases ignored those parts and ran the text');
+    expect(readFileSync(join(root, 'openapi.yaml'), 'utf8')).toContain('The agent takes no attachments (`attachments_disabled`');
   });
 
   it('a file_id needs the session it was uploaded to (session_id, conversation or previous_response_id)', async () => {
@@ -759,7 +813,7 @@ describe('client Responses: input_file / input_image', () => {
     const r = await responses();
     const ok = await post(r, { model: 'field-ops', previous_response_id: 'resp_conv-1', input: [{ role: 'user', content: [{ type: 'input_text', text: 'again' }, { type: 'input_file', file_id: 'f1' }] }] });
     expect(ok.statusCode).toBe(200);
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ conversationId: 'conv-1', attachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ conversationId: 'conv-1', attachments: ['f1'] });
 
     mockFn(storeResponseInputFiles).mockRejectedValue(new AgentAttachmentError(413, 'file_too_large', 'too big'));
     const refused = await post(r, { model: 'field-ops', previous_response_id: 'resp_conv-1', input: [{ role: 'user', content: [{ type: 'input_file', file_data: 'QUJD', filename: 'a.txt' }] }] });
@@ -771,7 +825,7 @@ describe('client Responses: input_file / input_image', () => {
   it('a background run carries the attachments; only the ids the caller named identify it for idempotency', async () => {
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['f1', 'up1'], named: ['f1'] });
     mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'field-ops' }));
-    mockFn(createBackgroundAgentRun).mockResolvedValue({ kind: 'created', run: { _id: 'run-1', status: 'queued' } });
+    mockFn(startAgentRun).mockResolvedValue({ kind: 'accepted', run: { _id: 'run-1', status: 'queued', mode: 'background', conversationId: 'conv-1', agentKey: 'field-ops' } });
     mockFn(validateCallbackRequest).mockResolvedValue({ ok: true });
     const r = await responses();
     const res = await post(r, {
@@ -779,14 +833,18 @@ describe('client Responses: input_file / input_image', () => {
       input: [{ role: 'user', content: [{ type: 'input_file', file_id: 'f1' }, { type: 'input_file', file_data: 'QUJD', filename: 'b.txt' }] }],
     });
     expect(res.statusCode).toBe(202);
-    expect(mockFn(createBackgroundAgentRun).mock.calls[0]![0]).toMatchObject({ attachments: ['f1', 'up1'], idempotencyAttachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ attachments: ['f1', 'up1'], idempotencyAttachments: ['f1'] });
     await r.close();
   });
 });
 
 describe('client Responses: continuing a session with session_id / conversation', () => {
   const responses = async () => createFastifyApiTestApp(clientAgentsApiPlugin);
-  const syncOk = { kind: 'ok', response: { id: 'resp_conv-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] } };
+  const syncOk = {
+    kind: 'completed',
+    run: { _id: 'run-1', status: 'succeeded', mode: 'inline', conversationId: 'conv-1', agentKey: 'field-ops' },
+    response: { id: 'resp_run-1', object: 'response', status: 'completed', output: [], _conversation_messages: [] },
+  };
   const post = (app2: Awaited<ReturnType<typeof responses>>, payload: Record<string, unknown>) =>
     app2.inject({ method: 'POST', url: '/api/client/v1/agents/responses', headers: clientHeaders, payload });
   const fileInput = [{ role: 'user', content: [{ type: 'input_text', text: 'read it' }, { type: 'input_file', file_id: 'f1' }] }];
@@ -795,8 +853,8 @@ describe('client Responses: continuing a session with session_id / conversation'
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: FILES_ON } });
     mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'field-ops', metadata: { source: 'api' } }));
     mockFn(createConversation).mockResolvedValue(conversation());
-    mockFn(resolveAgentExecutionLimits).mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
-    mockFn(runSyncAgentTurn).mockResolvedValue(syncOk);
+    mockFn(resolveAgentRunLimits).mockResolvedValue({ syncWaitMs: 60_000, maxDurationMs: 1_800_000, maxActivePerTenant: 0, maxActivePerProject: 0 });
+    mockFn(startAgentRun).mockResolvedValue(syncOk);
     mockFn(pendingActionsBlockingMessage).mockResolvedValue(null);
     mockFn(storeResponseInputFiles).mockResolvedValue({ attachments: ['f1'], named: ['f1'] });
   });
@@ -807,17 +865,17 @@ describe('client Responses: continuing a session with session_id / conversation'
     expect(res.statusCode).toBe(200);
     expect(getConversationById).toHaveBeenCalledWith('tenant_acme', 'conv-1');
     expect(createConversation).not.toHaveBeenCalled();
-    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ conversationId: 'conv-1', userMessage: 'read it', attachments: ['f1'] });
+    expect(mockFn(startAgentRun).mock.calls[0]![0]).toMatchObject({ conversationId: 'conv-1', userMessage: 'read it', attachments: ['f1'] });
     await r.close();
   });
 
   it('conversation is the OpenAI-style alias: a string, or { id }', async () => {
     const r = await responses();
     for (const conversationRef of ['conv-1', { id: 'conv-1' }]) {
-      mockFn(runSyncAgentTurn).mockClear();
+      mockFn(startAgentRun).mockClear();
       const res = await post(r, { model: 'field-ops', conversation: conversationRef, input: 'hi' });
       expect(res.statusCode).toBe(200);
-      expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request.conversationId).toBe('conv-1');
+      expect(mockFn(startAgentRun).mock.calls[0]![0].conversationId).toBe('conv-1');
     }
     await r.close();
   });
@@ -849,7 +907,7 @@ describe('client Responses: continuing a session with session_id / conversation'
       mockFn(getConversationById).mockResolvedValue(conversation(other));
       expect((await post(r, { model: 'field-ops', session_id: 'conv-1', input: 'hi' })).statusCode).toBe(404);
     }
-    expect(runSyncAgentTurn).not.toHaveBeenCalled();
+    expect(startAgentRun).not.toHaveBeenCalled();
     await r.close();
   });
 
@@ -905,13 +963,18 @@ describe('what the agent lookup tells a client about files', () => {
 
   it('says whether the agent takes files now, its limits and whether its model reads images', async () => {
     mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, createdAt: new Date('2026-01-01T00:00:00Z'), config: { modelKey: 'm', attachments: FILES_ON } });
-    mockFn(describeAgentAttachments).mockResolvedValue({ enabled: true, maxFiles: 5, maxFileSizeMb: 8, allowedMimeTypes: ['image/*'], acceptsImages: true });
+    mockFn(describeAgentAttachments).mockResolvedValue({
+      enabled: true, maxFiles: 5, maxFileSizeMb: 8, allowedMimeTypes: ['image/*'], acceptsImages: true,
+      outputs: { enabled: true, maxFilesPerTurn: 10, maxFileSizeMb: 2, types: ['md', 'csv'] },
+    });
 
     const res = await lookup();
 
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ agent: Record<string, unknown> }>(res.body).agent.attachments).toEqual({
       enabled: true, max_files: 5, max_file_size_mb: 8, allowed_mime_types: ['image/*'], accepts_images: true,
+      // The files the agent writes itself (session_files_create), apart from the uploads above.
+      outputs: { enabled: true, max_files_per_turn: 10, max_file_size_mb: 2, types: ['md', 'csv'] },
     });
     expect(describeAgentAttachments).toHaveBeenCalledWith({
       tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', config: { modelKey: 'm', attachments: FILES_ON },
