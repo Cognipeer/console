@@ -1385,8 +1385,17 @@ const panel = (over: Partial<Parameters<typeof AgentUsagePanel>[0]> = {}) =>
     ...over,
   });
 
-/** Text as it comes out of the markup: entities decoded. */
-const textOf = (html: string) => html.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+const ENTITIES: Record<string, string> = { quot: '"', '#x27': "'", amp: '&', lt: '<', gt: '>' };
+
+/** Text as it comes out of the markup: tags dropped, entities decoded in one pass (`&amp;lt;` stays `&lt;`). */
+const textOf = (html: string) => {
+  let text = html;
+  for (let before = ''; before !== text;) {
+    before = text;
+    text = text.replace(/<[^>]*>/g, '');
+  }
+  return text.replace(/&(quot|#x27|amp|lt|gt);/g, (_, name: string) => ENTITIES[name]);
+};
 
 describe('the Usage tab', () => {
   it('shows the header, then Runs API, SDK, OpenAI, A2A and the docs, in that order', () => {
