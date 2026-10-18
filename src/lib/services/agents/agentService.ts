@@ -1655,16 +1655,20 @@ async function buildAgentCostEstimator(
     primary: PricedModel,
     subagentModels: PricedModel[],
     sessionBudgetActive = false,
+    onWarning?: (message: string) => void,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
     const limited = sessionBudgetActive || Number(config.runtime?.limits?.maxCostUsd) > 0;
     if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
-    const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
+    const models: Parameters<typeof buildCostEstimator>[0] = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
     ];
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
-        models.push({ names: [child.key, child.modelId], pricing: child.pricing });
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
+        if (!(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
+            onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted in the turn's cost, the cost limit or the session budget.`);
+        }
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
     if (!estimator && limited) {
@@ -4269,7 +4273,7 @@ async function buildLocalAgentRun(input: {
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
         : buildTracingMetadata(runtimeContext);
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive);
+    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message));
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
