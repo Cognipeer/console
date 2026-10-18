@@ -1,4 +1,5 @@
 import { accountPageEn } from './accountPage.en';
+import { agentTemplatesEn } from './agentTemplates.en';
 import { alertsEn, incidentsEn } from './alerts.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
@@ -3947,6 +3948,7 @@ export const en = {
   incidents: incidentsEn,
   tracingHealth: tracingHealthEn,
   entityHealth: entityHealthEn,
+  agentTemplates: agentTemplatesEn,
   healthDigest: healthDigestEn,
   analyticsDashboards: analyticsDashboardsEn,
   memory: {

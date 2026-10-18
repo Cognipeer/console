@@ -2651,12 +2651,16 @@ export async function createAgentRecord(
         description?: string;
         config: IAgent['config'];
         status?: IAgent['status'];
+        /** A key chosen by the caller (checked for uniqueness below). Default: the name as a slug plus a random suffix. */
+        key?: string;
+        /** Where the agent came from (`metadata.template` for an agent made from a template). */
+        metadata?: IAgent['metadata'];
     },
 ): Promise<IAgent> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    const key = generateAgentKey(data.name);
+    const key = data.key ?? generateAgentKey(data.name);
 
     // Verify uniqueness
     const existing = await db.findAgentByKey(key, projectId);
@@ -2674,6 +2678,7 @@ export async function createAgentRecord(
         // (dashboard, client API) goes through.
         config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
         status: data.status || 'active',
+        ...(data.metadata ? { metadata: data.metadata } : {}),
         createdBy: userId,
     });
 
