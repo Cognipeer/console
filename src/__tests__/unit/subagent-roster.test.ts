@@ -19,11 +19,11 @@ type Entry = Parameters<typeof resolveSubagentTarget>[2] & Record<string, unknow
 const inline = (name: string, extra: Record<string, unknown> = {}) => ({ kind: 'inline', name, header: name, ...extra }) as never;
 const ref = (name: string, agentKey: string, extra: Record<string, unknown> = {}) => ({ kind: 'ref', name, header: name, agentKey, ...extra }) as never;
 
-/** Agents of the project by key: a draft config, an optional published snapshot, an optional pinned one. */
-function stubAgents(agents: Record<string, { config: Record<string, unknown>; published?: Record<string, unknown>; pinned?: Record<string, unknown> }>) {
+/** Agents of the project by key: a draft config, an optional published snapshot, an optional pinned one, a status (active unless said). */
+function stubAgents(agents: Record<string, { config: Record<string, unknown>; published?: Record<string, unknown>; pinned?: Record<string, unknown>; status?: string }>) {
   const findAgentByKey = vi.fn(async (key: string) => {
     const agent = agents[key];
-    return agent ? { _id: `id-${key}`, key, config: agent.config, publishedVersion: agent.published ? 2 : undefined } : null;
+    return agent ? { _id: `id-${key}`, key, status: agent.status ?? 'active', config: agent.config, publishedVersion: agent.published ? 2 : undefined } : null;
   });
   const findAgentVersion = vi.fn(async (id: string, version: number) => {
     const agent = agents[id.replace('id-', '')];
@@ -85,6 +85,24 @@ describe('resolveSubagentTarget', () => {
     expect(await target(ref('w', 'remote') as Entry)).toMatchObject({ message: expect.stringContaining('connected agent') });
   });
 
+  it('skips an agent that is not active, as everything else on the platform does, and names its status', async () => {
+    stubAgents({
+      resting: { config: { modelKey: 'm' }, published: { modelKey: 'm' }, status: 'inactive' },
+      wip: { config: { modelKey: 'm' }, status: 'draft' },
+      live: { config: { modelKey: 'm' }, status: 'active' },
+    });
+    expect(await target(ref('r', 'resting') as Entry))
+      .toMatchObject({ ok: false, reason: 'inactive', message: 'Sub-agent "r" was skipped: agent "resting" is not active (inactive).' });
+    expect(await target(ref('w', 'wip') as Entry))
+      .toMatchObject({ ok: false, reason: 'inactive', message: 'Sub-agent "w" was skipped: agent "wip" is not active (draft).' });
+    expect(await target(ref('l', 'live') as Entry)).toMatchObject({ ok: true });
+  });
+
+  it('judges the agent, not the version: a pinned snapshot of an agent that is not active is skipped too', async () => {
+    stubAgents({ resting: { config: { modelKey: 'm' }, pinned: { modelKey: 'old' }, status: 'inactive' } });
+    expect(await target(ref('r', 'resting', { agentVersion: 1 }) as Entry)).toMatchObject({ ok: false, reason: 'inactive' });
+  });
+
   it('reports a pinned version that does not exist, not a silent fallback', async () => {
     stubAgents({ writer: { config: { modelKey: 'draft' }, published: { modelKey: 'live' } } });
     expect(await target(ref('w', 'writer', { agentVersion: 7 }) as Entry))
@@ -110,8 +128,11 @@ describe('subagentModelKeys', () => {
   });
 
   it('skips a reference the run would skip, whatever model it names', async () => {
-    stubAgents({ remote: { config: { kind: 'external', modelKey: 'x' } } });
-    expect(await keys({ subagents: [ref('a', 'gone', { modelKey: 'override' }), ref('b', 'remote'), ref('c', '')] })).toEqual([]);
+    stubAgents({
+      remote: { config: { kind: 'external', modelKey: 'x' } },
+      resting: { config: { modelKey: 'asleep' }, status: 'inactive' },
+    });
+    expect(await keys({ subagents: [ref('a', 'gone', { modelKey: 'override' }), ref('b', 'remote'), ref('c', ''), ref('d', 'resting', { modelKey: 'override' })] })).toEqual([]);
   });
 
   it('is empty for a roster that cannot run, without loading anything', async () => {

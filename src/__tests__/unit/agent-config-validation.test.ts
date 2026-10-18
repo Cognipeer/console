@@ -218,6 +218,24 @@ describe('validateAgentConfig', () => {
             const result = await validate({ modelKey: 'gpt-main', variables: [{ name: 'region', type: 'string' }], subagents: [ref] });
             expect(warned(result)).toEqual([]);
         });
+
+        it('warns, without refusing the save, that an agent which is not active is skipped when this one delegates', async () => {
+            published([{ name: 'customer_id', type: 'string', required: true }]);
+            for (const status of ['inactive', 'draft']) {
+                db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? { ...target, status } : null));
+                const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+                expect(result.errors).toEqual([]);
+                // One warning, about the thing that matters: the child never runs, so what it would require is moot.
+                expect(warned(result)).toEqual([`Agent "tenant-support" is not active (${status}), so this agent skips it when it delegates`]);
+            }
+        });
+
+        it('says nothing about an active agent', async () => {
+            published([]);
+            db.findAgentByKey.mockImplementation(async (key: string) => (key === 'tenant-support' ? { ...target, status: 'active' } : null));
+            const result = await validate({ modelKey: 'gpt-main', subagents: [ref] });
+            expect(warned(result)).toEqual([]);
+        });
     });
 
     it('rejects a structured-output schema the provider cannot use', () => {

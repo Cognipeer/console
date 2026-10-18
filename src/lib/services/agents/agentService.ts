@@ -1866,7 +1866,11 @@ async function buildAgentSubagents(
 
     for (const entry of entries) {
         if (!entry.name || seen.has(entry.name)) {
-            logger.warn('Skipping sub-agent with missing or duplicate name', { name: entry.name });
+            const message = entry.name
+                ? `Sub-agent name "${entry.name}" is used more than once: only the first one is available.`
+                : 'A sub-agent has no name, so it was skipped.';
+            logger.warn(message, { name: entry.name });
+            input.onWarning?.(message);
             continue;
         }
         seen.add(entry.name);
@@ -1880,6 +1884,7 @@ async function buildAgentSubagents(
             const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
             if (!target.ok) {
                 logger.warn(target.message, { name: entry.name, agentKey: entry.agentKey, reason: target.reason });
+                input.onWarning?.(target.message);
                 continue;
             }
             systemPrompt = await resolveChildPrompt(input, entry, target);
@@ -1932,9 +1937,11 @@ async function buildAgentSubagents(
         let childModel: unknown;
         if (modelKey) {
             const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
-            if (built) {
+            if (built.ok) {
                 childModel = built.chatModel;
                 models.push(built.model);
+            } else {
+                input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
             }
         }
 
@@ -2004,9 +2011,10 @@ async function resolveChildPrompt(
 type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | null };
 
 /**
- * Builds the gateway chat model for a sub-agent's model override. Returns
- * undefined when the key no longer resolves, which makes the child fall back to
- * the parent's model rather than failing the whole run.
+ * Builds the gateway chat model for a sub-agent's model override. Answers why
+ * when the key no longer resolves (or the model cannot be set up), which makes
+ * the child fall back to the parent's model rather than failing the whole run;
+ * the caller reports it.
  *
  * Like every agent model it is a call into the gateway (gatewayChatModel.ts), so the
  * model's own guardrails, cache, pool and routing apply to the child too, and its
@@ -2021,10 +2029,13 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<{ chatModel: unknown; model: PricedModel } | undefined> {
+): Promise<{ ok: true; chatModel: unknown; model: PricedModel } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
-        if (!model || model.category !== 'llm') return undefined;
+        if (!model || model.category !== 'llm') {
+            logger.warn('Sub-agent model override is not a chat model of this project; falling back to parent model', { modelKey });
+            return { ok: false, message: `model "${modelKey}" does not exist in this project or is not a chat model` };
+        }
         const agentPick = agentReasoningForModel(reasoning?.config, modelKey);
         const chatModel = await buildGatewayChatModel({
             tenantDbName,
@@ -2042,6 +2053,7 @@ async function buildSubagentModel(
         });
         // A sub-agent can be handed the parent's context, image references included.
         return {
+            ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
             model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
         };
@@ -2050,7 +2062,7 @@ async function buildSubagentModel(
             modelKey,
             error: error instanceof Error ? error.message : String(error),
         });
-        return undefined;
+        return { ok: false, message: `model "${modelKey}" could not be set up` };
     }
 }
 

@@ -193,10 +193,14 @@ describe('resolution per scope rule', () => {
       expect(resolve(guardrailIn(null), e, [pii('p1')]).status).toBe('ok');
       expect(EDGE_KINDS['guardrail.piiPolicy'].severity).toBe('error');
     });
-    it('agent.subagent: a draft/inactive target agent still runs, so it is not inactive', () => {
+    it('agent.subagent: a draft/inactive target agent is skipped by the run, so it is inactive', () => {
       const e = edge('agent.subagent', 'sub');
-      const sub = rec({ type: 'agent', id: 's', key: 'sub', projectId: 'p1', status: 'draft', statusTone: 'off' });
-      expect(resolve(agentIn('p1'), e, [sub]).status).toBe('ok');
+      const sub = (status: string, statusTone: ResourceRecord['statusTone']) =>
+        rec({ type: 'agent', id: 's', key: 'sub', projectId: 'p1', status, statusTone });
+      expect(resolve(agentIn('p1'), e, [sub('draft', 'off')]).status).toBe('inactive');
+      expect(resolve(agentIn('p1'), e, [sub('inactive', 'off')]).status).toBe('inactive');
+      expect(resolve(agentIn('p1'), e, [sub('active', 'ok')]).status).toBe('ok');
+      expect(EDGE_KINDS['agent.subagent'].severity).toBe('warning');
     });
   });
 

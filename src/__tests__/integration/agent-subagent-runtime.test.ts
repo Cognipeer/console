@@ -100,14 +100,14 @@ const inlineHelper = (extra: Partial<Subagent> = {}): Subagent => ({
   kind: 'inline', name: 'helper', header: 'Does the legwork', systemPrompt: 'You do the legwork.', modelKey: 'worker', enabled: true, ...extra,
 } as Subagent);
 
-async function createAgent(config: Partial<IAgentConfig> = {}, key = AGENT_KEY) {
+async function createAgent(config: Partial<IAgentConfig> = {}, key = AGENT_KEY, status: 'active' | 'inactive' | 'draft' = 'active') {
   return db.createAgent({
     tenantId,
     projectId: PROJECT_ID,
     key,
     name: key,
     config: { modelKey: 'main', systemPrompt: 'You orchestrate.', ...config },
-    status: 'active',
+    status,
     createdBy: OWNER,
   });
 }
@@ -542,6 +542,149 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
 
       expect(told(worker)).toContain('You are writer. Writes the copy');
       expect(await warningsOf(id)).toEqual([expect.stringContaining('"writer-agent" has no system prompt, or its prompt could not be found')]);
+    });
+  });
+  describe('a child that cannot run, or runs degraded, says so (CON-6, CON-7)', () => {
+    const REF = { kind: 'ref', name: 'writer', header: 'Writes the copy', agentKey: 'writer-agent', enabled: true } as Subagent;
+    const warningsOf = async (id: string) => (await stored(id)).messages.at(-1)!.warnings ?? [];
+    const modelsBuilt = () => hoisted.buildGatewayChatModel.mock.calls.map((call) => (call[0] as { model: { key: string } }).model.key);
+    /** What the parent was told it may delegate to (the SDK lists the roster in its system prompt). */
+    const offered = (parent: ScriptedModel) => parent.systemPrompts().join('\n');
+    const freshConversation = async () => String((await newConversation())._id);
+
+    it('skips a referenced agent that is not active, offers the others, and tells the owner', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent', 'inactive');
+      await createAgent({ subagents: [REF, inlineHelper()] });
+      const main = script('main', () => answer('done'));
+      script('worker', () => answer('unused'));
+      script('writer-model', () => answer('unused'));
+      const id = await freshConversation();
+
+      const response = await chat(id, 'hello');
+
+      expect(response.output.find((item) => item.type === 'message')).toBeTruthy();
+      expect(offered(main)).toContain('- helper: Does the legwork');
+      expect(offered(main)).not.toContain('- writer:');
+      expect(modelsBuilt()).not.toContain('writer-model');
+      expect(await warningsOf(id)).toEqual(['Sub-agent "writer" was skipped: agent "writer-agent" is not active (inactive).']);
+    });
+
+    it('runs the agent as a child again once it is active', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent', 'draft');
+      await createAgent({ subagents: [REF] });
+      script('main', () => answer('done'));
+      const first = await freshConversation();
+      await chat(first, 'hello');
+      expect(await warningsOf(first)).toEqual(['Sub-agent "writer" was skipped: agent "writer-agent" is not active (draft).']);
+
+      await db.updateAgent(String((await db.findAgentByKey('writer-agent', PROJECT_ID))!._id), { status: 'active' });
+      const main = script('main', () => answer('done'));
+      script('writer-model', () => answer('written'));
+      const second = await freshConversation();
+      await chat(second, 'hello');
+
+      expect(await warningsOf(second)).toEqual([]);
+      expect(offered(main)).toContain('- writer: Writes the copy');
+    });
+
+    it('carries the same warning on a playground turn', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent', 'inactive');
+      await createAgent({ subagents: [REF] });
+      script('main', () => answer('done'));
+      const id = await freshConversation();
+
+      const result = await playground(id, 'hello');
+
+      expect(result.warnings).toEqual(['Sub-agent "writer" was skipped: agent "writer-agent" is not active (inactive).']);
+    });
+
+    it('says why for a referenced agent that is missing, pinned to a version that is gone, connected or not chosen', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent');
+      await createAgent({ kind: 'external' } as Partial<IAgentConfig>, 'remote-agent');
+      await createAgent({
+        subagents: [
+          { ...REF, name: 'ghost', agentKey: 'nobody' },
+          { ...REF, name: 'pinned', agentVersion: 9 },
+          { ...REF, name: 'remote', agentKey: 'remote-agent' },
+          { ...REF, name: 'nowhere', agentKey: '' },
+          inlineHelper(),
+        ],
+      });
+      const main = script('main', () => answer('done'));
+      script('worker', () => answer('unused'));
+      const id = await freshConversation();
+
+      await chat(id, 'hello');
+
+      expect(await warningsOf(id)).toEqual([
+        'Sub-agent "ghost" was skipped: Agent "nobody" not found.',
+        'Sub-agent "pinned" was skipped: Version 9 not found for agent "writer-agent".',
+        'Sub-agent "remote" was skipped: "remote-agent" is a connected agent, and only agents that run on this platform can be delegated to.',
+        'Sub-agent "nowhere" was skipped: it points at no agent.',
+      ]);
+      expect(offered(main)).toContain('- helper: Does the legwork');
+      expect(offered(main)).not.toMatch(/- (ghost|pinned|remote|nowhere):/);
+    });
+
+    it('says which entries share a name or have none, and keeps the first of a pair', async () => {
+      await createAgent({ subagents: [inlineHelper(), inlineHelper({ header: 'The other one' }), inlineHelper({ name: '' })] });
+      const main = script('main', () => answer('done'));
+      script('worker', () => answer('unused'));
+      const id = await freshConversation();
+
+      await chat(id, 'hello');
+
+      expect(offered(main)).toContain('- helper: Does the legwork');
+      expect(offered(main)).not.toContain('The other one');
+      expect(await warningsOf(id)).toEqual([
+        'Sub-agent name "helper" is used more than once: only the first one is available.',
+        'A sub-agent has no name, so it was skipped.',
+      ]);
+    });
+
+    it('says when a child runs on the agent\'s own model because the one it names cannot be used', async () => {
+      await createAgent({
+        subagents: [
+          inlineHelper({ name: 'gone', header: 'Names a model that was deleted', modelKey: 'deleted-model' }),
+          inlineHelper({ name: 'embedder', header: 'Names a model that does not chat', modelKey: 'embedding-model' }),
+          inlineHelper({ name: 'broken', header: 'Names a model that cannot be set up', modelKey: 'broken-model' }),
+        ],
+      });
+      hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => {
+        if (key === 'deleted-model') return null;
+        if (key === 'embedding-model') return { ...modelRecord(key), category: 'embedding' };
+        return modelRecord(key);
+      });
+      // The first delegation shows the child really runs on the parent's model (one script serving both).
+      const main = script('main', (call) => {
+        if (call === 0) return delegateTo('d1', 'gone', 'go');
+        if (call === 1) return answer('child answer');
+        return answer('done');
+      });
+      const id = await freshConversation();
+
+      await chat(id, 'hello');
+
+      expect(main.seen).toHaveLength(3);
+      expect(await warningsOf(id)).toEqual([
+        'Sub-agent "gone" runs on this agent\'s model: model "deleted-model" does not exist in this project or is not a chat model.',
+        'Sub-agent "embedder" runs on this agent\'s model: model "embedding-model" does not exist in this project or is not a chat model.',
+        'Sub-agent "broken" runs on this agent\'s model: model "broken-model" could not be set up.',
+      ]);
+    });
+
+    it('says it too when the model of a referenced agent is gone', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent');
+      await createAgent({ subagents: [REF] });
+      hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => (key === 'writer-model' ? null : modelRecord(key)));
+      script('main', () => answer('done'));
+      const id = await freshConversation();
+
+      await chat(id, 'hello');
+
+      expect(await warningsOf(id)).toEqual([
+        'Sub-agent "writer" runs on this agent\'s model: model "writer-model" does not exist in this project or is not a chat model.',
+      ]);
     });
   });
 });

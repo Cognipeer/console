@@ -29,12 +29,14 @@ export function activeSubagentEntries(config: Pick<IAgentConfig, 'subagents' | '
 /** Why a `ref` entry cannot run, or the agent it points at. */
 export type SubagentTarget =
     | { ok: true; agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }
-    | { ok: false; reason: 'no_agent_key' | 'unresolved' | 'external'; message: string };
+    | { ok: false; reason: 'no_agent_key' | 'unresolved' | 'external' | 'inactive'; message: string };
 
 /**
  * Loads the agent a `ref` entry points at, the way a run of that agent would
  * (the pinned version, else the PUBLISHED one: editing a draft never changes
- * what a parent delegates to mid-flight), or says why the entry cannot run.
+ * what a parent delegates to mid-flight), or says why the entry cannot run: an
+ * agent that is not active is not run by anything else on the platform either
+ * (a request, a trigger, a schedule), and delegation is no way around that.
  * The message is written for the person who owns the parent agent.
  */
 export async function resolveSubagentTarget(
@@ -58,6 +60,13 @@ export async function resolveSubagentTarget(
             ok: false,
             reason: 'external',
             message: `Sub-agent "${entry.name}" was skipped: "${entry.agentKey}" is a connected agent, and only agents that run on this platform can be delegated to.`,
+        };
+    }
+    if (resolved.agent.status && resolved.agent.status !== 'active') {
+        return {
+            ok: false,
+            reason: 'inactive',
+            message: `Sub-agent "${entry.name}" was skipped: agent "${entry.agentKey}" is not active (${resolved.agent.status}).`,
         };
     }
     return { ok: true, ...resolved };

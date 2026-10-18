@@ -595,6 +595,13 @@ export async function validateAgentConfig(input: {
                 issues.errors.push({ field: `${field}.agentKey`, message: `Agent "${entry.agentKey}" has no published version to delegate to` });
             } else if (input.agentKey && (target.config?.subagents ?? []).some((child) => child.kind === 'ref' && child.agentKey === input.agentKey)) {
                 issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" already delegates back to this agent (a cycle)` });
+            } else if (target.status && target.status !== 'active') {
+                // Nothing else on the platform runs an agent that is not active, and delegation is no exception:
+                // a run skips this entry (and says so) until the agent is active again.
+                issues.warnings.push({
+                    field: `${field}.agentKey`,
+                    message: `Agent "${entry.agentKey}" is not active (${target.status}), so this agent skips it when it delegates`,
+                });
             } else {
                 // A sub-agent is handed free text, never a set of values: a variable the referenced agent
                 // requires can only come from a variable of the same name here. Read from the version a run
