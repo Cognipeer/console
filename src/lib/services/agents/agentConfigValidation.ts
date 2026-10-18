@@ -103,6 +103,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
     checkAdditionalModelsShape(issues, config);
+    checkSkillPolicyShape(issues, config);
     issues.errors.push(...reasoningConfigIssues(config));
     if (config.systemPrompt && config.promptKey) {
         issues.warnings.push({
@@ -356,6 +357,11 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         const field = `subagents[${index}]`;
         if (!entry.name) {
             issues.errors.push({ field: `${field}.name`, message: 'A sub-agent needs a name' });
+        } else if (!SUBAGENT_NAME_PATTERN.test(entry.name)) {
+            // A warning, not an error: the Studio form slugs names to this shape, but agents written through the API or an
+            // import may carry others (hyphens, capitals) and re-saving them must keep working.
+            issues.warnings.push({ field: `${field}.name`, message: 'Use lowercase letters, digits and underscores for a sub-agent name' });
+            names.add(entry.name);
         } else if (names.has(entry.name)) {
             issues.errors.push({ field: `${field}.name`, message: `Duplicate sub-agent name "${entry.name}"` });
         } else {
@@ -376,6 +382,26 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     issues.errors.push(...subagentConfigIssues(config));
 
     return issues;
+}
+
+/** The shape the Studio form gives a sub-agent name (lowercase letters, digits, underscores). */
+const SUBAGENT_NAME_PATTERN = /^[a-z0-9_]{1,48}$/;
+
+/** Bounds of the skill policy limits; the Studio form already refuses below 1. */
+export const SKILL_POLICY_LIMIT_MAX = 100;
+
+function checkSkillPolicyShape(issues: Issues, config: IAgentConfig): void {
+    const policy = config.skillPolicy as unknown;
+    if (policy === undefined || policy === null) return;
+    if (typeof policy !== 'object' || Array.isArray(policy)) {
+        issues.errors.push({ field: 'skillPolicy', message: 'must be an object' });
+        return;
+    }
+    const record = policy as Record<string, unknown>;
+    for (const name of ['maxOpenSkills', 'maxBoundToolsPerSkill', 'maxBoundToolsTotal']) {
+        checkNumber(issues, `skillPolicy.${name}`, record[name], { min: 1, max: SKILL_POLICY_LIMIT_MAX, integer: true });
+    }
+    checkEnum(issues, 'skillPolicy.disclosure', record.disclosure, new Set(['catalog', 'search']));
 }
 
 export const MAX_ADDITIONAL_MODELS = 10;
