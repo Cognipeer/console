@@ -8,6 +8,7 @@
 
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
+import { agentTemplatesTr } from './agentTemplates.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
@@ -1241,6 +1242,7 @@ export const tr: typeof en = {
   incidents: incidentsTr,
   tracingHealth: tracingHealthTr,
   entityHealth: entityHealthTr,
+  agentTemplates: agentTemplatesTr,
   healthDigest: healthDigestTr,
   analyticsDashboards: analyticsDashboardsTr,
   projectTabs: projectTabsTr,

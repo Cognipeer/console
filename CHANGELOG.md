@@ -93,6 +93,16 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   (`0` when not reported; `reasoning_tokens` is `0` for an agent run). `reasoning` is applied to runs that execute in the
   request only: a queued (`background`, `flex`, `POST …/runs` without `stream`) run uses the agent's own effort.
 
+### Agent templates
+
+- **Agent templates**: 25 ready-made agents (support, knowledge, engineering, research, sales and marketing, operations,
+  multi-agent) in a gallery under Agents → Templates. **Use template** creates a draft agent with your model, knowledge
+  bases and guardrails, its `tpl-` skills (reused when they exist) and the suggested [triggers](docs/guide/agent-triggers.md)
+  **disabled**; a webhook trigger's secret is shown once. Creating is all-or-nothing. Each template shows whether the
+  project can run it (ready, needs setup, unavailable). New dashboard routes `GET /agents/templates`,
+  `GET /agents/templates/{templateKey}` (agents read) and `POST /agents/templates/{templateKey}/instantiate` (agents
+  write); the agent records `metadata.template`. See [Agent templates](docs/guide/agent-templates.md).
+
 ### Responses, chat completions and models
 
 - `/responses` and `/chat/completions` serve **models and agents**. `model: "agent:<key>"` is an agent; a bare name is a

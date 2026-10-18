@@ -16,6 +16,7 @@ import {
   IconFileImport,
   IconPlus,
   IconRobot,
+  IconTemplate,
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
@@ -92,6 +93,7 @@ interface Provider {
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
+  const tTemplates = useTranslations('agentTemplates');
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -331,6 +333,10 @@ export default function AgentsPage() {
         title={t('title')}
         subtitle={t('subtitle')}
         actions={
+          <>
+          <Button variant="default" size="sm" leftSection={<IconTemplate size={14} />} onClick={() => router.push('/dashboard/agents/templates')}>
+            {tTemplates('ui.entry.link')}
+          </Button>
           <Menu position="bottom-end" withinPortal>
             <Menu.Target>
               <Button
@@ -343,6 +349,12 @@ export default function AgentsPage() {
               </Button>
             </Menu.Target>
             <Menu.Dropdown>
+              <Menu.Item
+                leftSection={<IconTemplate size={15} />}
+                onClick={() => router.push('/dashboard/agents/templates')}
+              >
+                <MenuOption title={tTemplates('ui.entry.menuTitle')} description={tTemplates('ui.entry.menuDescription')} />
+              </Menu.Item>
               <Menu.Item
                 leftSection={<IconRobot size={15} />}
                 onClick={() => setCreateModalOpen(true)}
@@ -367,6 +379,7 @@ export default function AgentsPage() {
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
+          </>
         }
       />
 
@@ -454,6 +467,11 @@ export default function AgentsPage() {
             icon: <IconPlus size={14} stroke={1.7} />,
             onClick: () => setCreateModalOpen(true),
           },
+          extra: (
+            <Button mt="xs" size="sm" variant="subtle" leftSection={<IconTemplate size={14} />} onClick={() => router.push('/dashboard/agents/templates')}>
+              {tTemplates('ui.entry.browse')}
+            </Button>
+          ),
         }}
         footerLeft={`Showing ${filtered.length} of ${agents.length} agents`}
         rowActions={(agent) => [

@@ -73,6 +73,7 @@ import { clientCrawlerApiPlugin } from './plugins/client-crawler';
 import { clientOcrJobsApiPlugin } from './plugins/client-ocr-jobs';
 import { ocrJobsApiPlugin } from './plugins/ocr-jobs';
 import { agentsApiPlugin } from './plugins/agents';
+import { agentTemplatesApiPlugin } from './plugins/agent-templates';
 import { alertsApiPlugin } from './plugins/alerts';
 import { configApiPlugin } from './plugins/config';
 import { modelPriceCatalogApiPlugin } from './plugins/model-price-catalog';
@@ -523,6 +524,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   });
 
   await app.register(agentsApiPlugin);
+  await app.register(agentTemplatesApiPlugin);
   await app.register(alertsApiPlugin);
   await app.register(auditApiPlugin);
   await app.register(authApiPlugin);
