@@ -172,10 +172,12 @@ The session route stops whatever the session is doing and answers `{ "object": "
 
 A run that nobody is waiting on reports itself in two ways:
 
-- **A callback** you give the run: `callback: { url, secret? }` on the runs API, `callback_url` and `callback_secret` on `/responses`, or the agent's own default under **Configure → Callback & budget** (`config.callback`, used when the request gives none). The URL must be `http` or `https` and resolve to a public address (`400 invalid_callback` otherwise); a secret needs a URL and is 16–256 characters. A `callback_url` without a secret is delivered unsigned: the agent's secret goes only with the agent's URL.
+- **A callback** you give the run: `callback: { url, secret? }` on the runs API, `callback_url` and `callback_secret` on `/responses`, or the agent's own default under **Build → Callback & budget** (`config.callback`, used when the request gives none). The URL must be `http` or `https` and resolve to a public address (`400 invalid_callback` otherwise); a secret needs a URL and is 16–256 characters. A `callback_url` without a secret is delivered unsigned: the agent's secret goes only with the agent's URL.
 - **Webhook subscriptions**: [`agent_run.succeeded`, `.failed`, `.canceled` and `.requires_action`](/guide/webhooks) go to every matching subscription whether or not the run has a callback. Their data carries `runId`, `sessionId`, `agentKey`, `status`, `class`, `metadata` and `triggerId`.
 
 Both fire only for **async runs**: a queued run, and a plain call that detached. A call answered inline sends nothing.
+
+A runs API call that waits for its run gets no per-run callback for the state it was answered with (finished, or paused for a person): the caller already has it. Webhook subscriptions still fire. Later states are called back: the outcome of a run that outlived the wait, the outcome after a pause the caller was answered with, and the outcome of a run whose caller disconnected, or whose node stopped, before the answer.
 
 A callback is a `POST` with `x-cognipeer-event: agent_run.succeeded | agent_run.failed | agent_run.canceled | agent_run.requires_action`, a stable `x-cognipeer-event-id` (deduplicate retries on it; `evt_<runId>_<event>`, and `evt_<runId>_<event>_<generation>` for the second and later outcomes of a run that paused and was resumed, so each one has its own id), and, with a secret, `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`:
 
@@ -183,7 +185,7 @@ A callback is a `POST` with `x-cognipeer-event: agent_run.succeeded | agent_run.
 { "id": "evt_…", "event": "agent_run.succeeded", "createdAt": "…", "runId": "run_…", "sessionId": "…", "conversationId": "…", "data": { "result": { … } } }
 ```
 
-`data` is `{ result }` on success, `{ errorReason, message }` on failure and empty on cancel. Delivery goes through its own queue (`AGENT_RUN_CALLBACK_CONCURRENCY` workers a node), up to five attempts with exponential backoff from 2 seconds, and the state is on the run (`callback.status`: `pending`, `delivered` or `failed`; `attempts`). A late delivery of an older event never overwrites the state of a newer one. A callback that never settled, because a node died or the queue lost the job, is queued again by the reconciler. To remove an agent's default callback, clear its URL in **Configure → Callback & budget**: the stored secret is removed with it. The run's own status is the source of truth: poll it if a callback does not arrive.
+`data` is `{ result }` on success, `{ errorReason, message }` on failure and empty on cancel. Delivery goes through its own queue (`AGENT_RUN_CALLBACK_CONCURRENCY` workers a node), up to five attempts with exponential backoff from 2 seconds, and the state is on the run (`callback.status`: `pending`, `delivered` or `failed`; `attempts`). A late delivery of an older event never overwrites the state of a newer one. A callback that never settled, because a node died or the queue lost the job, is queued again by the reconciler. To remove an agent's default callback, clear its URL in **Build → Callback & budget**: the stored secret is removed with it. The run's own status is the source of truth: poll it if a callback does not arrive.
 
 ## Shutdown and crashes
 

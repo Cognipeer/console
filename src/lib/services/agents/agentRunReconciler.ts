@@ -311,6 +311,8 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
         // Callbacks nobody delivered: the row says `pending` / `failed`, the run
         // is past the point of sending one, and it has been quiet for longer than
         // the queue's own retries take (a live retry would have touched the row).
+        // `waiting` too: a caller's wait ends as soon as its run stops, so a run
+        // that stopped this long ago and still waits lost its caller with a node.
         const stuckCallbacks = await tenantDb.listAgentRunsWithUndeliveredCallbacks(tenantId, {
           // At boot an in-memory queue lost every job, so nothing is "in flight".
           updatedBefore: options.requeueAllQueued ? new Date(now + 1) : new Date(now - cfg.agent.runRequeueAfterMs),

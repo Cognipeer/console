@@ -297,6 +297,16 @@ describe('run callbacks', () => {
     expect(callbackJobs()).toHaveLength(1);
   });
 
+  it('a run whose waiting caller was lost with its node still calls back', async () => {
+    const run = await waitedRun('conv-cb-lost-wait');
+    const done = await succeed(run);
+    await fireAgentRunCallback(done, 'succeeded', { result: null });
+    expect(callbackJobs()).toHaveLength(0);
+    // No settle: the node that held the wait died. The next boot's reconciler finds it.
+    await reconcileOrphanedAgentRuns();
+    expect(callbackJobs()).toHaveLength(1);
+  });
+
   it('a late delivery of an older event does not overwrite the bookkeeping of the newer one', async () => {
     const run = await queued('conv-cb-cas', { callbackUrl: 'https://example.com/cb' });
     const paused = await pause(run);

@@ -472,7 +472,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         .find({
           tenantId,
           callbackUrl: { $nin: [null, ''] },
-          callbackStatus: { $in: ['pending', 'failed'] },
+          callbackStatus: { $in: ['pending', 'failed', 'waiting'] },
           callbackAttempts: { $not: { $gte: options.maxAttempts } },
           status: { $in: ['succeeded', 'failed', 'canceled', 'requires_action'] },
           updatedAt: { $lt: options.updatedBefore },

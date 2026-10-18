@@ -392,7 +392,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const rows = db.prepare(`
         SELECT * FROM ${TABLES.agentRuns}
         WHERE tenantId = @tenantId AND callbackUrl IS NOT NULL
-          AND callbackStatus IN ('pending', 'failed') AND COALESCE(callbackAttempts, 0) < @maxAttempts
+          AND callbackStatus IN ('pending', 'failed', 'waiting') AND COALESCE(callbackAttempts, 0) < @maxAttempts
           AND status IN ('succeeded', 'failed', 'canceled', 'requires_action')
           AND updatedAt < @updatedBefore
         ORDER BY updatedAt ASC LIMIT @limit
