@@ -137,6 +137,7 @@ export default defineConfig({
             { text: 'Model Hub', link: '/guide/model-hub' },
             { text: 'Model Inference', link: '/guide/inference' },
             { text: 'Agent Runs & Background', link: '/guide/agent-background-execution' },
+            { text: 'Agent Templates', link: '/guide/agent-templates' },
             { text: 'Agent Triggers', link: '/guide/agent-triggers' },
             { text: 'Approvals & Questions', link: '/guide/agent-approvals' },
             { text: 'Agent Sessions API', link: '/guide/agent-sessions' },

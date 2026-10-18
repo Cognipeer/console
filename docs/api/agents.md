@@ -372,6 +372,7 @@ Agents configured in the dashboard can include:
 | **Temperature / Top-P** | Model parameter overrides |
 | **Max Tokens** | Output length limit |
 | **Versioning** | Publish and pin specific agent configurations |
+| **Templates** | Start from one of 25 ready-made agents instead of an empty one. See [Agent templates](/guide/agent-templates). |
 
 ## Errors
 
