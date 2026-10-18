@@ -16428,6 +16428,9 @@ components:
         tool_name:
           type: string
           description: "`tool_approval` and `client_tool`: the tool the model wants to call, as it is named to the model. A `user_question` never carries it."
+        subagent:
+          type: string
+          description: "The sub-agent that asked, when the request comes from a sub-agent the agent delegated to (its tool call or its question). Absent when the agent itself asked."
         args:
           type: object
           additionalProperties: true
