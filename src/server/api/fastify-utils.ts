@@ -122,6 +122,19 @@ export function readJsonBody<T>(request: FastifyRequest): T {
 }
 
 /**
+ * readJsonBody for a handler that reads fields off the body: a literal `null`
+ * (or a bare string, number or boolean) is valid JSON but no body, so it throws
+ * the same SyntaxError an empty body does and the route answers 400.
+ */
+export function readJsonObjectBody<T extends object = Record<string, unknown>>(request: FastifyRequest): T {
+  const parsed: unknown = readJsonBody<unknown>(request);
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new SyntaxError('Request body must be a JSON object');
+  }
+  return parsed as T;
+}
+
+/**
  * Same as readJsonBody but never throws — returns `{}` on missing or malformed
  * payload. Use when the handler validates field-by-field and prefers to reply
  * with a domain-specific 400 rather than letting JSON parse errors leak out.

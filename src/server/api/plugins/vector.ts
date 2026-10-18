@@ -42,6 +42,7 @@ import {
 } from '@/lib/utils/dashboardDateFilter';
 import {
   readJsonBody,
+  readJsonObjectBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
@@ -717,7 +718,7 @@ export const vectorApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as VectorIndexQuery;
       const { projectId, session } = await requireProjectContextForRequest(request);
       const licenseType = session.licenseType as LicenseType;
-      const payload = readJsonBody<{ ids?: unknown[] }>(request);
+      const payload = readJsonObjectBody<{ ids?: unknown[] }>(request);
 
       if (!query.providerKey) {
         return reply.code(400).send({ error: 'providerKey query parameter is required' });

@@ -55,10 +55,11 @@ const surfaces = [
   {
     label: 'dashboard',
     plugin: projectsApiPlugin,
-    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>) => app.inject({
+    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, payload?: string) => app.inject({
       method: 'DELETE',
       url: `/api/projects/${PROJECT}/members`,
       headers: { ...sessionHeaders, 'content-type': 'application/json' },
+      ...(payload !== undefined ? { payload } : {}),
     }),
     remove: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, userId: string) => app.inject({
       method: 'DELETE',
@@ -70,10 +71,11 @@ const surfaces = [
   {
     label: 'client API',
     plugin: clientProjectsApiPlugin,
-    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>) => app.inject({
+    removeWithoutBody: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, payload?: string) => app.inject({
       method: 'DELETE',
       url: `/api/client/v1/projects/${PROJECT}/members`,
       headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+      ...(payload !== undefined ? { payload } : {}),
     }),
     remove: (app: Awaited<ReturnType<typeof createFastifyApiTestApp>>, userId: string) => app.inject({
       method: 'DELETE',
@@ -140,6 +142,16 @@ describe.each(surfaces)('DELETE project member: $label', ({ plugin, remove, remo
     const res = await remove(app, 'user-1');
     expect(res.statusCode).toBe(500);
     expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Failed to update membership');
+  });
+
+  it.each(['null', '"x"', '7', 'true'])('answers 400 for a JSON body that is not an object (%s)', async (payload) => {
+    const rawApp = await createFastifyApiTestApp(plugin, { rawJsonBody: true });
+    try {
+      const res = await removeWithoutBody(rawApp, payload);
+      expect(res.statusCode).toBe(400);
+    } finally {
+      await rawApp.close();
+    }
   });
 
   it('answers 400 (not a 500 with an error log) when the JSON content type comes with no body', async () => {
