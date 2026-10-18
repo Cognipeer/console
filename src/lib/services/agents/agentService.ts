@@ -1666,8 +1666,8 @@ async function buildAgentCostEstimator(
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
         models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
-        if (!(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
-            onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted in the turn's cost, the cost limit or the session budget.`);
+        if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
+            onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
         }
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
