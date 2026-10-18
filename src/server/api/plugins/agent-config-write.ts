@@ -337,3 +337,20 @@ export function pickAgentUpdateFields(body: Record<string, unknown>): Partial<Pi
   }
   return picked as Partial<Pick<IAgent, typeof AGENT_UPDATABLE_FIELDS[number]>>;
 }
+
+const AGENT_STATUSES = ['active', 'inactive', 'draft'] as const;
+
+/**
+ * The 400 body for a write whose `status` is not one of the agent statuses
+ * (`active`, `inactive`, `draft`), else null. An absent status is fine.
+ */
+export function invalidAgentStatusBody(body: Record<string, unknown>): Record<string, unknown> | null {
+  if (body.status === undefined) return null;
+  if (typeof body.status === 'string' && (AGENT_STATUSES as readonly string[]).includes(body.status)) return null;
+  return {
+    error: `status must be one of: ${AGENT_STATUSES.join(', ')}`,
+    type: 'invalid_request',
+    code: 'invalid_status',
+    field: 'status',
+  };
+}

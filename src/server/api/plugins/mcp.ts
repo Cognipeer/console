@@ -472,6 +472,11 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
+      // A remote server that needs no credential does not have to spell that out.
+      if ((body.upstreamAuth === undefined || body.upstreamAuth === null) && sourceType === 'remote') {
+        body.upstreamAuth = { type: 'none' };
+      }
+
       if (
         !body.upstreamAuth
         || typeof body.upstreamAuth !== 'object'

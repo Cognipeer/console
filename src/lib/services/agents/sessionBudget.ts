@@ -19,6 +19,7 @@
  */
 
 import { AgentBudgetReachedError } from './agentErrors';
+import { formatUsd } from '@/lib/utils/formatUsd';
 import type {
   IAgentConfig,
   IAgentConversation,
@@ -28,10 +29,6 @@ import type {
 /** Rounds away float dust so `0.1 + 0.2` does not read as `0.30000000000000004`. */
 export function roundUsd(value: number): number {
   return Math.round(value * 1e8) / 1e8;
-}
-
-function formatUsd(value: number): string {
-  return value >= 1 ? value.toFixed(2) : value.toFixed(4);
 }
 
 export { AgentBudgetReachedError };

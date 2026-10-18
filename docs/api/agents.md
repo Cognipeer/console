@@ -355,6 +355,10 @@ The id resolves to the run, and the run to its session, so the history is rebuil
 | **Models** | `GET /models` lists the project's models and its active agents (`agent:<key>`); a token with only the Agents service lists the agents alone. See [Inference](/guide/inference#model-discovery). |
 | **A2A** | `POST /a2a/{agentKey}`: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`. A run that was canceled answers a Task `canceled`, one that failed after it started (the quota refusal, a request that is still pending) a Task `failed` with `metadata.errorType` / `errorCode`; its status message is the run's own public message, the one `tasks/get` and `GET /agents/runs/{id}` read back, so a provider's own error text (its endpoint, deployment or request ids) never reaches the caller; `tasks/cancel` of a task that cannot be canceled is `-32002`. The public route (`/api/public/a2a/{tenantId}/{slug}`) binds a task to its caller: the ids are `run_<runId>.<nonce>` and `<sessionId>.<nonce>`, to be handed back whole (see the OpenAPI description). See [Approvals](/guide/agent-approvals#background-runs-and-a2a) and [Session files](/guide/session-files#files-the-agent-produces). |
 
+### Unknown fields
+
+The bodies of runs, responses and triggers ignore fields they do not define: a misspelled or retired name (`inputs`, `routine`) is not an error, it simply has no effect. Use `variables` for the values a run takes and `triggers` for scheduled and webhook starts. An agent's own `config` is different: a top-level key outside the config shape is dropped when the agent is saved, and never appears in an export.
+
 ### Cancelling
 
 One meaning on four routes: `POST /agents/runs/{runId}/cancel`, `POST /agents/sessions/{sessionId}/cancel`, `POST /responses/{id}/cancel` and A2A `tasks/cancel`. A queued or scheduled run is cancelled at once, a running one stops before its next step, a run that waits for an approval is ended and its requests cancelled. Details are in [Agent runs](/guide/agent-background-execution#cancel).

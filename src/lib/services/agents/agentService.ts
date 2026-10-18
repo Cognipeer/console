@@ -2213,12 +2213,14 @@ export async function buildBoundTools(
                         },
                         async (args: Record<string, unknown>) => {
                             try {
-                                const { result, latencyMs } = await executeToolAction(
+                                const { result, latencyMs, isError } = await executeToolAction(
                                     toolRecord, action.key, args, toolRuntimeHeaders,
                                 );
+                                // An MCP `isError` result is a failed call: logged as one, the text still reaches the model.
                                 log(
-                                    'success', latencyMs, args,
+                                    isError ? 'error' : 'success', latencyMs, args,
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
+                                    isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
                                 );
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {

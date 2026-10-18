@@ -304,7 +304,7 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
       const secretValues = toolRequestSecretValues(tool, runtimeHeaders);
 
       try {
-        const { latencyMs, result } = await executeToolAction(tool, actionKey, args, runtimeHeaders);
+        const { latencyMs, result, isError } = await executeToolAction(tool, actionKey, args, runtimeHeaders);
 
         void logToolRequest(
           session.tenantDbName,
@@ -313,11 +313,11 @@ export const toolsApiPlugin: FastifyPluginAsync = async (app) => {
           tool.key,
           actionKey,
           actionName,
-          'success',
+          isError ? 'error' : 'success',
           latencyMs,
           args,
           typeof result === 'object' ? result as Record<string, unknown> : { value: result },
-          undefined,
+          isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
           'dashboard',
           undefined,
           runtimeAuth,

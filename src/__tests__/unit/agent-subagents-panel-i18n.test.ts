@@ -34,6 +34,11 @@ describe('agents.subagents messages', () => {
     expect(source).not.toMatch(/>\s*(Sub-agents|Add sub-agent|Delegation guards|Remove|Cancel)\s*</);
   });
 
+  it('edits a sub-agent in a full-screen FormShell, not a Modal', () => {
+    expect(source).toMatch(/<FormShell\b/);
+    expect(source).not.toMatch(/<Modal\b/);
+  });
+
   it('describes what the runtime does with a referenced agent and with approvals', () => {
     const text = `${en.refNote} ${en.promptRefDescription} ${en.modelRefDescription}`;
     expect(text).toMatch(/name, header, system prompt and model/);

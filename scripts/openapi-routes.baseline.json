@@ -71,7 +71,6 @@
     "DELETE /client/v1/realtime/models/{}",
     "DELETE /client/v1/sandbox/sandboxes/{}",
     "DELETE /client/v1/sandbox/sandboxes/{}/sessions/{}",
-    "DELETE /client/v1/tools/{}",
     "GET /client/v1/mcp/hubs",
     "GET /client/v1/mcp/hubs/{}",
     "GET /client/v1/mcp/hubs/{}/servers",
@@ -88,11 +87,8 @@
     "GET /client/v1/sandbox/sandboxes/{}/sessions",
     "GET /client/v1/sandbox/sandboxes/{}/sessions/{}/commands/{}/logs",
     "GET /client/v1/sandbox/snapshots",
-    "GET /client/v1/tools",
-    "GET /client/v1/tools/{}",
     "PATCH /client/v1/realtime/models/{}",
     "PATCH /client/v1/sandbox/sandboxes/{}/preview",
-    "PATCH /client/v1/tools/{}",
     "POST /client/v1/realtime/models",
     "POST /client/v1/realtime/sessions/{}/messages",
     "POST /client/v1/sandbox/sandboxes",
@@ -128,9 +124,6 @@
     "POST /client/v1/sandbox/sandboxes/{}/snapshot",
     "POST /client/v1/sandbox/sandboxes/{}/start",
     "POST /client/v1/sandbox/sandboxes/{}/stop",
-    "POST /client/v1/sandbox/snapshots/{}/restore",
-    "POST /client/v1/tools",
-    "POST /client/v1/tools/{}/actions/{}/execute",
-    "POST /client/v1/tools/{}/sync"
+    "POST /client/v1/sandbox/snapshots/{}/restore"
   ]
 }

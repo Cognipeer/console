@@ -186,6 +186,14 @@ describe('applyAgentDocumentImport', () => {
         await expect(applyAgentDocumentImport(CTX, { content: 'name: x', modelKey: 'opus' })).rejects.toMatchObject({ status: 422 });
     });
 
+    it('skips the web_fetch (Browser Use) binding with a warning instead of producing an invalid config', async () => {
+        const doc = DOC.replace('      - name: bash\n', '      - name: web_fetch\n        enabled: true\n      - name: bash\n');
+        const result = await applyAgentDocumentImport(CTX, { content: doc, modelKey: 'opus', mcp: { github: { action: 'skip' }, jira: { action: 'skip' } } });
+        const manifest = fn(applyAgentManifest).mock.calls[0][4];
+        expect(JSON.stringify(manifest.spec.toolBindings)).not.toContain('browser_use');
+        expect(result.warnings.some((w) => w.code === 'web_fetch_skipped')).toBe(true);
+    });
+
     it('turns on the sandbox when it is available', async () => {
         fn(resolveSandboxAvailability).mockResolvedValue({ available: true });
         await applyAgentDocumentImport(CTX, { content: DOC, modelKey: 'opus', mcp: { github: { action: 'skip' }, jira: { action: 'skip' } } });
@@ -258,7 +266,7 @@ describe('cognipeer manifest with embedded definitions', () => {
             },
         });
         expect(fn(createMcpServer).mock.calls[0][4]).toMatchObject({ key: 'github', sourceType: 'remote', upstreamAuth: { type: 'token', token: 'ghp_x' } });
-        expect(fn(createTool).mock.calls[0][4]).toMatchObject({ upstreamAuth: { type: 'header', headerName: 'X-Key', headerValue: 'k' } });
+        expect(fn(createTool).mock.calls[0][4]).toMatchObject({ key: 'crm', upstreamAuth: { type: 'header', headerName: 'X-Key', headerValue: 'k' } });
         expect(createPrompt).not.toHaveBeenCalled();
         const written = fn(applyAgentManifest).mock.calls[0][4];
         expect(written.resources).toBeUndefined();

@@ -417,3 +417,27 @@ describe('validateAgentConfig: where session files are kept', () => {
         expect(db.findFileBucketByKey).not.toHaveBeenCalled();
     });
 });
+
+describe('skillPolicy and sub-agent name shape', () => {
+  it('refuses out-of-range skill policy values', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', skillPolicy: { maxOpenSkills: -3, maxBoundToolsPerSkill: 1.5, maxBoundToolsTotal: 5000, disclosure: 'x' } } as never);
+    expect(result.errors.map((e) => e.field).sort()).toEqual([
+      'skillPolicy.disclosure', 'skillPolicy.maxBoundToolsPerSkill', 'skillPolicy.maxBoundToolsTotal', 'skillPolicy.maxOpenSkills',
+    ]);
+    expect(validateAgentConfigShape({ modelKey: 'm', skillPolicy: { maxOpenSkills: 3, disclosure: 'search' } } as never).errors).toEqual([]);
+  });
+
+  it('warns (does not refuse) on a sub-agent name outside lowercase letters, digits and underscores', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', subagents: [{ kind: 'inline', name: 'Research-Bot', header: 'h', systemPrompt: 'p' }] } as never);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.map((w) => w.field)).toContain('subagents[0].name');
+  });
+});
+
+describe('callback secret without a url', () => {
+  it('is refused instead of silently dropped', () => {
+    const result = validateAgentConfigShape({ modelKey: 'm', callback: { secret: 'a-long-enough-secret-value' } } as never);
+    expect(result.errors.map((e) => e.field)).toContain('callback.secret');
+    expect(validateAgentConfigShape({ modelKey: 'm', callback: { url: 'https://example.com/hook', secret: 'a-long-enough-secret-value' } } as never).errors).toEqual([]);
+  });
+});

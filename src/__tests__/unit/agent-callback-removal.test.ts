@@ -46,11 +46,11 @@ describe('updating an agent that has a callback with a stored secret', () => {
     ];
 
     it.each(REMOVING)('%s clears the field and the stored secret with it', async (_label, callback) => {
-        await updateAgentRecord('t_db', 'a1', { config: { modelKey: 'm', description: 'kept', callback } as never }, 'u');
+        await updateAgentRecord('t_db', 'a1', { config: { modelKey: 'm', systemPrompt: 'kept', callback } as never }, 'u');
         const saved = writtenConfig();
         expect('callback' in saved).toBe(false);
         expect(JSON.stringify(saved)).not.toContain('secretSealed');
-        expect(saved).toEqual({ modelKey: 'm', description: 'kept' });
+        expect(saved).toEqual({ modelKey: 'm', systemPrompt: 'kept' });
     });
 
     it('a config saved without a callback key has none afterwards either', async () => {

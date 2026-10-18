@@ -252,7 +252,7 @@ export async function createTool(
   projectId: string | undefined,
   input: CreateToolInput,
 ): Promise<ITool> {
-  const key = await generateUniqueKey(tenantDbName, projectId, input.name);
+  const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
 
   let actions: IToolAction[] = [];
   let upstreamBaseUrl = input.upstreamBaseUrl;
@@ -641,7 +641,10 @@ async function executeMcpAction(
     result = data.result;
   }
 
-  return { result, latencyMs };
+  // A tool that failed on the server's side answers 200 with `isError: true`. The text still goes to the
+  // caller (the model reads it), but the call is a failure for logs and metrics.
+  const isError = data?.result?.isError === true;
+  return { result, latencyMs, ...(isError ? { isError: true } : {}) };
 }
 
 // ── Serialization ─────────────────────────────────────────────────────────

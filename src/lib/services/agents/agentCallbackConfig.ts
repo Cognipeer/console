@@ -65,12 +65,36 @@ export function agentDefaultCallback(agentConfig?: Pick<IAgentConfig, 'callback'
 }
 
 /**
- * Drops the removed Execution settings (`config.execution`, gone with the run
- * engine rework) from a config about to be saved. Stored agents may still
- * carry the blob; nothing reads it, and the next save removes it.
+ * Every top-level key an agent config may carry. Typed as a full record of
+ * `IAgentConfig`, so adding a field to the interface fails to compile until it
+ * is listed here (otherwise saves would silently drop it).
+ */
+const AGENT_CONFIG_KEYS: Record<keyof IAgentConfig, true> = {
+  modelKey: true, reasoningEffort: true, reasoningBudgetTokens: true, showReasoning: true,
+  additionalModels: true, systemPrompt: true, promptKey: true, promptVariables: true,
+  temperature: true, topP: true, maxTokens: true, knowledgeEngineKey: true,
+  knowledgeBindings: true, knowledgeToolMode: true, guardrails: true,
+  inputGuardrailKey: true, outputGuardrailKey: true, toolBindings: true, kind: true,
+  connection: true, runtime: true, structuredOutput: true, subagents: true,
+  subagentPolicy: true, skills: true, skillPolicy: true, memory: true, sandbox: true,
+  callback: true, budget: true, variables: true, humanInTheLoop: true,
+  attachments: true, clientTools: true, clientToolSurfaces: true,
+};
+
+/**
+ * Drops top-level keys an agent config does not define from a config about to
+ * be saved or exported: the removed Execution settings (`config.execution`),
+ * the never-shipped `inputs` / `routine(s)` blobs, and any stray key a client
+ * sent. Nothing reads them; keeping them only made them round-trip through
+ * exports. Stored agents may still carry such keys; the next save removes them.
  */
 export function stripLegacyExecutionConfig<T extends IAgentConfig>(config: T): T {
-  if (!config || !Object.prototype.hasOwnProperty.call(config, 'execution')) return config;
-  const { execution: _legacy, ...rest } = config as T & { execution?: unknown };
-  return rest as T;
+  if (!config || typeof config !== 'object') return config;
+  const keys = Object.keys(config);
+  if (keys.every((key) => Object.prototype.hasOwnProperty.call(AGENT_CONFIG_KEYS, key))) return config;
+  const kept: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(AGENT_CONFIG_KEYS, key)) kept[key] = (config as Record<string, unknown>)[key];
+  }
+  return kept as T;
 }

@@ -37,6 +37,7 @@ import {
 import { authz } from '@/lib/iam/routeAuthz';
 import {
   connectedConfigForUpdate,
+  invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
   prepareNewAgentConfig,
@@ -527,6 +528,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
 
       if (typeof body.name !== 'string' || body.name.trim() === '') {
         return reply.code(400).send({ error: 'Agent name is required' });
@@ -581,6 +584,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);
+      const invalidStatus = invalidAgentStatusBody(body);
+      if (invalidStatus) return reply.code(400).send(invalidStatus);
 
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;

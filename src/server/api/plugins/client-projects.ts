@@ -229,6 +229,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (result === 'failed') return reply.code(500).send({ error: 'Failed to update membership' });
       return reply.code(200).send({ success: true });
     } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Request body must be valid JSON' });
       logger.error('Client remove project member error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }

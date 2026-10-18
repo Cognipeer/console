@@ -195,12 +195,12 @@ describe('agent callback secret (config.callback)', () => {
     });
 
     it('sealAgentConfigSecrets clears the field when the callback has no URL, and leaves everything else alone', () => {
-        const withStored = { modelKey: 'm', description: 'keep me', callback: stored } as IAgentConfig;
+        const withStored = { modelKey: 'm', systemPrompt: 'keep me', callback: stored } as IAgentConfig;
         for (const callback of [{}, { url: '' }, { url: '', secret: MASK }, { secret: MASK }, null]) {
-            const next = sealAgentConfigSecrets({ modelKey: 'm', description: 'keep me', callback } as unknown as IAgentConfig, withStored);
+            const next = sealAgentConfigSecrets({ modelKey: 'm', systemPrompt: 'keep me', callback } as unknown as IAgentConfig, withStored);
             expect('callback' in next, JSON.stringify(callback)).toBe(false);
             expect(JSON.stringify(next)).not.toContain('secretSealed');
-            expect(next).toEqual({ modelKey: 'm', description: 'keep me' });
+            expect(next).toEqual({ modelKey: 'm', systemPrompt: 'keep me' });
         }
         // No callback key at all stays no callback key (the stored one is not carried over: `config` replaces).
         expect('callback' in sealAgentConfigSecrets({ modelKey: 'm' }, withStored)).toBe(false);

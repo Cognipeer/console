@@ -20,6 +20,7 @@ import { getRoutingAnalytics } from '@/lib/services/models/routingAnalytics';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
   ModelCapabilityValidationError,
+  ModelKeyConflictError,
   parseModelCapabilityOverrides,
   resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
@@ -559,6 +560,9 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Create model error', { error });
+      if (error instanceof ModelKeyConflictError) {
+        return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
+      }
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }
