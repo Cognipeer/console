@@ -120,6 +120,16 @@ export async function registerNextHandoff(
     scope.addContentTypeParser('*', (_request, _payload, done) => done(null));
 
     scope.all('/*', async (request, reply) => {
+      // Next serves pages and assets only: it has no API routes, so a path under /api that no Fastify route
+      // claimed (or claimed for another method) would come back as an HTML 404 page. Answer it as JSON.
+      const path = request.raw.url?.split('?')[0] ?? '';
+      if (path === '/api' || path.startsWith('/api/')) {
+        return reply.code(404).send({
+          error: `No route ${request.method} ${path}`,
+          type: 'not_found',
+          code: 'route_not_found',
+        });
+      }
       await handle(request.raw, reply.raw);
       reply.hijack();
     });
