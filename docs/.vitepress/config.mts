@@ -60,7 +60,7 @@ export default defineConfig({
       { text: 'Architecture', link: '/guide/architecture' },
       { text: 'Core Modules', link: '/guide/core-overview' },
       { text: 'API Reference', link: '/api/overview' },
-      { text: 'SDK Docs', link: 'https://cognipeer.github.io/console-sdk/' },
+      { text: 'SDK Docs', link: 'https://docs.cognipeer.com/console-sdk/' },
       { text: 'Licensing', link: '/guide/licensing' },
       {
         // The current community release line. Bump this when a new minor line

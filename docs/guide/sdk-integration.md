@@ -11,7 +11,7 @@ Cognipeer Console and the Console SDK solve different layers of the same system.
 | --- | --- |
 | Deploying or operating the platform | Cognipeer Console docs |
 | Configuring tenants, providers, prompts, tools, agents, or guardrails | Cognipeer Console docs |
-| Writing backend or frontend application code against the API | [Console SDK docs](https://cognipeer.github.io/console-sdk/) |
+| Writing backend or frontend application code against the API | [Console SDK docs](https://docs.cognipeer.com/console-sdk/) |
 | Debugging raw HTTP request and response behavior | Console API Reference |
 | Generating a client in another language, or driving contract tests | [OpenAPI Specification](/api/openapi) |
 
@@ -21,7 +21,7 @@ Cognipeer Console and the Console SDK solve different layers of the same system.
 2. Configure providers, models, storage, and any policies you need.
 3. Create an API token in the dashboard.
 4. Capture the client API base URL for your deployment.
-5. Install the [Console SDK](https://cognipeer.github.io/console-sdk/guide/getting-started).
+5. Install the [Console SDK](https://docs.cognipeer.com/console-sdk/guide/getting-started).
 6. Implement application calls with the SDK while using the Console dashboards for observability and operations.
 
 ## Responsibilities Split
@@ -49,5 +49,5 @@ The SDK expects the client API surface, not just the dashboard origin.
 
 - [API Reference Overview](/api/overview) for the raw client API surface.
 - [Authentication](/guide/authentication) for how Console issues and validates tokens.
-- [Console SDK Getting Started](https://cognipeer.github.io/console-sdk/guide/getting-started) for client setup.
-- [Console SDK API Mapping](https://cognipeer.github.io/console-sdk/api/console-mapping) to map SDK methods to Console endpoints.
+- [Console SDK Getting Started](https://docs.cognipeer.com/console-sdk/guide/getting-started) for client setup.
+- [Console SDK API Mapping](https://docs.cognipeer.com/console-sdk/api/console-mapping) to map SDK methods to Console endpoints.
