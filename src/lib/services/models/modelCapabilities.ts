@@ -41,6 +41,15 @@ export class ModelCapabilityValidationError extends Error {
   }
 }
 
+/** A create named a key (not just a name) that another model in the project already has. */
+export class ModelKeyConflictError extends Error {
+  readonly code = 'model_key_conflict';
+  constructor(readonly key: string) {
+    super(`A model with key "${key}" already exists in this project`);
+    this.name = 'ModelKeyConflictError';
+  }
+}
+
 const INPUT_MODALITIES = new Set<ModelInputModality>([
   'text',
   'image',

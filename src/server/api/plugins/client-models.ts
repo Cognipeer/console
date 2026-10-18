@@ -49,6 +49,7 @@ import { toOpenAiAgentListEntry, toOpenAiModelListResponse } from '@/lib/service
 import { getAgentByKey, listAgents } from '@/lib/services/agents';
 import {
   ModelCapabilityValidationError,
+  ModelKeyConflictError,
   parseModelCapabilityOverrides,
   resolveModelCapabilities,
 } from '@/lib/services/models/modelCapabilities';
@@ -312,6 +313,9 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(201).send({ model: sanitizeModel(model) });
     } catch (error) {
       logger.error('Client create model error', { error });
+      if (error instanceof ModelKeyConflictError) {
+        return reply.code(409).send({ error: error.message, type: error.code, code: error.code });
+      }
       if (error instanceof ModelCapabilityValidationError) {
         return reply.code(400).send({ error: error.message });
       }

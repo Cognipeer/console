@@ -32,7 +32,7 @@ import type {
   ModelProviderView,
   CreateModelProviderInput,
 } from './types';
-import { applyModelCapabilityOverrides, ModelCapabilityValidationError } from './modelCapabilities';
+import { applyModelCapabilityOverrides, ModelCapabilityValidationError, ModelKeyConflictError } from './modelCapabilities';
 import { validateUpstreamApi } from './upstreamApi';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
@@ -211,7 +211,12 @@ export async function createModel(
     await validateDynamicConfigReferences(tenantDbName, projectId, createDynamic, payload.key);
   }
 
-  const keyCandidate = payload.key || payload.name;
+  // A key the caller named is theirs to keep: a clash is a 409. A key derived from the name is suffixed (-2, -3 ...).
+  const namedKey = payload.key?.trim();
+  if (namedKey && await db.findModelByKey(normalizeKeyCandidate(namedKey), projectId)) {
+    throw new ModelKeyConflictError(normalizeKeyCandidate(namedKey));
+  }
+  const keyCandidate = namedKey || payload.name;
   const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
 
   const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
