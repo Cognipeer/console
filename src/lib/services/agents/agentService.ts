@@ -6587,7 +6587,6 @@ async function runAgentResumeTurn(
         const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
-        await reconcileTrace(usage);
         const compactedTools = compactions.length > 0
             ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
@@ -6598,6 +6597,8 @@ async function runAgentResumeTurn(
         // the SDK counts only the leg it just ran. The stored message keeps its own leg.
         const earlierLegs = pausedRun ? pausedLegsUsage(conversation.messages ?? []) : undefined;
         const turnUsage = earlierLegs ? (usage ? addPlaygroundUsage(earlierLegs, usage) : earlierLegs) : usage;
+        // The trace session spans every leg of the turn, so it is reconciled with all of them.
+        await reconcileTrace(turnUsage);
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
