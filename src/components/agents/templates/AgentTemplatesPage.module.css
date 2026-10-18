@@ -1,0 +1,23 @@
+.toolbar { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chipLabel { font-size: 11px; color: var(--mantine-color-dimmed); margin-right: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.sectionTitle { font-size: 13px; font-weight: 600; margin: 22px 0 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.card {
+  text-align: left; display: flex; flex-direction: column; gap: 8px; padding: 14px; cursor: pointer;
+  border: 1px solid var(--mantine-color-default-border); border-radius: 10px; background: var(--mantine-color-body);
+  font: inherit; color: inherit;
+}
+.card:hover { border-color: var(--mantine-color-teal-6); }
+.card:focus-visible { outline: 2px solid var(--mantine-color-teal-6); outline-offset: 2px; }
+.cardHead { display: flex; align-items: center; gap: 10px; }
+.cardIcon { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: var(--mantine-color-teal-light); color: var(--mantine-color-teal-light-color); flex: none; }
+.cardName { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+.cardSummary { font-size: 12.5px; color: var(--mantine-color-dimmed); line-height: 1.45; }
+.cardFoot { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: auto; }
+.where { font-size: 11px; color: var(--mantine-color-dimmed); margin-left: auto; }
+.section { margin-bottom: 18px; }
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 13px; }
+.kvLabel { color: var(--mantine-color-dimmed); }
+.prompt { max-height: 280px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+.secret { font-family: var(--mantine-font-family-monospace); font-size: 12px; word-break: break-all; }
