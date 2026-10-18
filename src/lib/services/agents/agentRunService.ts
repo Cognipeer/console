@@ -2124,7 +2124,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       settleAgentRun(quotaCaller, usage, raced.response.usage?.total_tokens);
 
       const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced.response;
-      const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };
+      // `model` names the agent the way every other agent surface does (`agent:<key>`), not by its display name.
+      const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}`, model: `agent:${request.agentKey}` };
       if (responseWithRunId.status === 'requires_action') {
         // Paused for a person: not terminal. The run waits as `requires_action`
         // (the conversation's slot is free) until the actions are resolved.
