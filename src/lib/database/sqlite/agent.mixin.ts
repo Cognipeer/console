@@ -616,10 +616,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.agentPendingActions}
         (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
          allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy,
-         clientTool)
+         clientTool, subagent)
         VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
          @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
-         @usePublished, @createdBy, @clientTool)
+         @usePublished, @createdBy, @clientTool, @subagent)
       `);
       const created: IAgentPendingAction[] = actions.map((action) => ({
         ...action,
@@ -651,6 +651,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             usePublished: action.usePublished === undefined ? null : action.usePublished ? 1 : 0,
             createdBy: action.createdBy ?? null,
             clientTool: action.clientTool ? this.toJson(action.clientTool) : null,
+            subagent: action.subagent ?? null,
           });
         }
       })();
@@ -931,6 +932,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.usePublished !== null && row.usePublished !== undefined ? { usePublished: Number(row.usePublished) === 1 } : {}),
         ...(row.createdBy ? { createdBy: String(row.createdBy) } : {}),
         ...(row.clientTool ? { clientTool: this.parseJson<NonNullable<IAgentPendingAction['clientTool']>>(row.clientTool, { timeoutSeconds: 60 }) } : {}),
+        ...(row.subagent ? { subagent: String(row.subagent) } : {}),
       };
     }
 

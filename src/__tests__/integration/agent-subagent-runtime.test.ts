@@ -19,7 +19,10 @@ import {
   SDK_HAS_DELEGATION_HARDENING,
   ScriptedModel,
   answer,
+  callTools,
   delegateTo,
+  shownText,
+  toolCall,
   type Script,
 } from '../helpers/subagentRun';
 
@@ -685,6 +688,70 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(await warningsOf(id)).toEqual([
         'Sub-agent "writer" runs on this agent\'s model: model "writer-model" does not exist in this project or is not a chat model.',
       ]);
+    });
+  });
+  describe('approvals through delegation (CON-2)', () => {
+    const asking = { toolApproval: { enabled: true, defaultPolicy: 'always' as const } };
+    const withTool = (extra: Partial<Subagent> = {}) => inlineHelper({
+      toolBindings: [{ source: 'tool', sourceKey: 'crm', toolNames: ['lookup'] }],
+      ...extra,
+    } as Partial<Subagent>);
+
+    beforeEach(async () => {
+      await db.createTool({
+        tenantId, projectId: PROJECT_ID, key: 'crm', name: 'CRM', type: 'openapi', status: 'active', createdBy: OWNER,
+        actions: [{
+          key: 'lookup', name: 'lookup', description: 'Looks a customer up', inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+          executionType: 'openapi_http', httpMethod: 'GET', httpPath: '/c',
+        }],
+      } as never);
+    });
+
+    const parentDelegates = () => script('main', (call) => (call === 0 ? delegateTo('d1', 'helper', 'find them') : answer('done')));
+    const childCallsLookup = () => script('worker', (call) => (call === 0 ? callTools([toolCall('t1', 'lookup', { q: 'acme' })]) : answer('child done')));
+    const actionsOf = (result: unknown) => ((result as { required_action?: { actions?: Array<Record<string, unknown>> } }).required_action?.actions ?? []);
+    const freshConv = async () => String((await newConversation())._id);
+
+    it('pauses on a tool of an inline sub-agent when the delegating agent asks about its tools, and names the sub-agent', async () => {
+      await createAgent({ subagents: [withTool()], humanInTheLoop: asking });
+      parentDelegates();
+      childCallsLookup();
+      const id = await freshConv();
+
+      const result = await chat(id, 'who is acme');
+
+      expect(actionsOf(result)).toHaveLength(1);
+      expect(actionsOf(result)[0]).toMatchObject({ kind: 'tool_approval', tool_name: 'lookup', subagent: 'helper' });
+      const message = (await stored(id)).messages.at(-1)!;
+      expect(message.pendingActions?.[0]).toMatchObject({ toolName: 'lookup', subagent: 'helper' });
+    });
+
+    it('refuses the call on a run nobody can answer, and the sub-agent carries on without the tool', async () => {
+      await createAgent({ subagents: [withTool()], humanInTheLoop: asking });
+      parentDelegates();
+      const worker = childCallsLookup();
+      const id = await freshConv();
+
+      const result = await chat(id, 'who is acme', { unattended: true });
+
+      expect(actionsOf(result)).toEqual([]);
+      expect(shownText(worker)).toContain('needs human approval');
+      expect(worker.seen).toHaveLength(2);
+    });
+
+    it('also asks when only the referenced agent asks about its tools', async () => {
+      await createAgent({
+        modelKey: 'worker', systemPrompt: 'You look things up.', humanInTheLoop: asking,
+        toolBindings: [{ source: 'tool', sourceKey: 'crm', toolNames: ['lookup'] }],
+      } as Partial<IAgentConfig>, 'crm-agent');
+      await createAgent({ subagents: [{ kind: 'ref', name: 'helper', header: 'Looks up', agentKey: 'crm-agent', enabled: true } as Subagent] });
+      parentDelegates();
+      childCallsLookup();
+      const id = await freshConv();
+
+      const result = await chat(id, 'who is acme');
+
+      expect(actionsOf(result)[0]).toMatchObject({ tool_name: 'lookup', subagent: 'helper' });
     });
   });
 });

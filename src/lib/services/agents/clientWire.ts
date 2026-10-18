@@ -47,6 +47,7 @@ export interface ClientPendingAction {
     id: string;
     kind: string;
     tool_name?: string;
+    subagent?: string;
     args?: unknown;
     questions?: unknown[];
     allow_free_text?: boolean;
@@ -61,6 +62,7 @@ export interface PendingActionLike {
     id: string;
     kind: string;
     toolName?: string;
+    subagent?: string;
     args?: unknown;
     questions?: unknown[];
     allowFreeText?: boolean;
@@ -77,6 +79,7 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
         // A question is not a tool call: the stored `toolName` of one (the SDK's
         // ask-user tool) is an internal detail and stays off the wire.
         ...(action.toolName && action.kind !== 'user_question' ? { tool_name: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: toSnakeCaseDeep<unknown[]>(action.questions) } : {}),
         ...(action.allowFreeText !== undefined ? { allow_free_text: action.allowFreeText } : {}),

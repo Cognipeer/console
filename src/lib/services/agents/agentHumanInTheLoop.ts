@@ -233,6 +233,35 @@ export function denyUnattendedTools<T extends ToolRecord>(
     });
 }
 
+/** One set of approval settings a sub-agent's tools answer to, and how it applies to this run. */
+export interface ChildApprovalSide {
+    hitl: ResolvedHitlConfig;
+    mode: HitlRunMode;
+}
+
+/**
+ * The tools of a sub-agent, gated the way the people who own it would gate them.
+ * A sub-agent's tools answer to every side that applies to it: the delegating
+ * agent's settings always, and, when the sub-agent is another agent, that agent's
+ * own settings too. A tool that any side gates is gated; a side that cannot ask
+ * anybody on this run (`deny`) refuses the call, whatever the other sides say.
+ * Calls that wait for approval are applied first so a refusal is never undone.
+ */
+export function gateChildTools<T extends ToolRecord>(
+    tools: T[],
+    sides: ChildApprovalSide[],
+    allowedTools: ReadonlySet<string>,
+): T[] {
+    let gated = tools;
+    for (const side of sides) {
+        if (side.mode === 'ask') gated = applyToolApprovals(gated, side.hitl, allowedTools);
+    }
+    for (const side of sides) {
+        if (side.mode === 'deny') gated = denyUnattendedTools(gated, side.hitl, allowedTools);
+    }
+    return gated;
+}
+
 /** Warnings/errors for the saved config — `agentConfigValidation` merges them into its report. */
 export function validateHitlConfig(config: IAgentConfig): {
     errors: Array<{ field: string; message: string }>;
@@ -274,12 +303,6 @@ export function validateHitlConfig(config: IAgentConfig): {
         enumCheck('humanInTheLoop.toolApproval.defaultPolicy', approval.defaultPolicy, ['always', 'never']);
         for (const [tool, policy] of Object.entries(approval.tools ?? {})) {
             enumCheck(`humanInTheLoop.toolApproval.tools.${tool}`, policy, ['always', 'never']);
-        }
-        if (approval.enabled && (config.subagents ?? []).length > 0) {
-            warnings.push({
-                field: 'humanInTheLoop.toolApproval',
-                message: 'Tool approval covers this agent\'s own tools only; tool calls made by its sub-agents run without asking',
-            });
         }
     }
     if (hitl.unattended === 'allow' && (approval?.enabled || hitl.askUser?.enabled)) {

@@ -212,9 +212,13 @@ import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     denyUnattendedTools,
+    gateChildTools,
     resolveHitlConfig,
     resolveHitlRunMode,
     sessionAllowedTools,
+    type ChildApprovalSide,
+    type HitlRunMode,
+    type ResolvedHitlConfig,
 } from './agentHumanInTheLoop';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
 import {
@@ -1837,6 +1841,16 @@ type BuildSubagentsInput = {
     };
     /** Reports, once, a child that was skipped or runs short of what its author set up. */
     onWarning?: (message: string) => void;
+    /**
+     * How the delegating run answers tool approvals, so a child's tools are gated like the parent's own:
+     * the parent's settings and mode, and (for a `ref` child) its agent's settings under the same run.
+     */
+    approvals?: {
+        hitl: ResolvedHitlConfig;
+        mode: HitlRunMode;
+        run: { unattended?: boolean; canPause?: boolean };
+        allowedTools: ReadonlySet<string>;
+    };
 };
 
 /**
@@ -1879,6 +1893,7 @@ async function buildAgentSubagents(
         let toolBindings = entry.toolBindings;
         let knowledgeSource: KnowledgeBindingSource = { knowledgeEngineKey: entry.knowledgeEngineKey };
         let modelKey = entry.modelKey;
+        let targetHitl: ResolvedHitlConfig | undefined;
 
         if (entry.kind === 'ref') {
             const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
@@ -1895,6 +1910,7 @@ async function buildAgentSubagents(
                 knowledgeToolMode: target.config.knowledgeToolMode,
             };
             modelKey = entry.modelKey ?? target.config.modelKey;
+            targetHitl = resolveHitlConfig(target.config.humanInTheLoop);
         }
 
         if (entry.kind !== 'ref') systemPrompt = await resolveChildPrompt(input, entry);
@@ -1932,6 +1948,13 @@ async function buildAgentSubagents(
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
+        }
+
+        if (input.approvals && childTools.length > 0) {
+            const { hitl, mode, run, allowedTools } = input.approvals;
+            const sides: ChildApprovalSide[] = [{ hitl, mode }];
+            if (targetHitl) sides.push({ hitl: targetHitl, mode: resolveHitlRunMode(targetHitl, run) });
+            childTools.splice(0, childTools.length, ...gateChildTools(childTools, sides, allowedTools));
         }
 
         let childModel: unknown;
@@ -4202,6 +4225,7 @@ async function buildLocalAgentRun(input: {
             ...(input.userId ? { userId: input.userId } : {}),
         },
         onWarning: (message) => warnings.add(message),
+        approvals: { hitl, mode: hitlMode, run: { unattended: input.unattended, canPause: input.canPause }, allowedTools },
     });
     cleanupTasks.push(...subagentCleanupTasks);
 

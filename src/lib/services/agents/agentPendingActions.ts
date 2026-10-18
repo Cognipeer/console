@@ -46,6 +46,8 @@ export interface PublicPendingAction {
     id: string;
     kind: IAgentPendingAction['kind'];
     toolName?: string;
+    /** The sub-agent whose tool call or question this is; absent for the agent's own. */
+    subagent?: string;
     args?: unknown;
     questions?: IAgentPendingAction['questions'];
     allowFreeText?: boolean;
@@ -61,6 +63,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         id: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -77,6 +80,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         id: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -92,6 +96,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         actionId: String(action._id),
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
+        ...(action.subagent ? { subagent: action.subagent } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -211,11 +216,19 @@ interface PauseEntry {
     sdkId: string;
     toolCallId?: string;
     toolName?: string;
+    /** The sub-agent that asked, when the SDK surfaced a child's pause. */
+    subagent?: string;
     args?: unknown;
     questions?: IAgentUserQuestion[];
     allowFreeText?: boolean;
     /** `client_tool`: how long the host page may take. */
     timeoutSeconds?: number;
+}
+
+/** The sub-agent the SDK tagged a surfaced child pause with. */
+function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string } {
+    const tag = entry.metadata?.__subagent as { name?: unknown } | undefined;
+    return typeof tag?.name === 'string' && tag.name ? { subagent: tag.name } : {};
 }
 
 /** The approvals, questions and client tool calls the SDK state is waiting on. */
@@ -228,6 +241,7 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
             sdkId: approval.id,
             toolCallId: approval.toolCallId,
             toolName: approval.toolName,
+            ...subagentField(approval),
             args: approval.args,
         });
     }
@@ -251,6 +265,7 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
             sdkId: question.id,
             toolCallId: question.toolCallId,
             toolName: question.toolName,
+            ...subagentField(question as { metadata?: Record<string, unknown> }),
             questions: question.questions as unknown as IAgentUserQuestion[],
             allowFreeText: question.allowFreeText,
         });
@@ -323,6 +338,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         sdkId: entry.sdkId,
         ...(entry.toolCallId ? { toolCallId: entry.toolCallId } : {}),
         ...(entry.toolName ? { toolName: entry.toolName } : {}),
+        ...(entry.subagent ? { subagent: entry.subagent } : {}),
         ...(entry.args !== undefined ? { args: entry.args } : {}),
         ...(entry.questions ? { questions: entry.questions } : {}),
         ...(entry.allowFreeText !== undefined ? { allowFreeText: entry.allowFreeText } : {}),
