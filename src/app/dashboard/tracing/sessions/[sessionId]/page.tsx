@@ -231,6 +231,13 @@ function sourceBadge(source?: string) {
             </Badge>
         );
     }
+    if (source === 'trigger') {
+        return (
+            <Badge size="xs" variant="light" color="teal">
+                Trigger
+            </Badge>
+        );
+    }
     return (
         <Badge size="xs" variant="light" color="blue">
             Custom

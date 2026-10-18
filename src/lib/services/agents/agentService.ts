@@ -1733,6 +1733,10 @@ export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undef
         out.via = runtimeContext.via.kind;
         out.viaIssuer = runtimeContext.via.issuer;
     }
+    if (runtimeContext.trigger) {
+        out.triggerId = runtimeContext.trigger.id;
+        out.trigger = runtimeContext.trigger.type;
+    }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
         const value = meta?.[key];
@@ -2529,6 +2533,8 @@ export async function createInternalTracingSink(
                 const cancelledByCaller = currentTurnSignal()?.aborted === true
                     && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
 
+                const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
+                    && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
                     traceId: session.traceId,
@@ -2536,7 +2542,7 @@ export async function createInternalTracingSink(
                     threadId: session.threadId,
                     tenantId,
                     projectId,
-                    source: 'custom',
+                    source: agentTriggerId ? 'trigger' : 'custom',
                     agent: session.agent ?? {},
                     agentName: session.agent?.name ?? undefined,
                     agentVersion: session.agent?.version ?? undefined,

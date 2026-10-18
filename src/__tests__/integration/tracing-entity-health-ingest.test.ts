@@ -786,4 +786,17 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     expect(await session(`h-cancel-${sequence}`)).toMatchObject({ status: 'cancelled', statusExplicit: true });
     expect(await session(`h-ok-${sequence}`)).toMatchObject({ status: 'success' });
   });
+
+  it('hosted sink: a session a trigger started is stored with source trigger', async () => {
+    const sink = await createInternalTracingSink(dbName, tenantId, projectId, undefined, 'agent-key-5');
+    const base = {
+      agent: { name: agent }, startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(),
+      durationMs: 500, summary: {}, errors: [], events: [aiCall()], status: 'success',
+    };
+    await onSession(sink, { ...base, sessionId: `h-trig-${sequence}`, metadata: { source: 'trigger', triggerId: 'trg_9', trigger: 'webhook' } } as never);
+    await onSession(sink, { ...base, sessionId: `h-api-${sequence}`, metadata: { source: 'api' } } as never);
+    await settle();
+    expect(await session(`h-trig-${sequence}`)).toMatchObject({ source: 'trigger', metadata: { triggerId: 'trg_9', trigger: 'webhook' } });
+    expect((await session(`h-api-${sequence}`))?.source).toBe('custom');
+  });
 });

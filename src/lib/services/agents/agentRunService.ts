@@ -1711,6 +1711,15 @@ function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'liter
   };
 }
 
+/** The run's trigger, stamped on its runtime context so its trace session is tagged with it. */
+export function withTriggerMarker(
+  context: AgentRuntimeContext | undefined,
+  run: Pick<IAgentRun, 'triggerId' | 'trigger'>,
+): AgentRuntimeContext | undefined {
+  if (!run.triggerId) return context;
+  return { ...context, source: 'trigger', trigger: { id: run.triggerId, type: run.trigger ?? 'trigger' } };
+}
+
 function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellationCell): AgentChatRequest {
   return {
     tenantDbName: run.tenantDbName,
@@ -1724,7 +1733,7 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     ...(run.accountableUserId ? { accountableUserId: run.accountableUserId } : {}),
     version: run.version ?? undefined,
     usePublished: run.usePublished,
-    runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
+    runtimeContext: withTriggerMarker(openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed), run),
     ...(run.responseFormat ? { responseFormat: run.responseFormat } : {}),
     ...(run.variables ? { variables: run.variables } : {}),
     ...runFlags(run),
