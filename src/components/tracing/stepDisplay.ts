@@ -27,6 +27,7 @@ export function stepBadge(node: TraceNode): string {
   if (node.human?.kind === 'approval') return 'Approval';
   if (node.human?.kind === 'question') return 'Question';
   if (node.human?.kind === 'client_tool') return 'Client tool';
+  if (node.event?.type?.toLowerCase() === 'summarization') return 'Summary';
   return CATEGORY_DISPLAY[node.category].badge;
 }
 

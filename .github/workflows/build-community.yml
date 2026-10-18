@@ -20,8 +20,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ci.yml'den tasinan kontroller
-  validate:
+  # Checks moved over from ci.yml. They run in parallel, the same way as there
+  # (see the comments in that file for the matrix details); `validate` is the
+  # single gate that collects them all, and `build` stays dependent on it.
+  lint:
     runs-on: cognipeer-azure-runners
     timeout-minutes: 40
     steps:
@@ -37,16 +39,84 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Install Chromium for browser tests
-        run: npx playwright install --with-deps chromium
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Lint
         run: npm run lint
 
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unit 1/3
+            args: src/__tests__/unit --shard=1/3
+          - name: unit 2/3
+            args: src/__tests__/unit --shard=2/3
+          - name: unit 3/3
+            args: src/__tests__/unit --shard=3/3
+          - name: api
+            args: src/__tests__/api
+          - name: integration
+            args: src/__tests__/integration
+          - name: contracts + ai
+            args: src/__tests__/contracts src/__tests__/ai
+          # vitest bunlari dosya yolunda alt-dize filtresi olarak okur; diger
+          # gruplarin '**/browser-*.test.ts' ve '**/crawler-e2e.test.ts' ile
+          # disarida biraktigi dosyalari secer. Chromium'u yalniz bu grup kurar.
+          - name: browser
+            args: browser- crawler-e2e
+            chromium: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Install Chromium for browser tests
+        if: matrix.chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Test
-        run: npm run test
+        if: ${{ !matrix.chromium }}
+        run: >
+          npx vitest run ${{ matrix.args }}
+          --exclude '**/browser-*.test.ts'
+          --exclude '**/crawler-e2e.test.ts'
+
+      - name: Test (browser)
+        if: matrix.chromium
+        run: npx vitest run ${{ matrix.args }}
+
+  endpoint-coverage:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Endpoint auth-coverage gate
         run: npm run test:endpoints
@@ -54,8 +124,44 @@ jobs:
       - name: OpenAPI route gate
         run: npm run test:openapi
 
+  docs:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
       - name: Build docs
         run: npm run docs:build
+
+  audit:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Production dependency audit
         run: npm audit --omit=dev --audit-level=high
@@ -63,6 +169,24 @@ jobs:
 
       - name: License summary
         run: npx license-checker --production --summary
+
+  validate:
+    if: ${{ always() }}
+    needs: [lint, test, endpoint-coverage, docs, audit]
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "$NEEDS"
+          if [ "$FAILED" = 'true' ]; then
+            echo 'One or more required jobs did not succeed.'
+            exit 1
+          fi
+
 
   build:
     runs-on: cognipeer-azure-runners
