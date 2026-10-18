@@ -62,7 +62,7 @@ Returns multiple embedding objects indexed by position.
 
 | Status | Description |
 |--------|-------------|
-| 400 | Missing `model` or `input` |
+| 400 | A body that is not a JSON object (`invalid_json`), missing `model` or `input` |
 | 401 | Invalid API token |
 | 500 | Model not found |
 | 500 | Model is not configured for embeddings |

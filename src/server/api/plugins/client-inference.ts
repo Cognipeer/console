@@ -128,13 +128,25 @@ function extractEmbeddingInputText(input: unknown): string {
   return JSON.stringify(input);
 }
 
-function invalidJson(reply: FastifyReply) {
-  return reply.code(400).send({
-    error: {
-      message: 'Invalid JSON body',
-      type: 'invalid_request_error',
-    },
-  });
+/**
+ * The JSON object body of an OpenAI-shaped model route. A body that is not one - malformed, empty, or JSON that
+ * is not an object - is answered here as `400 invalid_json` (the error carries a `code` like every other refusal
+ * of these routes) and null comes back; the caller returns the reply.
+ */
+function readOpenAiJsonBody<T extends object>(request: FastifyRequest, reply: FastifyReply): T | null {
+  let parsed: unknown;
+  try {
+    parsed = readJsonBody<unknown>(request);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    sendInvocationFailure(reply, 'openai', { status: 400, type: 'invalid_request_error', message: 'The body is not valid JSON', code: 'invalid_json' });
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    sendInvocationFailure(reply, 'openai', { status: 400, type: 'invalid_request_error', message: 'The body must be a JSON object', code: 'invalid_json' });
+    return null;
+  }
+  return parsed as T;
 }
 
 /** Chat parameters an agent does not take (its own config decides); listed back in `X-Cognipeer-Ignored-Params`. */
@@ -527,17 +539,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
     let modelKey = '';
 
     try {
-      try {
-        const parsed = readJsonBody<unknown>(request);
-        body = parsed && typeof parsed === 'object'
-          ? parsed as ChatCompletionRequest
-          : {};
-      } catch (error) {
-        if (error instanceof SyntaxError) {
-          return invalidJson(reply);
-        }
-        throw error;
-      }
+      const parsed = readOpenAiJsonBody<ChatCompletionRequest>(request, reply);
+      if (!parsed) return reply;
+      body = parsed;
 
       if (!body.model || typeof body.model !== 'string') {
         return reply.code(400).send({
@@ -823,14 +827,8 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
     let modelKey = '';
 
     try {
-      let body: Record<string, unknown>;
-      try {
-        const parsed = readJsonBody<unknown>(request);
-        body = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
-      } catch (error) {
-        if (error instanceof SyntaxError) return invalidJson(reply);
-        throw error;
-      }
+      const body = readOpenAiJsonBody<Record<string, unknown>>(request, reply);
+      if (!body) return reply;
 
       if (typeof body.model !== 'string' || !body.model) {
         return reply.code(400).send({
@@ -951,17 +949,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
     let modelKey = '';
 
     try {
-      try {
-        const parsed = readJsonBody<unknown>(request);
-        body = parsed && typeof parsed === 'object'
-          ? parsed as EmbeddingRequest
-          : {};
-      } catch (error) {
-        if (error instanceof SyntaxError) {
-          return invalidJson(reply);
-        }
-        throw error;
-      }
+      const parsed = readOpenAiJsonBody<EmbeddingRequest>(request, reply);
+      if (!parsed) return reply;
+      body = parsed;
 
       if (!body.model || typeof body.model !== 'string') {
         return reply.code(400).send({

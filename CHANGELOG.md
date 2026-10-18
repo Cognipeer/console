@@ -75,7 +75,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   a limit the answer is a plain JSON `429` (`Retry-After` 30 s for the cap, 60 s for the quota), not an `error` event;
   non-stream concurrency `429`s carry `Retry-After: 30` too. Long-polls (`?wait`, a trigger's Run now) stop when the
   client disconnects.
-- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses` and `/agents/responses`; an
+- A body that is not a JSON object is `400 invalid_json` on the runs API, `/responses`, `/agents/responses`, chat
+  completions, embeddings and image generation (it carried no `error.code` on the last three); an
   `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
   has to arrive within the outbound timeout (`400 attachment_unreachable`), and a malformed percent-escape in its name no
   longer fails the call.
