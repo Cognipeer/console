@@ -384,9 +384,64 @@ describe('message/send — a recorded run, one active turn per conversation', ()
 
     const body = parseJsonBody<{ result: { kind: string; id: string; contextId: string; status: { state: string; message: { parts: Array<{ text: string }> } }; metadata: Record<string, unknown> } }>(res.body);
     expect(body.result).toMatchObject({ kind: 'task', id: 'run_run-1', contextId: 'conv-9', status: { state: 'failed' } });
-    expect(body.result.status.message.parts[0].text).toBe('The agent run failed.');
+    // The words the run row records and `tasks/get` reads back.
+    expect(body.result.status.message.parts[0].text).toBe('The agent run failed. See the run trace for details.');
     expect(body.result.metadata).toMatchObject({ errorType: 'server_error', errorCode: 'agent_run_failed' });
     expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed', errorReason: 'agent_error' }));
+  });
+
+  describe('a failed run says what the run itself recorded, never the provider\'s own text', () => {
+    // What an upstream fault carries: its endpoint, a deployment name and a request id.
+    const UPSTREAM = 'upstream connect error: reset before headers at https://10.2.4.7:8443/openai/deployments/prod-gpt4o (request id req_9f3c1a)';
+    const PUBLIC = 'The agent run failed. See the run trace for details.';
+    const send = async () => {
+      mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+      const app = await buildApp();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/a2a/support-bot',
+        headers: { authorization: 'Bearer tok' },
+        payload: { jsonrpc: '2.0', id: 6, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+      });
+      return { res, body: parseJsonBody<{ result: { id: string; status: { state: string; message: { parts: Array<{ text: string }> } }; metadata: Record<string, unknown> } }>(res.body) };
+    };
+
+    it('a provider fault (5xx): the task and the run carry the same public message; the provider text stays in the log', async () => {
+      mockFn(executeAgentChat).mockRejectedValue(Object.assign(new Error(UPSTREAM), { status: 502 }));
+      const { res, body } = await send();
+      expect(body.result.status.state).toBe('failed');
+      expect(body.result.status.message.parts[0].text).toBe(PUBLIC);
+      expect(body.result.metadata).toMatchObject({ errorType: 'server_error', errorCode: 'provider_error' });
+      for (const leaked of ['10.2.4.7', 'prod-gpt4o', 'req_9f3c1a', 'upstream connect']) expect(res.body).not.toContain(leaked);
+      // The run row says the same, so tasks/get of this run reads what message/send answered.
+      expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed', errorReason: 'agent_error', errorMessage: PUBLIC }));
+    });
+
+    it('a connection fault that names the provider\'s host answers the same public message', async () => {
+      mockFn(executeAgentChat).mockRejectedValue(new Error('fetch failed: connect ECONNREFUSED 10.2.4.7:8443'));
+      const { res, body } = await send();
+      expect(body.result.status.message.parts[0].text).toBe(PUBLIC);
+      expect(res.body).not.toContain('10.2.4.7');
+      expect(body.result.metadata).toMatchObject({ errorType: 'server_error', errorCode: expect.any(String) });
+    });
+
+    it('a failure the caller can act on keeps its message and code (here: the prompt does not fit the model)', async () => {
+      mockFn(executeAgentChat).mockRejectedValue(Object.assign(
+        new Error("This model's maximum context length is 128000 tokens. However, your messages resulted in 130114 tokens."),
+        { status: 400, code: 'context_length_exceeded' },
+      ));
+      const { body } = await send();
+      expect(body.result.status.message.parts[0].text).toContain('maximum context length is 128000 tokens');
+      expect(body.result.metadata).toMatchObject({ errorType: 'invalid_request_error', errorCode: 'context_length_exceeded' });
+    });
+
+    it('a run ended elsewhere keeps its own retry message: it is the platform\'s, not the provider\'s', async () => {
+      const { AgentRunInterruptedError } = await import('@/lib/services/agents/agentErrors');
+      mockFn(executeAgentChat).mockRejectedValue(new AgentRunInterruptedError('worker_lost'));
+      const { body } = await send();
+      expect(body.result.status.message.parts[0].text).toBe('The agent run was stopped before it finished. It was not completed; retry it.');
+      expect(body.result.metadata).toMatchObject({ errorCode: 'agent_run_interrupted', retryable: true });
+    });
   });
 
   it('past the wait window the task comes back working, named by its run, and the run carries on', async () => {
@@ -954,6 +1009,23 @@ describe('message/stream', () => {
     expect(last.status.message.parts[0].text).not.toContain('upstream exploded');
     expect(last.status.message.parts[0].text.length).toBeGreaterThan(0);
     expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({ status: 'failed' }));
+  });
+
+  it('a provider fault after the stream opened ends it failed with the run\'s public message, not the provider\'s text', async () => {
+    mockFn(executeAgentChat).mockImplementation(async (request: { onTextChunk: (t: string) => void }) => {
+      request.onTextChunk('Part');
+      throw Object.assign(new Error('upstream connect error at https://10.2.4.7:8443/openai/deployments/prod-gpt4o (request id req_9f3c1a)'), { status: 502 });
+    });
+    const res = await stream();
+    const events = parseEvents(res.body);
+    const last = events[events.length - 1];
+    expect(summary(events)).toEqual(['task', 'status:working', 'artifact:response', 'status:failed:final']);
+    expect(last.status.message.parts[0].text).toBe('The agent run failed. See the run trace for details.');
+    expect(last.metadata).toMatchObject({ errorType: 'server_error', errorCode: 'provider_error' });
+    for (const leaked of ['10.2.4.7', 'prod-gpt4o', 'req_9f3c1a']) expect(res.body).not.toContain(leaked);
+    expect(finalizeAgentRun).toHaveBeenCalledWith('run-1', 'tenant-1', expect.objectContaining({
+      status: 'failed', errorMessage: 'The agent run failed. See the run trace for details.',
+    }));
   });
 
   it('a stopped turn ends the stream canceled', async () => {

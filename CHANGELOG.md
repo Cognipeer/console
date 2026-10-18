@@ -80,6 +80,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `Idempotency-Key` replay of a `stream: true` runs-API request answers as a stream; a remote `file_url` / `image_url`
   has to arrive within the outbound timeout (`400 attachment_unreachable`), and a malformed percent-escape in its name no
   longer fails the call.
+- An A2A task that failed after the run started (`message/send`, `message/stream`) reads the run's own public message,
+  the one `tasks/get` and the runs API return, instead of the provider's error text, which can name its endpoint,
+  deployment or request ids; an error the caller can act on keeps its message.
 - Responses `usage` always carries `input_tokens_details.cached_tokens` and `output_tokens_details.reasoning_tokens`
   (`0` when not reported; `reasoning_tokens` is `0` for an agent run). `reasoning` is applied to runs that execute in the
   request only: a queued (`background`, `flex`, `POST …/runs` without `stream`) run uses the agent's own effort.

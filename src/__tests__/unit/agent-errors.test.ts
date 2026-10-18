@@ -4,7 +4,15 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { annotateAgentRunError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import {
+    AgentBudgetReachedError,
+    AgentRunInterruptedError,
+    AgentRunTimeoutError,
+    GENERIC_RUN_FAILURE_MESSAGE,
+    annotateAgentRunError,
+    classifyAgentRunError,
+    publicRunFailureMessage,
+} from '@/lib/services/agents/agentErrors';
 
 const providerError = (status: number, message: string) => Object.assign(new Error(message), { status });
 
@@ -43,5 +51,35 @@ describe('classifyAgentRunError', () => {
         const error = new Error('Cannot read properties of undefined (reading "foo")');
         expect(classifyAgentRunError(error).error.message).toBe('The agent run failed.');
         expect(classifyAgentRunError(error, { exposeInternal: true }).error.message).toContain('reading "foo"');
+    });
+});
+
+describe('publicRunFailureMessage: what a client reads of a failed run', () => {
+    it('is the generic line for the provider\'s own faults and for bugs, whose text can name endpoints and request ids', () => {
+        for (const error of [
+            providerError(502, 'Bad gateway from https://10.2.4.7:8443/openai/deployments/prod (request id req_1)'),
+            providerError(503, 'upstream connect error'),
+            new Error('fetch failed: connect ECONNREFUSED 10.2.4.7:8443'),
+            new Error('Cannot read properties of undefined (reading "foo")'),
+        ]) {
+            expect(publicRunFailureMessage(error)).toBe(GENERIC_RUN_FAILURE_MESSAGE);
+        }
+    });
+
+    it('keeps the message of a failure the caller can act on', () => {
+        expect(publicRunFailureMessage(providerError(429, 'Too many requests'))).toBe('Too many requests');
+        expect(publicRunFailureMessage(providerError(400, "This model's maximum context length is 128000 tokens."))).toContain('maximum context length');
+        expect(publicRunFailureMessage(new AgentBudgetReachedError(1, 1))).toContain('reached its budget');
+        expect(publicRunFailureMessage(new Error('Model "gpt-old" not found'))).toBe('Model "gpt-old" not found');
+    });
+
+    it('keeps the words of a run the platform itself ended: they are not the provider\'s', () => {
+        expect(publicRunFailureMessage(new AgentRunInterruptedError('worker_lost'))).toBe('The agent run was stopped before it finished. It was not completed; retry it.');
+        expect(publicRunFailureMessage(new AgentRunTimeoutError())).toContain('exceeded its maximum duration');
+    });
+
+    it('takes a classification already made instead of making another', () => {
+        const error = providerError(502, 'upstream connect error');
+        expect(publicRunFailureMessage(error, classifyAgentRunError(error))).toBe(GENERIC_RUN_FAILURE_MESSAGE);
     });
 });

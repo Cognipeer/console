@@ -216,6 +216,25 @@ export function annotateAgentRunError<E>(error: E, context: { modelKey?: string;
     return error;
 }
 
+/** What a client reads of a run that failed on the platform's or the model provider's side: the detail stays in the log and the run trace. */
+export const GENERIC_RUN_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
+
+/**
+ * The message a client reads for a failed run - the one the run row records, so every surface that reports the
+ * run says the same. A failure the caller can act on keeps its message (a usage limit, a prompt that does not fit
+ * the model, a pending approval). An internal one - the provider's own fault, whose text can carry its endpoint,
+ * a deployment name or a request id, or a bug - is the generic line. A run the platform itself ended (the time
+ * limit, a hand-over on shutdown) says so in words of its own and keeps them.
+ */
+export function publicRunFailureMessage(
+    error: unknown,
+    classified: ClassifiedAgentRunError = classifyAgentRunError(error),
+): string {
+    if (error instanceof AgentRunTimeoutError || error instanceof AgentRunInterruptedError) return classified.error.message;
+    const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
+    return internal ? GENERIC_RUN_FAILURE_MESSAGE : classified.error.message;
+}
+
 export function classifyAgentRunError(
     error: unknown,
     options?: {

@@ -39,7 +39,7 @@ import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
-import { AgentRunInterruptedError, AgentRunTimeoutError, classifyAgentRunError } from './agentErrors';
+import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import {
@@ -1191,7 +1191,7 @@ function executeInlineRun(
       return done ? { kind: 'response', run: done, response: raced.response } : await settleFromRow();
     } catch (error) {
       logger.error('Inline agent run failed unexpectedly', { runId, error: error instanceof Error ? error.message : String(error) });
-      const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_FAILURE_MESSAGE }, { errorReason: 'agent_error' });
+      const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_RUN_FAILURE_MESSAGE }, { errorReason: 'agent_error' });
       return { kind: 'error', run: finalized ?? run, error };
     } finally {
       clearInterval(heartbeatTimer);
@@ -1696,19 +1696,14 @@ async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promis
   return null;
 }
 
-const GENERIC_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
 
 /** Run owners that are not user rows (triggers, timeouts, public A2A). */
 function isSyntheticRunActor(userId: string): boolean {
   return userId.startsWith('system:') || userId === 'a2a-public';
 }
 
-/** Client-facing text for a failed run: classified errors keep their message, anything else is generic. */
-function publicFailureMessage(error: unknown): string {
-  const classified = classifyAgentRunError(error);
-  const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
-  return internal ? GENERIC_FAILURE_MESSAGE : classified.error.message;
-}
+/** Client-facing text for a failed run: errors the caller can act on keep their message, anything else is generic. */
+const publicFailureMessage = (error: unknown): string => publicRunFailureMessage(error);
 
 /**
  * §7 steps 3-8: claim, race against the run's ceiling, heartbeat (liveness)
@@ -2084,7 +2079,7 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
         runId,
         error: error instanceof Error ? error.message : String(error),
       });
-      await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_FAILURE_MESSAGE }, { errorReason: 'agent_error' })
+      await finalize('failed', { errorReason: 'agent_error', errorMessage: GENERIC_RUN_FAILURE_MESSAGE }, { errorReason: 'agent_error' })
         .catch(() => undefined);
     }
   });
