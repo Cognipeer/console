@@ -126,6 +126,8 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
         const where = `spec.subagents[${subagent.name}]`;
         if (subagent.kind === 'ref' && subagent.agentKey) {
             out.push({ type: 'agent', key: subagent.agentKey, usedBy: where });
+            // A reference may override the model its agent runs on: the importing project needs that model too.
+            if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
             continue;
         }
         if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
