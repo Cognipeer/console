@@ -46,8 +46,10 @@ export function delegatedSubagentName(toolName: string | undefined, args: unknow
     if (!isDelegationTool(toolName)) return undefined;
     const names = [...new Set(childResults(output).map((r) => (typeof r.name === 'string' && r.name !== '?' ? r.name : undefined)).filter(Boolean))];
     if (names.length > 0) return names.join(', ');
-    const named = (args as { subagent?: unknown } | null | undefined)?.subagent;
-    return typeof named === 'string' ? named : undefined;
+    const given = (args ?? undefined) as { subagent?: unknown; role?: unknown } | undefined;
+    if (typeof given?.subagent === 'string') return given.subagent;
+    // `spawn_subagent` has no named child yet when it starts: the role it spawns is the label.
+    return toolName === 'spawn_subagent' && typeof given?.role === 'string' && given.role ? given.role : undefined;
 }
 
 /**

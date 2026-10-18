@@ -125,3 +125,13 @@ describe('delegation steps (CON-8)', () => {
     expect(some.error).toBeUndefined();
   });
 });
+
+describe('delegatedSubagentName on a start event', () => {
+  it('labels spawn_subagent with the role it spawns, and names a delegate_to target', async () => {
+    const { delegatedSubagentName } = await import('@/lib/services/agents/subagentEvents');
+    expect(delegatedSubagentName('spawn_subagent', { role: 'researcher', task: 'x' }, undefined)).toBe('researcher');
+    expect(delegatedSubagentName('delegate_to', { subagent: 'writer' }, undefined)).toBe('writer');
+    expect(delegatedSubagentName('delegate_to', { role: 'ignored' }, undefined)).toBeUndefined();
+    expect(delegatedSubagentName('web_search', { role: 'x' }, undefined)).toBeUndefined();
+  });
+});
