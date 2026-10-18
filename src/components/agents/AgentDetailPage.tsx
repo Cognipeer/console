@@ -57,6 +57,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import SectionCard from '@/components/common/SectionCard';
 import { KnowledgeBindingsEditor } from './KnowledgeBindingsEditor';
 import AgentUsagePanel from './AgentUsagePanel';
+import { a2aSendCurl, sampleVariables, variablesOfRunVersion } from './agentUsageSnippets';
 import CopyableCode from './CopyableCode';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
@@ -314,6 +315,9 @@ export default function AgentDetailPage() {
   const [filesSaveRefused, setFilesSaveRefused] = useState(false);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
+  // What `publishedConfig` has answered for, as `<agent id>@<version>` (it holds that snapshot, or the request failed):
+  // the Usage tab and the Overview quick start wait for it, because a call runs the snapshot, not the draft.
+  const [publishedConfigKey, setPublishedConfigKey] = useState<string | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
@@ -615,8 +619,13 @@ export default function AgentDetailPage() {
       .then((data: { version?: AgentVersion } | null) => {
         if (cancelled) return;
         setPublishedConfig((data?.version?.snapshot?.config as Record<string, unknown> | undefined) ?? null);
+        setPublishedConfigKey(`${agentId}@${publishedVersionNumber}`);
       })
-      .catch(() => { if (!cancelled) setPublishedConfig(null); });
+      .catch(() => {
+        if (cancelled) return;
+        setPublishedConfig(null);
+        setPublishedConfigKey(`${agentId}@${publishedVersionNumber}`);
+      });
     return () => { cancelled = true; };
   }, [agentId, publishedVersionNumber]);
 
@@ -886,6 +895,14 @@ export default function AgentDetailPage() {
     ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
+
+  // The variables a call has to supply are those of the version it runs: the published snapshot's, not the draft's.
+  const variablesLoading = Boolean(publishedVersionNumber) && publishedConfigKey !== `${agentId}@${publishedVersionNumber}`;
+  const callVariables = variablesOfRunVersion({
+    publishedVersion: publishedVersionNumber,
+    publishedConfig,
+    draftVariables: agent.config?.variables,
+  });
 
   /**
    * The General section's fields, all open.
@@ -1181,6 +1198,8 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="overview">
           <AgentOverviewPanel
             agent={agent}
+            variables={callVariables}
+            variablesLoading={variablesLoading}
             isConnected={isConnected}
             sessionCount={sessions.length}
             onStartSession={() => setStartSessionOpen(true)}
@@ -1660,27 +1679,15 @@ export default function AgentDetailPage() {
                     <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
                     <CopyableCode value={a2aEndpointUrl} />
 
-                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
-                    <Code block>
-                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
-  -H "Authorization: Bearer YOUR_API_KEY" \\`}
-  -H "Content-Type: application/json" \\
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Hello!" }],
-        "messageId": "msg-1"
-      }
-    }
-  }'
-
-# Continue the same conversation: set params.message.contextId
-# to the "contextId" returned in the previous task.`}
-                    </Code>
+                    {/* The example carries the variables of the version a call runs: it waits until they are known. */}
+                    {!variablesLoading && (
+                      <>
+                        <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                        <Code block>
+                          {a2aSendCurl({ endpointUrl: a2aEndpointUrl, isPublic: a2aIsPublic, variables: sampleVariables(callVariables) })}
+                        </Code>
+                      </>
+                    )}
                   </>
                 )}
               </Stack>
@@ -1739,10 +1746,12 @@ export default function AgentDetailPage() {
               agentName={agent.name}
               agentKey={agent.key}
               publishedVersion={agent.publishedVersion}
-              inputs={agent.config?.inputs}
+              variables={callVariables}
+              variablesLoading={variablesLoading}
               origin={origin}
               a2aEnabled={a2aEnabled}
-              a2aCardUrl={a2aCardUrl}
+              a2aEndpointUrl={a2aEndpointUrl}
+              a2aIsPublic={a2aIsPublic}
             />
           ) : null}
         </Tabs.Panel>

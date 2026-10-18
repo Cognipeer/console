@@ -42,7 +42,9 @@ import {
     IconTool,
 } from '@tabler/icons-react';
 import SectionCard from '@/components/common/SectionCard';
+import type { IAgentVariable } from '@/lib/database/provider/types.domain';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
+import { chatCompletionsCurl, sampleVariables } from '../agentUsageSnippets';
 import { formatCompactTokens } from '../session/sessionUsage';
 import classes from './AgentOverviewPanel.module.css';
 
@@ -82,6 +84,10 @@ interface TracingOverview {
 
 export interface AgentOverviewPanelProps {
     agent: OverviewAgent;
+    /** The variables a call has to supply: the published snapshot's, the draft's only while nothing is published. */
+    variables?: ReadonlyArray<IAgentVariable> | null;
+    /** The published snapshot is still being fetched, so the variables are not known yet: the quick start waits. */
+    variablesLoading?: boolean;
     isConnected: boolean;
     sessionCount: number;
     onStartSession: () => void;
@@ -133,6 +139,8 @@ function fillDays(daily: TracingOverview['analytics']['daily'], days: number) {
 
 export default function AgentOverviewPanel({
     agent,
+    variables,
+    variablesLoading,
     isConnected,
     sessionCount,
     onStartSession,
@@ -172,10 +180,13 @@ export default function AgentOverviewPanel({
 
     const boundTools = (agent.config?.toolBindings ?? []).reduce((sum, b) => sum + (b.toolNames?.length ?? 0), 0);
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com';
-    const quickCurl = `curl ${origin}/api/client/v1/chat/completions \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}]}'`;
+    // The same call the Usage tab shows (`agent:<key>`, the variables the agent declares), here answered as one JSON.
+    const quickCurl = chatCompletionsCurl({
+        baseUrl: `${origin}/api/client/v1`,
+        agentKey: agent.key,
+        variables: sampleVariables(variables),
+        stream: false,
+    });
 
     return (
         <Stack gap="lg">
@@ -270,18 +281,22 @@ export default function AgentOverviewPanel({
                     }
                 >
                     <Stack gap="xs">
-                        <Box className={classes.snippet}>
-                            <Code block className={classes.snippetCode}>{quickCurl}</Code>
-                            <CopyButton value={quickCurl}>
-                                {({ copied, copy }) => (
-                                    <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                                        <ActionIcon size="sm" variant="subtle" className={classes.copy} onClick={copy}>
-                                            {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                                        </ActionIcon>
-                                    </Tooltip>
-                                )}
-                            </CopyButton>
-                        </Box>
+                        {variablesLoading ? (
+                            <Skeleton height={96} />
+                        ) : (
+                            <Box className={classes.snippet}>
+                                <Code block className={classes.snippetCode}>{quickCurl}</Code>
+                                <CopyButton value={quickCurl}>
+                                    {({ copied, copy }) => (
+                                        <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
+                                            <ActionIcon size="sm" variant="subtle" className={classes.copy} onClick={copy}>
+                                                {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                                            </ActionIcon>
+                                        </Tooltip>
+                                    )}
+                                </CopyButton>
+                            </Box>
+                        )}
                         <Group gap="xs">
                             <Button size="compact-xs" variant="subtle" onClick={() => onGoToTab('usage')}>
                                 All channels & SDK examples

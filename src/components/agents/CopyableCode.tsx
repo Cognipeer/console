@@ -13,7 +13,7 @@ interface CopyableCodeProps {
 
 /** A code block with a copy button. */
 export default function CopyableCode({ value, align = 'center' }: CopyableCodeProps) {
-  const t = useTranslations('agents.usage');
+  const t = useTranslations('agents');
   return (
     <Group gap="xs" align={align === 'start' ? 'flex-start' : 'center'} wrap="nowrap">
       <Code block className={classes.grow}>{value}</Code>
