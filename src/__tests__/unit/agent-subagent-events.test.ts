@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { __testables } from '@/lib/services/agents/agentService';
+import { __testables, extractPlaygroundSteps } from '@/lib/services/agents/agentService';
 import { isSubagentEvent } from '@/lib/services/agents/subagentEvents';
 import type { IAgentTurnCompaction } from '@/lib/database';
 
@@ -92,5 +92,36 @@ describe('noteTurnCompaction', () => {
     expect(boom).toHaveBeenCalledTimes(1);
     noteTurnCompaction(event(), { compactions, turnEvents: undefined, agentKey: 'a1' });
     expect(compactions).toHaveLength(2);
+  });
+});
+
+describe('delegation steps (CON-8)', () => {
+  const step = (toolName: string, args: unknown, output: unknown, status = 'success') => extractPlaygroundSteps({
+    state: { toolHistory: [{ executionId: 'e1', toolName, args, output, status, tool_call_id: 't1' }], messages: [] },
+  } as never)[0];
+
+  it('names the sub-agent a delegate_to step went to', () => {
+    expect(step('delegate_to', { subagent: 'researcher' }, { name: 'researcher', status: 'ok', content: 'x' }).subagent).toBe('researcher');
+  });
+
+  it('names every sub-agent of a parallel step once', () => {
+    const out = { results: [{ name: 'a', status: 'ok' }, { name: 'b', status: 'ok' }, { name: 'a', status: 'ok' }] };
+    expect(step('spawn_subagents_parallel', {}, out).subagent).toBe('a, b');
+  });
+
+  it('does not label any other tool', () => {
+    expect(step('search', {}, { name: 'x' }).subagent).toBeUndefined();
+  });
+
+  it('reports a failed child with its reason, and a parallel call only when every task failed', () => {
+    const failed = step('delegate_to', { subagent: 'r' }, { name: 'r', status: 'error', error: 'boom' }, 'error');
+    expect(failed).toMatchObject({ status: 'error', error: 'boom' });
+
+    const all = step('spawn_subagents_parallel', {}, { results: [{ name: 'a', status: 'error', error: 'x' }, { name: 'b', status: 'cancelled' }] });
+    expect(all).toMatchObject({ status: 'error', error: 'All 2 sub-agent tasks failed: x' });
+
+    const some = step('spawn_subagents_parallel', {}, { results: [{ name: 'a', status: 'error', error: 'x' }, { name: 'b', status: 'ok' }] });
+    expect(some.status).toBe('success');
+    expect(some.error).toBeUndefined();
   });
 });

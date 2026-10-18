@@ -192,7 +192,7 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { isSubagentEvent } from './subagentEvents';
+import { delegatedSubagentName, delegationFailure, isSubagentEvent } from './subagentEvents';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -5288,7 +5288,8 @@ export function extractPlaygroundSteps(
         const record = output !== null && typeof output === 'object'
             ? output as Record<string, unknown>
             : undefined;
-        const sniffedError = Boolean(record?.error) || record?.ok === false;
+        const delegationError = delegationFailure(typeof entry.toolName === 'string' ? entry.toolName : undefined, output);
+        const sniffedError = Boolean(record?.error) || record?.ok === false || Boolean(delegationError);
         const deniedByUser = status === 'rejected' && (
             (typeof entry.tool_call_id === 'string' && deniedCallIds.has(entry.tool_call_id))
             // The SDK words a reviewer's refusal `Rejected: <comment>`; a policy block carries its own reason.
@@ -5298,8 +5299,14 @@ export function extractPlaygroundSteps(
         const errorText = failed
             ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
                 ?? (record?.error ? String(record.error) : undefined)
+                ?? delegationError
                 ?? 'The tool call failed.'
             : undefined;
+
+        // The history entry names no child; the delegation call's own result does.
+        const subagentOf = typeof entry.subagent === 'string'
+            ? entry.subagent
+            : delegatedSubagentName(typeof entry.toolName === 'string' ? entry.toolName : undefined, entry.args, output);
 
         const rawOutput = entry.rawOutput;
         const rawDiffers = rawOutput !== undefined && rawOutput !== output;
@@ -5311,7 +5318,7 @@ export function extractPlaygroundSteps(
             output,
             ...(rawDiffers ? { rawOutput } : {}),
             ...(errorText ? { error: errorText } : {}),
-            ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
+            ...(subagentOf ? { subagent: subagentOf } : {}),
             // Reported as an error even when the SDK called it a success,
             // so the transcript, the Events tab and the per-tool failure
             // count all agree with the error text above.

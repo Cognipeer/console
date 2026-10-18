@@ -13,6 +13,7 @@ import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentTurnCompaction } from '@/lib/database';
 import { classifyAgentRunError } from './agentErrors';
+import { delegatedSubagentName } from './subagentEvents';
 import { sessionUsageEventData, type SessionBudgetSettlement } from './sessionBudget';
 import {
   createSessionEventWriter,
@@ -234,7 +235,9 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
       guarded('tool event', () => {
         if (isSuperseded()) return;
         ensureStarted();
-        const subagent = (event as { subagentName?: string }).subagentName;
+        // A forwarded child event names its child; a delegation call names the one it handed the task to.
+        const subagent = (event as { subagentName?: string }).subagentName
+          ?? delegatedSubagentName(event.name, event.args, (event as { result?: unknown }).result);
         if (event.phase === 'start') {
           writer.emit('agent.tool_use', {
             toolCallId: event.id,
