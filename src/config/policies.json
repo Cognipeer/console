@@ -202,9 +202,7 @@
       "description": "Manage and execute tools from OpenAPI specs or MCP servers",
       "endpoints": [
         "/api/tools",
-        "/api/tools/*",
-        "/api/client/v1/tools",
-        "/api/client/v1/tools/*"
+        "/api/tools/*"
       ]
     },
     "AUTOMATIONS_CONTROL": {
