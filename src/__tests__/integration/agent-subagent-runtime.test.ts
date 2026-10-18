@@ -93,6 +93,9 @@ function script(key: string, replies: Script, streamChunks?: (call: number) => u
 
 type Subagent = NonNullable<IAgentConfig['subagents']>[number];
 
+const price = (usage: { input: number; output: number }, rates: typeof MAIN_PRICING) =>
+  (usage.input * rates.inputTokenPer1M + usage.output * rates.outputTokenPer1M) / 1e6;
+
 const inlineHelper = (extra: Partial<Subagent> = {}): Subagent => ({
   kind: 'inline', name: 'helper', header: 'Does the legwork', systemPrompt: 'You do the legwork.', modelKey: 'worker', enabled: true, ...extra,
 } as Subagent);
@@ -174,8 +177,6 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
     const ASK = { input: 100, output: 20 };
     const CHILD = { input: 1000, output: 500 };
     const FINISH = { input: 150, output: 30 };
-    const price = (usage: { input: number; output: number }, rates: typeof MAIN_PRICING) =>
-      (usage.input * rates.inputTokenPer1M + usage.output * rates.outputTokenPer1M) / 1e6;
     const PARENT_COST = price(ASK, MAIN_PRICING) + price(FINISH, MAIN_PRICING);
     const CHILD_COST = price(CHILD, WORKER_PRICING);
 
@@ -338,6 +339,85 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(live.join('')).toBe('Parent plans.\n\nParent concludes.');
       expect(text.join('')).toBe('all done');
       expect(result.reasoning).toBe('Parent plans.\n\nParent concludes.');
+    });
+  });
+  describe('a roster that cannot run costs nothing (CON-5)', () => {
+    const modelsLookedUp = () => hoisted.getModelByKey.mock.calls.map((call) => call[1]);
+    const modelsBuilt = () => hoisted.buildGatewayChatModel.mock.calls.map((call) => (call[0] as { model: { key: string } }).model.key);
+
+    it('builds no child when the policy switches delegation off', async () => {
+      await createAgent({ subagents: [inlineHelper()], subagentPolicy: { mode: 'off' } });
+      script('main', () => answer('no delegation here'));
+      script('worker', () => answer('never asked'));
+      const id = String((await newConversation())._id);
+
+      const response = await chat(id, 'hello');
+
+      expect(response.output.find((item) => item.type === 'message')).toBeTruthy();
+      // Not looked up, not built, so nothing of it was prepared (tools, connections) or priced.
+      expect(modelsLookedUp()).not.toContain('worker');
+      expect(modelsBuilt()).toEqual(['main']);
+    });
+
+    it('builds no child that is switched off on its own', async () => {
+      await createAgent({ subagents: [inlineHelper({ enabled: false })] });
+      script('main', () => answer('alone'));
+      script('worker', () => answer('never asked'));
+      const id = String((await newConversation())._id);
+
+      await chat(id, 'hello');
+
+      expect(modelsLookedUp()).not.toContain('worker');
+      expect(modelsBuilt()).toEqual(['main']);
+    });
+
+    it('still builds the children of a roster that can run, and prices them', async () => {
+      await createAgent({ subagents: [inlineHelper()] });
+      script('main', (call) => (call === 0 ? delegateTo('d1', 'helper', 'go') : answer('done')));
+      script('worker', () => answer('ok'));
+      const id = String((await newConversation())._id);
+
+      await chat(id, 'hello');
+
+      expect(modelsBuilt().sort()).toEqual(['main', 'worker']);
+    });
+  });
+
+  describe('a sub-agent that is another agent (CON-10)', () => {
+    const REF = { kind: 'ref', name: 'writer', header: 'Writes the copy', agentKey: 'writer-agent', enabled: true } as Subagent;
+
+    it('is priced at the model that agent runs on', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent');
+      pricing['writer-model'] = WORKER_PRICING;
+      await createAgent({ subagents: [REF] });
+      script('main', (call) => (call === 0 ? delegateTo('d1', 'writer', 'write it', { input: 100, output: 20 }) : answer('done', { input: 150, output: 30 })));
+      script('writer-model', () => answer('written', { input: 1000, output: 500 }));
+      const id = String((await newConversation())._id);
+
+      const response = await chat(id, 'write something');
+
+      expect(response.usage).toMatchObject({ input_tokens: 1250, output_tokens: 550 });
+      const message = (await stored(id)).messages.at(-1)!;
+      expect(message.usage?.costUsd).toBeCloseTo(price({ input: 250, output: 50 }, MAIN_PRICING) + price({ input: 1000, output: 500 }, WORKER_PRICING), 8);
+    });
+
+    it('is priced at the parent\'s rates when its model cannot be built', async () => {
+      await createAgent({ modelKey: 'writer-model', systemPrompt: 'You write.' }, 'writer-agent');
+      pricing['writer-model'] = WORKER_PRICING;
+      await createAgent({ subagents: [REF] });
+      // The target's model is gone from the Model Hub: the child runs on the parent's model, one script serving both.
+      hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => (key === 'writer-model' ? null : modelRecord(key)));
+      script('main', (call) => {
+        if (call === 0) return delegateTo('d1', 'writer', 'write it', { input: 100, output: 20 });
+        if (call === 1) return answer('written', { input: 1000, output: 500 });
+        return answer('done', { input: 150, output: 30 });
+      });
+      const id = String((await newConversation())._id);
+
+      await chat(id, 'write something');
+
+      const message = (await stored(id)).messages.at(-1)!;
+      expect(message.usage?.costUsd).toBeCloseTo(price({ input: 1250, output: 550 }, MAIN_PRICING), 8);
     });
   });
 });

@@ -192,6 +192,8 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
 import { isSubagentEvent } from './subagentEvents';
+import { resolveAgentConfig } from './agentConfigResolution';
+import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
     buildClientTools,
     checkEmbeddedClientTools,
@@ -1771,7 +1773,8 @@ type BuildSubagentsInput = {
     tenantDbName: string;
     tenantId: string;
     projectId: string;
-    subagents: IAgentSubagent[] | undefined;
+    /** The entries that can run (`activeSubagentEntries`): a roster switched off is never built. */
+    subagents: IAgentSubagent[];
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
@@ -1805,7 +1808,7 @@ type BuildSubagentsInput = {
 async function buildAgentSubagents(
     input: BuildSubagentsInput,
 ): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
-    const entries = (input.subagents ?? []).filter((entry) => entry.enabled !== false);
+    const entries = input.subagents;
     if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
 
     const subagents: AgentSdkSubagentDef[] = [];
@@ -1827,42 +1830,19 @@ async function buildAgentSubagents(
         let modelKey = entry.modelKey;
 
         if (entry.kind === 'ref') {
-            if (!entry.agentKey) {
-                logger.warn('Skipping sub-agent reference with no agentKey', { name: entry.name });
+            const target = await resolveSubagentTarget(input.tenantDbName, input.projectId, entry);
+            if (!target.ok) {
+                logger.warn(target.message, { name: entry.name, agentKey: entry.agentKey, reason: target.reason });
                 continue;
             }
-            try {
-                const resolved = await resolveAgentConfig(
-                    input.tenantDbName,
-                    entry.agentKey,
-                    input.projectId,
-                    entry.agentVersion,
-                );
-                if (resolved.config.kind === 'external') {
-                    // An external agent is an HTTP endpoint, not a set of tools —
-                    // it cannot be flattened into a child of this process.
-                    logger.warn('Skipping connected agent used as sub-agent', {
-                        name: entry.name,
-                        agentKey: entry.agentKey,
-                    });
-                    continue;
-                }
-                systemPrompt = entry.systemPrompt ?? resolved.config.systemPrompt;
-                toolBindings = resolved.config.toolBindings;
-                knowledgeSource = {
-                    knowledgeEngineKey: resolved.config.knowledgeEngineKey,
-                    knowledgeBindings: resolved.config.knowledgeBindings,
-                    knowledgeToolMode: resolved.config.knowledgeToolMode,
-                };
-                modelKey = entry.modelKey ?? resolved.config.modelKey;
-            } catch (error) {
-                logger.warn('Sub-agent reference could not be resolved; skipping', {
-                    name: entry.name,
-                    agentKey: entry.agentKey,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-                continue;
-            }
+            systemPrompt = entry.systemPrompt ?? target.config.systemPrompt;
+            toolBindings = target.config.toolBindings;
+            knowledgeSource = {
+                knowledgeEngineKey: target.config.knowledgeEngineKey,
+                knowledgeBindings: target.config.knowledgeBindings,
+                knowledgeToolMode: target.config.knowledgeToolMode,
+            };
+            modelKey = entry.modelKey ?? target.config.modelKey;
         }
 
         const childTools: AgentSdkToolInterface[] = [];
@@ -2861,42 +2841,9 @@ export async function listAgentVersions(
     return db.listAgentVersions(agentId, options);
 }
 
-/**
- * Resolves the agent config to use for execution.
- * - If a specific version is requested, returns that version's config.
- * - For API/SDK calls (not playground), uses the published version.
- * - Falls back to current agent config if no version is published (backward compat).
- */
-export async function resolveAgentConfig(
-    tenantDbName: string,
-    agentKey: string,
-    projectId?: string,
-    requestedVersion?: number,
-): Promise<{ agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-
-    const agent = await db.findAgentByKey(agentKey, projectId);
-    if (!agent) throw new Error(`Agent "${agentKey}" not found`);
-
-    // If a specific version is requested
-    if (requestedVersion !== undefined && requestedVersion !== null) {
-        const version = await db.findAgentVersion(String(agent._id), requestedVersion);
-        if (!version) {
-            throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
-        }
-        return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
-
-    // Use published version if available
-    if (agent.publishedVersion) {
-        const version = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
-        if (version) return { agent, config: version.snapshot.config, resolvedVersion: version.version };
-    }
-
-    // Fallback to current config (never published or version data missing)
-    return { agent, config: agent.config, resolvedVersion: null };
-}
+// Lives in agentConfigResolution.ts (the spend pre-flight and the sub-agent roster need it without
+// importing this module); the name stays here for every caller.
+export { resolveAgentConfig } from './agentConfigResolution';
 
 /**
  * Which version of an agent a realtime (voice) session should run, as the
@@ -4133,7 +4080,7 @@ async function buildLocalAgentRun(input: {
         tenantDbName,
         tenantId,
         projectId,
-        subagents: config.subagents,
+        subagents: activeSubagentEntries(config),
         createToolFn: createTool,
         zod: z,
         guard: toolGuard,
