@@ -2279,21 +2279,24 @@ export const AGENT_RUN_CALLBACK_MAX_ATTEMPTS = CALLBACK_ATTEMPTS;
  * Ends the hold on the per-run callback of a run created with `waiting`, once its caller's wait is over.
  * `settled` is the run as the caller was answered. A final state the caller received owes no callback;
  * anything else (still going, paused, the caller left) hands the callback duty back, and a change that
- * landed after `settled` was read is called back now.
+ * landed after `settled` was read is called back now. Returns the callback state it stored, so the caller's
+ * own answer can show the settled state instead of `waiting`.
  */
 export async function settleWaitedRunCallback(
   ref: { tenantDbName: string; tenantId: string },
   settled: IAgentRun,
-): Promise<void> {
-  if (settled.callbackStatus !== 'waiting' && settled.callbackStatus !== undefined) return;
+): Promise<'answered' | 'pending' | undefined> {
+  if (settled.callbackStatus !== 'waiting' && settled.callbackStatus !== undefined) return undefined;
   const runId = String(settled._id);
   const final = settled.status === 'succeeded' || settled.status === 'failed' || settled.status === 'canceled';
+  let applied: 'answered' | 'pending' | undefined;
   try {
     await runWithTenantDb(ref.tenantDbName, async (db) => {
       const current = await db.getAgentRunById(runId, ref.tenantId, settled.projectId);
       if (!current || current.callbackStatus !== 'waiting') return;
+      applied = final ? 'answered' : 'pending';
       await db.updateAgentRunCallback(runId, ref.tenantId, {
-        callbackStatus: final ? 'answered' : 'pending',
+        callbackStatus: applied,
         callbackAttempts: current.callbackAttempts ?? 0,
       });
       if (final) return;
@@ -2306,6 +2309,7 @@ export async function settleWaitedRunCallback(
   } catch (error) {
     logger.warn('Could not settle the callback of a waited run', { runId, error: error instanceof Error ? error.message : String(error) });
   }
+  return applied;
 }
 
 export async function redeliverAgentRunCallback(run: IAgentRun): Promise<boolean> {

@@ -403,7 +403,11 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
           settled = (await waitForAgentRun({ ...ref, runId: String(run._id) }, waitMs, gone)) ?? run;
         }
       } finally {
-        if (run.callbackStatus === 'waiting') await settleWaitedRunCallback({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, settled);
+        if (run.callbackStatus === 'waiting') {
+          const callbackStatus = await settleWaitedRunCallback({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, settled);
+          // The answer shows the state the callback was left in (a run answered inside its wait owes none).
+          if (callbackStatus) settled = { ...settled, callbackStatus } as IAgentRun;
+        }
       }
       return sendRun(reply, settled);
     } catch (error) {

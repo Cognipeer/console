@@ -19,6 +19,7 @@ const hoisted = vi.hoisted(() => ({
   resolveAgentConfig: vi.fn(),
   startAgentRun: vi.fn(),
   waitForAgentRun: vi.fn(),
+  settleWaitedRunCallback: vi.fn(),
   getAgentRunStatus: vi.fn(),
   cancelAgentRun: vi.fn(),
   listAgentRuns: vi.fn(),
@@ -65,6 +66,7 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     ...actual,
     startAgentRun: hoisted.startAgentRun,
     waitForAgentRun: hoisted.waitForAgentRun,
+    settleWaitedRunCallback: hoisted.settleWaitedRunCallback,
     getAgentRunStatus: hoisted.getAgentRunStatus,
     cancelAgentRun: hoisted.cancelAgentRun,
     listAgentRuns: hoisted.listAgentRuns,
@@ -203,6 +205,23 @@ describe('POST /client/v1/agents/:agentKey/runs', () => {
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody(res.body)).toMatchObject({ status: 'succeeded', output_text: 'Hi there' });
     expect(hoisted.waitForAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'r1', projectId: 'proj-1' }), 30_000, expect.any(AbortSignal));
+  });
+
+  it('a run answered inside its wait shows the settled callback state, not the held one', async () => {
+    const waited = { callbackUrl: 'https://hooks.example.com/run', callbackStatus: 'waiting' };
+    hoisted.startAgentRun.mockResolvedValue({ kind: 'accepted', run: run({ ...waited }) });
+    hoisted.waitForAgentRun.mockResolvedValue(run({ ...waited, status: 'succeeded', result: { id: 'resp_r1', object: 'response', output_text: 'Hi' }, completedAt: CREATED }));
+    hoisted.settleWaitedRunCallback.mockResolvedValue('answered');
+    const answered = await create({ input: 'hello', wait: 30, callback: { url: 'https://hooks.example.com/run' } });
+    expect(answered.statusCode).toBe(200);
+    expect(parseJsonBody<{ callback: { status: unknown } }>(answered.body).callback.status).toBeNull();
+
+    // A run that outlives its wait hands the callback back: it is owed.
+    hoisted.waitForAgentRun.mockResolvedValue(run({ ...waited, status: 'running' }));
+    hoisted.settleWaitedRunCallback.mockResolvedValue('pending');
+    const going = await create({ input: 'hello', wait: 30, callback: { url: 'https://hooks.example.com/run' } });
+    expect(going.statusCode).toBe(202);
+    expect(parseJsonBody<{ callback: { status: unknown } }>(going.body).callback.status).toBe('pending');
   });
 
   it('wait that ends first is a 202 with the run still going; the wait never exceeds the window', async () => {
