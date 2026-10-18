@@ -73,6 +73,11 @@ describe('publicRunFailureMessage: what a client reads of a failed run', () => {
         expect(publicRunFailureMessage(new Error('Model "gpt-old" not found'))).toBe('Model "gpt-old" not found');
     });
 
+    it('keeps the message of a retryable authorization_unavailable (503), which is written for the caller', () => {
+        const error = Object.assign(new Error('Authorization is temporarily unavailable'), { status: 503, code: 'authorization_unavailable', type: 'api_error' });
+        expect(publicRunFailureMessage(error)).toBe('Authorization is temporarily unavailable');
+    });
+
     it('keeps the words of a run the platform itself ended: they are not the provider\'s', () => {
         expect(publicRunFailureMessage(new AgentRunInterruptedError('worker_lost'))).toBe('The agent run was stopped before it finished. It was not completed; retry it.');
         expect(publicRunFailureMessage(new AgentRunTimeoutError())).toContain('exceeded its maximum duration');
