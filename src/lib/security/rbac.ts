@@ -244,7 +244,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // entry. A prior comment in client-reranker.ts incorrectly assumed the
   // `/rerank` prefix above already covered it; it never matched.
   { prefix: '/api/client/v1/rerankers', service: 'reranker' },
-  { prefix: '/api/client/v1/tools', service: 'tools' },
   { prefix: '/api/client/v1/tracing', service: 'tracing' },
   { prefix: '/api/client/v1/traces', service: 'tracing' },
   { prefix: '/api/client/v1/vector', service: 'vector' },

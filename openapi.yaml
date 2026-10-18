@@ -646,6 +646,16 @@ paths:
                 properties:
                   agent:
                     $ref: '#/components/schemas/AgentRecord'
+                  warnings:
+                    type: array
+                    description: Things in the config worth a second look that did not stop the save (for example summarization configured on an agent without tools). Same list the dashboard returns.
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        message:
+                          type: string
         '400':
           description: The config is invalid (`validation.errors[{ field, message }]`), or `name` is missing.
           content:
@@ -1103,7 +1113,7 @@ paths:
         - Agent Runs
       summary: Answer a pending approval or question of a run
       description: >-
-        The same as `POST /agents/sessions/{conversationId}/actions/{actionId}`, addressed through the run that paused (`requires_action`): the body, the permission rules and the answers are identical. The action must be one of this run's session (and of this run, when it names one), else `404` `action_not_found`. The turn continues inline (`200`, the Responses-shaped result) or, with `background: true` or `X-Cognipeer-Background: true`, as a run (`202` with the continuation run). An inline continuation is the paused run's own: its `id` is `resp_<runId>` of that run (also while other requests of the same pause are still open and the answer is `requires_action` again), the run's events carry the continuation, and the run is settled by it.
+        The same as `POST /agents/sessions/{conversationId}/actions/{actionId}`, addressed through the run that paused (`requires_action`): the body, the permission rules and the answers are identical. The action must be one of this run's session (and of this run, when it names one), else `404` `action_not_found`. The turn continues inline (`200`, the Responses-shaped result) or, with `background: true` or `X-Cognipeer-Background: true`, as a run (`202` with the continuation run). The `200` body is the Responses object, so its `status` is `completed` (not `succeeded`: that is the status of the run envelope `GET /agents/runs/{runId}` returns for the same turn). An inline continuation is the paused run's own: its `id` is `resp_<runId>` of that run (also while other requests of the same pause are still open and the answer is `requires_action` again), the run's events carry the continuation, and the run is settled by it.
       operationId: resolveAgentRunAction
       parameters:
         - $ref: '#/components/parameters/AgentRunId'
@@ -2218,6 +2228,16 @@ paths:
                 properties:
                   agent:
                     $ref: '#/components/schemas/AgentRecord'
+                  warnings:
+                    type: array
+                    description: Things in the config worth a second look that did not stop the save (for example summarization configured on an agent without tools). Same list the dashboard returns.
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        message:
+                          type: string
         '400':
           description: The config is invalid (`validation.errors[{ field, message }]`), or the body is not usable.
           content:
@@ -16798,6 +16818,12 @@ components:
         output_error:
           type: string
           description: Present instead of `output_parsed` when the contract failed (parse or validation).
+        warnings:
+          type: array
+          items:
+            type: string
+          description: >-
+            What the turn could not do as configured, for example a sub-agent that was skipped because its agent is not active, a sub-agent without instructions, or files that were not delivered. Absent when there is nothing to report. Also on the run's `result`.
         output_files:
           type: array
           description: Files the agent wrote this turn (sandbox `/outputs/` or `session_files_create`), saved as session files; also `file_path` annotations on the message text. Absent when none.
@@ -27440,6 +27466,11 @@ components:
           type: string
           format: date-time
           nullable: true
+        warnings:
+          type: array
+          items:
+            type: string
+          description: 'Only on an assistant message whose turn had warnings: what it could not do as configured (a skipped sub-agent, undelivered files).'
         attachments:
           type: array
           items:

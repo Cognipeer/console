@@ -28,6 +28,7 @@ import {
 import {
   getApiTokenContextForRequest,
   readJsonBody,
+  readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { VectorFilterError } from '@/lib/providers';
@@ -454,7 +455,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { externalId, providerKey } = request.params as { externalId: string; providerKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody<Record<string, unknown>>(request);
       const ids = Array.isArray(body.ids)
         ? body.ids.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
         : [];

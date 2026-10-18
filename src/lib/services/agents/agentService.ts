@@ -3676,6 +3676,8 @@ export interface AgentChatResponse {
     output_error?: string;
     /** Files the agent produced this turn (its sandbox's `/outputs/`, or `session_files_create`), saved as session files. Additive; absent when none. */
     output_files?: ClientOutputFile[];
+    /** Things the turn could not do as configured (a sub-agent skipped or empty, files not delivered, a tool not offered). Additive; absent when none. */
+    warnings?: string[];
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
@@ -4721,6 +4723,7 @@ function toAgentChatResponse(input: {
     usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
+    warnings?: ReadonlySet<string>;
     /** The approvals / questions the turn paused on — makes the response `requires_action`. */
     pendingActions?: PublicPendingAction[];
 }): AgentChatResponse {
@@ -4773,6 +4776,7 @@ function toAgentChatResponse(input: {
         ...(input.outputParsed !== undefined ? { output_parsed: input.outputParsed } : {}),
         ...(input.outputError ? { output_error: input.outputError } : {}),
         ...(outputFiles.length > 0 ? { output_files: outputFiles } : {}),
+        ...(input.warnings && input.warnings.size > 0 ? { warnings: [...input.warnings] } : {}),
         _conversation_messages: input.messages,
     };
 }
@@ -5285,6 +5289,7 @@ async function runAgentChatTurn(
             usage,
             outputParsed,
             outputError,
+            warnings,
             ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
@@ -6694,6 +6699,7 @@ async function runAgentResumeTurn(
                 usage: turnUsage,
                 outputParsed: result.output,
                 outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
+                warnings,
                 ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
             }),
             stopReason,

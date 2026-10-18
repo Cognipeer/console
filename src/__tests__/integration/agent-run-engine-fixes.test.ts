@@ -272,14 +272,15 @@ describe('run callbacks', () => {
     await fireAgentRunCallback(done, 'succeeded', { result: null });
     expect(callbackJobs()).toHaveLength(0);
 
-    await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, done);
+    // The state it returns is what the caller's own answer shows (not the stale `waiting`).
+    expect(await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, done)).toBe('answered');
     expect(await read(run)).toMatchObject({ callbackStatus: 'answered' });
     expect(callbackJobs()).toHaveLength(0);
   });
 
   it('a run that outlives its wait calls back when it finishes', async () => {
     const run = await waitedRun('conv-cb-outlives');
-    await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, run);
+    expect(await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, run)).toBe('pending');
     expect(await read(run)).toMatchObject({ callbackStatus: 'pending' });
 
     const done = await succeed(run);
