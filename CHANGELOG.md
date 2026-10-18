@@ -15,7 +15,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - The per-agent **Execution** settings are gone (background on/off, default mode, sync timeout, background timeout and
   the callback fields that lived there). How long a call waits is `AGENT_SYNC_TIMEOUT_MS` and how long a run may take is
   `AGENT_BACKGROUND_MAX_DURATION_MS`, for the whole deployment. The agent's default callback is `config.callback`
-  (Studio: Configure → Callback & budget) and its default session budget `config.budget`. The
+  (Studio: Build → Callback & budget) and its default session budget `config.budget`. The
   `agent_background_disabled` error no longer exists.
 - A call that is still running when its wait window ends no longer fails: it answers `202` with a `Location` header and
   the run carries on. Clients that treated a long call as an error should read the run instead.
@@ -121,7 +121,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   exactly one of the owner's sessions matches (an ambiguous transcript starts a new session).
 - `attachments.accepts_images` on `GET /agents/{key}` is `false` while uploads are off or the bucket is unusable.
 - **Structured output** per request in each dialect (`text.format`, `response_format`, an A2A data artifact).
-  `GET /agents/{key}` returns `variables_schema` and `output_schema`. Studio: Configure → Variables and Output.
+  `GET /agents/{key}` returns `variables_schema` and `output_schema`. Studio: Build → Variables and Output.
 - **Variables.** An agent can declare typed variables (`config.variables`: a name, a type of text, number, integer,
   yes/no or JSON, required or optional, allowed values, a default) that a caller sends next to the message as
   `variables` (runs API, `/responses`, `/chat/completions`, A2A `data` parts, triggers). They are checked before the model
@@ -131,7 +131,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   message that arrives through the API: on an agent that is also used in chat, keep variables optional or give them a
   default. Values belong to the request that carries them: a session does not remember them, the prompt is rendered
   again on every turn, and the block stays in the history of each turn that sent one. Studio explains this in
-  Configure → Variables and warns next to a required variable that has no default.
+  Build → Variables and warns next to a required variable that has no default.
 - Prompt templates insert a value as it is. An agent's instructions, the prompt library's render endpoint
   (`POST /prompts/{key}/render`) and the Prompt Studio preview no longer turn `&`, `<`, `>` and quotes into HTML entities
   (`Tom & Jerry` used to reach the model as `Tom &amp; Jerry`); `{{x}}`, `{{{x}}}` and `{{&x}}` give the same text.
@@ -156,7 +156,7 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 
 ### Triggers and incoming webhooks
 
-- **Triggers** (Studio: Deploy → Triggers; `/agents/{key}/triggers` on both APIs) start an agent by their `type` and that
+- **Triggers** (Studio: Ship → Triggers; `/agents/{key}/triggers` on both APIs) start an agent by their `type` and that
   type's settings object: a cron `schedule` in an IANA timezone, `once`, `manual` or `webhook`. An agent can have several
   triggers (a schedule one and a webhook one, say); each has one type. A fire is a queued, unattended run in a new session
   owned by `system:trigger:<id>`, with the idempotency key `trigger:<id>:<slot>`; **Run now** and a run history per
