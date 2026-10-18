@@ -252,7 +252,7 @@ export async function createTool(
   projectId: string | undefined,
   input: CreateToolInput,
 ): Promise<ITool> {
-  const key = await generateUniqueKey(tenantDbName, projectId, input.name);
+  const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
 
   let actions: IToolAction[] = [];
   let upstreamBaseUrl = input.upstreamBaseUrl;

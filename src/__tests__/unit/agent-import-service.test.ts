@@ -266,7 +266,7 @@ describe('cognipeer manifest with embedded definitions', () => {
             },
         });
         expect(fn(createMcpServer).mock.calls[0][4]).toMatchObject({ key: 'github', sourceType: 'remote', upstreamAuth: { type: 'token', token: 'ghp_x' } });
-        expect(fn(createTool).mock.calls[0][4]).toMatchObject({ upstreamAuth: { type: 'header', headerName: 'X-Key', headerValue: 'k' } });
+        expect(fn(createTool).mock.calls[0][4]).toMatchObject({ key: 'crm', upstreamAuth: { type: 'header', headerName: 'X-Key', headerValue: 'k' } });
         expect(createPrompt).not.toHaveBeenCalled();
         const written = fn(applyAgentManifest).mock.calls[0][4];
         expect(written.resources).toBeUndefined();

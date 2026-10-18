@@ -7,6 +7,7 @@ const db = {
   findPromptByKey: vi.fn(async () => null),
   findMcpServerByKey: vi.fn(async () => null),
   findToolByKey: vi.fn(async () => null),
+  findModelByKey: vi.fn(async () => ({ key: 'gpt' })),
 };
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
 

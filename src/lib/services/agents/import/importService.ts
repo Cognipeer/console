@@ -750,7 +750,7 @@ async function applyManifestDocument(
             let record;
             try {
                 record = await createTool(ctx.tenantDbName, ctx.tenantId, ctx.userId, ctx.projectId, {
-                    name: tool.name, type: tool.type,
+                    key: tool.key, name: tool.name, type: tool.type,
                     ...(tool.description ? { description: tool.description } : {}),
                     ...(tool.openApiSpec ? { openApiSpec: tool.openApiSpec } : {}),
                     ...(tool.upstreamBaseUrl ? { upstreamBaseUrl: tool.upstreamBaseUrl } : {}),
