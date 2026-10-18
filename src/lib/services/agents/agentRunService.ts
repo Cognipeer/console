@@ -39,7 +39,7 @@ import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
-import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage } from './agentErrors';
+import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage, runFailureReason } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import {
@@ -1170,7 +1170,8 @@ function executeInlineRun(
       if (!raced.ok) {
         if (superseded) return await settleFromRow();
         const message = publicFailureMessage(raced.error);
-        const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
+        const reason = runFailureReason(raced.error);
+        const finalized = await finalize('failed', { errorReason: reason, errorMessage: message }, { errorReason: reason, message });
         return { kind: 'error', run: finalized ?? run, error: raced.error };
       }
       const { _conversation_messages: _omitted, ...body } = raced.response;
@@ -2100,7 +2101,8 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
           error: raced.error instanceof Error ? raced.error.message : String(raced.error),
         });
         const message = publicFailureMessage(raced.error);
-        await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
+        const reason = runFailureReason(raced.error);
+        await finalize('failed', { errorReason: reason, errorMessage: message }, { errorReason: reason, message });
         return;
       }
 

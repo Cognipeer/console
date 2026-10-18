@@ -4640,6 +4640,8 @@ export type AgentRunStatus =
  */
 export type AgentRunErrorReason =
   | 'agent_error'
+  /** A guardrail refused the prompt or the answer: a policy decision, not a fault. */
+  | 'guardrail_block'
   | 'worker_lost'
   | 'max_duration_exceeded'
   | 'canceled_by_caller'

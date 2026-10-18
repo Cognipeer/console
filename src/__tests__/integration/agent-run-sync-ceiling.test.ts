@@ -210,6 +210,23 @@ describe('inline run — wait window and detach (§4.2)', () => {
     expect(row).toMatchObject({ status: 'failed', errorReason: 'agent_error' });
   });
 
+  it('a detached turn refused by a guardrail is finalized failed/guardrail_block with the side in the message', async () => {
+    let failTurn!: (error: Error) => void;
+    hoisted.executeAgentChat.mockImplementation(() => new Promise((_, reject) => { failTurn = reject; }));
+
+    const outcome = await syncTurn('conv-held-guardrail', 60);
+    expect(outcome.kind).toBe('detached');
+    const blocked = Object.assign(new Error('Agent input blocked by guardrail: injection'), { name: 'AgentGuardrailBlockedError', status: 400 });
+    failTurn(blocked);
+    await vi.waitFor(async () => {
+      expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
+    });
+    if (outcome.kind !== 'detached') return;
+    const row = await db.getAgentRunById(String(outcome.run._id), tenantId, PROJECT_ID);
+    expect(row).toMatchObject({ status: 'failed', errorReason: 'guardrail_block' });
+    expect(row?.errorMessage).toContain('input blocked');
+  });
+
   it('a turn that completes in time is recorded as a succeeded inline run before returning', async () => {
     hoisted.executeAgentChat.mockResolvedValue(okResponse('resp_ok'));
 

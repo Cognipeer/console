@@ -1613,10 +1613,13 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
         ? deniedBy.slice(GUARDRAIL_PLUGIN_PREFIX.length)
         : undefined;
 
-    return new AgentGuardrailBlockedError(`Agent response blocked by guardrail: ${reason}`, {
+    const hook = consoleHookFor(incident?.hook ?? markerPlugin?.hook);
+    // Which side was refused: the prompt (`input.*`) or the answer.
+    const side = hook?.startsWith('input.') ? 'input' : 'response';
+    return new AgentGuardrailBlockedError(`Agent ${side} blocked by guardrail: ${reason}`, {
         guardrailKey,
         reason,
-        hook: consoleHookFor(incident?.hook ?? markerPlugin?.hook),
+        hook,
     });
 }
 

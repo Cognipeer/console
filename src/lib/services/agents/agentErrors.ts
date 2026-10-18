@@ -235,6 +235,11 @@ export function publicRunFailureMessage(
     return internal ? GENERIC_RUN_FAILURE_MESSAGE : classified.error.message;
 }
 
+/** The `errorReason` a failed run is recorded with: a guardrail refusal is its own reason, anything else `agent_error`. */
+export function runFailureReason(error: unknown): 'agent_error' | 'guardrail_block' {
+    return error instanceof Error && error.name === 'AgentGuardrailBlockedError' ? 'guardrail_block' : 'agent_error';
+}
+
 export function classifyAgentRunError(
     error: unknown,
     options?: {
