@@ -62,7 +62,11 @@ The session page and the Sessions list do not guess from the viewer's role: the 
 
 Tools that only read are never asked about, unless you set them to *Always ask*: `knowledge_*`, `memory_search`, `sandbox_read_file`, `sandbox_list_files`, `sandbox_preview_link`, `web_search`, `session_files_list`, `session_files_read` and the question tool itself. Everything else Console builds follows the default: bound, MCP and custom tools, memory writes, `sandbox_exec`, `sandbox_run_code`, `sandbox_write_file`.
 
-The agent-sdk's own tools (plan, context, delegation, skills) are never gated. Approvals apply to the agent's own tools; a call made by a sub-agent is not gated, and Studio warns about that when both are set.
+The agent-sdk's own tools (plan, context, delegation, skills) are never gated.
+
+### Sub-agents
+
+Approvals reach the tools of a [sub-agent](/guide/agent-delegation) too. Its tools are gated by this agent's settings and, for a sub-agent that is another agent, by that agent's own settings as well (a tool that either side asks about is asked about). A call that needs approval pauses the run and the request names the sub-agent (`subagent`); on a run nobody can answer, the [unattended](#unattended-runs) setting applies to it as it does to the agent's own tools. Sub-agents run in parallel cannot wait for an answer; the task comes back to the parent as `needs_input`.
 
 ## In Studio
 

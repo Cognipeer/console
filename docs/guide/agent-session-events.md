@@ -48,10 +48,10 @@ Each event:
 | --- | --- |
 | `user.message` | `content` |
 | `session.status_running` | `trigger`: `message`, `resume` (a person answered the request the turn paused on) or `timeout` (the request timed out and the agent's timeout policy, *deny* or *allow*, let the turn go on: recorded with the actor `system` and the channel `timeout`) |
-| `agent.tool_use` | `tool_call_id`, `name`, `args`, `subagent?` |
-| `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?`, `subagent?`, `source?` (`client`: the page embedding the chat ran it) |
+| `agent.tool_use` | `tool_call_id`, `name`, `args`, `subagent?` (the sub-agent that made the call, or the one a delegation call went to) |
+| `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?` (also the reason a delegated child failed: `ok` is `false` then), `subagent?`, `source?` (`client`: the page embedding the chat ran it) |
 | `agent.compaction` | what a context compaction did (`at`, `messages_compressed`, `tokens_before`, `tokens_after`, …) |
-| `action.required` | `action_id`, `kind` (`tool_approval`, `user_question` or `client_tool`), `tool_name?` (`tool_approval` and `client_tool`), `args?`, `questions?`, `allow_free_text?`, `timeout_seconds?` (`client_tool`), `expires_at?` |
+| `action.required` | `action_id`, `kind` (`tool_approval`, `user_question` or `client_tool`), `tool_name?` (`tool_approval` and `client_tool`), `subagent?` (the request comes from a [sub-agent](/guide/agent-delegation)), `args?`, `questions?`, `allow_free_text?`, `timeout_seconds?` (`client_tool`), `expires_at?` |
 | `action.resolved` | `action_id`, `kind`, `tool_name?` (`client_tool`), `decision?`, `cancelled?`, `expired?`, `ok?`, `duration_ms?`, `timed_out?` (`client_tool`), `resolved_by`, `channel` (`dashboard`, `api`, `portal`, `timeout` or `system`) |
 | `agent.output_file` | a file the agent produced this turn (its sandbox `/outputs/`, or `session_files_create`), saved as a session file: `file_id`, `name`, `mime_type`, `size`, `download_url`. One event per file, just before `agent.message` |
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
