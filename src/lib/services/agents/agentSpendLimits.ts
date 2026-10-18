@@ -27,6 +27,7 @@ import { getDatabase, type IAgentConfig } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { AgentSpendLimitError } from './agentErrors';
 import { checkBudget, settleUsageBudget, type QuotaContext } from '@/lib/quota/quotaGuard';
+import { subagentModelKeys } from './subagentRoster';
 
 export { AgentSpendLimitError };
 
@@ -96,18 +97,17 @@ export function agentSpendSettler(
 /**
  * The tenant spend pre-flight for a turn. Counters are per model key, and a
  * sub-agent with its own model debits its own counter, so every model the turn
- * can call is checked — not only the primary one. (A `ref` sub-agent borrows
- * another agent's model and is resolved at build time, so it is not covered.)
+ * can call is checked — not only the primary one: the model of each sub-agent
+ * that can run, a referenced agent's included (resolved the way the run will
+ * resolve it). A roster switched off, or an entry that is, checks nothing.
  */
 export async function assertAgentTurnSpendAllowed(
  spend: AgentSpendScope,
- config: Pick<IAgentConfig, 'modelKey' | 'subagents'>,
+ config: Pick<IAgentConfig, 'modelKey' | 'subagents' | 'subagentPolicy'>,
 ): Promise<void> {
   const keys = new Set<string>();
   if (config.modelKey) keys.add(config.modelKey);
-  for (const entry of config.subagents ?? []) {
-    if (entry.modelKey) keys.add(entry.modelKey);
-  }
+  for (const key of await subagentModelKeys(spend.tenantDbName, spend.projectId, config)) keys.add(key);
   for (const key of keys) await assertAgentSpendAllowed(spend, key);
 }
 

@@ -135,6 +135,9 @@ export async function peekAgentRunQuota(caller: AgentRunCaller): Promise<void> {
  * Charges a run that is over - however it ended - for the larger of what the
  * run reported and what its model calls were seen to spend (`sink`, runUsage.ts).
  * A failed or aborted run reports nothing, but its tokens are spent all the same.
+ * Both figures include the model calls of the sub-agents the run delegated to
+ * (the SDK's ledger and the gateway tap alike), and the larger of the two is
+ * charged, so a delegating run is charged for them once.
  */
 export function settleAgentRun(caller: AgentRunCaller, sink: RunUsageSink, reportedTokens?: number): void {
   const reported = typeof reportedTokens === 'number' && Number.isFinite(reportedTokens) ? reportedTokens : 0;

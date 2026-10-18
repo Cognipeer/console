@@ -17,7 +17,7 @@ const hoisted = vi.hoisted(() => ({
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
   buildGatewayChatModel: vi.fn(),
-  scripted: { content: 'plain answer', reasoning: 'secret thoughts' } as { content: string; reasoning?: string; events?: Array<Record<string, unknown>> },
+  scripted: { content: 'plain answer', reasoning: 'secret thoughts' } as { content: string; reasoning?: string; events?: Array<Record<string, unknown>>; chunks?: Array<Record<string, unknown>> },
   invokeConfigs: [] as Array<Record<string, unknown>>,
 }));
 
@@ -71,10 +71,11 @@ vi.mock('@cognipeer/agent-sdk', () => {
   };
 
   const createSmartAgent = () => ({
-    invoke: async (state: { messages: Array<{ role: string; content: unknown }> }, config?: { onEvent?: (event: Record<string, unknown>) => void }) => {
+    invoke: async (state: { messages: Array<{ role: string; content: unknown }> }, config?: { onEvent?: (event: Record<string, unknown>) => void; onStream?: (chunk: Record<string, unknown>) => void }) => {
       hoisted.invokeConfigs.push((config ?? {}) as Record<string, unknown>);
       // What a streaming model call reports while it runs (the SDK's `reasoning` events).
       for (const event of hoisted.scripted.events ?? []) config?.onEvent?.(event);
+      for (const chunk of hoisted.scripted.chunks ?? []) config?.onStream?.(chunk);
       const answer = {
         role: 'assistant',
         content: hoisted.scripted.content,
@@ -355,5 +356,81 @@ describe('live reasoning', () => {
     hoisted.buildGatewayChatModel.mockClear();
     await executeAgentChatLocal({ ...base });
     expect(hoisted.buildGatewayChatModel.mock.calls.at(-1)![0]).toMatchObject({ showReasoning: false });
+  });
+});
+
+describe('what a sub-agent forwards is not the turn\'s own', () => {
+  // The SDK passes a delegated child's events up stamped with the child (`subagentName` / `subagentId`).
+  const child = { subagentName: 'helper', subagentId: 'sa_1' };
+  const compaction = (extra: Record<string, unknown> = {}) => ({
+    type: 'summarization', messagesCompressed: 12, tokenCountBefore: 9000, tokenCountAfter: 2000, ...extra,
+  });
+
+  beforeEach(() => {
+    hoisted.invokeConfigs.length = 0;
+  });
+
+  it('keeps the child\'s thinking out of the live reasoning and the turn\'s reasoning', async () => {
+    hoisted.scripted = {
+      content: 'plain answer',
+      events: [
+        { type: 'reasoning', text: 'Parent plans.' },
+        { type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1' },
+        { type: 'reasoning', text: 'Child thinks.', ...child },
+        { type: 'tool_call', phase: 'start', name: 'lookup', id: 'c1', ...child },
+        { type: 'reasoning', text: 'Child again.', ...child },
+        { type: 'tool_call', phase: 'success', name: 'delegate_to', id: 'd1' },
+        { type: 'reasoning', text: 'Parent concludes.' },
+      ],
+    };
+    db.findAgentByKey.mockResolvedValue(agentWith({}));
+    const chunks: string[] = [];
+    const response = await executeAgentChatLocal({ ...base, onReasoningChunk: (text: string) => chunks.push(text) });
+    expect(chunks.join('')).toBe('Parent plans.\n\nParent concludes.');
+    expect(reasoningItem(response)).toMatchObject({ summary: [{ text: 'Parent plans.\n\nParent concludes.' }] });
+    expect(persistedAssistantTurn()).toMatchObject({ reasoning: 'Parent plans.\n\nParent concludes.' });
+
+    chunks.length = 0;
+    db.updateAgentConversation.mockClear();
+    const result = await executePlaygroundChatLocal({ ...base, onReasoningChunk: (text: string) => chunks.push(text) });
+    expect(chunks.join('')).toBe('Parent plans.\n\nParent concludes.');
+    expect(result.reasoning).toBe('Parent plans.\n\nParent concludes.');
+  });
+
+  it('keeps the child\'s text out of the answer stream', async () => {
+    hoisted.scripted = {
+      content: 'plain answer',
+      chunks: [
+        { text: 'Parent ' },
+        { text: 'CHILD LEAK', ...child },
+        { text: 'answer' },
+        { text: 'plain answer', isFinal: true },
+      ],
+    };
+    db.findAgentByKey.mockResolvedValue(agentWith({}));
+    const seen: string[] = [];
+    await executeAgentChatLocal({ ...base, onTextChunk: (text: string) => seen.push(text) });
+    expect(seen).toEqual(['Parent ', 'answer']);
+
+    seen.length = 0;
+    await executePlaygroundChatLocal({ ...base, onTextChunk: (text: string) => seen.push(text) });
+    expect(seen).toEqual(['Parent ', 'answer']);
+  });
+
+  it('does not record the child\'s compaction as a compaction of the turn', async () => {
+    hoisted.scripted = {
+      content: 'plain answer',
+      events: [compaction(child), compaction({ messagesCompressed: 4 })],
+    };
+    db.findAgentByKey.mockResolvedValue(agentWith({}));
+    const live: unknown[] = [];
+    await executeAgentChatLocal({ ...base });
+    // Only the turn's own compaction is on the stored message.
+    expect((persistedAssistantTurn().compactions as Array<{ messagesCompressed: number }>).map((c) => c.messagesCompressed)).toEqual([4]);
+
+    db.updateAgentConversation.mockClear();
+    await executePlaygroundChatLocal({ ...base, onCompaction: (c: unknown) => live.push(c) });
+    expect((persistedAssistantTurn().compactions as Array<{ messagesCompressed: number }>).map((c) => c.messagesCompressed)).toEqual([4]);
+    expect(live).toHaveLength(1);
   });
 });

@@ -409,6 +409,19 @@ describe('session turn recorder', () => {
     expect(db.updateAgentConversationRuntime.mock.invocationCallOrder[statusCall]).toBeLessThan(db.appendAgentSessionEvents.mock.invocationCallOrder.at(-1)!);
   });
 
+  it('names the sub-agent a delegation went to, and marks a delegation whose child failed as a failed call', async () => {
+    const db = fakeDb();
+    const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });
+    turn.onSdkEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', args: { subagent: 'researcher', input: 'x' } } as never);
+    turn.onSdkEvent({
+      type: 'tool_call', phase: 'error', name: 'delegate_to', id: 'd1', args: { subagent: 'researcher' },
+      result: { name: 'researcher', status: 'error', error: 'model unavailable' }, error: { message: 'model unavailable' }, durationMs: 4,
+    } as never);
+    await turn.finish({ stopReason: 'end_turn', content: 'a', messageIndex: 1 });
+    const result = db.rows.find((r) => r.type === 'agent.tool_result');
+    expect(result?.data).toMatchObject({ toolCallId: 'd1', ok: false, error: 'model unavailable', subagent: 'researcher' });
+  });
+
   it('records a thrown turn as session.error + idle(error) and no work_done', async () => {
     const db = fakeDb();
     const turn = startSessionTurnEvents({ db, ...ids, bus: recordingBus().bus, trigger: 'message', userMessage: 'hi' });

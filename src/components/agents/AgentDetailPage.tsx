@@ -91,6 +91,7 @@ import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
+import { subagentPolicyToStore } from './studio/subagentSettings';
 import { migrateAgentReasoning } from '@/lib/services/agents/agentReasoning';
 import type { SkillView } from '@/components/skills/types';
 import type {
@@ -682,7 +683,7 @@ export default function AgentDetailPage() {
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
     nextConfig.variables = variablesConfig && variablesConfig.length > 0 ? variablesConfig : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
-    nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.subagentPolicy = subagentPolicyToStore(subagents, subagentPolicy);
     nextConfig.skills = skills.length > 0 ? skills : undefined;
     nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
     nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey || memoryConfig?.mounts?.length ? memoryConfig : undefined;

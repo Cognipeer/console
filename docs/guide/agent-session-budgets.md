@@ -13,7 +13,7 @@ A session is a conversation that can go on for days through many turns. The per-
 | **Pause and wait** (default) | The turn stops where it is. The session is `budget_paused`. Once the budget is raised or removed, the turn carries on from where it stopped, with no new message. |
 | **Stop** | The turn stops and new messages are refused until the budget is raised or removed. Raising it only reopens the session: nothing carries on by itself, the next message starts the next turn. |
 
-The budget is checked before each model request against what the session has actually spent, so a turn can overshoot by at most one request. The per-turn limit still applies: a turn runs under the lower of the two.
+The budget is checked before each model request of the agent against what the session has actually spent, so a turn can overshoot by at most one request. The requests of [sub-agents](/guide/agent-delegation) count as spend as soon as the sub-agent finishes, at the sub-agent's own model price; a sub-agent that is already running is not stopped midway, so a turn that delegates can overshoot by the sub-agents it had started. The per-turn limit still applies: a turn runs under the lower of the two.
 
 A turn that finishes by itself but leaves the session at or past its budget (the common case for a plain chat turn, which is a single request) counts as reaching it: the answer is delivered, then the session is stopped exactly as above. Raising or removing the budget of such a session simply puts it back to idle, since its turn is already complete and there is nothing to continue.
 

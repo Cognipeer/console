@@ -7,6 +7,7 @@ import {
   UNATTENDED_DENIED_MESSAGE,
   applyToolApprovals,
   denyUnattendedTools,
+  gateChildTools,
   hitlCanPause,
   isReadOnlyTool,
   resolveHitlConfig,
@@ -272,16 +273,14 @@ describe('validation', () => {
     expect(errors({ timeoutMinutes: 0 })).toEqual([]);
   });
 
-  it('warns, but does not refuse, when tool approval is on and sub-agents exist', () => {
+  it('has nothing to warn about when tool approval is on and sub-agents exist: their tools are gated too', () => {
     const withSubagents = {
       ...config({ toolApproval: { enabled: true } }),
       subagents: [{ kind: 'inline', name: 'helper', header: 'Helps', systemPrompt: 'x' }],
     } as IAgentConfig;
     const result = validateHitlConfig(withSubagents);
     expect(result.errors).toEqual([]);
-    expect(result.warnings.map((w) => w.field)).toContain('humanInTheLoop.toolApproval');
-    const off = validateHitlConfig({ ...withSubagents, humanInTheLoop: { toolApproval: { enabled: false } } });
-    expect(off.warnings).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 
   it('accepts every unattended policy; "allow" is a warning, not an error', () => {
@@ -311,5 +310,50 @@ describe('Configure → Approvals & questions', () => {
     const published = { modelKey: 'gpt', humanInTheLoop: { toolApproval: { enabled: true } } };
     const draft = { modelKey: 'gpt', humanInTheLoop: { toolApproval: { enabled: false } } };
     expect([...changedConfigSections(draft, published)]).toEqual(['hitl']);
+  });
+});
+
+describe('gateChildTools', () => {
+  const makeTool = (name: string) => {
+    const run = vi.fn(async () => ({ ran: name }));
+    return { name, func: run, invoke: run, call: run, run, spy: run } as { name: string; needsApproval?: () => boolean; func: () => Promise<unknown>; spy: ReturnType<typeof vi.fn> };
+  };
+  const asking = resolveHitlConfig({ toolApproval: { enabled: true } });
+  const lenient = resolveHitlConfig({ toolApproval: { enabled: true, defaultPolicy: 'never' } });
+  const off = resolveHitlConfig(undefined);
+
+  it('asks about a child tool the delegating agent would ask about', () => {
+    const [gated] = gateChildTools([makeTool('crm_lookup')], [{ hitl: asking, mode: 'ask' }], new Set());
+    expect(gated.needsApproval?.()).toBe(true);
+  });
+
+  it('leaves the tools alone when nothing gates them', () => {
+    const tools = [makeTool('crm_lookup')];
+    expect(gateChildTools(tools, [{ hitl: off, mode: 'allow' }], new Set())).toEqual(tools);
+  });
+
+  it('gates a tool that either side gates: the referenced agent can be stricter than the delegating one', () => {
+    const strict = resolveHitlConfig({ toolApproval: { enabled: true, defaultPolicy: 'never', tools: { crm_lookup: 'always' } } });
+    const [gated, free] = gateChildTools([makeTool('crm_lookup'), makeTool('other')], [{ hitl: lenient, mode: 'ask' }, { hitl: strict, mode: 'ask' }], new Set());
+    expect(gated.needsApproval?.()).toBe(true);
+    expect(free.needsApproval).toBeUndefined();
+  });
+
+  it('keeps a gate from the delegating agent when the referenced agent asks about nothing', () => {
+    const [gated] = gateChildTools([makeTool('crm_lookup')], [{ hitl: asking, mode: 'ask' }, { hitl: off, mode: 'allow' }], new Set());
+    expect(gated.needsApproval?.()).toBe(true);
+  });
+
+  it('honours the session allow-list', () => {
+    const [gated] = gateChildTools([makeTool('crm_lookup')], [{ hitl: asking, mode: 'ask' }], new Set(['crm_lookup']));
+    expect(gated.needsApproval?.()).toBe(false);
+  });
+
+  it('refuses the call when nobody can answer, and a side that can still ask does not undo the refusal', async () => {
+    const tool = makeTool('crm_lookup');
+    const [denied] = gateChildTools([tool], [{ hitl: asking, mode: 'deny' }, { hitl: asking, mode: 'ask' }], new Set());
+    await expect(denied.func()).rejects.toThrow(UNATTENDED_DENIED_MESSAGE);
+    expect(tool.spy).not.toHaveBeenCalled();
+    expect(denied.needsApproval).toBeUndefined();
   });
 });

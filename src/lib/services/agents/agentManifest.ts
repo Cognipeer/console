@@ -17,6 +17,7 @@ import YAML from 'yaml';
 
 import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
+import { subagentConfigIssues } from './subagentConfigRules';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
 import { maskAgentCallbackConfig, stripLegacyExecutionConfig } from './agentCallbackConfig';
@@ -126,6 +127,8 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
         const where = `spec.subagents[${subagent.name}]`;
         if (subagent.kind === 'ref' && subagent.agentKey) {
             out.push({ type: 'agent', key: subagent.agentKey, usedBy: where });
+            // A reference may override the model its agent runs on: the importing project needs that model too.
+            if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
             continue;
         }
         if (subagent.modelKey) out.push({ type: 'model', key: subagent.modelKey, usedBy: where });
@@ -257,6 +260,8 @@ export function validateAgentManifest(input: unknown): string[] {
             issues.push(`sub-agent "${subagent.name}" has an unknown kind "${String(subagent.kind)}"`);
         }
     }
+
+    for (const issue of subagentConfigIssues(spec)) issues.push(`spec.${issue.field} ${issue.message}`);
 
     if (spec.structuredOutput?.enabled && !spec.structuredOutput.schema) {
         issues.push('spec.structuredOutput.enabled is true but no schema is set');

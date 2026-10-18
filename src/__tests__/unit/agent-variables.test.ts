@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest';
 import type { IAgentConfig, IAgentVariable } from '@/lib/database/provider/types.domain';
 import {
     composeUserMessageWithVariables,
+    delegatedVariableValues,
+    unsuppliableRequiredVariables,
     variablePromptValues,
     variablesToJsonSchema,
     MAX_AGENT_VARIABLES,
@@ -264,5 +266,46 @@ describe('delivery: prompt variables', () => {
     it('variablePromptValues is undefined when there is nothing to expose', () => {
         expect(variablePromptValues(undefined, null)).toBeUndefined();
         expect(variablePromptValues([], {})).toBeUndefined();
+    });
+});
+
+describe('variables of an agent used as a sub-agent', () => {
+    it('delegatedVariableValues: a referenced agent takes the delegating run\'s value of each name it declares', () => {
+        const declared: IAgentVariable[] = [
+            { name: 'region', type: 'string' },
+            { name: 'tier', type: 'string', enum: ['a', 'b'], default: 'a' },
+            { name: 'attempts', type: 'integer' },
+            { name: 'untouched', type: 'string', default: 'x' },
+        ];
+        expect(delegatedVariableValues(declared, { region: 'eu', tier: 'b', attempts: 3, other: 'not declared' }))
+            .toEqual({ region: 'eu', tier: 'b', attempts: 3 });
+    });
+
+    it('delegatedVariableValues: leaves out a value of another type, outside the allowed list, null, or absent', () => {
+        const declared: IAgentVariable[] = [
+            { name: 'attempts', type: 'integer' },
+            { name: 'tier', type: 'string', enum: ['a', 'b'] },
+            { name: 'region', type: 'string' },
+        ];
+        expect(delegatedVariableValues(declared, { attempts: 'three', tier: 'c', region: null })).toBeNull();
+        expect(delegatedVariableValues(declared, undefined)).toBeNull();
+        expect(delegatedVariableValues(undefined, { a: 1 })).toBeNull();
+    });
+
+    it('so the default fills what the delegating run did not carry, and the run\'s value wins where it did', () => {
+        const declared: IAgentVariable[] = [{ name: 'region', type: 'string', default: 'eu' }, { name: 'tier', type: 'string', default: 'a' }];
+        expect(variablePromptValues(declared, delegatedVariableValues(declared, { tier: 'b' }))).toEqual({ region: 'eu', tier: 'b' });
+    });
+
+    it('unsuppliableRequiredVariables: required, no default, and not declared by the delegating agent', () => {
+        const referenced: IAgentVariable[] = [
+            { name: 'customer_id', type: 'string', required: true },
+            { name: 'region', type: 'string', required: true },
+            { name: 'tier', type: 'string', required: true, default: 'a' },
+            { name: 'note', type: 'string' },
+        ];
+        expect(unsuppliableRequiredVariables(referenced, [{ name: 'region', type: 'string' }])).toEqual(['customer_id']);
+        expect(unsuppliableRequiredVariables(referenced, undefined)).toEqual(['customer_id', 'region']);
+        expect(unsuppliableRequiredVariables(undefined, undefined)).toEqual([]);
     });
 });

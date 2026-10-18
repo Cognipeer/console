@@ -3427,6 +3427,8 @@ export interface IAgentMessagePendingAction {
   id: string;
   kind: AgentPendingActionKind;
   toolName?: string;
+  /** The sub-agent whose tool call or question this is. */
+  subagent?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3453,6 +3455,8 @@ export interface IAgentPendingAction {
   sdkId: string;
   toolCallId?: string;
   toolName?: string;
+  /** The sub-agent whose tool call or question this is (a child's pause surfaced by the SDK). */
+  subagent?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;

@@ -139,6 +139,7 @@ export default defineConfig({
             { text: 'Agent Runs & Background', link: '/guide/agent-background-execution' },
             { text: 'Agent Triggers', link: '/guide/agent-triggers' },
             { text: 'Approvals & Questions', link: '/guide/agent-approvals' },
+            { text: 'Delegation (Sub-agents)', link: '/guide/agent-delegation' },
             { text: 'Agent Sessions API', link: '/guide/agent-sessions' },
             { text: 'Session Events', link: '/guide/agent-session-events' },
             { text: 'Feedback & Message Actions', link: '/guide/agent-feedback' },

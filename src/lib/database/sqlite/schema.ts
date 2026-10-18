@@ -1827,7 +1827,8 @@ export const TENANT_SCHEMA_SQL = `
     agentVersion INTEGER,
     usePublished INTEGER,
     createdBy TEXT,
-    clientTool TEXT
+    clientTool TEXT,
+    subagent TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
   CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
