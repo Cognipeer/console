@@ -79,6 +79,30 @@ export function toChatToolCalls(actions: ReadonlyArray<ClientPendingAction> | un
         }));
 }
 
+/**
+ * What a chat-completions client reads when a turn is paused on something this
+ * wire cannot answer (an approval, a question): the message names what waits
+ * and where to answer it, so `content` is never an empty 200.
+ */
+export function pausedMessage(actions: ReadonlyArray<ClientPendingAction>, conversationId: string): string {
+    const open = actions.filter((action) => action.status === 'pending');
+    const lines = open.map((action) => {
+        const by = action.subagent ? ` (requested by sub-agent "${action.subagent}")` : '';
+        if (action.kind === 'tool_approval') return `- approval to run the tool "${action.tool_name ?? 'unknown'}"${by} [action ${action.id}]`;
+        const first = (action.questions ?? [])
+            .map((q) => (q && typeof q === 'object'
+                ? (q as Record<string, unknown>).question ?? (q as Record<string, unknown>).text ?? (q as Record<string, unknown>).prompt
+                : q))
+            .find((q): q is string => typeof q === 'string' && q.length > 0);
+        return `- an answer to the question${first ? ` "${first}"` : ''}${by} [action ${action.id}]`;
+    });
+    return [
+        'The agent is paused and waiting for:',
+        ...lines,
+        `Answer in the Console (session ${conversationId}) or with POST /client/v1/agents/sessions/${conversationId}/actions/{action id}; the turn then carries on.`,
+    ].join('\n');
+}
+
 export interface ToolAnswer {
     callId: string;
     /** The body of the actions endpoint: `{ output }` or `{ error }`. */
@@ -265,6 +289,8 @@ export function toChatCompletion(input: {
     reasoning?: string;
     /** Files the agent produced this turn: `output_files` on the body, `file_path` annotations on the message. */
     outputFiles?: ClientOutputFile[];
+    /** The open approvals / questions of a paused turn, as the Responses API names them (`required_action`). */
+    requiredAction?: { type: 'agent_actions'; actions: ClientPendingAction[] };
 }) {
     const calling = (input.toolCalls?.length ?? 0) > 0;
     const files = input.outputFiles?.length ? input.outputFiles : undefined;
@@ -287,6 +313,7 @@ export function toChatCompletion(input: {
             finish_reason: calling ? ('tool_calls' as const) : agentFinishReason(input.stopReason),
         }],
         ...(input.usage ? { usage: input.usage } : {}),
+        ...(input.requiredAction && !calling ? { required_action: input.requiredAction } : {}),
         // Not an OpenAI field: files the agent wrote for the user (download via `download_url`).
         ...(files ? { output_files: files } : {}),
         // Not OpenAI fields either: why a run ended without a final answer.
@@ -315,6 +342,8 @@ export function toChatChunk(input: {
     files?: ClientOutputFile[];
     /** The session (`conversation_id`, not an OpenAI field): on the first and the closing chunk. */
     conversationId?: string;
+    /** On the closing chunk of a paused turn: the open approvals / questions (`required_action`, not an OpenAI field). */
+    requiredAction?: { type: 'agent_actions'; actions: ClientPendingAction[] };
 }) {
     return {
         id: input.id,
@@ -333,6 +362,7 @@ export function toChatChunk(input: {
             finish_reason: input.finish ? agentFinishReason(input.stopReason) : null,
         }],
         ...(input.finish && input.files?.length ? { files: input.files } : {}),
+        ...(input.finish && input.requiredAction ? { stop_reason: 'requires_action', required_action: input.requiredAction } : {}),
         ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
     };
 }
@@ -447,6 +477,8 @@ export type AgentCompletionResult =
         reasoning?: string;
         /** Files the agent produced this turn (sandbox /outputs), as `output_files`. */
         outputFiles?: ClientOutputFile[];
+        /** The open approvals / questions of a paused turn (`required_action` of the Responses API). */
+        requiredAction?: { type: 'agent_actions'; actions: ClientPendingAction[] };
         /** The run this turn was (a tool answer continues the paused run's session and has none of its own). */
         runId?: string;
     };
@@ -577,11 +609,18 @@ export function completionOfRun(run: IAgentRun, conversationId: string): AgentCo
 export function completionFrom(result: AgentChatResponse, conversationId: string): AgentCompletionResult {
     const toolCalls = toChatToolCalls(result.required_action?.actions);
     const reasoning = extractAnswerReasoning(result);
+    let content = result.output_parsed !== undefined && result.output_parsed !== null
+        ? JSON.stringify(result.output_parsed)
+        : extractAnswerText(result);
+    // A pause on something this wire cannot answer says what waits, instead of an empty answer.
+    const paused = result.stop_reason === 'requires_action' && toolCalls.length === 0 && (result.required_action?.actions.length ?? 0) > 0
+        ? result.required_action
+        : undefined;
+    if (paused && !content.trim()) content = pausedMessage(paused.actions, conversationId);
     return {
         // A turn under a structured contract answers with the JSON of the parsed output.
-        content: result.output_parsed !== undefined && result.output_parsed !== null
-            ? JSON.stringify(result.output_parsed)
-            : extractAnswerText(result),
+        content,
+        ...(paused ? { requiredAction: paused } : {}),
         ...(reasoning ? { reasoning } : {}),
         conversationId,
         ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),

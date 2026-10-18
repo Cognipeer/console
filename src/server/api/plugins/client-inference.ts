@@ -512,7 +512,7 @@ async function runAgentChat(input: {
         // Ends the stream the way OpenAI does when the model calls tools: the calls, then finish_reason "tool_calls".
         send({ ...toChatToolCallsChunk({ id, model, toolCalls: result.toolCalls }), conversation_id: result.conversationId });
       } else {
-        send({ ...toChatChunk({ id, model, finish: true, stopReason: result.stopReason, files: result.outputFiles, conversationId: result.conversationId }), ...cognipeer });
+        send({ ...toChatChunk({ id, model, finish: true, stopReason: result.stopReason, files: result.outputFiles, conversationId: result.conversationId, requiredAction: result.requiredAction }), ...cognipeer });
       }
       // `stream_options.include_usage`: the run's usage, in a chunk of its own after the last one.
       if (result.usage && (body.stream_options as { include_usage?: unknown } | undefined)?.include_usage === true) {
