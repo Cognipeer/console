@@ -119,7 +119,7 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
-import { normalizePlaygroundUsage } from './playgroundUsage';
+import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from './playgroundUsage';
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
@@ -1613,10 +1613,13 @@ function guardrailBlockedError(result: DeniableInvokeResult): AgentGuardrailBloc
         ? deniedBy.slice(GUARDRAIL_PLUGIN_PREFIX.length)
         : undefined;
 
-    return new AgentGuardrailBlockedError(`Agent response blocked by guardrail: ${reason}`, {
+    const hook = consoleHookFor(incident?.hook ?? markerPlugin?.hook);
+    // Which side was refused: the prompt (`input.*`) or the answer.
+    const side = hook?.startsWith('input.') ? 'input' : 'response';
+    return new AgentGuardrailBlockedError(`Agent ${side} blocked by guardrail: ${reason}`, {
         guardrailKey,
         reason,
-        hook: consoleHookFor(incident?.hook ?? markerPlugin?.hook),
+        hook,
     });
 }
 
@@ -1652,16 +1655,20 @@ async function buildAgentCostEstimator(
     primary: PricedModel,
     subagentModels: PricedModel[],
     sessionBudgetActive = false,
+    onWarning?: (message: string) => void,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
     const limited = sessionBudgetActive || Number(config.runtime?.limits?.maxCostUsd) > 0;
     if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
-    const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
+    const models: Parameters<typeof buildCostEstimator>[0] = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
     ];
     for (const child of subagentModels) {
         if (child.key && child.key === primary.key) continue;
-        models.push({ names: [child.key, child.modelId], pricing: child.pricing });
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing, noFallback: true });
+        if (limited && !(((child.pricing?.inputTokenPer1M ?? 0) > 0) || ((child.pricing?.outputTokenPer1M ?? 0) > 0))) {
+            onWarning?.(`Sub-agent model "${child.key}" has no pricing, so its calls are not counted against the cost limit or the session budget.`);
+        }
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
     if (!estimator && limited) {
@@ -1729,6 +1736,10 @@ export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undef
     if (runtimeContext.via) {
         out.via = runtimeContext.via.kind;
         out.viaIssuer = runtimeContext.via.issuer;
+    }
+    if (runtimeContext.trigger) {
+        out.triggerId = runtimeContext.trigger.id;
+        out.trigger = runtimeContext.trigger.type;
     }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
@@ -1887,7 +1898,6 @@ async function buildAgentSubagents(
             input.onWarning?.(message);
             continue;
         }
-        seen.add(entry.name);
 
         let systemPrompt: string | undefined;
         let toolBindings = entry.toolBindings;
@@ -1968,6 +1978,9 @@ async function buildAgentSubagents(
             }
         }
 
+        // Taken only now that the entry will be built: a reference that could not run must not
+        // make a later, working one of the same name look like the duplicate.
+        seen.add(entry.name);
         subagents.push({
             name: entry.name,
             ...(entry.title ? { title: entry.title } : {}),
@@ -2521,7 +2534,15 @@ export async function createInternalTracingSink(
                     nonSinkErrors,
                     ended: String(session.status ?? '').trim().toLowerCase() !== 'in_progress',
                 });
+                // A turn the caller stopped ends its session as the SDK sees an ordinary end ("success");
+                // the sink runs inside the invoke, so the turn's own signal says it was cancelled. A run
+                // that failed keeps its error. What the aborted model call used is only known when the
+                // gateway settled it (runUsage); the trace's token totals are the SDK's, so they may miss it.
+                const cancelledByCaller = currentTurnSignal()?.aborted === true
+                    && sessionStatus !== 'error' && sessionStatus !== 'paused' && sessionStatus !== 'in_progress';
 
+                const agentTriggerId = (session.metadata as Record<string, unknown> | undefined)?.source === 'trigger'
+                    && typeof (session.metadata as Record<string, unknown>).triggerId === 'string';
                 const sessionDoc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'> = {
                     sessionId: session.sessionId,
                     traceId: session.traceId,
@@ -2529,7 +2550,7 @@ export async function createInternalTracingSink(
                     threadId: session.threadId,
                     tenantId,
                     projectId,
-                    source: 'custom',
+                    source: agentTriggerId ? 'trigger' : 'custom',
                     agent: session.agent ?? {},
                     agentName: session.agent?.name ?? undefined,
                     agentVersion: session.agent?.version ?? undefined,
@@ -2537,9 +2558,9 @@ export async function createInternalTracingSink(
                     config: session.config ?? {},
                     metadata: { ...(session.metadata ?? {}), ...(agentKey ? { agentKey } : {}) },
                     summary: session.summary ?? {},
-                    status: sessionStatus,
+                    status: cancelledByCaller ? 'cancelled' : sessionStatus,
                     // An SDK-supplied status is never overridden by a late error event (only a derived one is).
-                    statusExplicit: isExplicitClientStatus(session.status),
+                    statusExplicit: cancelledByCaller || isExplicitClientStatus(session.status),
                     startedAt: session.startedAt ? new Date(session.startedAt) : new Date(),
                     endedAt: session.endedAt ? new Date(session.endedAt) : undefined,
                     durationMs: session.durationMs ?? undefined,
@@ -4254,7 +4275,7 @@ async function buildLocalAgentRun(input: {
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
         : buildTracingMetadata(runtimeContext);
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive);
+    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive, (message) => warnings.add(message));
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
@@ -6505,6 +6526,10 @@ async function runAgentResumeTurn(
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+        // The usage the turn reports (response, run result, `agent.message` event) is every leg of it —
+        // the SDK counts only the leg it just ran. The stored message keeps its own leg.
+        const earlierLegs = pausedRun ? pausedLegsUsage(conversation.messages ?? []) : undefined;
+        const turnUsage = earlierLegs ? (usage ? addPlaygroundUsage(earlierLegs, usage) : earlierLegs) : usage;
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
@@ -6585,7 +6610,7 @@ async function runAgentResumeTurn(
             ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
             content: outcome.content,
             messageIndex: messages.length - 1,
-            ...(usage ? { usage: { ...usage } } : {}),
+            ...(turnUsage ? { usage: { ...turnUsage } } : {}),
             ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
             ...(budget && !superseded ? { budget } : {}),
         });
@@ -6603,7 +6628,7 @@ async function runAgentResumeTurn(
                 messages,
                 reasoning: assistantReasoning,
                 outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
-                usage,
+                usage: turnUsage,
                 outputParsed: result.output,
                 outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
                 ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),

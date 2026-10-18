@@ -399,6 +399,22 @@ describe('state persistence helpers', () => {
         expect(outcome).toMatchObject({ stopReason: 'paused', partial: true, content: '' });
     });
 
+    it('does not price a sub-agent model nobody priced at the parent rate, but still falls back for unknown names', () => {
+        const parent = { inputTokenPer1M: 1_000_000, outputTokenPer1M: 0 } as never;
+        const calc = (_pricing: unknown, usage: { inputTokens?: number }) => ({ totalCost: usage.inputTokens ?? 0 });
+        const estimator = buildCostEstimator(
+            [
+                { names: ['parent'], pricing: parent },
+                { names: ['child'], pricing: null, noFallback: true },
+            ],
+            parent,
+            calc as never,
+        )!;
+        expect(estimator({ modelName: 'child', inputTokens: 5, outputTokens: 0 })).toBe(0);
+        expect(estimator({ modelName: 'parent', inputTokens: 5, outputTokens: 0 })).toBe(5);
+        expect(estimator({ modelName: 'something-else', inputTokens: 5, outputTokens: 0 })).toBe(5);
+    });
+
     it('treats zero prices as "not priced", so maxCostUsd is not silently a no-op at $0', () => {
         const calc = () => ({ totalCost: 0 });
         expect(buildCostEstimator([{ names: ['m'], pricing: { inputTokenPer1M: 0, outputTokenPer1M: 0 } as never }], undefined, calc)).toBeUndefined();

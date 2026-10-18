@@ -93,6 +93,20 @@ function checkEnum(issues: Issues, field: string, value: unknown, allowed: Set<s
     }
 }
 
+/** Whether the agent can call anything that returns a tool result (tools, knowledge, sub-agents, skills, memory, sandbox, client tools). */
+function agentHasTools(config: IAgentConfig): boolean {
+    return Boolean(
+        config.toolBindings?.length
+        || config.knowledgeBindings?.length
+        || config.knowledgeEngineKey
+        || config.subagents?.length
+        || config.skills?.length
+        || config.clientTools?.length
+        || config.memory?.enabled
+        || config.sandbox?.enabled,
+    );
+}
+
 /**
  * The checks that need nothing but the config itself — no database lookups.
  * validateAgentConfig runs these first.
@@ -155,6 +169,22 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         issues.errors.push({
             field: 'runtime.context.policy',
             message: '"summary_only" needs summarization enabled — without a summary the agent keeps only the current turn',
+        });
+    }
+
+    // The SDK summarizes only tool results. With nothing that produces them, summarization never runs and
+    // the `hybrid` policy simply drops turns older than `lastTurnsToKeep`: facts from them are lost silently.
+    const summarizationConfigured = (runtime.summarization !== undefined && summarization.enable !== false)
+        || context.policy === 'summary_only' || context.policy === 'hybrid';
+    if (summarizationConfigured && !agentHasTools(config)) {
+        issues.warnings.push({
+            field: 'runtime.summarization',
+            message: 'Summarization only compresses tool results, and this agent has no tools, so it never summarizes. '
+                + (context.policy === 'summary_only'
+                    ? 'With "summary_only" the agent keeps only the current turn.'
+                    : context.policy === 'raw'
+                        ? 'Older turns are kept as they are until the context limit.'
+                        : `With the "hybrid" context policy, turns older than the last ${isNumber(context.lastTurnsToKeep) ? context.lastTurnsToKeep : 'few'} are dropped without a summary.`),
         });
     }
 

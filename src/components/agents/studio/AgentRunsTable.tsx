@@ -36,6 +36,7 @@ type AgentRunRow = ReturnType<typeof serializeAgentRun>;
 
 const ERROR_LABELS: Record<string, string> = {
     agent_error: 'Agent error',
+    guardrail_block: 'Blocked by guardrail',
     worker_lost: 'Worker lost',
     max_duration_exceeded: 'Max duration exceeded',
     canceled_by_caller: 'Canceled',

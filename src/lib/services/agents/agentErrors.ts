@@ -228,8 +228,15 @@ export function publicRunFailureMessage(
     classified: ClassifiedAgentRunError = classifyAgentRunError(error),
 ): string {
     if (error instanceof AgentRunTimeoutError || error instanceof AgentRunInterruptedError) return classified.error.message;
+    // A retryable refusal with a message written for the caller (the access engine could not decide): say it.
+    if (classified.error.code === 'authorization_unavailable') return classified.error.message;
     const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
     return internal ? GENERIC_RUN_FAILURE_MESSAGE : classified.error.message;
+}
+
+/** The `errorReason` a failed run is recorded with: a guardrail refusal is its own reason, anything else `agent_error`. */
+export function runFailureReason(error: unknown): 'agent_error' | 'guardrail_block' {
+    return error instanceof Error && error.name === 'AgentGuardrailBlockedError' ? 'guardrail_block' : 'agent_error';
 }
 
 export function classifyAgentRunError(

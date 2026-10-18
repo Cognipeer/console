@@ -187,6 +187,8 @@ describe('background execution core (§7)', () => {
     // §8: background/run responses get a per-run id, distinct from the
     // synchronous scheme's conversation-scoped id.
     expect((finalStatus?.result as { id?: string } | null)?.id).toBe(`resp_${run._id}`);
+    // The agent is named the way every agent surface names it, not by its display name.
+    expect((finalStatus?.result as { model?: string } | null)?.model).toMatch(/^agent:/);
   });
 
   it('records how the turn ended: end_turn, and a limit stop still finalizes succeeded with stopReason limit', async () => {

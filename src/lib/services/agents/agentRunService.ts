@@ -39,7 +39,7 @@ import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
-import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage } from './agentErrors';
+import { AgentRunInterruptedError, AgentRunTimeoutError, GENERIC_RUN_FAILURE_MESSAGE, publicRunFailureMessage, runFailureReason } from './agentErrors';
 import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import {
@@ -220,7 +220,8 @@ export function serializeAgentRun(run: IAgentRun) {
     callback: run.callbackUrl
       ? {
         url: run.callbackUrl,
-        status: run.callbackStatus ?? null,
+        // `waiting` may still be owed; `answered` (the caller got the final state) owes nothing.
+        status: run.callbackStatus === 'waiting' ? 'pending' : run.callbackStatus === 'answered' ? null : run.callbackStatus ?? null,
         attempts: run.callbackAttempts ?? 0,
         signed: Boolean(run.callbackSecret),
       }
@@ -485,6 +486,11 @@ export type StartAgentRunExecution =
     kind: 'queued';
     /** Scheduled start (`run_at` / `delay_seconds`); more than 1 s ahead = a `scheduled` row. */
     notBefore?: Date;
+    /**
+     * The caller waits for the answer in this call (`wait`): the per-run callback is held back and settled
+     * by `settleWaitedRunCallback` once the wait ends.
+     */
+    waiting?: boolean;
   };
 
 export interface StartAgentRunInput {
@@ -911,7 +917,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       mode: 'background',
       status: scheduled ? 'scheduled' : 'queued',
       notBefore: scheduled ? notBefore! : null,
-      callbackStatus: input.callback?.url ? 'pending' : null,
+      callbackStatus: input.callback?.url ? (input.execution.waiting && !scheduled ? 'waiting' : 'pending') : null,
     });
     if (isOutcome(inserted)) return inserted;
     const runId = String(inserted._id);
@@ -1170,7 +1176,8 @@ function executeInlineRun(
       if (!raced.ok) {
         if (superseded) return await settleFromRow();
         const message = publicFailureMessage(raced.error);
-        const finalized = await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
+        const reason = runFailureReason(raced.error);
+        const finalized = await finalize('failed', { errorReason: reason, errorMessage: message }, { errorReason: reason, message });
         return { kind: 'error', run: finalized ?? run, error: raced.error };
       }
       const { _conversation_messages: _omitted, ...body } = raced.response;
@@ -1710,6 +1717,15 @@ function runFlags(run: Pick<IAgentRun, 'unattended' | 'externalContent' | 'liter
   };
 }
 
+/** The run's trigger, stamped on its runtime context so its trace session is tagged with it. */
+export function withTriggerMarker(
+  context: AgentRuntimeContext | undefined,
+  run: Pick<IAgentRun, 'triggerId' | 'trigger'>,
+): AgentRuntimeContext | undefined {
+  if (!run.triggerId) return context;
+  return { ...context, source: 'trigger', trigger: { id: run.triggerId, type: run.trigger ?? 'trigger' } };
+}
+
 function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellationCell): AgentChatRequest {
   return {
     tenantDbName: run.tenantDbName,
@@ -1723,7 +1739,7 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     ...(run.accountableUserId ? { accountableUserId: run.accountableUserId } : {}),
     version: run.version ?? undefined,
     usePublished: run.usePublished,
-    runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
+    runtimeContext: withTriggerMarker(openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed), run),
     ...(run.responseFormat ? { responseFormat: run.responseFormat } : {}),
     ...(run.variables ? { variables: run.variables } : {}),
     ...runFlags(run),
@@ -2100,14 +2116,16 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
           error: raced.error instanceof Error ? raced.error.message : String(raced.error),
         });
         const message = publicFailureMessage(raced.error);
-        await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
+        const reason = runFailureReason(raced.error);
+        await finalize('failed', { errorReason: reason, errorMessage: message }, { errorReason: reason, message });
         return;
       }
 
       settleAgentRun(quotaCaller, usage, raced.response.usage?.total_tokens);
 
       const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced.response;
-      const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };
+      // `model` names the agent the way every other agent surface does (`agent:<key>`), not by its display name.
+      const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}`, model: `agent:${request.agentKey}` };
       if (responseWithRunId.status === 'requires_action') {
         // Paused for a person: not terminal. The run waits as `requires_action`
         // (the conversation's slot is free) until the actions are resolved.
@@ -2211,6 +2229,8 @@ export async function fireAgentRunCallback(
     },
   });
   if (!run.callbackUrl) return;
+  // A caller is still waiting on this run in its request: settleWaitedRunCallback decides once the wait ends.
+  if (run.callbackStatus === 'waiting') return;
   // A new event starts a new count: a run that was `requires_action` (callback
   // delivered) and later finishes owes a fresh `succeeded` callback, and the
   // reconciler keys off `pending` / `failed` to find callbacks that never made it.
@@ -2255,6 +2275,39 @@ export const AGENT_RUN_CALLBACK_MAX_ATTEMPTS = CALLBACK_ATTEMPTS;
  * rebuilt from the run row — the receiver sees the same stable event id as
  * the first try. One attempt per call: the reconciler's tick is the retry cadence.
  */
+/**
+ * Ends the hold on the per-run callback of a run created with `waiting`, once its caller's wait is over.
+ * `settled` is the run as the caller was answered. A final state the caller received owes no callback;
+ * anything else (still going, paused, the caller left) hands the callback duty back, and a change that
+ * landed after `settled` was read is called back now.
+ */
+export async function settleWaitedRunCallback(
+  ref: { tenantDbName: string; tenantId: string },
+  settled: IAgentRun,
+): Promise<void> {
+  if (settled.callbackStatus !== 'waiting' && settled.callbackStatus !== undefined) return;
+  const runId = String(settled._id);
+  const final = settled.status === 'succeeded' || settled.status === 'failed' || settled.status === 'canceled';
+  try {
+    await runWithTenantDb(ref.tenantDbName, async (db) => {
+      const current = await db.getAgentRunById(runId, ref.tenantId, settled.projectId);
+      if (!current || current.callbackStatus !== 'waiting') return;
+      await db.updateAgentRunCallback(runId, ref.tenantId, {
+        callbackStatus: final ? 'answered' : 'pending',
+        callbackAttempts: current.callbackAttempts ?? 0,
+      });
+      if (final) return;
+      // The run moved on between the answer and this hand-over: its callback was held back, so send it.
+      const latest = await db.getAgentRunById(runId, ref.tenantId, settled.projectId);
+      if (latest && latest.status !== settled.status && latest.status !== 'queued' && latest.status !== 'running' && latest.status !== 'scheduled') {
+        await redeliverAgentRunCallback(latest);
+      }
+    });
+  } catch (error) {
+    logger.warn('Could not settle the callback of a waited run', { runId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 export async function redeliverAgentRunCallback(run: IAgentRun): Promise<boolean> {
   if (!run.callbackUrl || !isAsyncAgentRun(run)) return false;
   const event: AgentRunCallbackEvent | null = run.status === 'succeeded' ? 'succeeded'
@@ -2384,6 +2437,9 @@ export async function publishAgentRunJob(run: IAgentRun, options: { republish?: 
 
 export const INTERRUPTED_RUN_MESSAGE = 'The server restarted while this run was in progress. It was not completed; retry it.';
 
+/** Longest the shutdown drain waits for the interrupted runs' session events to be written. */
+const DRAIN_EVENTS_MAX_WAIT_MS = 5_000;
+
 /**
  * Shutdown drain for the runs executing in this process (inline turns and
  * queue workers): waits up to `timeoutMs` for them to settle, then fails the
@@ -2432,10 +2488,20 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   // The session event logs hear about it before any caller is answered and before the session event
   // streams are ended: a follower reads the ending of its run, then its stream closes (it reconnects,
   // and replays the same ending). Together, so the shutdown does not wait one run after another.
-  await Promise.all(ended.map(({ local, run }) => runWithTenantDb(
-    local.tenantDbName,
-    (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
-  ).catch(() => undefined)));
+  // Bounded: a database that stopped answering must not hold the shutdown (the run rows are final already,
+  // the next boot's reconciler republishes what did not land).
+  const eventsTimer = delaySentinel(Math.min(timeoutMs, DRAIN_EVENTS_MAX_WAIT_MS), TIMEOUT_SENTINEL);
+  try {
+    await Promise.race([
+      Promise.all(ended.map(({ local, run }) => runWithTenantDb(
+        local.tenantDbName,
+        (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
+      ).catch(() => undefined))),
+      eventsTimer.promise,
+    ]);
+  } finally {
+    eventsTimer.clear();
+  }
   for (const local of leftovers) {
     // Abandoned: the row is final; whatever the turn still does must not land.
     // An inline run's caller is answered with the row at once (its stream ends).

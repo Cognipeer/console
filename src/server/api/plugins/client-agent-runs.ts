@@ -30,6 +30,7 @@ import {
   publicAgentRunId,
   runWithTenantDb,
   serializeAgentRun,
+  settleWaitedRunCallback,
   waitForAgentRun,
   type StartAgentRunExecution,
 } from '@/lib/services/agents/agentRunService';
@@ -385,15 +386,25 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const execution: StartAgentRunExecution = { kind: 'queued', ...(schedule.notBefore ? { notBefore: schedule.notBefore } : {}) };
+      const execution: StartAgentRunExecution = {
+        kind: 'queued',
+        ...(schedule.notBefore ? { notBefore: schedule.notBefore } : {}),
+        ...(waitMs > 0 && !schedule.notBefore ? { waiting: true as const } : {}),
+      };
       const outcome = await startRunOnSession({ ...base, execution }, { tenantDbName: ctx.tenantDbName, conversationId: prepared.conversationId, created: prepared.created });
       const refusal = runOutcomeRefusal(outcome);
       if (refusal) return sendRunRefusal(reply, 'client', refusal);
       if (outcome.kind !== 'accepted' && outcome.kind !== 'replay') return reply.code(500).send(INTERNAL_ERROR_BODY);
       const run = outcome.run;
-      const settled = waitMs > 0 && isAgentRunActive(run) && run.status !== 'scheduled'
-        ? (await waitForAgentRun({ ...ref, runId: String(run._id) }, waitMs, gone)) ?? run
-        : run;
+      // The per-run callback was held back while this call waits: the wait's outcome decides whether it is owed.
+      let settled = run;
+      try {
+        if (waitMs > 0 && isAgentRunActive(run) && run.status !== 'scheduled') {
+          settled = (await waitForAgentRun({ ...ref, runId: String(run._id) }, waitMs, gone)) ?? run;
+        }
+      } finally {
+        if (run.callbackStatus === 'waiting') await settleWaitedRunCallback({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, settled);
+      }
       return sendRun(reply, settled);
     } catch (error) {
       return sendClassifiedError(reply, 'Client agent run create error', error);

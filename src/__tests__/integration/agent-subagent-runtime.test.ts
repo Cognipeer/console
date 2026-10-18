@@ -629,6 +629,20 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(offered(main)).not.toMatch(/- (ghost|pinned|remote|nowhere):/);
     });
 
+    it('does not call a working entry a duplicate of one with the same name that could not run', async () => {
+      await createAgent({
+        subagents: [{ ...REF, name: 'helper', agentKey: 'nobody' }, inlineHelper()],
+      });
+      const main = script('main', () => answer('done'));
+      script('worker', () => answer('unused'));
+      const id = await freshConversation();
+
+      await chat(id, 'hello');
+
+      expect(offered(main)).toContain('- helper: Does the legwork');
+      expect(await warningsOf(id)).toEqual(['Sub-agent "helper" was skipped: Agent "nobody" not found.']);
+    });
+
     it('says which entries share a name or have none, and keeps the first of a pair', async () => {
       await createAgent({ subagents: [inlineHelper(), inlineHelper({ header: 'The other one' }), inlineHelper({ name: '' })] });
       const main = script('main', () => answer('done'));

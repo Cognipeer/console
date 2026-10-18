@@ -17285,6 +17285,7 @@ components:
               type: string
               enum:
                 - agent_error
+                - guardrail_block
                 - worker_lost
                 - max_duration_exceeded
                 - canceled_by_caller
@@ -17294,7 +17295,7 @@ components:
                 - expired
                 - interrupted
               description: >-
-                `agent_error`: the turn failed. `worker_lost`: the worker died mid-run. `max_duration_exceeded`: the run limit was hit. `canceled_by_caller`. `precondition_failed`: the agent was disabled or deleted, or the token revoked, before the run started. `owner_disabled` / `owner_unverifiable`: the user who started it is disabled or cannot be checked. `expired`: a deferred or scheduled run did not start in time. `interrupted`: the server shut down while it ran; it is not retried - run it again.
+                `agent_error`: the turn failed. `guardrail_block`: a guardrail refused the prompt or the answer (`error.message` says which: "input blocked" or "response blocked"). `worker_lost`: the worker died mid-run. `max_duration_exceeded`: the run limit was hit. `canceled_by_caller`. `precondition_failed`: the agent was disabled or deleted, or the token revoked, before the run started. `owner_disabled` / `owner_unverifiable`: the user who started it is disabled or cannot be checked. `expired`: a deferred or scheduled run did not start in time. `interrupted`: the server shut down while it ran; it is not retried - run it again.
             message:
               type: string
               nullable: true

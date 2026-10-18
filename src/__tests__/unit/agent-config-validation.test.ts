@@ -272,6 +272,26 @@ describe('validateAgentConfig', () => {
         expect(fields(result.warnings)).toContain('runtime.askUser');
     });
 
+    it('warns when summarization is configured but the agent has no tools to summarize', () => {
+        const noTools = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            runtime: { summarization: { enable: true }, context: { policy: 'hybrid', lastTurnsToKeep: 3 } },
+        });
+        const warning = noTools.warnings.find((issue) => issue.field === 'runtime.summarization');
+        expect(warning?.message).toContain('without a summary');
+        expect(warning?.message).toContain('last 3');
+
+        const withTools = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            toolBindings: [{ sourceType: 'tool', sourceKey: 't' }] as never,
+            runtime: { summarization: { enable: true }, context: { policy: 'hybrid' } },
+        });
+        expect(fields(withTools.warnings)).not.toContain('runtime.summarization');
+
+        // Nothing configured: no noise for an agent on the defaults.
+        expect(fields(validateAgentConfigShape({ modelKey: 'gpt-main' }).warnings)).not.toContain('runtime.summarization');
+    });
+
     it('leaves a connected agent to its own connection checks', async () => {
         const result = await validate({ kind: 'external' });
         expect(result).toEqual({ errors: [], warnings: [] });
