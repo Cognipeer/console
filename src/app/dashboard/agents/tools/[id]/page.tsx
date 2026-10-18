@@ -11,7 +11,6 @@ import {
   Center,
   Code,
   CopyButton,
-  Divider,
   Group,
   JsonInput,
   Loader,
@@ -81,74 +80,6 @@ function UsageSection({ tool }: { tool: ToolView }) {
   const actionKey = firstAction?.key ?? 'action-key';
   const actionName = firstAction?.name ?? 'action_name';
 
-  const curlListTools = `curl -X GET "https://your-cognipeer-host/api/client/v1/tools" \\
-  -H "Authorization: Bearer YOUR_API_TOKEN"`;
-
-  const curlGetTool = `curl -X GET "https://your-cognipeer-host/api/client/v1/tools/${tool.key}" \\
-  -H "Authorization: Bearer YOUR_API_TOKEN"`;
-
-  const curlExecute = `curl -X POST "https://your-cognipeer-host/api/client/v1/tools/${tool.key}/actions/${actionKey}/execute" \\
-  -H "Authorization: Bearer YOUR_API_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "arguments": {
-      "param": "value"
-    }
-  }'`;
-
-  const sdkTypeScript = `import { ConsoleClient } from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_TOKEN',
-  baseURL: 'https://your-cognipeer-host',
-});
-
-// List all tools
-const tools = await client.tools.list();
-console.log(\`Found \${tools.length} tools\`);
-
-// Get tool details
-const tool = await client.tools.get('${tool.key}');
-console.log(\`Tool: \${tool.name}, Actions: \${tool.actions.length}\`);
-
-// Execute an action
-const result = await client.tools.execute(
-  '${tool.key}',
-  '${actionKey}',
-  { param: 'value' },
-);
-console.log('Result:', result);
-
-// Convert to agent-sdk compatible tools
-const agentTools = await client.tools.toAgentTools('${tool.key}');
-// Pass agentTools directly to createAgent({ tools: agentTools })`;
-
-  const sdkPython = `import httpx
-
-BASE_URL = "https://your-cognipeer-host"
-API_TOKEN = "YOUR_API_TOKEN"
-headers = {"Authorization": f"Bearer {API_TOKEN}"}
-
-# List all tools
-resp = httpx.get(f"{BASE_URL}/api/client/v1/tools", headers=headers)
-tools = resp.json()["tools"]
-for t in tools:
-    print(f"  {t['name']} ({t['key']}): {len(t.get('actions', []))} actions")
-
-# Get tool details
-resp = httpx.get(f"{BASE_URL}/api/client/v1/tools/${tool.key}", headers=headers)
-tool = resp.json()["tool"]
-
-# Execute an action
-resp = httpx.post(
-    f"{BASE_URL}/api/client/v1/tools/${tool.key}/actions/${actionKey}/execute",
-    headers=headers,
-    json={"arguments": {"param": "value"}},
-)
-result = resp.json()
-print(f"Result: {result['result']}")
-print(f"Latency: {result['latencyMs']}ms")`;
-
   return (
     <Stack gap="md">
       {/* Tool key */}
@@ -177,141 +108,14 @@ print(f"Latency: {result['latencyMs']}ms")`;
         )}
       </Paper>
 
-      {/* Base URL */}
+      {/* The public client Tools API is retired: agents run tools server-side. */}
       <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="xs">Base Endpoint</Text>
-        <Code block fz="xs">{`/api/client/v1/tools/${tool.key}`}</Code>
-        <Text size="xs" c="dimmed" mt="sm">
-          Endpoints: <Code fz="xs">GET /tools</Code>{' '}
-          <Code fz="xs">GET /tools/:toolKey</Code>{' '}
-          <Code fz="xs">POST /tools/:toolKey/actions/:actionKey/execute</Code>
+        <Text fw={600} mb="xs">Using this tool</Text>
+        <Text size="sm" c="dimmed">
+          Tools run server-side through agent tool bindings. Add <Code fz="xs">{tool.key}</Code> to an agent
+          (Tools tab, source “Tool”) and call the agent through the Agents API. The standalone
+          client Tools API (<Code fz="xs">/api/client/v1/tools</Code>) has been retired. Use the Test tab to try an action here.
         </Text>
-      </Paper>
-
-      {/* cURL — list tools */}
-      <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="xs">cURL — List Tools</Text>
-        <Text size="xs" c="dimmed" mb="sm">
-          Replace <Code fz="xs">YOUR_API_TOKEN</Code> with a valid API token from Settings.
-        </Text>
-        <Box style={{ position: 'relative' }}>
-          <CopyButton value={curlListTools} timeout={2000}>
-            {({ copied, copy }) => (
-              <Button size="xs" variant={copied ? 'filled' : 'outline'} color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
-                onClick={copy}
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            )}
-          </CopyButton>
-          <Code block fz="xs">{curlListTools}</Code>
-        </Box>
-      </Paper>
-
-      {/* cURL — get tool */}
-      <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="xs">cURL — Get Tool Details</Text>
-        <Box style={{ position: 'relative' }}>
-          <CopyButton value={curlGetTool} timeout={2000}>
-            {({ copied, copy }) => (
-              <Button size="xs" variant={copied ? 'filled' : 'outline'} color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
-                onClick={copy}
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            )}
-          </CopyButton>
-          <Code block fz="xs">{curlGetTool}</Code>
-        </Box>
-      </Paper>
-
-      {/* cURL — execute action */}
-      <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="xs">cURL — Execute Action</Text>
-        <Text size="xs" c="dimmed" mb="sm">
-          Pass action arguments as a JSON object in <Code fz="xs">arguments</Code>.
-        </Text>
-        <Box style={{ position: 'relative' }}>
-          <CopyButton value={curlExecute} timeout={2000}>
-            {({ copied, copy }) => (
-              <Button size="xs" variant={copied ? 'filled' : 'outline'} color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
-                onClick={copy}
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            )}
-          </CopyButton>
-          <Code block fz="xs">{curlExecute}</Code>
-        </Box>
-      </Paper>
-
-      <Divider label="SDK Examples" labelPosition="center" />
-
-      {/* TypeScript SDK */}
-      <Paper withBorder radius="md" p="md">
-        <Group justify="space-between" mb="xs">
-          <Text fw={600}>TypeScript / Node.js SDK</Text>
-          <Badge size="sm" variant="light" color="blue">@cognipeer/console-sdk</Badge>
-        </Group>
-        <Text size="xs" c="dimmed" mb="sm">
-          Install: <Code fz="xs">npm install @cognipeer/console-sdk</Code>
-        </Text>
-        <Box style={{ position: 'relative' }}>
-          <CopyButton value={sdkTypeScript} timeout={2000}>
-            {({ copied, copy }) => (
-              <Button size="xs" variant={copied ? 'filled' : 'outline'} color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
-                onClick={copy}
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            )}
-          </CopyButton>
-          <Code block fz="xs" style={{ maxHeight: 400, overflow: 'auto' }}>{sdkTypeScript}</Code>
-        </Box>
-      </Paper>
-
-      {/* Python */}
-      <Paper withBorder radius="md" p="md">
-        <Group justify="space-between" mb="xs">
-          <Text fw={600}>Python</Text>
-          <Badge size="sm" variant="light" color="yellow">httpx</Badge>
-        </Group>
-        <Text size="xs" c="dimmed" mb="sm">
-          Install: <Code fz="xs">pip install httpx</Code>
-        </Text>
-        <Box style={{ position: 'relative' }}>
-          <CopyButton value={sdkPython} timeout={2000}>
-            {({ copied, copy }) => (
-              <Button size="xs" variant={copied ? 'filled' : 'outline'} color={copied ? 'teal' : 'gray'}
-                leftSection={copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
-                onClick={copy}
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            )}
-          </CopyButton>
-          <Code block fz="xs" style={{ maxHeight: 400, overflow: 'auto' }}>{sdkPython}</Code>
-        </Box>
-      </Paper>
-
-      {/* Response format */}
-      <Paper withBorder radius="md" p="md">
-        <Text fw={600} mb="xs">Execute Response Format</Text>
-        <Code block fz="xs">{`{
-  "result": { ... },
-  "latencyMs": 245,
-  "toolKey": "${tool.key}",
-  "actionKey": "${actionKey}"
-}`}</Code>
       </Paper>
     </Stack>
   );

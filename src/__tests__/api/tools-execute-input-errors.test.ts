@@ -1,5 +1,5 @@
 /**
- * Executing a Tools-service action through the dashboard and the client API:
+ * Executing a Tools-service action through the dashboard:
  * an argument the action cannot take (a missing or invalid path parameter) is
  * reported as a request error and never reaches the upstream, while a failure
  * of the call itself keeps its status.
@@ -40,7 +40,6 @@ vi.mock('@/server/api/fastify-utils', async (importActual) => ({
 
 import type { ITool } from '@/lib/database';
 import { getTool, getToolByKey, logToolRequest, parseOpenApiToActions } from '@/lib/services/tools';
-import { clientToolsApiPlugin } from '@/server/api/plugins/client-tools';
 import { toolsApiPlugin } from '@/server/api/plugins/tools';
 
 const SPEC = JSON.stringify({
@@ -91,7 +90,6 @@ describe('executing a tool action', () => {
     }));
     app = Fastify({ logger: false });
     await app.register(toolsApiPlugin, { prefix: '/api' });
-    await app.register(clientToolsApiPlugin, { prefix: '/api' });
   });
 
   afterEach(async () => {
@@ -103,12 +101,6 @@ describe('executing a tool action', () => {
     url: `/api/tools/tool-1/actions/${actionKey}/execute`,
     payload: { arguments: args },
   });
-  const client = (args: unknown) => app.inject({
-    method: 'POST',
-    url: `/api/client/v1/tools/upstream/actions/${actionKey}/execute`,
-    payload: { arguments: args },
-  });
-
   describe('from the dashboard', () => {
     it('answers an invalid path argument with 400 and the reason, without calling the upstream', async () => {
       const response = await dashboard({ id: '..' });
@@ -141,22 +133,6 @@ describe('executing a tool action', () => {
       const response = await dashboard({ id: 'u-1' });
       expect(response.statusCode).toBe(500);
       expect(JSON.parse(response.body).error).toContain('ECONNREFUSED');
-    });
-  });
-
-  describe('through the client API', () => {
-    it('answers an invalid path argument with 400 and the reason, without calling the upstream', async () => {
-      const response = await client({ id: '../admin' });
-      expect(response.statusCode).toBe(400);
-      expect(JSON.parse(response.body)).toEqual({ error: 'Invalid value for path parameter "id"' });
-      expect(hoisted.safeFetch).not.toHaveBeenCalled();
-    });
-
-    it('serves a valid call', async () => {
-      const response = await client({ id: 'u-2' });
-      expect(response.statusCode).toBe(200);
-      expect(JSON.parse(response.body).result).toEqual({ id: 'u-1' });
-      expect(hoisted.safeFetch.mock.calls[0][0]).toBe('https://api.example.com/v1/users/u-2');
     });
   });
 });

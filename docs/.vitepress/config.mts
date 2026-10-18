@@ -238,7 +238,6 @@ export default defineConfig({
             { text: 'Red Team', link: '/api/redteam' },
             { text: 'Agents', link: '/api/agents' },
             { text: 'Browser', link: '/api/browser' },
-            { text: 'Tools', link: '/api/tools' },
             { text: 'MCP Servers', link: '/api/mcp' },
             { text: 'Vector', link: '/api/vector' },
             { text: 'Reranker', link: '/api/reranker' },
