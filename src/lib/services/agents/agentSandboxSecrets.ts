@@ -116,7 +116,17 @@ export function sealAgentConfigSecrets(
 ): IAgentConfig {
     let next = stripLegacyExecutionConfig(config);
     if (next.sandbox) next = { ...next, sandbox: sealAgentSandboxConfig(next.sandbox, current?.sandbox) };
-    if (next.callback) next = { ...next, callback: sealAgentCallbackConfig(next.callback, current?.callback) };
+    // `!== undefined`, so a JSON `null` is looked at too: whatever says "no callback" leaves no field behind.
+    if (next.callback !== undefined) {
+        const callback = sealAgentCallbackConfig(next.callback, current?.callback);
+        if (callback) {
+            next = { ...next, callback };
+        } else {
+            // A callback with no URL is removed, not kept as `{}`, `{ url: '' }` or a secret with nothing to sign.
+            const { callback: _removed, ...withoutCallback } = next;
+            next = withoutCallback;
+        }
+    }
     return next;
 }
 

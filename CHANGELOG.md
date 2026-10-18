@@ -180,7 +180,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   stored values answers `409 sandbox_env_unreadable` and keeps the ciphertext, and the template editor asks for every
   value or none. A row opened with Replace and saved without a value keeps the stored one.
 - Clearing an agent's callback URL removes the whole callback, and the stored secret with it (the masked secret read back
-  next to no URL is accepted and dropped).
+  next to no URL is accepted and dropped). The field is gone from the saved config: a callback sent as `{}`, with an
+  empty `url` or as `null` is no longer stored as an empty object (or as a secret with nothing to sign), and the agent
+  reads back without `callback`.
 
 ### Configuration
 

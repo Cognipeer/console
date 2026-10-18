@@ -163,9 +163,20 @@ describe('agent callback secret (config.callback)', () => {
     });
 
     it('a masked secret without a URL drops the stored secret instead of keeping it', () => {
-        const dropped = sealAgentCallbackConfig({ secret: MASK }, stored)!;
-        expect(dropped.secretSealed).toBeUndefined();
+        const dropped = sealAgentCallbackConfig({ secret: MASK }, stored);
+        // Nothing is left of the callback: no URL, no orphan secret.
+        expect(dropped).toBeUndefined();
         expect(openAgentCallbackSecret(dropped)).toBeUndefined();
+    });
+
+    it('a callback without a URL is no callback: the seal answers nothing, not an empty object', () => {
+        // The ways a client says "remove it": an empty object, a cleared URL, a URL cleared next to the mask or an empty secret.
+        for (const incoming of [{}, { url: '' }, { url: '', secret: '' }, { url: '', secret: MASK }, { secret: MASK }, { secret: '' }]) {
+            expect(sealAgentCallbackConfig(incoming, stored), JSON.stringify(incoming)).toBeUndefined();
+            expect(sealAgentCallbackConfig(incoming, undefined), JSON.stringify(incoming)).toBeUndefined();
+        }
+        expect(sealAgentCallbackConfig(undefined, stored)).toBeUndefined();
+        expect(sealAgentCallbackConfig(null as never, stored)).toBeUndefined();
     });
 
     it('a client cannot supply its own ciphertext through secretSealed', () => {
@@ -181,6 +192,22 @@ describe('agent callback secret (config.callback)', () => {
         expect(next.callback?.secret).toBeUndefined();
         expect(openAgentCallbackSecret(next.callback)).toBe('agent-callback-secret-1');
         expect('execution' in next).toBe(false);
+    });
+
+    it('sealAgentConfigSecrets clears the field when the callback has no URL, and leaves everything else alone', () => {
+        const withStored = { modelKey: 'm', description: 'keep me', callback: stored } as IAgentConfig;
+        for (const callback of [{}, { url: '' }, { url: '', secret: MASK }, { secret: MASK }, null]) {
+            const next = sealAgentConfigSecrets({ modelKey: 'm', description: 'keep me', callback } as unknown as IAgentConfig, withStored);
+            expect('callback' in next, JSON.stringify(callback)).toBe(false);
+            expect(JSON.stringify(next)).not.toContain('secretSealed');
+            expect(next).toEqual({ modelKey: 'm', description: 'keep me' });
+        }
+        // No callback key at all stays no callback key (the stored one is not carried over: `config` replaces).
+        expect('callback' in sealAgentConfigSecrets({ modelKey: 'm' }, withStored)).toBe(false);
+        // A callback with a URL is still sealed and kept.
+        const kept = sealAgentConfigSecrets({ modelKey: 'm', callback: { url: URL_, secret: MASK } }, withStored);
+        expect(kept.callback?.url).toBe(URL_);
+        expect(openAgentCallbackSecret(kept.callback)).toBe('agent-callback-secret-1');
     });
 
     it('a read never returns a legacy execution blob (its sealed secret included)', () => {

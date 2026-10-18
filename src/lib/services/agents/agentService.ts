@@ -2691,11 +2691,12 @@ export async function updateAgentRecord(
     await db.switchToTenant(tenantDbName);
     // Old Advanced-tab reasoning moves next to the model on every save.
     if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
-    if (data.config?.sandbox || data.config?.callback) {
+    if (data.config?.sandbox || data.config?.callback !== undefined) {
         // `config` replaces the stored one wholesale; masked secret values
         // must resolve against what is stored, not be saved as the mask —
         // and a plaintext secret (sandbox secrets, the callback secret) must
-        // be sealed before it is written.
+        // be sealed before it is written. A callback sent without a URL (or
+        // as `null`) is the way to remove it: the field is dropped here.
         const current = await db.findAgentById(agentId);
         data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
     } else if (data.config) {
