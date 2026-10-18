@@ -15,6 +15,7 @@
 
 import { MODEL_PARAMETER_UNSUPPORTED_CODE, normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
+import { formatUsd } from '@/lib/utils/formatUsd';
 
 export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
 
@@ -109,10 +110,6 @@ export class AgentBudgetReachedError extends Error {
         this.spentUsd = spentUsd;
         this.maxCostUsd = maxCostUsd;
     }
-}
-
-function formatUsd(value: number): string {
-    return value >= 1 ? value.toFixed(2) : value.toFixed(4);
 }
 
 /**

@@ -127,5 +127,8 @@ describe('checkBudget — micro-dollar precision + fail-closed on counter error'
 
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/budget exceeded/i);
+    // Dollars, not the counter's micro-dollars.
+    expect(result.reason).not.toMatch(/micros/i);
+    expect(result.reason).toContain('$10.01 of the $10.00');
   });
 });
