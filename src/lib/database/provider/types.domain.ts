@@ -4658,7 +4658,14 @@ export type AgentRunErrorReason =
   | null;
 
 /** Durable delivery state for the optional callback webhook (§12.6). */
-export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
+export type AgentRunCallbackStatus =
+  | 'pending'
+  | 'delivered'
+  | 'failed'
+  /** A caller is waiting on the run (a `wait` window): no callback is owed unless it stops waiting before the answer. */
+  | 'waiting'
+  /** The waiting caller got the final state: no callback is owed. */
+  | 'answered';
 
 // ── Webhook subscriptions ────────────────────────────────────────────────
 

@@ -220,7 +220,8 @@ export function serializeAgentRun(run: IAgentRun) {
     callback: run.callbackUrl
       ? {
         url: run.callbackUrl,
-        status: run.callbackStatus ?? null,
+        // `waiting` may still be owed; `answered` (the caller got the final state) owes nothing.
+        status: run.callbackStatus === 'waiting' ? 'pending' : run.callbackStatus === 'answered' ? null : run.callbackStatus ?? null,
         attempts: run.callbackAttempts ?? 0,
         signed: Boolean(run.callbackSecret),
       }
@@ -485,6 +486,11 @@ export type StartAgentRunExecution =
     kind: 'queued';
     /** Scheduled start (`run_at` / `delay_seconds`); more than 1 s ahead = a `scheduled` row. */
     notBefore?: Date;
+    /**
+     * The caller waits for the answer in this call (`wait`): the per-run callback is held back and settled
+     * by `settleWaitedRunCallback` once the wait ends.
+     */
+    waiting?: boolean;
   };
 
 export interface StartAgentRunInput {
@@ -911,7 +917,7 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
       mode: 'background',
       status: scheduled ? 'scheduled' : 'queued',
       notBefore: scheduled ? notBefore! : null,
-      callbackStatus: input.callback?.url ? 'pending' : null,
+      callbackStatus: input.callback?.url ? (input.execution.waiting && !scheduled ? 'waiting' : 'pending') : null,
     });
     if (isOutcome(inserted)) return inserted;
     const runId = String(inserted._id);
@@ -2222,6 +2228,8 @@ export async function fireAgentRunCallback(
     },
   });
   if (!run.callbackUrl) return;
+  // A caller is still waiting on this run in its request: settleWaitedRunCallback decides once the wait ends.
+  if (run.callbackStatus === 'waiting') return;
   // A new event starts a new count: a run that was `requires_action` (callback
   // delivered) and later finishes owes a fresh `succeeded` callback, and the
   // reconciler keys off `pending` / `failed` to find callbacks that never made it.
@@ -2266,6 +2274,39 @@ export const AGENT_RUN_CALLBACK_MAX_ATTEMPTS = CALLBACK_ATTEMPTS;
  * rebuilt from the run row — the receiver sees the same stable event id as
  * the first try. One attempt per call: the reconciler's tick is the retry cadence.
  */
+/**
+ * Ends the hold on the per-run callback of a run created with `waiting`, once its caller's wait is over.
+ * `settled` is the run as the caller was answered. A final state the caller received owes no callback;
+ * anything else (still going, paused, the caller left) hands the callback duty back, and a change that
+ * landed after `settled` was read is called back now.
+ */
+export async function settleWaitedRunCallback(
+  ref: { tenantDbName: string; tenantId: string },
+  settled: IAgentRun,
+): Promise<void> {
+  if (settled.callbackStatus !== 'waiting' && settled.callbackStatus !== undefined) return;
+  const runId = String(settled._id);
+  const final = settled.status === 'succeeded' || settled.status === 'failed' || settled.status === 'canceled';
+  try {
+    await runWithTenantDb(ref.tenantDbName, async (db) => {
+      const current = await db.getAgentRunById(runId, ref.tenantId, settled.projectId);
+      if (!current || current.callbackStatus !== 'waiting') return;
+      await db.updateAgentRunCallback(runId, ref.tenantId, {
+        callbackStatus: final ? 'answered' : 'pending',
+        callbackAttempts: current.callbackAttempts ?? 0,
+      });
+      if (final) return;
+      // The run moved on between the answer and this hand-over: its callback was held back, so send it.
+      const latest = await db.getAgentRunById(runId, ref.tenantId, settled.projectId);
+      if (latest && latest.status !== settled.status && latest.status !== 'queued' && latest.status !== 'running' && latest.status !== 'scheduled') {
+        await redeliverAgentRunCallback(latest);
+      }
+    });
+  } catch (error) {
+    logger.warn('Could not settle the callback of a waited run', { runId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 export async function redeliverAgentRunCallback(run: IAgentRun): Promise<boolean> {
   if (!run.callbackUrl || !isAsyncAgentRun(run)) return false;
   const event: AgentRunCallbackEvent | null = run.status === 'succeeded' ? 'succeeded'

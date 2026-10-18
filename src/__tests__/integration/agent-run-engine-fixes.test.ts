@@ -66,6 +66,7 @@ import {
   deliverAgentRunCallbackJob,
   drainLocalAgentRuns,
   fireAgentRunCallback,
+  settleWaitedRunCallback,
   runAgentJobLocal,
   startAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -246,6 +247,54 @@ describe('run callbacks', () => {
     for (const call of callbackJobs()) await deliverAgentRunCallbackJob(payloadOf(call));
     const sentIds = hoisted.sendSignedWebhook.mock.calls.map(([input]) => (input as { eventId: string }).eventId);
     expect(sentIds).toEqual(ids);
+  });
+
+  const waitedRun = async (conversationId: string) => {
+    const outcome = await startAgentRun({
+      ...base(conversationId),
+      actorType: 'api_token',
+      channel: 'responses',
+      callback: { url: 'https://example.com/cb' },
+      execution: { kind: 'queued', waiting: true },
+    });
+    if (outcome.kind !== 'accepted') throw new Error(`expected accepted, got ${outcome.kind}`);
+    return outcome.run;
+  };
+  const succeed = async (run: IAgentRun) => {
+    await db.claimAgentRun(String(run._id), tenantId, 'node-1', new Date());
+    return (await db.finalizeAgentRun(String(run._id), tenantId, { status: 'succeeded', completedAt: new Date() }))!;
+  };
+
+  it('a run answered inside its wait sends no callback', async () => {
+    const run = await waitedRun('conv-cb-waited');
+    expect(run.callbackStatus).toBe('waiting');
+    const done = await succeed(run);
+    await fireAgentRunCallback(done, 'succeeded', { result: null });
+    expect(callbackJobs()).toHaveLength(0);
+
+    await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, done);
+    expect(await read(run)).toMatchObject({ callbackStatus: 'answered' });
+    expect(callbackJobs()).toHaveLength(0);
+  });
+
+  it('a run that outlives its wait calls back when it finishes', async () => {
+    const run = await waitedRun('conv-cb-outlives');
+    await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, run);
+    expect(await read(run)).toMatchObject({ callbackStatus: 'pending' });
+
+    const done = await succeed(run);
+    await fireAgentRunCallback(done, 'succeeded', { result: null });
+    expect(callbackJobs()).toHaveLength(1);
+  });
+
+  it('a run that finished while the caller was leaving still calls back', async () => {
+    const run = await waitedRun('conv-cb-race');
+    const done = await succeed(run);
+    await fireAgentRunCallback(done, 'succeeded', { result: null });
+    expect(callbackJobs()).toHaveLength(0);
+    // The caller's snapshot (still queued) is older than the finish.
+    await settleWaitedRunCallback({ tenantDbName: dbName, tenantId }, run);
+    expect(callbackJobs()).toHaveLength(1);
   });
 
   it('a late delivery of an older event does not overwrite the bookkeeping of the newer one', async () => {
