@@ -85,6 +85,8 @@ data: {"seq":42,"type":"agent.tool_use","data":{"tool_call_id":"call_2","name":"
 
 A `: ping` comment is sent every 15 seconds. The stream ends after an hour, when you close it, or when the server shuts down (open streams are ended during a graceful shutdown); reconnect with the last `id` to pick up where you left off.
 
+A turn the platform ends from outside, because the server shut down while it ran or because its worker was lost, is closed in the log like a turn that failed: `session.error` with `code: agent_run_interrupted`, then `session.status_idle` with `stop_reason: error`. Both carry the run's `run_id`, the session is no longer `running`, and a follower on a node that is shutting down receives them before its stream is ended. So waiting for `session.status_idle` is enough to know a turn is over, however it ended; read the run (`GET /agents/runs/{runId}`) for `interrupted` or `worker_lost`.
+
 With Redis configured, the stream follows a turn that runs on another node.
 
 A client that only needs to know when something happened can use [webhooks](/guide/webhooks) (`session.idled`, `action.required`, …) instead of holding a stream open.

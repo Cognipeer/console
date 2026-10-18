@@ -1555,6 +1555,62 @@ async function dropPausedConversation(db: DatabaseProvider, run: IAgentRun): Pro
   }
 }
 
+/**
+ * A run the platform ended from outside its turn: the shutdown drain (`interrupted`), or the reconciler
+ * for a worker that stopped sending heartbeats (`worker_lost`). The turn is gone, or is being cut off and
+ * would end its log as `cancelled`, which is not what happened to the run (it failed, and can be retried).
+ * So the session's event log is closed here, the way a failed turn closes it: `session.error`, then
+ * `session.status_idle` with `stop_reason: error`. The documented way to know a turn is over is that idle
+ * event, and a follower of the run or of the session (this node's are still attached when the drain calls
+ * this) is no longer left waiting for one that never comes; the session stops reading `running`, and the
+ * `session.idled` webhook fires.
+ *
+ * The session gets a new turn owner first, so the cut-off turn's own late end finds it has been overtaken
+ * and writes nothing (the same rule that keeps an old turn from overwriting a newer one). Only a session
+ * that still reads `running` is touched: one a pause or a newer message moved on is not this run's to
+ * reset. Best effort, like everything the log records: it never fails the drain or the sweep.
+ */
+export async function recordRunEndedInEvents(
+  db: DatabaseProvider,
+  run: Pick<IAgentRun, '_id' | 'tenantId' | 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId'>,
+  failure: { reason: string; message: string },
+): Promise<void> {
+  const runId = String(run._id);
+  try {
+    const conversation = await db.findAgentConversationById(run.conversationId);
+    if (!conversation || conversation.runtimeStatus !== 'running') return;
+
+    // The same client-safe wording and code the run's callers get (an inline caller, A2A, the runs API).
+    const ended = new AgentRunInterruptedError(failure.reason, failure.message);
+    // The status goes in BEFORE the idle frame is published, so a follower that reloads the session on
+    // it never reads 'running'.
+    await db.updateAgentConversationRuntime(run.conversationId, {
+      runtimeStatus: 'idle',
+      stopReason: 'error',
+      pendingActionIds: [],
+      runtimeTurnId: crypto.randomUUID(),
+    });
+    const writer = createSessionEventWriter({
+      db,
+      tenantDbName: run.tenantDbName,
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      agentKey: run.agentKey,
+      conversationId: run.conversationId,
+      runId,
+    });
+    writer.emit('session.error', { message: ended.message, code: ended.code });
+    writer.emit('session.status_idle', { stopReason: 'error', detail: ended.message });
+    await writer.close();
+    await db.updateAgentConversationRuntime(run.conversationId, { lastEventSeq: writer.lastSeq() });
+  } catch (error) {
+    logger.warn('Could not record the end of an interrupted run in its session events', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 // ── Status, listing, cancel ─────────────────────────────────────────────
 
 export async function getAgentRunStatus(
@@ -2348,6 +2404,7 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
   }
   const leftovers = [...activeLocalRuns.values()];
   let interrupted = 0;
+  const ended: Array<{ local: LocalRun; run: IAgentRun }> = [];
   for (const local of leftovers) {
     try {
       const completedAt = new Date();
@@ -2363,6 +2420,7 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
       if (finalized) {
         interrupted += 1;
         await fireAgentRunCallback(finalized, 'failed', { errorReason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }).catch(() => undefined);
+        ended.push({ local, run: finalized });
       }
     } catch (error) {
       logger.warn('Could not mark an interrupted agent run', {
@@ -2370,6 +2428,15 @@ export async function drainLocalAgentRuns(timeoutMs: number): Promise<{ settled:
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  // The session event logs hear about it before any caller is answered and before the session event
+  // streams are ended: a follower reads the ending of its run, then its stream closes (it reconnects,
+  // and replays the same ending). Together, so the shutdown does not wait one run after another.
+  await Promise.all(ended.map(({ local, run }) => runWithTenantDb(
+    local.tenantDbName,
+    (db) => recordRunEndedInEvents(db, run, { reason: 'interrupted', message: INTERRUPTED_RUN_MESSAGE }),
+  ).catch(() => undefined)));
+  for (const local of leftovers) {
     // Abandoned: the row is final; whatever the turn still does must not land.
     // An inline run's caller is answered with the row at once (its stream ends).
     local.cell.cancelled = true;

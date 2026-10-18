@@ -68,6 +68,12 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - The answer to a pause is part of the paused run's events too: `action.resolved` (also when a timeout denies or ends the
   request, then with the `session.status_idle` that closes the pause) and a client tool's `agent.tool_result` carry the
   run's `run_id`, so `GET /agents/runs/{runId}/events` and its stream no longer skip them.
+- A run the server ends from outside its turn (the shutdown drain, `interrupted`; a worker that stopped sending heartbeats,
+  `worker_lost`) now closes its session events like a failed turn: `session.error` (`agent_run_interrupted`) and
+  `session.status_idle` with `stop_reason: error`, with the run's `run_id`. A client that follows the run or the session and
+  waits for the idle event is no longer left waiting (after a drain the log held nothing, or a `cancelled` idle that came
+  after the stream had been ended), a follower on the draining node gets both events before its stream ends, and the session
+  no longer stays `running`.
 - The agent-run quota counts a run only once it is admitted (a conflict or a concurrency refusal uses no unit), and a
   start refused before its run exists removes the session that the same request created. A queued run whose job fails
   before it claims its run is no longer lost: the reconciler republishes it.

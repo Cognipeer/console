@@ -56,6 +56,7 @@ import {
   fireAgentRunCallback,
   isAbandonedSyncReservation,
   publishAgentRunJob,
+  recordRunEndedInEvents,
   redeliverAgentRunCallback,
   resolveAgentRunLimits,
   runWithTenantDb,
@@ -220,6 +221,8 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
                 error: error instanceof Error ? error.message : String(error),
               });
             });
+            // The worker is gone and will not write its turn's end: the log gets one, so a follower is not left waiting.
+            await recordRunEndedInEvents(tenantDb, finalized, { reason: 'worker_lost', message: ORPHANED_RUNNING_MESSAGE });
           }
         }
 
