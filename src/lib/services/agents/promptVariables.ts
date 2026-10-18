@@ -27,6 +27,7 @@
 import Mustache from 'mustache';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
+import { renderPromptText } from '@/lib/shared/promptText';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 import { variablePromptValues } from './agentVariables';
 
@@ -148,6 +149,9 @@ export interface RenderedPrompt {
  * changing it would break prompts that rely on an optional variable — but they
  * are returned so the caller can log them. Silently hollow is the bug this
  * module exists to fix; empty-and-reported is a decision.
+ *
+ * Values are inserted as they are: the text goes to a model, not to a browser,
+ * so nothing is HTML-escaped (see `renderPromptText`).
  */
 export function renderPromptTemplate(
     template: string,
@@ -160,7 +164,7 @@ export function renderPromptTemplate(
     });
 
     return {
-        text: Mustache.render(template, resolved.values),
+        text: renderPromptText(template, resolved.values),
         unresolved,
         fromCaller: resolved.fromCaller.filter((name) => referenced.includes(name)),
     };

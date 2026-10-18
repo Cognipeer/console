@@ -317,7 +317,6 @@
     "POST /client/v1/pii/detokenize",
     "POST /client/v1/pii/policies",
     "POST /client/v1/prompts/:key/deployments",
-    "POST /client/v1/prompts/:key/render",
     "POST /client/v1/prompts/:key/versions",
     "POST /client/v1/redteam/campaigns/:key/scan",
     "POST /client/v1/tools/:toolKey/sync",

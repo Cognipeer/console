@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
-import Mustache from 'mustache';
 import { createLogger } from '@/lib/core/logger';
+import { renderPromptText } from '@/lib/shared/promptText';
 import {
   activatePromptDeployment,
   comparePromptVersions,
@@ -309,7 +309,8 @@ export const clientPromptsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const rawData = body.data && typeof body.data === 'object' ? body.data : body;
-      const rendered = Mustache.render(
+      // The text goes to a model: values are inserted as they are, not HTML-escaped.
+      const rendered = renderPromptText(
         resolved.prompt.template,
         rawData as Record<string, unknown>,
       );

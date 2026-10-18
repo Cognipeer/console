@@ -49,6 +49,8 @@ POST /api/client/v1/prompts/:key/render?environment=prod
 }
 ```
 
+Values are inserted exactly as sent: `rendered` is text for a model, so `&`, `<`, `>` and quotes are not turned into HTML entities.
+
 ## Version History
 
 ```

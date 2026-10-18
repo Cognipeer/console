@@ -109,6 +109,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   default. Values belong to the request that carries them: a session does not remember them, the prompt is rendered
   again on every turn, and the block stays in the history of each turn that sent one. Studio explains this in
   Configure → Variables and warns next to a required variable that has no default.
+- Prompt templates insert a value as it is. An agent's instructions, the prompt library's render endpoint
+  (`POST /prompts/{key}/render`) and the Prompt Studio preview no longer turn `&`, `<`, `>` and quotes into HTML entities
+  (`Tom & Jerry` used to reach the model as `Tom &amp; Jerry`); `{{x}}`, `{{{x}}}` and `{{&x}}` give the same text.
 
 ### A2A
 

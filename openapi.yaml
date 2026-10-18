@@ -9218,7 +9218,7 @@ paths:
       tags:
         - Prompts
       summary: Render a prompt template
-      description: Resolves the prompt (optionally for a given environment/version) and renders its Mustache template with the supplied variables. Variables may be passed under a `data` object; if `data` is omitted the request body itself is used as the variable map.
+      description: Resolves the prompt (optionally for a given environment/version) and renders its Mustache template with the supplied variables. Variables may be passed under a `data` object; if `data` is omitted the request body itself is used as the variable map. Values are inserted exactly as sent, so `&`, `<`, `>` and quotes are not turned into HTML entities (the text is meant for a model).
       operationId: renderPrompt
       parameters:
         - name: key
