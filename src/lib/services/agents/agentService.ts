@@ -413,12 +413,17 @@ interface AgentToolSpec {
  * resolves to a STRING — the policy message, delivered to the model as the tool
  * RESULT — instead of rejecting; see `blockedToolResult` for why that is not the
  * same as throwing.
+ *
+ * Whatever the SDK passes after the arguments reaches the executor unchanged:
+ * from agent-sdk 0.15 that is the call's context (`toolCallId`, the
+ * cancellation token and the abort signal), which a long-running tool reads to
+ * stop when the run is cancelled.
  */
 interface AgentToolGuard {
     protect<A extends Record<string, unknown>, R>(
         spec: AgentToolSpec,
-        execute: (safeArgs: A) => Promise<R>,
-    ): (args: A) => Promise<R | string>;
+        execute: (safeArgs: A, ...rest: unknown[]) => Promise<R>,
+    ): (args: A, ...rest: unknown[]) => Promise<R | string>;
 }
 
 /**
@@ -539,9 +544,9 @@ export function createAgentToolGuard(input: {
         // types the subject builders erase.
         protect<A extends Record<string, unknown>, R>(
             spec: AgentToolSpec,
-            execute: (safeArgs: A) => Promise<R>,
-        ): (args: A) => Promise<R | string> {
-            return async (args: A) => {
+            execute: (safeArgs: A, ...rest: unknown[]) => Promise<R>,
+        ): (args: A, ...rest: unknown[]) => Promise<R | string> {
+            return async (args: A, ...rest: unknown[]) => {
                 const scope = scopeForCall();
                 try {
                     let safeArgs = args;
@@ -575,7 +580,7 @@ export function createAgentToolGuard(input: {
                         }
                     }
 
-                    const result = await execute(safeArgs);
+                    const result = await execute(safeArgs, ...rest);
                     if (postKeys.length === 0) return result;
 
                     const post = await runHook({
@@ -642,7 +647,7 @@ function protectBuiltTool(
     // would otherwise hand these back as `any`.
     const aliases: unknown[] = [tool.invoke, tool.call, tool.func, tool.run];
     const original = aliases.find(
-        (alias): alias is (input: Record<string, unknown>) => Promise<unknown> =>
+        (alias): alias is (input: Record<string, unknown>, ...rest: unknown[]) => Promise<unknown> =>
             typeof alias === 'function',
     );
     if (!original) {
@@ -650,9 +655,11 @@ function protectBuiltTool(
         return tool;
     }
 
+    // The SDK's second argument (the call's context) goes on to the tool: a
+    // guarded tool that stops on the run's abort signal must still see it.
     const guarded = guard.protect<Record<string, unknown>, unknown>(
         spec,
-        async (safeArgs) => original(safeArgs),
+        async (safeArgs, ...rest) => original(safeArgs, ...rest),
     );
     // Spread, not mutate: the record belongs to its builder, and the agent may
     // hold the original elsewhere (the trace definitions read `tool.name` off
@@ -1622,30 +1629,32 @@ export const __testables = {
 
 /**
  * `limits.maxCostUsd` is enforced by the SDK only through a `costEstimator`;
- * without one the limit did nothing at all. Built only when the limit is set —
- * or the session has a spend budget, which rides on the same SDK limit — from
- * the pricing of the agent's model and of every sub-agent model override: a
- * delegated call spends from the same budget.
+ * without one the limit did nothing at all. Built when the limit is set — or
+ * the session has a spend budget, which rides on the same SDK limit — and also
+ * whenever a sub-agent runs on a model of its own: the SDK's per-request usage
+ * carries the delegated calls too (each tagged with its sub-agent), and pricing
+ * them takes their model's rates, not the parent's. Priced from the agent's
+ * model and every model a sub-agent was given, so a delegated call spends from
+ * the same budget at its own price.
  */
 async function buildAgentCostEstimator(
-    tenantDbName: string,
-    projectId: string,
     config: IAgentConfig,
-    primary: { key?: string; modelId?: string; pricing?: IModelPricing | null },
+    primary: PricedModel,
+    subagentModels: PricedModel[],
     sessionBudgetActive = false,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
-    if (!sessionBudgetActive && !(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
+    const limited = sessionBudgetActive || Number(config.runtime?.limits?.maxCostUsd) > 0;
+    if (!limited && subagentModels.length === 0) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
     const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
     ];
-    for (const entry of config.subagents ?? []) {
-        if (!entry.modelKey || entry.modelKey === primary.key) continue;
-        const child = await getModelByKey(tenantDbName, entry.modelKey, projectId).catch(() => null);
-        if (child) models.push({ names: [child.key, child.modelId], pricing: child.pricing });
+    for (const child of subagentModels) {
+        if (child.key && child.key === primary.key) continue;
+        models.push({ names: [child.key, child.modelId], pricing: child.pricing });
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
-    if (!estimator) {
+    if (!estimator && limited) {
         logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
         });
@@ -1792,12 +1801,14 @@ type BuildSubagentsInput = {
  */
 async function buildAgentSubagents(
     input: BuildSubagentsInput,
-): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>> }> {
+): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
     const entries = (input.subagents ?? []).filter((entry) => entry.enabled !== false);
-    if (entries.length === 0) return { subagents: [], cleanupTasks: [] };
+    if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
 
     const subagents: AgentSdkSubagentDef[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
+    // The models the children were given, as the turn's cost estimator needs them.
+    const models: PricedModel[] = [];
     const seen = new Set<string>();
 
     for (const entry of entries) {
@@ -1879,7 +1890,11 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
+            const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
+            if (built) {
+                childModel = built.chatModel;
+                models.push(built.model);
+            }
         }
 
         subagents.push({
@@ -1898,8 +1913,11 @@ async function buildAgentSubagents(
         });
     }
 
-    return { subagents, cleanupTasks };
+    return { subagents, cleanupTasks, models };
 }
+
+/** What the cost estimator needs of a model: the names its requests are reported under, and its prices. */
+type PricedModel = { key?: string; modelId?: string; pricing?: IModelPricing | null };
 
 /**
  * Builds the gateway chat model for a sub-agent's model override. Returns
@@ -1919,7 +1937,7 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<unknown> {
+): Promise<{ chatModel: unknown; model: PricedModel } | undefined> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') return undefined;
@@ -1939,7 +1957,10 @@ async function buildSubagentModel(
             ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
         // A sub-agent can be handed the parent's context, image references included.
-        return images ? withSessionImages(chatModel, images) : chatModel;
+        return {
+            chatModel: images ? withSessionImages(chatModel, images) : chatModel,
+            model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+        };
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -4105,7 +4126,7 @@ async function buildLocalAgentRun(input: {
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions, agentKey);
 
-    const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
+    const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
         tenantDbName,
         tenantId,
         projectId,
@@ -4132,7 +4153,7 @@ async function buildLocalAgentRun(input: {
         ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
         : buildTracingMetadata(runtimeContext);
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
-    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model, sessionBudgetActive);
+    const costEstimator = await buildAgentCostEstimator(config, model, subagentModels, sessionBudgetActive);
     if (sessionBudgetActive && !costEstimator) {
         // A budget nothing can measure would let the session spend without
         // limit, so the turn is refused rather than run unmetered.
@@ -5244,11 +5265,15 @@ async function priceTurn(
 }
 
 /**
- * What a turn cost, for the session budget. With a budget in force this is the
- * SDK's own per-request usage priced by the cost estimator — the figure the
- * budget was enforced against, sub-agent models at their own prices — and
- * otherwise (or when the SDK reported no per-request usage) the turn's total
- * usage at the primary model's price.
+ * What a turn cost. With a budget in force this is the SDK's own per-request
+ * usage priced by the cost estimator — the figure the budget was enforced
+ * against, sub-agent models at their own prices. A turn that delegated is priced
+ * the same way even without a budget: the SDK's ledger holds the sub-agents'
+ * model calls next to the parent's (each tagged `subagent`, with the model it
+ * ran on), so the turn's total at the primary model's price would charge a
+ * cheaper or dearer child at the wrong rate. Otherwise (or when the SDK
+ * reported no per-request usage) it is the turn's total usage at the primary
+ * model's price.
  */
 async function priceAgentTurn(input: {
     plan: SessionBudgetPlan | null;
@@ -5261,6 +5286,7 @@ async function priceAgentTurn(input: {
         usage?: {
             perRequest?: Array<{
                 modelName?: string;
+                subagent?: { name?: string };
                 usage?: {
                     prompt_tokens?: number;
                     completion_tokens?: number;
@@ -5270,10 +5296,16 @@ async function priceAgentTurn(input: {
             }>;
         };
     } | undefined)?.usage?.perRequest;
-    if (input.plan && input.costEstimator && Array.isArray(perRequest) && perRequest.length > 0) {
+    // A turn whose own model has no price stays unpriced however its children are priced:
+    // a cost that left the parent's calls out would read as the whole bill.
+    const estimate = input.costEstimator;
+    if (
+        estimate && Array.isArray(perRequest) && perRequest.length > 0
+        && (input.plan || (input.pricing && perRequest.some((request) => request.subagent)))
+    ) {
         let cost = 0;
         for (const request of perRequest) {
-            cost += input.costEstimator({
+            cost += estimate({
                 modelName: request.modelName,
                 inputTokens: Number(request.usage?.prompt_tokens) || 0,
                 outputTokens: Number(request.usage?.completion_tokens) || 0,

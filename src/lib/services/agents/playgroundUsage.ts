@@ -62,6 +62,11 @@ export function normalizePlaygroundUsage(usage: unknown): { usage: PlaygroundUsa
  * Summed across models on purpose: the turn's cost is what every model it
  * touched cost together, and showing only the main model would under-report a
  * run that summarized or delegated.
+ *
+ * A delegated turn is counted once here. The SDK (0.15) merges the sub-agents'
+ * model calls into the parent's ledger — each `perRequest` entry tagged with its
+ * `subagent` — so these totals already are the whole turn; nothing adds the
+ * sub-agents' usage on top of them.
  */
 export function normalizeUsageLedger(totals: unknown): PlaygroundUsage | undefined {
     if (!totals || typeof totals !== 'object') return undefined;

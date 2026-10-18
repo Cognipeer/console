@@ -405,6 +405,18 @@ describe('policy-visible names and mutations', () => {
     expect(args).toEqual({ note: '[REDACTED]' });
   });
 
+  it('hands the executor what the SDK passes after the arguments (the call context)', async () => {
+    // agent-sdk 0.15: `func(args, { toolCallId, cancellationToken, signal })`. A tool that stops on the
+    // run's abort signal reads it from there, so the guard must not swallow it.
+    const context = { toolCallId: 'call-1', cancellationToken: { isCancelled: () => false }, signal: new AbortController().signal };
+    const execute = vi.fn(async () => 'done');
+    const guarded = guardFor(ARMED).protect({ name: 'agent.tool.crm.create_ticket', requestedName: 'create_ticket' }, execute);
+
+    expect(await guarded({ note: 'hello' }, context)).toBe('done');
+
+    expect(execute).toHaveBeenCalledWith({ note: 'hello' }, context);
+  });
+
   it('returns the REDACTED result when tool.post rewrote it', async () => {
     hoisted.runHook.mockImplementation(async (call: HookCall) => {
       if (call.hook !== 'tool.post') return pass(call.hook);
@@ -605,6 +617,21 @@ describe('browser system tools', () => {
       expect(await record[alias]({ url: 'https://example.com' })).toContain('Navigation is not permitted.');
     }
     expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('hands the tool the SDK\'s call context, whichever alias the SDK calls', async () => {
+    const context = { toolCallId: 'call-1', cancellationToken: { isCancelled: () => false }, signal: new AbortController().signal };
+    const executor = vi.fn(async () => 'navigated');
+    hoisted.buildBrowserAgentTools.mockReturnValue([browserTool('browser_navigate', executor)]);
+
+    const { tools } = await build([BROWSER_BINDING], ARMED);
+    const record = tools[0] as unknown as Record<string, (args: Record<string, unknown>, ctx?: unknown) => Promise<unknown>>;
+
+    for (const alias of ['invoke', 'call', 'func', 'run']) {
+      executor.mockClear();
+      expect(await record[alias]({ url: 'https://example.com' }, context)).toBe('navigated');
+      expect(executor).toHaveBeenCalledWith({ url: 'https://example.com' }, context);
+    }
   });
 
   it('evaluates a browser tool under its own name, verbatim', async () => {
