@@ -170,11 +170,11 @@ CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) 
 
 ## Preloaded files (agent sandbox)
 
-An agent's sandbox settings (Agents → Configure → Sandbox → **Preloaded files**) can carry files that are written into the sandbox automatically when it starts, before the agent works — for example a presentation template (`.pptx`).
+An agent's sandbox settings (Agents → Build → Sandbox → **Preloaded files**) can carry files that are written into the sandbox automatically when it starts, before the agent works — for example a presentation template (`.pptx`).
 
 - Click **Add file** (or drop files on the list) and type the destination path for each. The suggestion is `/workspace/templates/<file name>`; parent folders are created for you.
 - Paths must be absolute, include the file name, be normalized (no `..`, `//`, `./`), and must not be under `/proc`, `/sys`, `/dev`, `/etc`, `/bin`, `/sbin`, `/usr` or `/lib`. Two files cannot share a destination.
-- Limits: 25 files, 25 MB each, 100 MB in total. The bytes are stored in the agent's attachments bucket (Configure → Files) under `agent-assets/<agent key>/`, so that bucket must be set up.
+- Limits: 25 files, 25 MB each, 100 MB in total. The bytes are stored in the agent's attachments bucket (Build → Files) under `agent-assets/<agent key>/`, so that bucket must be set up.
 - Works for both `session` and `ephemeral` sandboxes. A reused session sandbox only gets files that are missing or whose content changed (checked by SHA-256).
 - The agent's system prompt gets a "Preloaded files" list (path and name). If a file cannot be written the turn still runs: the failure is logged and the first command result carries a `notice` naming the files that are not available.
 
@@ -182,7 +182,7 @@ API: `POST /api/agents/:agentId/sandbox-seed-files?name=<file>` (raw body) retur
 
 ## Agent secrets (agent sandbox)
 
-**Configure → Sandbox → Secrets** holds API keys, tokens and passwords an agent's sandbox commands need. Each `sandbox_exec` / `sandbox_run_code` call gets them as environment variables for that command only; they are not set on the sandbox machine. The agent is told the names, never the values.
+**Build → Sandbox → Secrets** holds API keys, tokens and passwords an agent's sandbox commands need. Each `sandbox_exec` / `sandbox_run_code` call gets them as environment variables for that command only; they are not set on the sandbox machine. The agent is told the names, never the values.
 
 - **Write-only.** Secrets are sealed on save and shown back as names with a masked value (`••••••`). Sending a key back with the mask keeps the stored value, a new value replaces it, a key left out is removed. They are never part of version snapshots, publish responses, manifest exports or the agent's other configuration reads.
 - **Masked where they could leak.** A value (four characters or more) that appears in command output is replaced with `••••••` before the model sees it, and so it is in the **text files** collected from `/outputs/` before they become session files. Binary files (a NUL byte or invalid UTF-8) and zip-based formats and PDF are not scrubbed, and neither is a value that was transformed (base64, split, URL-encoded). Masking does not stop a script from sending a value over the network: use short-lived, least-privilege keys.

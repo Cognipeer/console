@@ -10,7 +10,7 @@ The paperclip in the session composer attaches files. Each file appears as a chi
 
 ## Settings
 
-**Configure → Files**, per agent. Files are **off** until you switch them on and choose a bucket.
+**Build → Files**, per agent. Files are **off** until you switch them on and choose a bucket.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ Two things to know when you choose: **portal users get the settings of the agent
 - **Images travel by reference, not as bytes.** In the agent's context, its saved state and its traces a picture is a short reference (`session-file://<fileId>`) behind a text handle — `[Attached image: "cat.png" (id …)]` — that the model can call it by. The bytes are read from the bucket only at the moment the model is called, once per run, within *Pictures per model request* and *Picture bytes per model request*. Three things follow: a photo no longer makes a conversation look full to the agent (its size estimate counts an image as an image, about 850 tokens, not as the characters of its bytes), so it is not compacted away for nothing; the saved state stays small however many pictures a session holds; and a picture survives into later messages and into a replay of the conversation. A picture whose file is gone is replaced by `[Image "…" is no longer available]`.
 - **Looking again.** While the session holds an image and the model accepts images, the agent also has `session_files_view_image({ fileId })`: it returns the picture in a message that follows the tool result, for an image the context no longer shows or one that was left out of a crowded request. `session_files_read` on an image points at it.
 - **Files nobody has sent yet.** A file uploaded to the session before the first message, or since the last one, goes with the next message — you do not have to name it. That is how "create a session, upload, ask" works from the API. (The agent's *Attach new uploads to the next message* setting turns this off; the files are then only reachable with the two tools below.)
-- **Earlier files.** `session_files_list` and `session_files_read` are offered when the session holds a file and the agent takes uploads **or** can write files (both switches are in *Configure → Files*), so a later message can ask about an earlier upload or about a file the agent wrote. These tools only read, so tool approvals never ask about them.
+- **Earlier files.** `session_files_list` and `session_files_read` are offered when the session holds a file and the agent takes uploads **or** can write files (both switches are in *Build → Files*), so a later message can ask about an earlier upload or about a file the agent wrote. These tools only read, so tool approvals never ask about them.
 
 ## API
 
@@ -170,7 +170,7 @@ Two ways, and they can be used together: the agent writes a text file with a too
 
 ### Without a sandbox: `session_files_create` and `session_files_append`
 
-An agent that has an attachments bucket can write text files for the user. The *Let the agent create files* switch in **Configure → Files** turns it on and sets two limits. It is **on by default when the agent takes uploads and a bucket is chosen**. With uploads off, choose a bucket and switch it on yourself: outputs do not need uploads, and stay off until you do. Switching outputs on without a bucket is refused (`400`, `field: attachments.bucketKey`).
+An agent that has an attachments bucket can write text files for the user. The *Let the agent create files* switch in **Build → Files** turns it on and sets two limits. It is **on by default when the agent takes uploads and a bucket is chosen**. With uploads off, choose a bucket and switch it on yourself: outputs do not need uploads, and stay off until you do. Switching outputs on without a bucket is refused (`400`, `field: attachments.bucketKey`).
 
 - **`session_files_create({ filename, content, mime_type? })`** creates a file and returns `{ file_id, filename, mime_type, size_bytes, download_url }`. Allowed types: `.md .csv .txt .json .html .xml .yaml .yml`; the MIME type is derived from the extension, and a `mime_type` that disagrees is refused. The name is sanitized (no directories, no odd characters) and a name already used in the session becomes `name-1.ext`. What the agent writes is stored **byte for byte**: there is no converted text copy of it (its own text is already text), a Markdown file keeps its own object, and an append keeps the line breaks of what was written.
 - **`session_files_append({ file_id, content })`** adds text to the end of a file this agent created in this session (so a long file can be built in parts). It refuses a file the person uploaded, a file of another session, and any file that is not one of the text types.

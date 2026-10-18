@@ -9,7 +9,7 @@ The turn is paused, not lost. When the request is answered, the **same turn** ca
 
 ## Turning it on
 
-**Configure → Approvals & questions**, per agent. An agent created in Studio starts with tool approval on (every tool asks) and questions off. An agent created through the API starts with neither.
+**Build → Approvals & questions**, per agent. An agent created in Studio starts with tool approval on (every tool asks) and questions off. An agent created through the API starts with neither.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -151,9 +151,9 @@ Over A2A, a paused task reports the state `input-required` with the requests in 
 
 ## Client tools (`client_tool`)
 
-A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Configure → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`) and follow *Ask before tools run* and the per-tool setting like any other tool. A tool can be switched off without deleting it.
+A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`) and follow *Ask before tools run* and the per-tool setting like any other tool. A tool can be switched off without deleting it.
 
-Where the tools are offered is explicit. *Configure → Client tools → Where these tools are offered* has one switch per surface, all on by default:
+Where the tools are offered is explicit. *Build → Client tools → Where these tools are offered* has one switch per surface, all on by default:
 
 | Surface (switch) | Who runs the call | How the caller learns about it | How it answers |
 | --- | --- | --- | --- |
@@ -210,7 +210,7 @@ while (res.status === 'requires_action') {
 }
 ```
 
-With `"background": true` (or a [callback](/guide/agent-background-execution#callbacks-and-webhooks), the agent's default one under *Configure → Callback & budget* included) nothing waits on the connection: the `requires_action` callback and the `action.required` webhook carry the same `required_action`, and the receiver answers on the same endpoint. A background run stays `requires_action` until every call is answered or times out.
+With `"background": true` (or a [callback](/guide/agent-background-execution#callbacks-and-webhooks), the agent's default one under *Build → Callback & budget* included) nothing waits on the connection: the `requires_action` callback and the `action.required` webhook carry the same `required_action`, and the receiver answers on the same endpoint. A background run stays `requires_action` until every call is answered or times out.
 
 The caller runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
 

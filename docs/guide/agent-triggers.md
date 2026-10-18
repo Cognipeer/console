@@ -4,7 +4,7 @@ A **trigger** is a saved way of starting an agent: a prompt (with optional [vari
 
 Several [agent templates](/guide/agent-templates) bring a suggested trigger (a weekly schedule, a GitHub or generic webhook). It is created **disabled**, so you can check it before it starts anything.
 
-In Studio, **Deploy → Triggers** lists an agent's triggers with their type, next and last fire; **Run now** fires one by hand and **Runs** opens its history. The same is on the API ([below](#api)).
+In Studio, **Ship → Triggers** lists an agent's triggers with their type, next and last fire; **Run now** fires one by hand and **Runs** opens its history. The same is on the API ([below](#api)).
 
 For worked recipes (a pull request reviewer, a build triage agent, a nightly report) see the integration guides at [docs.cognipeer.com](https://docs.cognipeer.com), under **Integrations → Agents**. This page is the reference for what the platform does.
 

@@ -89,7 +89,7 @@ The created agent is a normal draft:
 
 - Open it in the Studio and edit the instructions, model, tools, [variables](/api/agents#variables) or structured output. Nothing is locked, and the agent does not change when the catalog changes (a later catalog version does not update agents you already created).
 - Edit or delete the `tpl-` skills, or add your own.
-- Add knowledge, web search, MCP servers or more triggers from the agent's Configure and Deploy tabs.
+- Add knowledge, web search, MCP servers or more triggers from the agent's Build and Ship tabs.
 - Test with the playground (the detail drawer suggests a first message), then publish. API calls, triggers and A2A run the **published** version.
 - To reuse your tuned agent elsewhere, export it as a manifest (`GET /api/agents/{agentId}/export`) and import it into another project.
 

@@ -2,7 +2,7 @@
 
 An agent can hand a task to a **sub-agent**: a second agent loop that works on the task with its own instructions, tools and model, and sends back one result. The parent's transcript only holds the task and the result, not the fifty tool calls in between. Use it when a task needs its own prompt, its own tool surface, a cheaper model, or a context budget of its own.
 
-Configure it under **Configure → Sub-agents**. Delegation is off until you turn it on (or add a sub-agent).
+Configure it under **Build → Sub-agents**. Delegation is off until you turn it on (or add a sub-agent).
 
 ## Two kinds of sub-agent
 
