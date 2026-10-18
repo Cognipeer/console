@@ -65,6 +65,9 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - Answering an approval inline continues the paused run: the response id is `resp_<runId>` of that run, its events cover
   the continuation (they no longer stop at the pause), and a timeout continuation (`onTimeout` deny or allow) is labelled
   `timeout` in the session events.
+- The answer to a pause is part of the paused run's events too: `action.resolved` (also when a timeout denies or ends the
+  request, then with the `session.status_idle` that closes the pause) and a client tool's `agent.tool_result` carry the
+  run's `run_id`, so `GET /agents/runs/{runId}/events` and its stream no longer skip them.
 - The agent-run quota counts a run only once it is admitted (a conflict or a concurrency refusal uses no unit), and a
   start refused before its run exists removes the session that the same request created. A queued run whose job fails
   before it claims its run is no longer lost: the reconciler republishes it.

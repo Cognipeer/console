@@ -45,6 +45,7 @@ import {
     RESUME_TIMEOUT_ACTOR,
     cancelPausedAgentRuns,
     findPausedOwnerRun,
+    normalizeAgentRunId,
     queueAgentRunResume,
     reserveConversationForSyncTurn,
     runWithTenantDb,
@@ -331,16 +332,30 @@ export async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendin
     return resolveHitlConfig(config?.humanInTheLoop);
 }
 
-/** Writes events to the conversation's log and waits until they are stored (and published). */
+/**
+ * Writes events to the conversation's log and waits until they are stored (and published). With `runId` they
+ * are the run's events: the answer to a pause belongs to the run that paused, so that run's stream reads
+ * `action.required`, `action.resolved`, then its continuation, with nothing missing in between.
+ */
 async function writeSessionEvents(
     db: DatabaseProvider,
-    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string },
+    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string; runId?: string },
     events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }>,
 ): Promise<void> {
     if (events.length === 0) return;
     const writer = createSessionEventWriter({ db, ...scope });
     for (const event of events) writer.emit(event.type, event.data);
     await writer.close();
+}
+
+/**
+ * The run that raised these requests, as its events carry the id (bare). Nothing when no run did (a dashboard
+ * turn) or when they name more than one: an event is then left outside every run rather than given to a wrong one.
+ */
+function raisingRunId(actions: ReadonlyArray<Pick<IAgentPendingAction, 'runId'>>): string | undefined {
+    const ids = new Set(actions.map((action) => (action.runId ? normalizeAgentRunId(action.runId) : '')));
+    const [only] = ids;
+    return ids.size === 1 && only ? only : undefined;
 }
 
 function auditResolution(
@@ -617,7 +632,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             const messages = updateMessageSnapshots(conversation.messages ?? [], snapshots);
             await db.updateAgentConversation(conversationId, { messages, ...(metadata ? { metadata } : {}) });
 
-            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId }, [
+            const raisedBy = raisingRunId([action]);
+            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId, ...(raisedBy ? { runId: raisedBy } : {}) }, [
                 ...(action.kind === 'client_tool' ? [clientToolResultEvent(action, resolution)] : []),
                 {
                     type: 'action.resolved' as const,
@@ -803,7 +819,11 @@ export async function sweepExpiredPendingActions(
                 continue;
             }
             const hitl = await hitlSettingsFor(db, first);
-            const scope = { tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
+            const raisedBy = raisingRunId(actions);
+            const scope = {
+                tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId,
+                ...(raisedBy ? { runId: raisedBy } : {}),
+            };
             const events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }> = [];
             const snapshots = new Map<string, { status: IAgentPendingAction['status']; resolution?: IAgentPendingActionResolution }>();
             // A page that never answered is a failed tool call the model reads and goes on from, whatever

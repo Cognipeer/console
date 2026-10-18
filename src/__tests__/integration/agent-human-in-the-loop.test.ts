@@ -1637,6 +1637,98 @@ describe('a paused run follows its pause', () => {
     expect(runEvents.filter((event) => event.type === 'session.status_idle').at(-1)?.data).toMatchObject({ stopReason: 'end_turn' });
   });
 
+  describe('the answer to a pause is in the paused run\'s own event stream: its events do not skip it', () => {
+    /** The run's events and the session's, in order: a session with one run has nothing outside it. */
+    const logs = async (id: string, runId: string) => {
+      const run = await db.listAgentSessionEvents(id, { runId });
+      const session = await db.listAgentSessionEvents(id);
+      return { run, session, types: run.map((event) => event.type) };
+    };
+
+    it('answered inline: the pause, the answer, then the continuation', async () => {
+      await createAgent({ humanInTheLoop: HITL_ON });
+      scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await pausedQueuedRun(id);
+
+      expect((await resolve(id, actionId, { decision: 'allow' })).kind).toBe('resumed');
+
+      const { run, session, types } = await logs(id, runId);
+      const required = types.indexOf('action.required');
+      const resolved = types.indexOf('action.resolved');
+      expect(required).toBeGreaterThanOrEqual(0);
+      expect(resolved).toBeGreaterThan(required);
+      expect(types.indexOf('session.status_running', resolved)).toBeGreaterThan(resolved);
+      expect(run[resolved].data).toMatchObject({ actionId, kind: 'tool_approval', decision: 'allow', resolvedBy: OWNER, channel: 'api' });
+      expect(run.map((event) => event.seq)).toEqual(session.map((event) => event.seq));
+    });
+
+    it('answered in the background: the worker\'s continuation follows the answer in the same stream', async () => {
+      await createAgent({ humanInTheLoop: HITL_ON });
+      scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await pausedQueuedRun(id);
+
+      expect((await resolve(id, actionId, { decision: 'deny' }, ownerActor, 'background')).kind).toBe('queued');
+      await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+
+      const { run, session, types } = await logs(id, runId);
+      const resolved = types.indexOf('action.resolved');
+      expect(resolved).toBeGreaterThan(types.indexOf('action.required'));
+      expect(types.indexOf('session.status_running', resolved)).toBeGreaterThan(resolved);
+      expect(run[resolved].data).toMatchObject({ actionId, decision: 'deny' });
+      expect(run.map((event) => event.seq)).toEqual(session.map((event) => event.seq));
+    });
+
+    it('a request that timed out and was denied: the timeout is in the stream before the run goes on', async () => {
+      await createAgent({ humanInTheLoop: HITL_ON });
+      scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await pausedQueuedRun(id);
+      await expire(actionId);
+
+      expect(await sweepExpiredPendingActions(db, DB_NAME, new Date())).toMatchObject({ denied: 1, continued: 1 });
+      await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+
+      const { run, session, types } = await logs(id, runId);
+      const resolved = types.indexOf('action.resolved');
+      expect(resolved).toBeGreaterThan(types.indexOf('action.required'));
+      expect(types.indexOf('session.status_running', resolved)).toBeGreaterThan(resolved);
+      expect(run[resolved].data).toMatchObject({ actionId, expired: true, channel: 'timeout', resolvedBy: 'system:timeout' });
+      expect(run.map((event) => event.seq)).toEqual(session.map((event) => event.seq));
+    });
+
+    it('a request that timed out and ended the pause: the stream says so and then goes idle, once', async () => {
+      await createAgent({ humanInTheLoop: { ...HITL_ON, onTimeout: 'cancel' } });
+      scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const { runId, actionId } = await pausedQueuedRun(id);
+      await expire(actionId);
+
+      expect(await sweepExpiredPendingActions(db, DB_NAME, new Date())).toMatchObject({ expired: 1 });
+
+      const { run, session, types } = await logs(id, runId);
+      expect(types.slice(-2)).toEqual(['action.resolved', 'session.status_idle']);
+      expect(run.at(-2)?.data).toMatchObject({ actionId, expired: true, cancelled: true, channel: 'timeout' });
+      expect(run.at(-1)?.data).toEqual({ stopReason: 'cancelled' });
+      expect(run.filter((event) => event.type === 'session.status_idle' && (event.data as { stopReason?: string }).stopReason === 'cancelled')).toHaveLength(1);
+      expect(run.map((event) => event.seq)).toEqual(session.map((event) => event.seq));
+    });
+
+    it('a pause no run owns (a dashboard turn) keeps its answer outside every run, as before', async () => {
+      await createAgent({ humanInTheLoop: HITL_ON });
+      scriptModel(oneToolScript('ls'));
+      const id = String((await newConversation())._id);
+      const paused = await chat(id, 'go');
+
+      expect((await resolve(id, paused.required_action!.actions[0].id, { decision: 'allow' })).kind).toBe('resumed');
+
+      const resolved = (await events(id)).find((event) => event.type === 'action.resolved');
+      expect(resolved).toBeDefined();
+      expect(resolved?.runId).toBeUndefined();
+    });
+  });
+
   it('answered with another request of the pause still open, the answer names the paused run', async () => {
     await createAgent({ humanInTheLoop: HITL_ON });
     scriptModel(oneToolScript('ls'));
