@@ -466,6 +466,37 @@ describe('worker hardening', () => {
     expect(finalStatus?.errorMessage).toMatch(/not active/i);
   });
 
+  it('a reminder run wakes the session with the note framed as the agent\'s own (request.reminder)', async () => {
+    await db.updateAgent(agentId, { config: { modelKey: 'gpt-4o', reminders: { enabled: true } } });
+    hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_wake'));
+    const run = await createRun('conv-reminder-wake', {
+      channel: 'reminder',
+      userMessage: 'Check the deploy.',
+      unattended: true,
+      metadata: { reminder_chain: '3' },
+    });
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.executeAgentChatLocal).toHaveBeenCalledWith(expect.objectContaining({
+      userMessage: 'Check the deploy.',
+      unattended: true,
+      reminder: { runId: `run_${String(run._id)}`, message: 'Check the deploy.', setAt: expect.any(String), chain: 3 },
+    }));
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id)))?.status).toBe('succeeded');
+  });
+
+  it('a reminder of an agent that turned reminders off fails precondition_failed without invoking', async () => {
+    const run = await createRun('conv-reminder-off', { channel: 'reminder', userMessage: 'Check the deploy.', unattended: true });
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+    const finalStatus = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    expect(finalStatus?.errorReason).toBe('precondition_failed');
+    expect(finalStatus?.errorMessage).toBe('Reminders are turned off for this agent.');
+  });
+
   it('a run whose agent was deleted after submit fails precondition_failed without invoking', async () => {
     const run = await createRun('conv-deleted-agent');
     await db.deleteAgent(agentId);

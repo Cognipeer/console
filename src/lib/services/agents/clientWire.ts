@@ -231,7 +231,14 @@ export function toClientMessageAttachments(
 export function toClientTranscriptMessage(
     conversationId: string,
     index: number,
-    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike>; warnings?: string[] },
+    message: {
+        role: string;
+        content: string;
+        timestamp: Date | string;
+        attachments?: ReadonlyArray<OutputAttachmentLike>;
+        warnings?: string[];
+        metadata?: { origin?: string; reminder?: { runId: string; message: string; setAt?: string } };
+    },
     id: string,
 ) {
     const files = toClientMessageAttachments(conversationId, message.attachments);
@@ -246,5 +253,12 @@ export function toClientTranscriptMessage(
         attachments: files,
         ...(message.warnings?.length ? { warnings: message.warnings } : {}),
         ...(files.some((f) => f.origin === 'agent_output') ? { output_files: files.filter((f) => f.origin === 'agent_output') } : {}),
+        // A reminder's wake turn: `content` is the note as the model read it; show `reminder.message`.
+        ...(message.metadata?.origin === 'reminder' && message.metadata.reminder
+            ? {
+                origin: 'reminder' as const,
+                reminder: { id: message.metadata.reminder.runId, message: message.metadata.reminder.message, set_at: message.metadata.reminder.setAt ?? null },
+            }
+            : {}),
     };
 }

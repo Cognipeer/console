@@ -8,7 +8,7 @@ import {
 } from '@/lib/services/agents/import/importService';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
-import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentRun, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -116,6 +116,14 @@ import {
   type SessionNeed,
 } from './agent-session-access';
 import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
+import {
+  activeRemindersBySession,
+  cancelReminder,
+  fireReminderNow,
+  listReminders,
+  reminderPlatformLimits,
+  serializeReminder,
+} from '@/lib/services/agents/agentReminders';
 import {
   applyStreamHeaders,
   readJsonBody,
@@ -707,6 +715,66 @@ function summariseConversation(
   };
 }
 
+/** The `channel` values a run can carry (the runs list filters on them). */
+const RUN_CHANNEL_VALUES = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder'] as const satisfies ReadonlyArray<NonNullable<IAgentRun['channel']>>;
+
+/** The run each session of the agent is waiting on or running now (a reminder's own wait is not one), newest first. */
+async function activeRunsBySession(
+  tenantDbName: string,
+  filter: { tenantId: string; projectId: string; agentKey: string },
+): Promise<Map<string, { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }>> {
+  const runs = await listAgentRuns(tenantDbName, {
+    ...filter,
+    excludeModes: ['sync'],
+    status: ['scheduled', 'queued', 'running'],
+    limit: 500,
+  });
+  const out = new Map<string, { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }>();
+  for (const run of runs) {
+    if (out.has(run.conversationId)) continue;
+    if (run.status === 'scheduled' && run.channel === 'reminder') continue;
+    out.set(run.conversationId, {
+      id: `run_${String(run._id)}`,
+      status: run.status,
+      ...(run.notBefore ? { scheduledFor: Math.floor(new Date(run.notBefore).getTime() / 1000) } : {}),
+      cancelRequested: Boolean(run.cancelRequestedAt),
+    });
+  }
+  return out;
+}
+
+/** The sessions a trigger's runs ran in, newest first (Triggers → history). */
+async function sessionsOfTrigger(
+  tenantDbName: string,
+  filter: { tenantId: string; projectId: string; agentKey: string; triggerId: string; createdBy?: string },
+): Promise<IAgentConversation[]> {
+  const runs = await listAgentRuns(tenantDbName, {
+    tenantId: filter.tenantId,
+    projectId: filter.projectId,
+    agentKey: filter.agentKey,
+    triggerId: filter.triggerId,
+    excludeModes: ['sync'],
+    limit: 100,
+  });
+  const ids = [...new Set(runs.map((run) => run.conversationId))];
+  const found = await Promise.all(ids.map((id) => getConversationById(tenantDbName, id).catch(() => null)));
+  return found.filter((conversation): conversation is IAgentConversation => Boolean(conversation)
+    && conversation!.projectId === filter.projectId
+    && conversation!.agentKey === filter.agentKey
+    && (!filter.createdBy || conversation!.createdBy === filter.createdBy));
+}
+
+/** Session titles for the reminders list (at most 50 sessions are looked up). */
+async function sessionTitles(tenantDbName: string, projectId: string, ids: string[]): Promise<Map<string, string>> {
+  const distinct = [...new Set(ids)].slice(0, 50);
+  const found = await Promise.all(distinct.map((id) => getConversationById(tenantDbName, id).catch(() => null)));
+  const out = new Map<string, string>();
+  for (const conversation of found) {
+    if (conversation && conversation.projectId === projectId && conversation.title) out.set(String(conversation._id), conversation.title);
+  }
+  return out;
+}
+
 export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents', withApiRequestContext(async (request, reply) => {
     try {
@@ -1261,8 +1329,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string };
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string; triggerId?: string; trigger?: string; channel?: string };
       const trigger = AGENT_RUN_TRIGGERS.find((value) => value === query.trigger);
+      const channels = (query.channel ?? '').split(',').filter((value): value is NonNullable<IAgentRun['channel']> => (RUN_CHANNEL_VALUES as readonly string[]).includes(value));
       const allowed = new Set(['scheduled', 'queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'scheduled' | 'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
@@ -1289,10 +1358,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         // A trigger's history (Studio's Triggers list links here).
         ...(query.triggerId ? { triggerId: query.triggerId } : {}),
         ...(trigger ? { trigger } : {}),
+        ...(channels.length === 1 ? { channel: channels[0] } : {}),
         ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });
-      return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
+      const shown = channels.length > 1 ? runs.filter((run) => run.channel && channels.includes(run.channel)) : runs;
+      return reply.code(200).send({ runs: shown.map(serializeAgentRun) });
     } catch (error) {
       return sendRouteError(reply, error, 'List agent runs error', 'Failed to list runs');
     }
@@ -1337,6 +1408,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           }
         }
       }
+      if (existing.channel === 'reminder' && existing.status === 'scheduled') {
+        const canceled = await cancelReminder(
+          { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+          runId,
+          { agentKey: agent.key, actor: { userId: session.userId, via: 'dashboard' } },
+        );
+        if (canceled.kind === 'canceled') return reply.code(200).send({ run: serializeAgentRun(canceled.run) });
+      }
       const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
       if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
       if (outcome.kind === 'already_terminal') {
@@ -1345,6 +1424,95 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ run: serializeAgentRun(outcome.run) });
     } catch (error) {
       return sendRouteError(reply, error, 'Cancel agent run error', 'Failed to cancel run');
+    }
+  }));
+
+  // A reminder that has not fired yet, started now (Sessions → Reminders "Fire now").
+  app.post('/agents/:agentId/runs/:runId/fire', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const { runId } = request.params as { runId: string };
+      const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
+      if (!existing || existing.agentKey !== agent.key || existing.channel !== 'reminder') {
+        return reply.code(404).send({ error: 'Reminder not found' });
+      }
+      // Firing a reminder runs a turn in its session: the session's owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
+      if (!conversation || conversation.projectId !== projectId) return reply.code(404).send({ error: 'Reminder not found' });
+      const access = await decideSessionAccess(request, conversation, {
+        need: 'manage',
+        agent,
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        alsoOwnedBy: [existing.userId],
+      });
+      if (!access.ok) return sendSessionRefusal(reply, request, access);
+      const outcome = await fireReminderNow(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        runId,
+        { agentKey: agent.key, actor: { userId: session.userId, via: 'dashboard' } },
+      );
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Reminder not found' });
+      if (outcome.kind === 'not_scheduled') return reply.code(409).send({ error: `The reminder is already ${outcome.run.status}` });
+      if (outcome.kind === 'busy') return reply.code(409).send({ error: outcome.message });
+      return reply.code(200).send({ run: serializeAgentRun(outcome.run), reminder: serializeReminder(outcome.run) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Fire agent reminder error', 'Failed to fire the reminder');
+    }
+  }));
+
+  // The reminders the agent set itself, newest first (Sessions → Reminders; a session's own with `sessionId`).
+  app.get('/agents/:agentId/reminders', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const query = (request.query ?? {}) as { status?: string; limit?: string; sessionId?: string };
+      const actor = { tenantDbName: session.tenantDbName, projectId, userId: session.userId };
+      const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const scope = await sessionListScope(request, { agent, projectId, actor });
+      if (query.sessionId) {
+        const loaded = await loadSessionForPrincipal(request, query.sessionId, { need: 'view', agentKey: agent.key, agent, projectId, actor });
+        if (!loaded.ok) return sendSessionRefusal(reply, request, loaded);
+      }
+      // Somebody who may not view other people's sessions sees the reminders of their own (one session they may view: all of it).
+      const ownOnly = !query.sessionId && scope.ownOnly ? { userId: scope.userId } : {};
+      const limit = Math.min(Math.max(Number(query.limit) || 100, 1), 500);
+      const [runs, active] = await Promise.all([
+        listReminders(reminderScope, {
+          agentKey: agent.key,
+          ...(query.sessionId ? { conversationId: query.sessionId } : {}),
+          active: query.status !== 'all',
+          ...ownOnly,
+          limit,
+        }),
+        listReminders(reminderScope, { agentKey: agent.key, ...(query.sessionId ? { conversationId: query.sessionId } : {}), active: true, ...ownOnly, limit: 500 }),
+      ]);
+      const owners = await resolveSessionOwners(runs.map((run) => run.userId));
+      const titles = await sessionTitles(session.tenantDbName, projectId, runs.map((run) => run.conversationId));
+      return reply.code(200).send({
+        reminders: runs.map((run) => {
+          const owner = run.userId ? owners.get(run.userId) : undefined;
+          const title = titles.get(run.conversationId);
+          return { ...serializeReminder(run), ...(owner ? { owner } : {}), ...(title ? { session_title: title } : {}) };
+        }),
+        summary: { active: active.length },
+        scope: { viewOthers: !scope.ownOnly },
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent reminders error', 'Failed to list reminders');
+    }
+  }));
+
+  // The platform ceilings of agent reminders (env), for the Configure hints.
+  app.get('/agents/reminder-limits', withApiRequestContext(async (request, reply) => {
+    try {
+      await requireProjectContextForRequest(request);
+      return reply.code(200).send({ limits: reminderPlatformLimits() });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent reminder limits error', 'Failed to read reminder limits');
     }
   }));
 
@@ -1408,11 +1576,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
       // database, before the page, so a busy teammate cannot push theirs off it (one decision per request).
       const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      const sessions = await listConversations(session.tenantDbName, agent.key, {
-        limit: 100,
-        projectId,
-        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
-      });
+      const { triggerId } = (request.query ?? {}) as { triggerId?: string };
+      const sessions = triggerId
+        ? await sessionsOfTrigger(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key, triggerId, ...(scope.ownOnly ? { createdBy: scope.userId } : {}) })
+        : await listConversations(session.tenantDbName, agent.key, {
+          limit: 100,
+          projectId,
+          ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
+        });
+      const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      const [activeRuns, reminders] = await Promise.all([
+        activeRunsBySession(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key }),
+        activeRemindersBySession(reminderScope, agent.key),
+      ]);
       const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
       // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
       const waiting = sessions.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
@@ -1425,7 +1601,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // sent so the list can render a row count. The session PAGE fetches the
       // one transcript it actually shows.
       return reply.code(200).send({
-        sessions: sessions.map((entry) => summariseConversation(entry, owners.get(entry.createdBy), answerable.get(String(entry._id)), session.userId)),
+        sessions: sessions.map((entry) => {
+          const id = String(entry._id);
+          const run = activeRuns.get(id);
+          const due = reminders.get(id);
+          return {
+            ...summariseConversation(entry, owners.get(entry.createdBy), answerable.get(id), session.userId),
+            ...(run ? { activeRun: run } : {}),
+            ...(due ? { reminders: { active: due.active, nextAt: due.nextAt.toISOString() } } : {}),
+          };
+        }),
         // Whether this is everybody's sessions of the agent or only the caller's own.
         scope: { viewOthers: !scope.ownOnly },
       });
