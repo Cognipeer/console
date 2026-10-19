@@ -359,12 +359,6 @@
                   }
                 },
                 {
-                  "key": "cognipeer.sections",
-                  "value": {
-                    "stringValue": "[{\"kind\":\"message\",\"label\":\"Assistant\",\"role\":\"assistant\",\"content\":\"Looking up the order.\"}]"
-                  }
-                },
-                {
                   "key": "cognipeer.event.status",
                   "value": {
                     "stringValue": "success"
@@ -743,12 +737,6 @@
                   "key": "cognipeer.event.id",
                   "value": {
                     "stringValue": "evt_0005_fx5"
-                  }
-                },
-                {
-                  "key": "cognipeer.sections",
-                  "value": {
-                    "stringValue": "[{\"kind\":\"message\",\"label\":\"Assistant\",\"role\":\"assistant\",\"content\":\"Your order shipped yesterday.\"}]"
                   }
                 },
                 {
