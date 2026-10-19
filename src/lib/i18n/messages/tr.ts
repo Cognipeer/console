@@ -542,6 +542,8 @@ export const tr: typeof en = {
           maxAgentSyncTimeoutSeconds: 'Ajan eşzamanlı çalıştırma zaman aşımı (sn)',
           maxAgentBackgroundDurationMinutes: 'Ajan arka plan azami süresi (dk)',
           maxConcurrentAgentRuns: 'Eşzamanlı arka plan çalıştırmaları',
+          maxActiveAgentReminders: 'Bekleyen ajan hatırlatıcıları',
+          maxAgentRemindersPerDay: 'Günlük ajan hatırlatıcısı',
           maxVectorsTotal: 'En çok toplam vektör',
           maxStorageMB: 'En çok depolama (MB)',
         },
@@ -5398,6 +5400,8 @@ export const tr: typeof en = {
         maxStorageBytes: 'En çok depolama',
         maxFileBuckets: 'En çok doküman deposu',
         maxConcurrentAgentRuns: 'Eşzamanlı arka plan çalıştırması',
+        maxActiveAgentReminders: 'Bekleyen ajan hatırlatıcısı',
+        maxAgentRemindersPerDay: 'Günlük ajan hatırlatıcısı',
       },
     },
     actions: {

@@ -41,6 +41,10 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     // The agent's own text files for the user (agentFileOutputTools.ts): scratch output of the run, delivered after the turn.
     'session_files_create',
     'session_files_append',
+    // The agent's own reminders in this session (agentReminderTools.ts): reading them and taking one back.
+    // Setting one (`reminder_set`) follows the policy like any other write.
+    'reminder_list',
+    'reminder_cancel',
     // The SDK's own ask-user tool: asking IS the human step.
     'ask_user_question',
 ];

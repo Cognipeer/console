@@ -1046,6 +1046,8 @@ export const en = {
           maxAgentSyncTimeoutSeconds: 'Agent sync timeout (s)',
           maxAgentBackgroundDurationMinutes: 'Agent background max (min)',
           maxConcurrentAgentRuns: 'Concurrent background runs',
+          maxActiveAgentReminders: 'Pending agent reminders',
+          maxAgentRemindersPerDay: 'Agent reminders per day',
           maxVectorsTotal: 'Max Total Vectors',
           maxStorageMB: 'Max Storage (MB)',
         },
@@ -7045,6 +7047,8 @@ export const en = {
         maxStorageBytes: 'Max storage',
         maxFileBuckets: 'Max document stores',
         maxConcurrentAgentRuns: 'Concurrent background runs',
+        maxActiveAgentReminders: 'Pending agent reminders',
+        maxAgentRemindersPerDay: 'Agent reminders per day',
       },
     },
     actions: {

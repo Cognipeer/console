@@ -2251,12 +2251,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     opts?: { mode?: IAgentRun['mode']; runClass?: AgentRunClass },
   ): Promise<number>;
   /**
-   * Row counts per status (queue visibility, deferred caps). Every requested
-   * status is present in the result, 0 when there is none.
+   * Row counts per status (queue visibility, deferred caps, reminder quotas). Every
+   * requested status is present in the result, 0 when there is none.
    */
   countAgentRunsByStatus(
     tenantId: string,
-    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
   ): Promise<Record<string, number>>;
   /** `scheduled` rows of this tenant whose `notBefore` is due, oldest first. */
   listDueScheduledAgentRuns(tenantId: string, now: Date, limit: number): Promise<IAgentRun[]>;

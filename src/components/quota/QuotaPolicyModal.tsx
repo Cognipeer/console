@@ -859,6 +859,22 @@ export function QuotaPolicyModal({
                     )}
                   </FormRow>
                 ) : null}
+                {currentDomain === 'global' ? (
+                  <FormRow cols={3}>
+                    {limitField(
+                      t('quotas.maxActiveAgentReminders'),
+                      'limits.quotas.maxActiveAgentReminders',
+                      limits.quotas?.maxActiveAgentReminders,
+                      planLimit,
+                    )}
+                    {limitField(
+                      t('quotas.maxAgentRemindersPerDay'),
+                      'limits.quotas.maxAgentRemindersPerDay',
+                      limits.quotas?.maxAgentRemindersPerDay,
+                      planLimit,
+                    )}
+                  </FormRow>
+                ) : null}
               </>
             ) : null}
 

@@ -58,10 +58,12 @@ import {
   publishAgentRunJob,
   recordRunEndedInEvents,
   redeliverAgentRunCallback,
+  reminderSettingsForRun,
   resolveAgentRunLimits,
   runWithTenantDb,
   type AgentRunLimits,
 } from './agentRunService';
+import type { ResolvedRemindersConfig } from './agentRemindersConfig';
 import { cleanupWebhookDeliveries, sweepDueWebhookDeliveries } from '@/lib/services/webhooks/webhookService';
 import { sweepExpiredPendingActions } from './agentActionResolution';
 import { cleanupExpiredSessionFiles } from './sessionFiles';
@@ -128,6 +130,33 @@ async function promotionOverCap(
   if (limits.maxActivePerProject > 0
     && await db.countActiveAgentRuns(run.tenantId, run.projectId, { runClass: 'default' }) >= limits.maxActivePerProject) return true;
   return false;
+}
+
+/**
+ * A due reminder, before it is promoted: `go`, `wait` (stays scheduled for the
+ * next tick, and expires after the deferred-wait ceiling like any waiting run)
+ * or cancel. A session waiting on a person or its budget would refuse the turn,
+ * so the reminder waits (`whenBusy: 'postpone'`) or is dropped (`'skip'`).
+ */
+async function reminderGate(
+  db: DatabaseProvider,
+  run: IAgentRun,
+  settingsFor: (run: IAgentRun) => Promise<ResolvedRemindersConfig | null>,
+): Promise<'go' | 'wait' | { cancel: string }> {
+  const conversation = await db.findAgentConversationById(run.conversationId);
+  if (!conversation || conversation.projectId !== run.projectId) return { cancel: 'the session no longer exists' };
+  if (conversation.runtimeStatus !== 'requires_action' && conversation.runtimeStatus !== 'budget_paused') return 'go';
+  const settings = await settingsFor(run);
+  return settings?.whenBusy === 'skip' ? { cancel: 'the session was waiting on a person or its budget' } : 'wait';
+}
+
+async function cancelDueReminder(db: DatabaseProvider, run: IAgentRun, why: string): Promise<void> {
+  const canceled = await db.requestAgentRunCancel(String(run._id), run.tenantId, run.projectId);
+  if (canceled?.status !== 'canceled') return;
+  logger.info('Due reminder dropped', { runId: String(run._id), agentKey: run.agentKey, why });
+  await fireAgentRunCallback(canceled, 'canceled', {}).catch((error) => {
+    logger.warn('Could not queue the canceled callback', { runId: String(run._id), error: error instanceof Error ? error.message : String(error) });
+  });
 }
 
 /** Whether a sweep did anything worth a log line. */
@@ -251,17 +280,40 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           return limits;
         };
         const due = await tenantDb.listDueScheduledAgentRuns(tenantId, new Date(now), SCHEDULED_BATCH);
+        const reminderSettings = new Map<string, Promise<ResolvedRemindersConfig | null>>();
+        const reminderSettingsFor = (run: IAgentRun) => {
+          const key = `${run.projectId}:${run.agentKey}:${run.version ?? ''}:${run.usePublished ? 1 : 0}`;
+          let settings = reminderSettings.get(key);
+          if (!settings) {
+            settings = reminderSettingsForRun(tenantDb, run).catch(() => null);
+            reminderSettings.set(key, settings);
+          }
+          return settings;
+        };
         for (const run of due) {
           const runId = String(run._id);
+          let skipWhenBusy = false;
           try {
+            if (run.channel === 'reminder') {
+              const gate = await reminderGate(tenantDb, run, reminderSettingsFor);
+              if (gate === 'wait') continue;
+              if (gate !== 'go') {
+                await cancelDueReminder(tenantDb, run, gate.cancel);
+                continue;
+              }
+              skipWhenBusy = (await reminderSettingsFor(run))?.whenBusy === 'skip';
+            }
             if (run.runClass !== 'deferred' && await promotionOverCap(tenantDb, run, limitsFor)) continue;
             const promoted = await tenantDb.promoteScheduledAgentRun(runId, tenantId);
             if (!promoted) continue;
             promotedRuns += 1;
             if (promoted.runClass !== 'deferred') await publishAgentRunJob(promoted);
           } catch (error) {
-            // Another run holds the conversation: stays scheduled, tried again next tick.
-            if (error instanceof AgentRunConflictError) continue;
+            // Another run holds the conversation: stays scheduled, tried again next tick (a reminder set to skip a busy session is dropped).
+            if (error instanceof AgentRunConflictError) {
+              if (skipWhenBusy) await cancelDueReminder(tenantDb, run, 'another run was active in the session').catch(() => undefined);
+              continue;
+            }
             logger.warn('Failed to promote a scheduled agent run', {
               runId,
               error: error instanceof Error ? error.message : String(error),
