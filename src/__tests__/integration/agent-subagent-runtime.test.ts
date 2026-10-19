@@ -756,8 +756,8 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(delegation.map((e) => e.id)).toEqual(['d1']);
       expect(delegation[0]).not.toHaveProperty('subagent');
       expect(delegation[0]).not.toHaveProperty('resumed');
-      const lookups = first.filter((e) => e.name === 'lookup');
-      expect(lookups.every((e) => e.subagent?.name === 'helper')).toBe(true);
+      // The child's gated lookup has not started yet: nothing of it reaches the handler on the first leg.
+      expect(first.filter((e) => e.name === 'lookup')).toEqual([]);
 
       const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
       expect(action).toMatchObject({ subagent: 'helper', delegationToolCallId: 'd1' });
@@ -774,6 +774,14 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(starts.find((e) => e.id === 'd2')).not.toHaveProperty('resumed');
       expect(second.filter((e) => e.name === 'lookup').every((e) => e.subagent?.name === 'helper')).toBe(true);
       expect(second.some((e) => e.name === 'lookup')).toBe(true);
+
+      // The stored log: one tool_use for the delegation across both legs, and the child's rows carry the stamp.
+      const stored = await db.listAgentSessionEvents!(id, { types: ['agent.tool_use', 'agent.tool_result'] });
+      const uses = stored.filter((e) => e.type === 'agent.tool_use');
+      expect(uses.filter((e) => e.data.toolCallId === 'd1')).toHaveLength(1);
+      const lookupRows = stored.filter((e) => e.data.name === 'lookup');
+      expect(lookupRows.length).toBeGreaterThan(0);
+      expect(lookupRows.every((e) => e.data.subagent === 'helper')).toBe(true);
     });
 
     it('refuses the call on a run nobody can answer, and the sub-agent carries on without the tool', async () => {
