@@ -2614,6 +2614,33 @@ export interface IAgentVariable {
 }
 
 /**
+ * Reminders the agent sets for itself (`reminder_set`): a one-shot wake-up that
+ * later starts a new turn in the SAME session. Each reminder is a scheduled
+ * agent run (`channel: 'reminder'`). Off unless switched on; every limit is
+ * also capped by the platform (`AGENT_REMINDER_*`).
+ */
+export interface IAgentRemindersConfig {
+  /** Absent / false = the reminder tools are not offered and due reminders are not run. */
+  enabled?: boolean;
+  /** Shortest delay the agent may ask for (default 60 s). */
+  minDelaySeconds?: number;
+  /** Furthest ahead the agent may schedule (default 72 h). */
+  maxHorizonHours?: number;
+  /** Scheduled reminders one session may hold at once (default 3). */
+  maxActivePerSession?: number;
+  /** Reminders one session may ever create — stops a reminder that keeps re-arming itself (default 20). */
+  maxFiresPerSession?: number;
+  /** Run class of the wake-up turn (default `deferred`). */
+  runClass?: 'default' | 'deferred';
+  /** When the session is busy or waits on a person at fire time: wait (`postpone`, default) or drop it (`skip`). */
+  whenBusy?: 'postpone' | 'skip';
+  /** A reminder set after the run read outside content (web, MCP, tool output, webhook): ask (default), refuse or allow. */
+  afterUntrustedContent?: 'approve' | 'deny' | 'allow';
+  /** Extra guidance on when to set reminders, added to the reminders prompt section. */
+  instructions?: string;
+}
+
+/**
  * Files a user attaches to a session (the composer's paperclip, the client
  * API's `input_file` / `input_image`). Every field is a stored setting; absent
  * limits take the defaults in `SESSION_FILES_DEFAULTS` (sessionFilesConfig.ts).
@@ -2813,6 +2840,8 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
+  /** Reminders the agent may set for itself. Absent = off. */
+  reminders?: IAgentRemindersConfig;
   /**
    * Tools the agent calls but the CALLER runs: a portal's host page, or the
    * integrating backend (answers on the actions endpoint or from the agent's
@@ -3303,7 +3332,17 @@ export interface IAgentConversationMessage {
    * The model that answered, for an agent that offers several: `model` is the key the run used
    * (the Dynamic LLM's key when it is one), `routedModel` the concrete model it routed to.
    */
-  metadata?: { model?: string; routedModel?: string };
+  metadata?: {
+    model?: string;
+    routedModel?: string;
+    /**
+     * A user message the server wrote, not the person: `reminder` = the wake-up
+     * turn of a reminder the agent set. `content` then holds the framed note the
+     * model reads; `reminder.message` is what the agent wrote, for display.
+     */
+    origin?: 'reminder';
+    reminder?: { runId: string; message: string; setAt?: string };
+  };
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;
   /**
@@ -4803,7 +4842,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */
-  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | null;
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | null;
   triggerId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**
