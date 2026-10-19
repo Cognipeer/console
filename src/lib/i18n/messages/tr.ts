@@ -1636,6 +1636,7 @@ export const tr: typeof en = {
   },
   navigation: {
     ...en.navigation,
+    portalsYours: 'Portallarınız',
     settingsDescription: 'Projeler, sağlayıcılar, token\'lar, denetim ve lisans',
     iam: 'IAM merkezi',
     iamDescription: 'Politikalar, kişiler, erişim kontrolü, denetim izi ve limitler',
