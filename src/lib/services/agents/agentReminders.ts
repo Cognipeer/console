@@ -249,7 +249,8 @@ export async function fireReminderNow(
     if (busy) return { kind: 'busy', message: busy } as const;
     let promoted: IAgentRun | null;
     try {
-      promoted = await db.promoteScheduledAgentRun(String(run._id), scope.tenantId);
+      // Its start time moves to now too: the deferred dispatcher only takes runs that are due.
+      promoted = await db.promoteScheduledAgentRun(String(run._id), scope.tenantId, { notBefore: new Date() });
     } catch (error) {
       if (error instanceof AgentRunConflictError) return { kind: 'busy', message: 'Another run is active in this session.' } as const;
       throw error;
@@ -329,6 +330,12 @@ export async function scheduleReminder(input: ScheduleReminderInput): Promise<Sc
   };
 
   const refusal = await runWithTenantDb(scope.tenantDbName, async (db): Promise<string | null> => {
+    // The wake turn runs only for an active agent (agentRunService's precondition): say so now
+    // instead of setting a reminder that would fail when it fires (a draft is tried in the playground).
+    const agent = await db.findAgentByKey(input.agentKey, scope.projectId);
+    if (agent && agent.status !== 'active') {
+      return 'Not set: reminders only wake an active agent, and this one is not active yet. Activate or publish the agent first.';
+    }
     const inSession = await db.listAgentRuns({
       tenantId: scope.tenantId,
       projectId: scope.projectId,

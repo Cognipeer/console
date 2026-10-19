@@ -212,6 +212,17 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
       await expect(db.createAgentRun(rec({ conversationId: c }))).resolves.toBeTruthy();
     });
 
+    it('promote can move the start time to now, so the deferred dispatcher takes it at once', async () => {
+      const db = getDb();
+      const later = new Date(Date.now() + 10 * 60_000);
+      const run = await db.createAgentRun(rec({ conversationId: conv(), status: 'scheduled', runClass: 'deferred', notBefore: later }));
+      const now = new Date();
+      const promoted = await db.promoteScheduledAgentRun(id(run), tenantId, { notBefore: now });
+      expect(promoted?.status).toBe('queued');
+      expect(new Date(promoted!.notBefore!).getTime()).toBe(now.getTime());
+      expect((await db.listQueuedDeferredAgentRuns(tenantId, { limit: 10, dueBefore: new Date(now.getTime() + 1) })).map(id)).toContain(id(run));
+    });
+
     it('promote throws AgentRunConflictError while another run holds the conversation, and the row stays scheduled', async () => {
       const db = getDb();
       const c = conv();

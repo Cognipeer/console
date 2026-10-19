@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const hoisted = vi.hoisted(() => ({
   db: {
     listAgentRuns: vi.fn(),
+    findAgentByKey: vi.fn(),
     countAgentRunsByStatus: vi.fn(),
     getAgentRunById: vi.fn(),
     findAgentConversationById: vi.fn(),
@@ -65,6 +66,7 @@ const run = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.db.listAgentRuns.mockResolvedValue([]);
+  hoisted.db.findAgentByKey.mockResolvedValue({ key: 'ops', status: 'active' });
   hoisted.db.countAgentRunsByStatus.mockResolvedValue({});
   hoisted.resolveEffectiveLimits.mockResolvedValue({ quotas: {} });
   hoisted.startAgentRun.mockResolvedValue({ kind: 'accepted', run: run() });
@@ -107,6 +109,13 @@ describe('scheduleReminder', () => {
     expect(await scheduleReminder(input())).toEqual({ ok: false, reason: expect.stringContaining('already has 2 reminder(s) waiting') });
     hoisted.db.listAgentRuns.mockResolvedValueOnce([run({ status: 'succeeded' }), run({ status: 'canceled' }), run({ status: 'failed' })]);
     expect(await scheduleReminder(input())).toEqual({ ok: false, reason: expect.stringContaining('used all 3') });
+    expect(hoisted.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('refuses for an agent that is not active, whose wake turn could not run', async () => {
+    hoisted.db.findAgentByKey.mockResolvedValueOnce({ key: 'ops', status: 'draft' });
+    expect(await scheduleReminder(input())).toEqual({ ok: false, reason: expect.stringContaining('only wake an active agent') });
+    expect(hoisted.db.findAgentByKey).toHaveBeenCalledWith('ops', 'proj-1');
     expect(hoisted.startAgentRun).not.toHaveBeenCalled();
   });
 
@@ -160,6 +169,8 @@ describe('cancelReminder / fireReminderNow', () => {
     hoisted.db.promoteScheduledAgentRun.mockResolvedValueOnce(run({ status: 'queued', runClass: 'deferred' }));
     await fireReminderNow(SCOPE, 'run_rem-1', { actor });
     expect(hoisted.dispatchDeferredRuns).toHaveBeenCalledWith('tenant_acme', 'tenant-1');
+    // Fired now means due now: the deferred dispatcher only takes runs whose start time has come.
+    expect(hoisted.db.promoteScheduledAgentRun).toHaveBeenLastCalledWith('rem-1', 'tenant-1', { notBefore: expect.any(Date) });
   });
 });
 

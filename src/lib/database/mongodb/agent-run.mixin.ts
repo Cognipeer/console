@@ -532,7 +532,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
-    async promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null> {
+    async promoteScheduledAgentRun(runId: string, tenantId: string, options: { notBefore?: Date } = {}): Promise<IAgentRun | null> {
       const scheduled = await this.agentRunsCollection().findOne({ _id: objectId(runId), tenantId, status: 'scheduled' });
       if (!scheduled) return null;
       await this.ensureAgentRunsIndexes();
@@ -542,7 +542,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const locks = this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks);
       let run: IAgentRun | null;
       try {
-        run = await this.setAgentRun({ _id: objectId(runId), tenantId, status: 'scheduled' }, { status: 'queued', updatedAt: new Date() });
+        run = await this.setAgentRun(
+          { _id: objectId(runId), tenantId, status: 'scheduled' },
+          { status: 'queued', updatedAt: new Date(), ...(options.notBefore ? { notBefore: options.notBefore } : {}) },
+        );
       } catch (error) {
         await locks.deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
         if (isDuplicateKey(error)) throw new AgentRunConflictError(scheduled.conversationId);

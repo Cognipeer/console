@@ -2265,8 +2265,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Null when the row is no longer `scheduled` (another node promoted or
    * canceled it); throws `AgentRunConflictError` when another run holds the
    * slot (the row stays `scheduled`, retried on the next tick).
+   * `options.notBefore` moves the start time too (a reminder fired now, ahead of its time).
    */
-  promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null>;
+  promoteScheduledAgentRun(runId: string, tenantId: string, options?: { notBefore?: Date }): Promise<IAgentRun | null>;
   /** `deferred` `queued` rows (notBefore absent or <= `dueBefore`), oldest first: the dispatcher's input. */
   listQueuedDeferredAgentRuns(
     tenantId: string,
