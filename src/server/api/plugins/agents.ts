@@ -718,18 +718,21 @@ function summariseConversation(
 /** The `channel` values a run can carry (the runs list filters on them). */
 const RUN_CHANNEL_VALUES = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder'] as const satisfies ReadonlyArray<NonNullable<IAgentRun['channel']>>;
 
+/** A session row's run that is waiting for its time, queued or running. */
+interface ActiveRunRow { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }
+
 /** The run each session of the agent is waiting on or running now (a reminder's own wait is not one), newest first. */
 async function activeRunsBySession(
   tenantDbName: string,
   filter: { tenantId: string; projectId: string; agentKey: string },
-): Promise<Map<string, { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }>> {
+): Promise<Map<string, ActiveRunRow>> {
   const runs = await listAgentRuns(tenantDbName, {
     ...filter,
     excludeModes: ['sync'],
     status: ['scheduled', 'queued', 'running'],
     limit: 500,
   });
-  const out = new Map<string, { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }>();
+  const out = new Map<string, ActiveRunRow>();
   for (const run of runs) {
     if (out.has(run.conversationId)) continue;
     if (run.status === 'scheduled' && run.channel === 'reminder') continue;
@@ -1585,9 +1588,16 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
         });
       const reminderScope = { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId };
+      // What each row is waiting on or running, best effort: the list itself never fails over it.
+      const decoration = <T,>(what: string) => (error: unknown): Map<string, T> => {
+        logger.warn(`Sessions list: ${what} not shown`, { agentKey: agent.key, error: error instanceof Error ? error.message : String(error) });
+        return new Map();
+      };
       const [activeRuns, reminders] = await Promise.all([
-        activeRunsBySession(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key }),
-        activeRemindersBySession(reminderScope, agent.key),
+        activeRunsBySession(session.tenantDbName, { tenantId: session.tenantId, projectId, agentKey: agent.key })
+          .catch(decoration<ActiveRunRow>('active runs')),
+        activeRemindersBySession(reminderScope, agent.key)
+          .catch(decoration<{ active: number; nextAt: Date }>('reminders')),
       ]);
       const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
       // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
