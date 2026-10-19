@@ -213,7 +213,7 @@ describe('email dispatcher', () => {
 
 describe('mail templates', () => {
   async function render(name: string, data: Record<string, unknown>) {
-    const handlebars = (await import('handlebars/dist/cjs/handlebars')).default;
+    const handlebars = (await import('handlebars/dist/cjs/handlebars.js')).default;
     const content = fs.readFileSync(path.join(process.cwd(), 'mail-templates', `${name}.html`), 'utf-8');
     const subjectRaw = content.match(/<!--\s*subject:\s*(.+?)\s*-->/i)![1]!;
     const runtime = { allowProtoPropertiesByDefault: false, allowProtoMethodsByDefault: false } as const;

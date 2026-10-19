@@ -25,13 +25,10 @@ export default function ForgotPasswordPage() {
   const form = useForm({
     initialValues: {
       email: '',
-      slug: '',
     },
     validate: {
       email: (value) =>
         /^\S+@\S+$/.test(value) ? null : t('validation.invalidEmail'),
-      slug: (value) =>
-        value.trim().length > 0 ? null : t('validation.slugRequired'),
     },
   });
 
@@ -53,7 +50,17 @@ export default function ForgotPasswordPage() {
         return;
       }
 
-      // Always show success to prevent email enumeration
+      // An unknown address gets the same 200 as a known one, so only a failed
+      // request is reported as an error; it says nothing about the address.
+      if (!res.ok) {
+        notifications.show({
+          title: tCommon('error'),
+          message: t('notifications.genericError'),
+          color: 'red',
+        });
+        return;
+      }
+
       setSubmitted(true);
     } catch {
       notifications.show({
@@ -150,13 +157,6 @@ export default function ForgotPasswordPage() {
     >
       <form onSubmit={form.onSubmit(handleSubmit)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <TextInput
-            label={t('form.slug.label')}
-            placeholder={t('form.slug.placeholder')}
-            required
-            size="md"
-            {...form.getInputProps('slug')}
-          />
           <TextInput
             label={t('form.email.label')}
             placeholder={t('form.email.placeholder')}

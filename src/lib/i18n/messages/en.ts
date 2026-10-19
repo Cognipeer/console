@@ -605,17 +605,13 @@ export const en = {
     hero: {
       title: 'Reset your password',
       titleAccent: 'password',
-      subtitle: 'Enter your email and organization slug to receive a reset link.',
+      subtitle: 'Enter your email to receive a reset link.',
     },
     highlights: {
       emailLink: "We'll email you a reset link.",
       validity: 'Link is valid for 1 hour.',
     },
     form: {
-      slug: {
-        label: 'Organization Slug',
-        placeholder: 'my-company',
-      },
       email: {
         label: 'Email',
         placeholder: 'you@example.com',
@@ -628,7 +624,6 @@ export const en = {
     },
     validation: {
       invalidEmail: 'Invalid email address',
-      slugRequired: 'Organization slug is required',
     },
     notifications: {
       tooManyTitle: 'Too many requests',
@@ -640,7 +635,7 @@ export const en = {
       titleAccent: 'email',
       subtitle:
         "If an account exists with that email address, we've sent a password reset link. It will expire in 1 hour.",
-      note: "Didn't get an email? Check your spam folder, or try again with the correct organization slug.",
+      note: "Didn't get an email? Check your spam folder, or try again with the address you sign in with.",
       backToLogin: 'Back to login',
     },
   },

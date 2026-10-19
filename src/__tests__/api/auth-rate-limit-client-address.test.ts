@@ -46,7 +46,7 @@ const routes = [
     name: 'forgot-password',
     url: '/api/auth/forgot-password',
     limit: PASSWORD_RESET_RATE_LIMIT.maxAttempts,
-    body: { email: 'jane@acme.com', slug: 'acme' },
+    body: { email: 'jane@acme.com' },
   },
   { name: 'reset-password', url: '/api/auth/reset-password', limit: PASSWORD_RESET_RATE_LIMIT.maxAttempts, body: {} },
 ];

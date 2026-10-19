@@ -199,11 +199,19 @@ describe('disabled users and the auth routes', () => {
   });
 
   describe('POST /api/auth/forgot-password', () => {
+    // The address is in Acme's directory, so every request reaches the account lookup.
+    beforeEach(() => {
+      db.listTenantsForUser.mockResolvedValue([
+        { email: activeUser.email, tenantId: tenant._id, tenantSlug: tenant.slug, tenantDbName: tenant.dbName, tenantCompanyName: tenant.companyName },
+      ]);
+      db.findTenantById.mockResolvedValue(tenant as never);
+    });
+
     const forgot = () => app.inject({
       method: 'POST',
       url: '/api/auth/forgot-password',
       headers: { 'content-type': 'application/json' },
-      payload: JSON.stringify({ email: activeUser.email, slug: tenant.slug }),
+      payload: JSON.stringify({ email: activeUser.email }),
     });
 
     it('answers like an unknown email and sends nothing', async () => {

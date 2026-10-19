@@ -12,7 +12,9 @@ let handlebarsPromise: Promise<HandlebarsInstance> | null = null;
 
 async function getHandlebars(): Promise<HandlebarsInstance> {
   if (!handlebarsPromise) {
-    handlebarsPromise = import('handlebars/dist/cjs/handlebars').then((module) => module.default);
+    // With the extension: Node's ESM resolver (the server runs as `node --import tsx`)
+    // reads the bare path as the `dist/cjs/handlebars/` directory and refuses it.
+    handlebarsPromise = import('handlebars/dist/cjs/handlebars.js').then((module) => module.default);
   }
 
   return handlebarsPromise;
