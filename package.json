@@ -39,6 +39,7 @@
     "@aws-sdk/client-textract": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
+    "@azure/storage-blob": "12.33.0",
     "@cedar-policy/cedar-wasm": "4.13.0",
     "@cognipeer/agent-sdk": "^0.16.0",
     "@cognipeer/guardrail": "^0.1.0",
