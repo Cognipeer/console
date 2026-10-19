@@ -7,6 +7,7 @@ import {
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
+import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
 
 const logger = createLogger('provider-service');
 
@@ -147,6 +148,9 @@ export async function createProviderConfig(
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
+  // would say about the same value.
+  await validateProviderSettings(payload.driver, payload.credentials, payload.settings);
   await assertProviderEndpointsAllowed(payload.type, payload.credentials, payload.settings);
   const settings = payload.type === 'websearch'
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
@@ -203,6 +207,87 @@ function sameJson(a: unknown, b: unknown): boolean {
   );
 }
 
+/**
+ * The credentials a record holds, decrypted; `{}` when it has none and `undefined` when none of the configured
+ * secrets opens them (see `ProviderCredentialDecryptError`).
+ */
+function readStoredCredentials(
+  record: IProviderRecord | null,
+  replacing: boolean,
+): Record<string, unknown> | undefined {
+  if (!record?.credentialsEnc) return {};
+  try {
+    return decryptObject(record.credentialsEnc) as Record<string, unknown>;
+  } catch (error) {
+    // Undecryptable existing credentials must not block the save — that made
+    // the one action that repairs the record (re-entering the key) the one
+    // action guaranteed to fail. Whatever the operator supplies now is
+    // re-sealed under the current key.
+    logger.warn(
+      replacing
+        ? 'Existing provider credentials could not be decrypted; replacing them'
+        : 'Existing provider credentials could not be decrypted; their settings are saved without the driver check',
+      {
+        driver: record.driver,
+        providerKey: record.key,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    return undefined;
+  }
+}
+
+/** An update of a record's credentials: the stored set with the incoming values laid over it. */
+interface CredentialMerge {
+  /** The stored set (empty when there is none, or when it cannot be opened). */
+  current: Record<string, unknown>;
+  merged: Record<string, unknown>;
+  /** A record that had no credentials gets them from this update, which is a change of its connection. */
+  hadStored: boolean;
+}
+
+/**
+ * Merge incoming credentials over the existing decrypted set instead of
+ * replacing wholesale. A blank/undefined value means "leave this field
+ * unchanged" — the edit UI re-initialises secret fields (e.g. apiKey) to
+ * '' because the backend never returns the secret, so a wholesale replace
+ * would silently wipe the API key whenever an unrelated field (baseUrl,
+ * region, …) is edited.
+ */
+function mergeCredentials(
+  existing: IProviderRecord | null,
+  incoming: Record<string, unknown>,
+): CredentialMerge {
+  // Undecryptable existing credentials are treated as empty.
+  const current = readStoredCredentials(existing, true) ?? {};
+  const merged: Record<string, unknown> = { ...current };
+  for (const [field, value] of Object.entries(incoming)) {
+    if (value === '' || value === undefined || value === null) {
+      continue;
+    }
+    merged[field] = value;
+  }
+  return { current, merged, hadStored: Boolean(existing?.credentialsEnc) };
+}
+
+/**
+ * The driver's own check of an update, on what the update will store rather than on the patch: the settings replace
+ * the stored ones wholesale, the credentials are the merged set (or the stored one when the update leaves them alone).
+ */
+async function validateUpdatedProvider(
+  target: IProviderRecord | null,
+  payload: UpdateProviderConfigInput,
+  mergedCredentials: Record<string, unknown> | undefined,
+): Promise<void> {
+  const validate = settingsValidatorOf(target?.driver);
+  if (!target || !validate) return;
+  const credentials = mergedCredentials ?? readStoredCredentials(target, false);
+  // Credentials that cannot be opened say nothing about the settings: such a record still saves a settings-only edit,
+  // and the credentials are repaired by entering them again.
+  if (!credentials) return;
+  await validate(credentials, payload.settings ?? target.settings);
+}
+
 export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
@@ -216,10 +301,16 @@ export async function updateProviderConfig(
   // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
   let connectionChanged = false;
   let hadLastTest = false;
+  // Set when the update changes the credentials.
+  let credentialMerge: CredentialMerge | undefined;
 
   if (payload.settings !== undefined || payload.credentials !== undefined) {
     const target = await db.findProviderById(providerId);
     hadLastTest = Boolean(target?.lastTest);
+    if (payload.credentials !== undefined) {
+      credentialMerge = mergeCredentials(target, payload.credentials);
+    }
+    await validateUpdatedProvider(target, payload, credentialMerge?.merged);
     await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
     if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
       connectionChanged = true;
@@ -271,41 +362,11 @@ export async function updateProviderConfig(
     updates.metadata = payload.metadata;
   }
 
-  if (payload.credentials !== undefined) {
-    // Merge incoming credentials over the existing decrypted set instead of
-    // replacing wholesale. A blank/undefined value means "leave this field
-    // unchanged" — the edit UI re-initialises secret fields (e.g. apiKey) to
-    // '' because the backend never returns the secret, so a wholesale replace
-    // would silently wipe the API key whenever an unrelated field (baseUrl,
-    // region, …) is edited.
-    const existing = await db.findProviderById(providerId);
-    let current: Record<string, unknown> = {};
-    if (existing?.credentialsEnc) {
-      try {
-        current = decryptObject(existing.credentialsEnc) as Record<string, unknown>;
-      } catch (error) {
-        // Undecryptable existing credentials must not block the save — that made
-        // the one action that repairs the record (re-entering the key) the one
-        // action guaranteed to fail. Treat the old blob as empty; whatever the
-        // operator supplies now is re-sealed under the current key.
-        logger.warn('Existing provider credentials could not be decrypted; replacing them', {
-          driver: existing.driver,
-          providerKey: existing.key,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    const merged: Record<string, unknown> = { ...current };
-    for (const [field, value] of Object.entries(payload.credentials)) {
-      if (value === '' || value === undefined || value === null) {
-        continue;
-      }
-      merged[field] = value;
-    }
-    if (!existing?.credentialsEnc || !sameJson(merged, current)) {
+  if (credentialMerge) {
+    if (!credentialMerge.hadStored || !sameJson(credentialMerge.merged, credentialMerge.current)) {
       connectionChanged = true;
     }
-    updates.credentialsEnc = encryptObject(merged);
+    updates.credentialsEnc = encryptObject(credentialMerge.merged);
   }
 
   if (connectionChanged && hadLastTest) {

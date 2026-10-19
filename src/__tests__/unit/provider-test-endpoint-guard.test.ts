@@ -42,6 +42,16 @@ describe('assertProviderTestEndpointsAllowed (every domain, not only inference)'
     use(saas);
     await expect(assertProviderTestEndpointsAllowed('file', undefined, { endpoint: '10.1.2.3:9000' }))
       .rejects.toBeInstanceOf(ProviderEndpointError);
+    await expect(assertProviderTestEndpointsAllowed('file', undefined, { endpoint: 'localhost:9000' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+  });
+
+  it('SaaS refuses a private Entra authority host of a file provider, and takes a public one', async () => {
+    use(saas);
+    await expect(assertProviderTestEndpointsAllowed('file', { authorityHost: 'https://10.0.0.9' }, { endpoint: 'https://93.184.216.34' }))
+      .rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'authorityHost' });
+    await expect(assertProviderTestEndpointsAllowed('file', { authorityHost: 'https://93.184.216.34' }, { endpoint: '93.184.216.34:9000' }))
+      .resolves.toBeUndefined();
   });
 
   it('accepts public endpoints and values that name no server', async () => {
@@ -56,8 +66,11 @@ describe('assertProviderTestEndpointsAllowed (every domain, not only inference)'
   it('on-prem lets private endpoints through unless the deployment blocks them', async () => {
     use(onprem);
     await expect(assertProviderTestEndpointsAllowed('vector', { url: 'http://10.0.0.5:9200' })).resolves.toBeUndefined();
+    await expect(assertProviderTestEndpointsAllowed('file', undefined, { endpoint: '10.0.0.5:9000' })).resolves.toBeUndefined();
     use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
     await expect(assertProviderTestEndpointsAllowed('vector', { url: 'http://10.0.0.5:9200' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+    await expect(assertProviderTestEndpointsAllowed('file', undefined, { endpoint: '10.0.0.5:9000' }))
       .rejects.toBeInstanceOf(ProviderEndpointError);
   });
 

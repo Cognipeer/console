@@ -28,8 +28,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-
-import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+import { isProviderConfigError, sendProviderConfigError } from '../providerConfigErrors';
 
 const logger = createLogger('api:providers');
 
@@ -40,18 +39,22 @@ const logger = createLogger('api:providers');
  * invisible in both the UI and the server log.
  */
 function sendProviderError(reply: FastifyReply, error: unknown) {
-  logger.error('Provider request failed', {
-    error: error instanceof Error ? error.message : String(error),
-    name: error instanceof Error ? error.name : undefined,
-  });
+  if (isProviderConfigError(error)) {
+    // A refusal is the caller's to fix and is answered to the caller. Its text can quote what was typed into an
+    // endpoint or credential field, so the log keeps what and where, not the words.
+    logger.error('Provider request refused', { name: error.name, code: error.code, field: error.field });
+  } else {
+    logger.error('Provider request failed', {
+      error: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : undefined,
+    });
+  }
 
   if (error instanceof ProviderCredentialDecryptError) {
     return reply.code(409).send({ error: error.message });
   }
 
-  if (error instanceof ProviderEndpointError) {
-    return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
-  }
+  if (sendProviderConfigError(reply, error)) return reply;
 
   if (error instanceof WebSearchCacheConfigError) {
     return reply.code(400).send({ error: error.message });
@@ -292,9 +295,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
-      if (error instanceof ProviderEndpointError) {
-        return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
-      }
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ProviderProjectIdsError) {
         return reply.code(400).send({ error: error.message });
       }

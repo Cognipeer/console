@@ -49,6 +49,23 @@ export interface ResilienceOptions {
    * circuit although the provider never answered.
    */
   signal?: AbortSignal;
+  /**
+   * Whether a failed call counts against the circuit breaker. Asked once per
+   * call that failed for good (not retryable, or out of attempts) with the
+   * error it ended on. Return `false` for a failure that says nothing about the
+   * provider's health: a rejected credential, a missing bucket, a setting the
+   * provider refuses. The caller still gets the error.
+   *
+   * An uncounted failure is neutral, the way a caller's cancellation is: the
+   * circuit stays exactly as it was. A closed circuit keeps its failure count
+   * (it is not reset either), and a half-open one stays half-open, so the next
+   * call probes again instead of the circuit re-opening on an answer that was
+   * never about availability. Retrying is decided separately and is not
+   * affected.
+   *
+   * Default: every failure counts. A predicate that throws counts the failure.
+   */
+  countFailure?: (error: unknown) => boolean;
 }
 
 export interface RetryConfig {
@@ -74,10 +91,46 @@ export interface CircuitBreakerConfig {
 /* ------------------------------------------------------------------ */
 
 /** HTTP status codes that should never be retried */
-const NON_RETRYABLE_STATUSES = new Set([400, 401, 403, 404, 409, 422]);
+const NON_RETRYABLE_STATUSES = new Set([400, 401, 403, 404, 409, 413, 422]);
 
-function isRetryable(error: unknown): boolean {
+/**
+ * Error codes of an operation that fails the same way every time it is sent:
+ * - Node's own refusal to write an HTTP header, `ERR_INVALID_CHAR` (a value it
+ *   cannot encode, e.g. a non-Latin-1 metadata value) and `ERR_INVALID_HTTP_TOKEN`
+ *   (a name that is not a valid token): the request never left the process;
+ * - a file path that is not there (`ENOENT`, `ENOTDIR`) or is a directory
+ *   (`EISDIR`): what a local file store raises for a key it does not hold.
+ */
+const NON_RETRYABLE_ERROR_CODES = new Set(['ERR_INVALID_CHAR', 'ERR_INVALID_HTTP_TOKEN', 'ENOENT', 'ENOTDIR', 'EISDIR']);
+
+/**
+ * The HTTP statuses an error carries, wherever the SDK that raised it keeps
+ * them: `status` (fetch-style clients), `statusCode` (the agent-sdk providers'
+ * `ProviderError`, the Azure SDK's `RestError`) and `$metadata.httpStatusCode`
+ * (the AWS SDK). Usually one of the three is set; non-numeric values are skipped.
+ */
+export function errorStatusCodes(error: unknown): number[] {
+  if (!error || typeof error !== 'object') return [];
+  const carrier = error as { status?: unknown; statusCode?: unknown; $metadata?: { httpStatusCode?: unknown } | null };
+  return [carrier.status, carrier.statusCode, carrier.$metadata?.httpStatusCode].filter(
+    (value): value is number => typeof value === 'number',
+  );
+}
+
+/**
+ * Whether another attempt at the same operation can succeed. The one rule for it: `withResilience` retries on it,
+ * and callers that ask a different question about a failure (does it say the provider is unwell?) start from it
+ * instead of keeping a list of their own.
+ */
+export function isRetryable(error: unknown): boolean {
   if (error instanceof Error) {
+    // A verdict the error carries itself beats every guess below, in both
+    // directions: a storage driver that already classified a 403 or a rejected
+    // setting knows better than a keyword in the message.
+    const declared = (error as { retryable?: unknown }).retryable;
+    if (declared === false) return false;
+    if (declared === true) return true;
+
     const msg = error.message.toLowerCase();
     // Authentication / authorization — don't retry
     if (msg.includes('unauthorized') || msg.includes('forbidden') || msg.includes('api key')) {
@@ -88,12 +141,13 @@ function isRetryable(error: unknown): boolean {
     if (statusMatch && NON_RETRYABLE_STATUSES.has(parseInt(statusMatch[1], 10))) {
       return false;
     }
-    // Check for status property (`statusCode` is what the agent-sdk providers' ProviderError carries)
-    for (const key of ['status', 'statusCode'] as const) {
-      const value = (error as unknown as Record<string, unknown>)[key];
-      if (typeof value === 'number' && NON_RETRYABLE_STATUSES.has(value)) {
-        return false;
-      }
+    // Check for the status the error carries (`statusCode` is what the agent-sdk providers' ProviderError carries)
+    if (errorStatusCodes(error).some((status) => NON_RETRYABLE_STATUSES.has(status))) {
+      return false;
+    }
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && NON_RETRYABLE_ERROR_CODES.has(code)) {
+      return false;
     }
   }
   return true;
@@ -188,6 +242,33 @@ function recordFailure(key: string, cfg: CircuitBreakerConfig): void {
   if (circuit.state === 'half-open' || circuit.failures >= cfg.threshold) {
     circuit.state = 'open';
     log.warn(`Circuit breaker opened for "${key}" (failures: ${circuit.failures})`);
+  }
+}
+
+/**
+ * Record the failure that ended a call, unless the caller's `countFailure`
+ * says it is not about the provider's health (see `ResilienceOptions`). An
+ * uncounted failure touches nothing: no count, no re-opening, no recovery.
+ */
+function recordCallFailure(options: ResilienceOptions, cfg: CircuitBreakerConfig, error: unknown): void {
+  if (!cfg.enabled) return;
+  if (!countsAsFailure(options, error)) {
+    log.debug(`Failure not counted against the circuit of "${options.key}"`);
+    return;
+  }
+  recordFailure(options.key, cfg);
+}
+
+function countsAsFailure(options: ResilienceOptions, error: unknown): boolean {
+  if (!options.countFailure) return true;
+  try {
+    return options.countFailure(error) !== false;
+  } catch (predicateError) {
+    // A broken predicate must neither hide the provider's error nor leave the breaker blind.
+    log.warn(`countFailure threw for "${options.key}", counting the failure`, {
+      error: predicateError instanceof Error ? predicateError.message : String(predicateError),
+    });
+    return true;
   }
 }
 
@@ -358,7 +439,7 @@ export async function withResilience<T>(
           attempt,
           error: error instanceof Error ? error.message : String(error),
         });
-        recordFailure(options.key, cbCfg);
+        recordCallFailure(options, cbCfg, error);
         throw error;
       }
 
@@ -380,7 +461,7 @@ export async function withResilience<T>(
         log.error(`All ${maxAttempts} attempts failed for "${options.key}"`, {
           error: error instanceof Error ? error.message : String(error),
         });
-        recordFailure(options.key, cbCfg);
+        recordCallFailure(options, cbCfg, error);
       }
     }
   }

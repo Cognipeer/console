@@ -208,6 +208,33 @@ describe('runtime probes (vector, file)', () => {
     expect(result.message).toContain('***');
   });
 
+  it('scrubs that password in its decoded form too, and only the part after the first colon', async () => {
+    const createRuntime = vi.fn(async () => ({
+      listIndexes: async () => { throw new Error('rejected p@ss:w0rd for user app'); },
+      close: vi.fn(),
+    }));
+    const result = await testProviderConnection(
+      base({
+        type: 'vector',
+        driver: 'pgvector',
+        credentials: { connectionString: 'postgres://app:p%40ss:w0rd@93.184.216.34:5432/vec' },
+      }),
+      { createRuntime: createRuntime as never },
+    );
+    expect(result.message).toBe('rejected *** for user app');
+  });
+
+  it('a value made of colons is read in time proportional to its length', async () => {
+    // Looking for the password of "scheme://user:password@" must not try every colon in turn: a long run of them took
+    // time quadratic in its length (a request body of a megabyte kept the process busy for minutes).
+    const started = performance.now();
+    const result = await testProviderConnection(
+      base({ type: 'file', driver: 'local-filesystem', credentials: { note: `http://${':'.repeat(60_000)}` } }),
+    );
+    expect(result.ok).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('file: lists one object', async () => {
     const listFiles = vi.fn(async () => ({ items: [] }));
     const result = await testProviderConnection(
@@ -235,6 +262,17 @@ describe('the outbound guard', () => {
       base({ type: 'vector', driver: 'postgres', credentials: { connectionString: 'postgres://u:p@192.168.0.4:5432/db' } }),
       { createRuntime: createRuntime as never },
     )).rejects.toBeInstanceOf(ProviderEndpointError);
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('a MongoDB GridFS connection URI is held to it too: a private host, and a +srv record it cannot check, are refused on SaaS', async () => {
+    const createRuntime = vi.fn();
+    for (const uri of ['mongodb://127.0.0.1:27017', 'mongodb://u:p@10.0.0.5:27017/files', 'mongodb+srv://u:p@cluster0.example.net/files']) {
+      await expect(testProviderConnection(
+        base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      ), uri).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+    }
     expect(createRuntime).not.toHaveBeenCalled();
   });
 });

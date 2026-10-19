@@ -34,6 +34,7 @@ import {
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 
 const logger = createLogger('api:client-providers');
 
@@ -141,6 +142,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof Error && error.message.includes('already exists')) {
         return reply.code(409).send({ error: error.message });
       }
@@ -191,6 +193,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!updated) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ provider: updated });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof WebSearchCacheConfigError) {
         return reply.code(400).send({ error: error.message });
       }

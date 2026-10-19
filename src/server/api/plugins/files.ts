@@ -41,6 +41,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import { refuseSessionLinked, sendSessionRefusal } from './agent-session-access';
 import { listVisibleFiles, sessionOfFile } from './session-linked-files';
 
@@ -193,6 +194,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal server error',

@@ -74,6 +74,44 @@ describe('isPrivateIpAddress', () => {
     }
     expect(isPrivateIpAddress('2606:2800:220:1:248:1893:25c8:1946')).toBe(false);
   });
+
+  it('flags the special-purpose block 192.0.0.0/24 and the Azure host virtual IP', () => {
+    for (const ip of ['192.0.0.0', '192.0.0.8', '192.0.0.192', '192.0.0.255', '168.63.129.16']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(true);
+    }
+  });
+
+  it('keeps those two to the addresses they name', () => {
+    for (const ip of ['192.0.1.1', '192.1.0.1', '191.255.255.255', '168.63.129.15', '168.63.129.17', '168.63.128.16', '168.63.130.16', '168.62.129.16']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(false);
+    }
+  });
+
+  it('judges an IPv4-translated address (::ffff:0:a.b.c.d) by the IPv4 address in it, in both spellings', () => {
+    for (const ip of ['::ffff:0:10.0.0.1', '::ffff:0:a00:1', '::ffff:0:127.0.0.1', '::ffff:0:7f00:1', '::ffff:0:169.254.169.254', '::ffff:0:192.168.1.1', '::ffff:0:192.0.0.192']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ['::ffff:0:8.8.8.8', '::ffff:0:808:808']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(false);
+    }
+  });
+
+  it('flags the local-use NAT64 prefix 64:ff9b:1::/48 whatever it embeds, and still judges 64:ff9b::/96 by the IPv4 address', () => {
+    for (const ip of ['64:ff9b:1::a00:1', '64:ff9b:1::7f00:1', '64:ff9b:1::808:808', '64:ff9b:1:ffff:ffff:ffff:ffff:ffff']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(true);
+    }
+    expect(isPrivateIpAddress('64:ff9b::a00:1')).toBe(true);
+    expect(isPrivateIpAddress('64:ff9b::808:808')).toBe(false);
+  });
+
+  it('flags Teredo (2001::/32) and nothing next to it', () => {
+    for (const ip of ['2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001::1', '2001:0000:1:2:3:4:5:6', '2001:0:5ef5:79fd:0:0:f5ff:ffff']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ['2001:1::1', '2001:4860:4860::8888', '2001:db8::1', '2002:808:808::1']) {
+      expect(isPrivateIpAddress(ip), ip).toBe(false);
+    }
+  });
 });
 
 describe('assertPublicUrl: a failed lookup is not a private address', () => {
@@ -113,6 +151,19 @@ describe('assertPublicUrl', () => {
       'http://foo.internal/x',
     ]) {
       await expect(assertPublicUrl(url), url).rejects.toThrow(OutboundNetworkError);
+    }
+  });
+
+  it('says only "Invalid URL" for a value that does not parse: what was typed may hold a password or a signature', async () => {
+    for (const raw of [
+      'https://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@mini o.example.com',
+      'https://host:99999/?sig=SUPERSECRETSIG',
+      'https://public.example.com:99999?sig=SUPERSECRET',
+      'not a url ?token=abc123',
+    ]) {
+      const error = await assertPublicUrl(raw).catch((e: unknown) => e);
+      expect(error, raw).toBeInstanceOf(OutboundNetworkError);
+      expect((error as Error).message, raw).toBe('Invalid URL');
     }
   });
 

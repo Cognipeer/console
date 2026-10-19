@@ -1,6 +1,6 @@
 import type { ProviderDomain } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers';
-import type { FileProviderRuntime } from '@/lib/providers/domains/file';
+import type { FileConnectionCheck, FileProviderRuntime } from '@/lib/providers/domains/file';
 import type { VectorProviderRuntime } from '@/lib/providers/domains/vector';
 import type { ProviderContext } from '@/lib/providers/types';
 import { safeFetch } from '@/lib/security/outboundFetch';
@@ -9,6 +9,7 @@ import {
   endpointGuardOptions,
   hasUnvettableEndpoint,
 } from './providerEndpointGuard';
+import { validateProviderSettings } from './providerSettingsValidation';
 
 /** A "Test connection" never waits longer than this. */
 export const PROVIDER_TEST_TIMEOUT_MS = 10_000;
@@ -21,7 +22,12 @@ export interface ProviderTestResult {
   ok: boolean | null;
   latencyMs: number;
   message: string;
-  details?: { deployments?: string[]; models?: string[] };
+  details?: {
+    deployments?: string[];
+    models?: string[];
+    /** File providers: the steps their check ran (list, write, read, delete) and how each ended. */
+    steps?: FileConnectionCheck['steps'];
+  };
 }
 
 export interface ProviderTestInput {
@@ -153,6 +159,14 @@ function decodeURIComponentSafe(value: string): string {
   }
 }
 
+/**
+ * `scheme://user:password@`: the password of a connection string. The user part cannot hold a colon, so the
+ * password starts at the FIRST colon of the authority; a lazy `[^/?#@]*?` there tried every colon in turn, and a
+ * value made of colons ("http://" and a long run of ":") took time quadratic in its length - a request body of a
+ * megabyte kept the event loop busy for minutes. The captures are the same as the lazy pattern's.
+ */
+const CONNECTION_STRING_PASSWORD = /^[a-z][a-z0-9+.-]*:\/\/[^/?#@:]*:([^/?#@]+)@/i;
+
 /** Every credential value, so a message can be cleaned of them. */
 function secretsOf(...sources: Array<Record<string, unknown> | undefined>): string[] {
   const out: string[] = [];
@@ -160,7 +174,7 @@ function secretsOf(...sources: Array<Record<string, unknown> | undefined>): stri
     if (typeof value === 'string') {
       if (value.trim().length >= 6) out.push(value.trim());
       // A connection string hides its password inside; an error that echoes only that part must be cleaned too.
-      const userinfo = /^[a-z][a-z0-9+.-]*:\/\/[^/?#@]*?:([^/?#@]+)@/i.exec(value.trim());
+      const userinfo = CONNECTION_STRING_PASSWORD.exec(value.trim());
       if (userinfo && userinfo[1].length >= 3) out.push(userinfo[1], decodeURIComponentSafe(userinfo[1]));
     } else if (value && typeof value === 'object') {
       Object.values(value).forEach(visit);
@@ -178,10 +192,14 @@ export function scrubMessage(raw: string, secrets: readonly string[]): string {
   return message.length > 300 ? `${message.slice(0, 297)}...` : message;
 }
 
-function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+/** Rejects after `ms`. `onTimeout` runs first, so the work can be told to stop. */
+function withTimeout<T>(work: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`Timed out after ${Math.round(ms / 1000)} s`)), ms);
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`Timed out after ${Math.round(ms / 1000)} s`));
+    }, ms);
   });
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
@@ -229,9 +247,34 @@ async function runHttpProbe(
   return { ok: false, message: `The provider answered HTTP ${status}.` };
 }
 
+/** Releases what a probe's runtime holds; the answer is known by now, so a failure here changes nothing. */
+async function closeQuietly(runtime: { close?: () => Promise<void> | void }): Promise<void> {
+  try {
+    await runtime.close?.();
+  } catch {
+    /* best effort */
+  }
+}
+
+/** A file driver's own check, as a test result: nothing in it may carry a credential. */
+function fileCheckResult(check: FileConnectionCheck, secrets: readonly string[]): Omit<ProviderTestResult, 'latencyMs'> {
+  const steps = check.steps?.map((entry) => ({
+    step: entry.step,
+    ok: entry.ok,
+    ...(entry.message ? { message: scrubMessage(entry.message, secrets) } : {}),
+  }));
+  return {
+    ok: check.ok,
+    message: scrubMessage(check.message, secrets) || (check.ok ? 'Connected.' : 'The connection failed.'),
+    ...(steps && steps.length > 0 ? { details: { steps } } : {}),
+  };
+}
+
 async function runtimeProbe(
   input: ProviderTestInput,
   createRuntime: NonNullable<ProviderTestDeps['createRuntime']>,
+  signal: AbortSignal,
+  secrets: readonly string[],
 ): Promise<Omit<ProviderTestResult, 'latencyMs'>> {
   const context: ProviderContext = {
     tenantId: input.tenantId,
@@ -240,10 +283,15 @@ async function runtimeProbe(
     credentials: input.credentials,
     settings: input.settings ?? {},
   };
+  // The time limit may pass while the runtime is still being created; the caller has its answer by then.
+  const assertWaiting = () => {
+    if (signal.aborted) throw new Error('The connection test timed out.');
+  };
 
   if (input.type === 'vector') {
     const runtime = await createRuntime<VectorProviderRuntime>(input.driver, context);
     try {
+      assertWaiting();
       const indexes = await runtime.listIndexes();
       const names = indexes.map((index) => index.name).slice(0, MAX_LISTED);
       return {
@@ -252,13 +300,21 @@ async function runtimeProbe(
         ...(names.length > 0 ? { details: { deployments: names } } : {}),
       };
     } finally {
-      await Promise.resolve(runtime.close?.()).catch(() => undefined);
+      await closeQuietly(runtime);
     }
   }
 
   const runtime = await createRuntime<FileProviderRuntime>(input.driver, context);
-  await runtime.listFiles({ limit: 1 });
-  return { ok: true, message: 'Connected.' };
+  try {
+    assertWaiting();
+    if (runtime.checkConnection) {
+      return fileCheckResult(await runtime.checkConnection({ signal, write: true }), secrets);
+    }
+    await runtime.listFiles({ limit: 1 });
+    return { ok: true, message: 'Connected.' };
+  } finally {
+    await closeQuietly(runtime);
+  }
 }
 
 /**
@@ -266,7 +322,9 @@ async function runtimeProbe(
  * deployments / indexes). Never persists anything; never returns credentials or an upstream body.
  * `ok: null` = the driver has no test.
  *
- * Throws `ProviderEndpointError` when an endpoint is refused by the outbound guard (HTTP 400 for the caller).
+ * Throws `ProviderSettingsError` when the driver's own check refuses the settings, and `ProviderEndpointError` when
+ * an endpoint is refused by the outbound guard (both HTTP 400 for the caller: they say what to change, where a
+ * failed connection is only `ok: false`).
  */
 export async function testProviderConnection(
   input: ProviderTestInput,
@@ -285,7 +343,9 @@ export async function testProviderConnection(
     return done({ ok: null, message: 'This provider runs inside the console; there is no connection to test.' });
   }
 
-  // Every outbound target goes through the guard before anything is dialled.
+  // The driver's own checks first (as when the provider is saved), then every outbound target goes through the guard
+  // before anything is dialled.
+  await validateProviderSettings(input.driver, input.credentials, settings);
   await assertProviderTestEndpointsAllowed(input.type, input.credentials, settings);
   if (hasUnvettableEndpoint(input.credentials, settings)) {
     return done({ ok: null, message: 'A connection string of this form cannot be checked, so it is not tested from here.' });
@@ -297,12 +357,20 @@ export async function testProviderConnection(
     return done({ ok: null, message: 'Testing is not supported for this driver.' });
   }
 
+  // Aborted when the time limit passes, so a probe that is still running stops instead of holding a connection.
+  const abort = new AbortController();
   try {
     const result = await withTimeout(
       httpProbe
         ? runHttpProbe(httpProbe, deps.fetchImpl ?? safeFetch, timeoutMs)
-        : runtimeProbe(input, deps.createRuntime ?? ((driver, context) => providerRegistry.createRuntime(driver, context))),
+        : runtimeProbe(
+          input,
+          deps.createRuntime ?? ((driver, context) => providerRegistry.createRuntime(driver, context)),
+          abort.signal,
+          secrets,
+        ),
       timeoutMs,
+      () => abort.abort(),
     );
     return done(result);
   } catch (error) {

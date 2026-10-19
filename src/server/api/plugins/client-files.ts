@@ -5,6 +5,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
+  composeUploadKeyHint,
   createFileProvider,
   deleteFile,
   downloadFile,
@@ -20,11 +21,13 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
+import { toHeaderSafeJson } from '@/lib/utils/headerSafeJson';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
 import { listVisibleFiles, sessionOfFile } from './session-linked-files';
 
@@ -98,6 +101,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       logger.error('Create client file provider error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -191,6 +195,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required (base64 or data URL)' });
       }
+      // The same destination rules as the Document Store: no "." / ".." segments, no control characters.
+      const destination = composeUploadKeyHint({ keyHint: body.keyHint });
+      if ('error' in destination) return reply.code(400).send({ error: destination.error });
 
       const tokenId = ctx.tokenRecord._id?.toString() ?? ctx.token;
       const estimatedFileBytes = estimateBase64Bytes(body.data);
@@ -248,7 +255,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         createdBy: ctx.user?._id?.toString() ?? 'api',
         data: body.data,
         fileName: body.fileName,
-        keyHint: body.keyHint as string | undefined,
+        keyHint: destination.keyHint,
         metadata: body.metadata as Record<string, unknown> | undefined,
       });
 
@@ -356,7 +363,8 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (result.metadata) {
         try {
-          reply.header('X-File-Metadata', JSON.stringify(result.metadata));
+          // A header value is ASCII: metadata in any language travels as \uXXXX escapes, which JSON.parse reads back.
+          reply.header('X-File-Metadata', toHeaderSafeJson(result.metadata));
         } catch (error) {
           logger.warn('Failed to serialize client file metadata', { error });
         }

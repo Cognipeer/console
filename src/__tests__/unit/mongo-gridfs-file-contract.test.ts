@@ -4,8 +4,14 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
+import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { MongoGridFsFileProviderContract } from '@/lib/providers/contracts/mongoGridFsFiles.contract';
 import type { FileProviderRuntime } from '@/lib/providers/domains/file';
+import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+
+function deployment(overrides: Record<string, string>) {
+  setConfigSource({ get: (k: string) => overrides[k] ?? process.env[k] } as ConfigSource);
+}
 
 const MONGO_AVAILABLE: boolean = (() => {
   try {
@@ -20,16 +26,20 @@ describe.runIf(MONGO_AVAILABLE)('MongoGridFsFileProviderContract', () => {
   let server: { getUri(): string; stop(): Promise<boolean> };
   let runtime: FileProviderRuntime;
   let other: FileProviderRuntime;
+  const original = getConfigSource();
 
   beforeAll(async () => {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
     server = await MongoMemoryServer.create();
+    // The test server is on loopback: a self-hosted install, where an in-network database is what this driver is for.
+    deployment({ DEPLOYMENT_MODE: 'onprem' });
     const base = { credentials: { uri: server.getUri() }, settings: { database: 'test_files' } };
     runtime = await MongoGridFsFileProviderContract.createRuntime({ tenantId: 't1', providerKey: 'p', ...base });
     other = await MongoGridFsFileProviderContract.createRuntime({ tenantId: 't2', providerKey: 'p', ...base });
   });
 
   afterAll(async () => {
+    setConfigSource(original);
     await server?.stop();
   });
 
@@ -78,6 +88,10 @@ describe.runIf(MONGO_AVAILABLE)('MongoGridFsFileProviderContract', () => {
     await expect(runtime.downloadFile('d.txt')).rejects.toThrow(/not found/i);
   });
 
+  it('reports a missing key as a 404, which is no storage outage', async () => {
+    await expect(runtime.downloadFile('never-uploaded.txt')).rejects.toMatchObject({ statusCode: 404 });
+  });
+
   it('isolates tenants', async () => {
     await runtime.uploadFile({ key: 'iso.txt', name: 'iso', data: Buffer.from('x') });
     expect(await other.getFileMetadata('iso.txt')).toBeNull();
@@ -88,5 +102,31 @@ describe.runIf(MONGO_AVAILABLE)('MongoGridFsFileProviderContract', () => {
     await expect(runtime.downloadFile('/')).rejects.toThrow(/Invalid file key/);
     await other.uploadFile({ key: 'x', name: 'x', data: Buffer.from('secret') });
     await expect(runtime.downloadFile('../../t2/p/x')).rejects.toThrow(/not found/i);
+  });
+
+  describe('on SaaS', () => {
+    it('does not connect to a database a tenant names when it is on a private network', async () => {
+      deployment({ DEPLOYMENT_MODE: 'saas' });
+      try {
+        await expect(MongoGridFsFileProviderContract.createRuntime({
+          tenantId: 't1', providerKey: 'p', credentials: { uri: server.getUri() }, settings: {},
+        })).rejects.toBeInstanceOf(ProviderEndpointError);
+      } finally {
+        deployment({ DEPLOYMENT_MODE: 'onprem' });
+      }
+    });
+
+    it("keeps using the application's own connection when the URI is left empty", async () => {
+      deployment({ DEPLOYMENT_MODE: 'saas', DB_PROVIDER: 'mongodb', MONGODB_URI: server.getUri() });
+      try {
+        const own = await MongoGridFsFileProviderContract.createRuntime({
+          tenantId: 't3', providerKey: 'p', credentials: {}, settings: { database: 'test_files' },
+        });
+        await own.uploadFile({ key: 'own.txt', name: 'own', data: Buffer.from('app connection') });
+        expect((await own.downloadFile('own.txt')).data.toString()).toBe('app connection');
+      } finally {
+        deployment({ DEPLOYMENT_MODE: 'onprem' });
+      }
+    });
   });
 });

@@ -34,6 +34,12 @@ export interface ProviderFormField {
   options?: ProviderFormFieldOption[];
   defaultValue?: unknown;
   scope?: 'credentials' | 'settings' | 'metadata';
+  /**
+   * Show this field only while another field of the same form holds one of the given values (an Azure Blob
+   * credential belongs to one authentication method, for example). Presentation only: the runtime ignores the values
+   * of fields that do not apply, and the server does not evaluate this.
+   */
+  visibleWhen?: { field: string; equals: string | string[] };
 }
 
 export interface ProviderFormSection {
@@ -78,6 +84,27 @@ export interface ProviderContract<TRuntime = unknown, TCredentials = Record<stri
   createRuntime: (
     context: ProviderContext<TCredentials, TSettings>,
   ) => Promise<TRuntime> | TRuntime;
+  /**
+   * Strict check of what is about to be saved or tested. The provider service calls it on create and on update
+   * (with the credentials and settings the update will store: blank secrets keep the stored ones, settings replace
+   * the stored ones), and "Test connection" calls it before it creates a runtime. Throw `ProviderSettingsError` to
+   * refuse; the entry points answer 400 `{ error, code, field }`.
+   *
+   * Save-time only: `createRuntime` stays lenient for rows that are already stored.
+   */
+  validateSettings?(input: {
+    credentials: TCredentials;
+    settings: TSettings;
+    /** `getConfig().deployment.isOnPrem`: some options are self-hosted only. */
+    isOnPrem: boolean;
+  }): void | Promise<void>;
+  /**
+   * File providers only: where this provider's objects live, for display (for example
+   * `s3://archive/console/<tenantId>/<providerKey>/`). Built from settings alone, never from credentials, and ends at
+   * the runtime's base prefix with a trailing '/'; the Files service appends the bucket prefix. Return null when
+   * there is nothing meaningful to show (the server's own disk).
+   */
+  describeStorageLocation?(input: { settings: TSettings; tenantId: string; providerKey: string }): string | null;
 }
 
 export interface ProviderDescriptor {

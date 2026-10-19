@@ -4,8 +4,8 @@ import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFile
 import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
-import { withResilience } from '@/lib/core/resilience';
+import { runtimePool, hashRuntimeConfig } from '@/lib/core/runtimePool';
+import { errorStatusCodes, isRetryable, withResilience, type ResilienceOptions } from '@/lib/core/resilience';
 import {
     providerRegistry,
     type FileProviderRuntime,
@@ -195,6 +195,51 @@ function ensureFileProvider(record: IProviderRecord): void {
     }
 }
 
+/**
+ * Whether a failed storage call says the storage itself is unwell. It is the circuit breaker's
+ * `countFailure` for file I/O: only an outage should cut a tenant's uploads off, not a request that
+ * can never succeed. A rejected key (403), a missing bucket or object (404, ENOENT), an oversized upload
+ * (413), a header value Node refuses to write or a setting the endpoint policy refuses is the caller's
+ * to fix and no evidence about the next request.
+ *
+ * Transient (true): timeouts, network failures, 408, 429, 5xx and anything unclassified.
+ * Not transient (false): an error that declares `retryable: false` (the settings / endpoint-policy
+ * refusals do), anything the retry rules call hopeless (`isRetryable`: the same request fails the same
+ * way, so it is no sign of an outage either), and any other 4xx. An error that declares
+ * `retryable: true` (a resolver that is down) is transient; the flag wins over the status, as it does
+ * for retries.
+ *
+ * The retry rules are asked rather than copied: a verdict added there (a new status, a new Node error
+ * code) reaches the breaker without a second list to keep in step.
+ */
+export function isTransientStorageError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+        return true;
+    }
+
+    const { retryable } = error as { retryable?: unknown };
+    if (retryable === false) return false;
+    if (retryable === true) return true;
+    if (!isRetryable(error)) return false;
+
+    return !errorStatusCodes(error).some(
+        (status) => status >= 400 && status < 500 && status !== 408 && status !== 429,
+    );
+}
+
+type FileOperation = 'upload' | 'download' | 'delete';
+
+/**
+ * `withResilience` options for one file I/O call. The breaker key carries the tenant: a provider key is
+ * only unique inside its tenant, so each tenant's provider gets a circuit of its own.
+ */
+function fileResilience(operation: FileOperation, tenantId: string, providerKey: string): ResilienceOptions {
+    return {
+        key: `file-${operation}:${tenantId}:${providerKey}`,
+        countFailure: isTransientStorageError,
+    };
+}
+
 async function buildRuntimeContext(
     tenantDbName: string,
     tenantId: string,
@@ -213,11 +258,13 @@ async function buildRuntimeContext(
     ensureFileProvider(record);
 
     const cacheKey = `file:${tenantId}:${record.key}`;
-    const credHash = hashCredentials(credentials);
+    // The settings (bucket, endpoint, auth method, ...) shape the runtime as much as the credentials do: without
+    // them an edited setting would go unseen until the pooled runtime expired.
+    const configHash = hashRuntimeConfig({ driver: record.driver, credentials, settings: record.settings ?? {} });
 
     const runtime = await runtimePool.getOrCreate<FileProviderRuntime>(
         cacheKey,
-        credHash,
+        configHash,
         async () => {
             const providerLog = createProviderLogger(record.key);
             return providerRegistry.createRuntime<FileProviderRuntime>(
@@ -766,7 +813,7 @@ async function applyMarkdownConversion(
                     converter: '@cognipeer/to-markdown',
                 },
             }),
-            { key: `file-upload:${bucket.providerKey}` },
+            fileResilience('upload', bucket.tenantId, bucket.providerKey),
         );
 
         const handle = upload.handle;
@@ -827,7 +874,7 @@ export async function uploadFile(
             data: fileBuffer,
             metadata: request.metadata,
         }),
-        { key: `file-upload:${bucket.providerKey}` },
+        fileResilience('upload', tenantId, bucket.providerKey),
     );
 
     const storedRelativeKey = stripBucketPrefix(
@@ -920,7 +967,7 @@ export async function replaceFileContent(
             data: input.data,
             metadata: record.metadata,
         }),
-        { key: `file-upload:${bucket.providerKey}` },
+        fileResilience('upload', tenantId, bucket.providerKey),
     );
 
     const db = await withTenantDb(tenantDbName);
@@ -1004,7 +1051,7 @@ export async function downloadFile(
 
     const result = await withResilience(
         () => runtime.downloadFile(providerObjectKey),
-        { key: `file-download:${bucket.providerKey}` },
+        fileResilience('download', tenantId, bucket.providerKey),
     );
     const fileName = variant === 'markdown'
         ? deriveMarkdownKey(record.name)
@@ -1040,7 +1087,7 @@ export async function deleteFile(
         () => runtime.deleteFile(
             composeProviderObjectKey(bucket, record.key),
         ),
-        { key: `file-delete:${bucket.providerKey}` },
+        fileResilience('delete', tenantId, bucket.providerKey),
     );
 
     if (record.markdownKey) {

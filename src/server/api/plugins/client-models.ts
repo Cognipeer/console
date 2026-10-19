@@ -64,6 +64,7 @@ import {
   serviceRefusalError,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -201,6 +202,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof Error && error.message.includes('already exists')) {
         return reply.code(409).send({ error: error.message });
       }

@@ -58,8 +58,41 @@ describe('assertProviderEndpointsAllowed', () => {
       .rejects.toBeInstanceOf(ProviderEndpointError);
   });
 
-  it('ignores non-inference domains', async () => {
+  it('ignores domains that hold no guarded endpoints', async () => {
     use(saas);
     await expect(assertProviderEndpointsAllowed('vector', { baseUrl: 'http://127.0.0.1' })).resolves.toBeUndefined();
+    await expect(assertProviderEndpointsAllowed('vector', undefined, { endpoint: '10.0.0.5:9200', authorityHost: 'https://10.0.0.9' }))
+      .resolves.toBeUndefined();
+  });
+
+  it('guards file stores like model endpoints, and reads their bare hosts as https', async () => {
+    use(saas);
+    for (const endpoint of ['http://10.0.0.5:9000', 'http://127.0.0.1:9000', 'http://169.254.169.254', '10.0.0.5:9000', 'localhost:9000']) {
+      await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint }), endpoint)
+        .rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint' });
+    }
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: 'https://93.184.216.34:9000' })).resolves.toBeUndefined();
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: '93.184.216.34:9000' })).resolves.toBeUndefined();
+    // Only a file store takes a bare host: a model URL has to be a URL.
+    await expect(assertProviderEndpointsAllowed('model', { baseUrl: '93.184.216.34:9000' })).rejects.toBeInstanceOf(ProviderEndpointError);
+  });
+
+  it('checks an authority host wherever the domain is guarded', async () => {
+    use(saas);
+    await expect(assertProviderEndpointsAllowed('file', { authorityHost: 'https://10.0.0.9' }))
+      .rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'authorityHost' });
+    await expect(assertProviderEndpointsAllowed('model', undefined, { authorityHost: 'http://169.254.169.254' }))
+      .rejects.toMatchObject({ field: 'authorityHost' });
+    await expect(assertProviderEndpointsAllowed('file', { authorityHost: 'https://93.184.216.34' })).resolves.toBeUndefined();
+  });
+
+  it('on-prem lets a file store reach in-network hosts, unless the deployment blocks them', async () => {
+    use(onprem);
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: 'http://10.0.0.5:9000' })).resolves.toBeUndefined();
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: '10.0.0.5:9000' })).resolves.toBeUndefined();
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: '10.0.0.5:9000' })).rejects.toBeInstanceOf(ProviderEndpointError);
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: '10.0.0.5' });
+    await expect(assertProviderEndpointsAllowed('file', undefined, { endpoint: '10.0.0.5:9000' })).resolves.toBeUndefined();
   });
 });

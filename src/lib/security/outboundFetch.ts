@@ -19,9 +19,13 @@
  *    exempted from the block (for self-hosted deployments that legitimately
  *    call in-network services)
  *  - `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` (default 30s)
+ *
+ * Clients that connect through their own http(s) agent (the storage SDKs) cannot use `safeFetch`: they
+ * run `assertPublicUrl` on their endpoint and give the agent `createGuardedLookup`, which applies the same
+ * policy to the address the socket is about to dial (`privateNetworkBlockApplies` says whether it does).
  */
 
-import { isIP } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { Agent, buildConnector } from 'undici';
 
@@ -37,7 +41,14 @@ interface ResolvedAddress {
 
 const hostPrivacyCache = new Map<string, { privateNetwork: boolean; addresses: ResolvedAddress[]; expiresAt: number }>();
 
+/**
+ * A target the guard refuses (a private address, a protocol other than http(s), a URL that does not parse). The
+ * same target is refused again by the next attempt, so the error declares itself not retryable: `withResilience`
+ * and the file circuit breaker read `retryable` instead of guessing from the message.
+ */
 export class OutboundNetworkError extends Error {
+  readonly retryable: boolean = false;
+
   constructor(message: string) {
     super(message);
     this.name = 'OutboundNetworkError';
@@ -48,9 +59,12 @@ export class OutboundNetworkError extends Error {
  * The host could not be resolved (a resolver outage, NXDOMAIN). Still refused —
  * the guard fails closed — but it says nothing about the ADDRESS, so a caller
  * that retries (webhook delivery) can tell it from a rejected private target.
+ * Unlike a refused address it may well succeed later: it is retryable, and counts
+ * as an outage.
  */
 export class OutboundDnsError extends OutboundNetworkError {
   readonly code = 'dns_lookup_failed';
+  readonly retryable = true;
 }
 
 export function isPrivateIpAddress(ip: string): boolean {
@@ -60,7 +74,7 @@ export function isPrivateIpAddress(ip: string): boolean {
     if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
       return true;
     }
-    const [a, b] = parts;
+    const [a, b, c, d] = parts;
     return (
       a === 0
       || a === 10
@@ -68,8 +82,10 @@ export function isPrivateIpAddress(ip: string): boolean {
       || (a === 100 && b >= 64 && b <= 127) // CGNAT
       || (a === 169 && b === 254) // link-local + cloud metadata
       || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 0 && c === 0) // 192.0.0.0/24 IETF protocol assignments (a legacy cloud metadata address sits here)
       || (a === 192 && b === 168)
       || (a === 198 && (b === 18 || b === 19)) // benchmarking
+      || (a === 168 && b === 63 && c === 129 && d === 16) // Azure's host virtual IP (WireServer), a public address that answers for the host
       || a >= 224 // multicast + reserved
     );
   }
@@ -85,6 +101,8 @@ export function isPrivateIpAddress(ip: string): boolean {
     // hex form of `::ffff:127.0.0.1`; the old prefix check only understood the
     // dotted one). The verdict is the embedded address's.
     if (zero(0, 5) && groups[5] === 0xffff) return isPrivateIpAddress(embeddedV4(groups[6], groups[7]));
+    // ::ffff:0:a.b.c.d — IPv4-translated (SIIT): the same embedded address, one group further left.
+    if (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) return isPrivateIpAddress(embeddedV4(groups[6], groups[7]));
     // :: and ::1, plus the deprecated IPv4-compatible `::a.b.c.d`.
     if (zero(0, 6)) {
       if (groups[6] === 0 && groups[7] <= 1) return true;
@@ -95,8 +113,14 @@ export function isPrivateIpAddress(ip: string): boolean {
     if (groups[0] === 0x64 && groups[1] === 0xff9b && zero(2, 6)) {
       return isPrivateIpAddress(embeddedV4(groups[6], groups[7]));
     }
+    // 64:ff9b:1::/48 — local-use NAT64 (RFC 8215). Where the IPv4 address sits depends on the prefix length
+    // the translator uses, and the range is for a site's own network: all of it is internal.
+    if (groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1) return true;
     // 2002::/16 — 6to4. Bits 16..47 carry the IPv4 relay/host address.
     if (groups[0] === 0x2002) return isPrivateIpAddress(embeddedV4(groups[1], groups[2]));
+    // 2001::/32 — Teredo, a deprecated tunnel that embeds a server and an obfuscated client IPv4 address. No
+    // service a console is pointed at lives behind one, so the range is refused rather than decoded.
+    if (groups[0] === 0x2001 && groups[1] === 0) return true;
 
     const first = groups[0];
     if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
@@ -297,6 +321,20 @@ export interface OutboundGuardOptions {
 }
 
 /**
+ * Whether the private-network block is in force for `hostname` under `options`: the question
+ * `assertPublicUrl` answers before it resolves anything, for callers that need the answer without a URL
+ * to check (deciding whether a storage client's connections get a guarded lookup). `forceBlock` always
+ * blocks; otherwise the block applies unless the deployment switch is off, the caller allows private
+ * targets, or the host is on `OUTBOUND_HTTP_ALLOWED_HOSTS`. Pass the host as `URL.hostname` spells it.
+ */
+export function privateNetworkBlockApplies(hostname: string, options?: OutboundGuardOptions): boolean {
+  if (options?.forceBlock) return true;
+  const { blockPrivateNetwork, allowedHosts } = getConfig().outboundHttp;
+  if (!blockPrivateNetwork || options?.allowPrivate) return false;
+  return !isAllowlistedHost(hostname, allowedHosts);
+}
+
+/**
  * Throws `OutboundNetworkError` when the URL is not a public http(s) target.
  * DNS-resolves hostnames, so names pointing at private IPs are also rejected.
  */
@@ -318,18 +356,16 @@ async function checkPublicUrl(
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new OutboundNetworkError(`Invalid URL: ${rawUrl}`);
+    // The value is not echoed: it is whatever was typed into a URL field, and that is often a URL with a
+    // password or a signature in it. Callers put this message in API responses and logs.
+    throw new OutboundNetworkError('Invalid URL');
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new OutboundNetworkError(`Unsupported protocol for outbound request: ${url.protocol}`);
   }
 
-  if (!options?.forceBlock) {
-    const { blockPrivateNetwork, allowedHosts } = getConfig().outboundHttp;
-    if (!blockPrivateNetwork || options?.allowPrivate) return { url, pinned: [] };
-    if (isAllowlistedHost(url.hostname, allowedHosts)) return { url, pinned: [] };
-  }
+  if (!privateNetworkBlockApplies(url.hostname, options)) return { url, pinned: [] };
 
   const { privateNetwork, lookupFailed } = await resolvesToPrivateNetwork(url.hostname);
   if (lookupFailed) throw new OutboundDnsError(`Could not resolve host: ${url.hostname}`);
@@ -352,6 +388,55 @@ async function checkPublicUrl(
     );
   }
   return { url, pinned };
+}
+
+/**
+ * A `lookup` for `http.Agent` / `https.Agent` (anything that takes a `net` lookup option) that applies
+ * the private-network policy when the socket connects. It resolves the name itself and, where the policy
+ * applies to that host (`privateNetworkBlockApplies`), refuses the connection if ANY answer is private;
+ * the addresses it returns are the ones the socket dials. That closes the gap an `assertPublicUrl` call
+ * leaves between "validated" and "connected": a name that answered with a public address a moment ago
+ * and answers with a loopback one now still cannot get through. The same local-name rule as
+ * `assertPublicUrl` (`localhost`, `*.local`, `*.internal`, ...) is applied without asking DNS.
+ *
+ * Node calls `lookup` for host NAMES only: a literal IP in the URL is connected to directly. A caller
+ * that builds an agent for an endpoint therefore also runs `assertPublicUrl` on that endpoint.
+ *
+ * Both callback shapes are answered: `{ all: true }` (Node races address families by default) takes the
+ * array, otherwise one address and its family. A name that does not resolve passes the resolver's own
+ * error through (ENOTFOUND, EAI_AGAIN) so "unreachable" stays distinguishable from "refused".
+ */
+export function createGuardedLookup(options?: OutboundGuardOptions): LookupFunction {
+  return (hostname, lookupOptions, callback) => {
+    const blocking = privateNetworkBlockApplies(hostname, options);
+    const refuse = (): void => callback(
+      new OutboundNetworkError(`Refusing outbound request to private/loopback host: ${hostname}`),
+      [],
+    );
+    if (blocking && isLocalHostname(hostname.toLowerCase())) {
+      // Like every other answer, never inside the call that asked.
+      process.nextTick(refuse);
+      return;
+    }
+
+    lookup(hostname, { verbatim: true, ...lookupOptions, all: true }).then(
+      (records) => {
+        if (records.length === 0) {
+          callback(
+            Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname }),
+            [],
+          );
+        } else if (blocking && records.some((record) => isPrivateIpAddress(record.address))) {
+          refuse();
+        } else if (lookupOptions.all) {
+          callback(null, records);
+        } else {
+          callback(null, records[0].address, records[0].family);
+        }
+      },
+      (error: NodeJS.ErrnoException) => callback(error, []),
+    );
+  };
 }
 
 export interface SafeFetchOptions extends OutboundGuardOptions {
