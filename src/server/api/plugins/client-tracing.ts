@@ -191,6 +191,12 @@ function eventErrorMessage(event: Pick<IAgentTracingEvent, 'error' | 'label'>): 
   return typeof event.label === 'string' ? event.label : 'Event error';
 }
 
+/**
+ * Events that wrap other events. The SDK widens an iteration or an agent span to cover its children (the
+ * wall-clock extent of the run), so adding their duration to the children's would count the same time twice.
+ */
+const CONTAINER_EVENT_TYPES = new Set(['agent_iteration', 'span']);
+
 function aggregateEvents(events: IAgentTracingEvent[]) {
   const eventCounts: Record<string, number> = {};
   const modelsUsed = new Set<string>();
@@ -224,7 +230,9 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalCachedInputTokens += typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
     totalBytesIn += typeof event.requestBytes === 'number' ? event.requestBytes : 0;
     totalBytesOut += typeof event.responseBytes === 'number' ? event.responseBytes : 0;
-    totalDurationMs += typeof event.durationMs === 'number' ? event.durationMs : 0;
+    if (typeof event.durationMs === 'number' && !CONTAINER_EVENT_TYPES.has(String(event.type))) {
+      totalDurationMs += event.durationMs;
+    }
     totalReasoningTokens += typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
     if (isTruncatedFinishReason(event.finishReason)) truncatedEvents += 1;
 
@@ -791,7 +799,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             eventCounts: stats.eventCounts,
             modelsUsed: stats.modelsUsed,
             aiErrors: stats.aiErrors,
-            rootSpanId: existing?.rootSpanId || session.rootSpanId,
+            // A paused run's first leg has no root, so the mapper falls back to a child span; the real root arrives
+            // with the batch that ends the session and must replace it.
+            rootSpanId: rootEnded ? (session.rootSpanId || existing?.rootSpanId) : (existing?.rootSpanId || session.rootSpanId),
             source: existing?.source || session.source || 'otlp',
             startedAt: nextStartedAt,
             status,

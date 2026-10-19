@@ -67,6 +67,10 @@ import type { EntityMetricType, IEntityMetricAggregate } from '@/lib/database/pr
 import { clientTracingApiPlugin } from '@/server/api/plugins/client-tracing';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
 import { describeForEachProvider } from './db-parity.helper';
+import sdkLegsLeg1 from '../fixtures/otlp-sdk/legs-paused.leg1.both.json';
+import sdkLegsLeg2 from '../fixtures/otlp-sdk/legs-paused.leg2.both.json';
+import sdkSubagentLeg1 from '../fixtures/otlp-sdk/subagent-pending.leg1.both.json';
+import sdkSubagentLeg2 from '../fixtures/otlp-sdk/subagent-pending.leg2.both.json';
 
 const DAY_MS = 86_400_000;
 
@@ -695,6 +699,120 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await sweepStaleTracingSessions(quietLater());
     await settle();
     expect(await row('agent', agent)).toMatchObject({ requests: 1, errors: 1 });
+  });
+
+  // ── OTLP from the SDK, a run exported in legs ────────────────────────────
+
+  /**
+   * A copy of an SDK golden request under this test's own session and trace id, so legs of one run still share
+   * both and different tests never meet. The SDK leaves the root out of a leg that ends in a pause.
+   */
+  function sdkLeg(fixture: unknown, sessionId: string, traceId: string) {
+    const request = JSON.parse(JSON.stringify(fixture)) as {
+      resourceSpans: Array<{ resource: { attributes: Array<{ key: string; value: { stringValue?: string } }> }; scopeSpans: Array<{ spans: Array<Json> }> }>;
+    };
+    for (const resource of request.resourceSpans) {
+      for (const attribute of resource.resource.attributes) {
+        if (attribute.key === 'cognipeer.session.id') attribute.value.stringValue = sessionId;
+        if (attribute.key === 'service.name') attribute.value.stringValue = agent;
+      }
+      for (const scope of resource.scopeSpans) for (const span of scope.spans) span.traceId = traceId;
+    }
+    return request;
+  }
+  const sdkRootSpanId = (fixture: unknown) =>
+    (fixture as { resourceSpans: Array<{ scopeSpans: Array<{ spans: Array<{ spanId: string; attributes: Array<{ key: string }> }> }> }> })
+      .resourceSpans[0].scopeSpans[0].spans.find((span) => span.attributes.some((a) => a.key === 'cognipeer.session.status'))!.spanId;
+  async function eventsOf(sessionId: string) {
+    await db.switchToTenant(dbName);
+    return db.listAgentTracingEvents(sessionId, projectId);
+  }
+
+  it('otlp sdk legs: a run paused for a person and resumed stays one session, the real root replaces the fallback, container durations are not added', async () => {
+    const sessionId = `sdk-legs-${sequence}`;
+    const traceId = `0af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    expect((await exportTraces(sdkLeg(sdkLegsLeg1, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    const paused = await session(sessionId);
+    expect(paused).toMatchObject({ status: 'in_progress' });
+    expect(paused?.rootSpanId).not.toBe(sdkRootSpanId(sdkLegsLeg2));
+    expect(await eventsOf(sessionId)).toHaveLength(3);
+
+    expect((await exportTraces(sdkLeg(sdkLegsLeg2, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    const done = await session(sessionId);
+    expect(done).toMatchObject({ status: 'success', totalEvents: 7 });
+    expect(done?.rootSpanId).toBe(sdkRootSpanId(sdkLegsLeg2));
+    const events = await eventsOf(sessionId);
+    expect(events.map((event) => event.sequence).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    // Iterations are widened to cover their children by the exporter; only the leaves add up.
+    const leafMs = events
+      .filter((event) => event.type !== 'agent_iteration' && event.type !== 'span')
+      .reduce((total, event) => total + (event.durationMs ?? 0), 0);
+    const containerMs = events
+      .filter((event) => event.type === 'agent_iteration' || event.type === 'span')
+      .reduce((total, event) => total + (event.durationMs ?? 0), 0);
+    expect(containerMs).toBeGreaterThan(0);
+    expect(done?.summary?.totalDurationMs).toBe(leafMs);
+
+    // The same legs again change nothing (deduplicated by the events' identity).
+    expect((await exportTraces(sdkLeg(sdkLegsLeg2, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    expect(await eventsOf(sessionId)).toHaveLength(7);
+  });
+
+  it('otlp sdk legs: a session waiting for an approval is neither finalized nor abandoned until it is history', async () => {
+    const sessionId = `sdk-wait-${sequence}`;
+    const traceId = `1af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg1, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    expect((await eventsOf(sessionId)).find((event) => event.type === 'tool_approval')?.status).toBe('pending');
+
+    // Past the OTLP quiet window, and past the stale window: a person may take that long.
+    await sweepStaleTracingSessions(quietLater());
+    await sweepStaleTracingSessions(later());
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'in_progress' });
+    expect((await session(sessionId))?.metricsOutcome).toBeFalsy();
+
+    // The answer arrives after the quiet window: it lands in the same session and finishes it.
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg2, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    const done = await session(sessionId);
+    expect(done).toMatchObject({ status: 'success' });
+    expect(done?.rootSpanId).toBe(sdkRootSpanId(sdkSubagentLeg2));
+    expect(await eventsOf(sessionId)).toHaveLength(13);
+  });
+
+  it('otlp sdk legs: a pause nobody answers is closed once it is history', async () => {
+    const sessionId = `sdk-wait-history-${sequence}`;
+    const traceId = `2af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg1, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+
+    await sweepStaleTracingSessions(Date.now() + 3 * DAY_MS);
+    await settle();
+    const closed = await session(sessionId);
+    expect(closed?.status).not.toBe('in_progress');
+    // History books nothing.
+    expect(closed?.metricsOutcome).toBeFalsy();
+  });
+
+  it('otlp sdk legs: a session whose latest event is not pending is still finalized after the quiet window', async () => {
+    const sessionId = `sdk-quiet-${sequence}`;
+    const traceId = `3af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    // The second leg without its root: the run answered, did more work, and the root never arrived.
+    const request = sdkLeg(sdkLegsLeg2, sessionId, traceId);
+    request.resourceSpans[0].scopeSpans[0].spans = request.resourceSpans[0].scopeSpans[0].spans
+      .filter((span) => (span.spanId as string) !== sdkRootSpanId(sdkLegsLeg2));
+    expect((await exportTraces(sdkLeg(sdkLegsLeg1, sessionId, traceId))).statusCode).toBe(200);
+    expect((await exportTraces(request)).statusCode).toBe(200);
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'in_progress' });
+
+    await sweepStaleTracingSessions(quietLater());
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success' });
   });
 
   // ── hosted-agent sink ─────────────────────────────────────────────────────
