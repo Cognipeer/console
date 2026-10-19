@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -11,7 +11,6 @@ import {
   FileInput,
   Group,
   Loader,
-  Modal,
   SegmentedControl,
   Stack,
   Table,
@@ -49,6 +48,7 @@ import {
   subFolders,
   type SessionFileFilter,
 } from './fileBrowse';
+import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 
 interface FileObjectManagerProps {
   bucket?: FileBucketView | null;
@@ -114,6 +114,7 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
   const t = useTranslations('files');
   const locale = useLocale();
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const uploadFormRef = useRef<HTMLFormElement>(null);
   // The folder being viewed (`''` = the bucket root) and which files it lists.
   const [prefix, setPrefix] = useState('');
   const [filter, setFilter] = useState<SessionFileFilter>('all');
@@ -343,68 +344,69 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
   };
 
   const uploadModal = (
-    <Modal
-      opened={uploadModalOpen}
+    <FormShell
+      open={uploadModalOpen}
       onClose={() => setUploadModalOpen(false)}
-  title={`Upload file${bucket ? ` to ${bucket.name}` : ''}`}
-      size="md"
+      title={`Upload file${bucket ? ` to ${bucket.name}` : ''}`}
+      primaryAction={{
+        label: 'Upload',
+        loading: uploadMutation.isPending,
+        disabled: uploadMutation.isPending,
+        onClick: () => uploadFormRef.current?.requestSubmit(),
+      }}
+      secondaryAction={{ label: 'Cancel', onClick: () => setUploadModalOpen(false), disabled: uploadMutation.isPending }}
     >
       <form
+        ref={uploadFormRef}
         onSubmit={form.onSubmit((values) => {
           void handleSubmit(values);
         })}
       >
-        <Stack gap="md">
-          {prefix ? <Text size="xs" c="dimmed">{t('browse.uploadsTo', { path: prefix })}</Text> : null}
-          {(() => {
-            const fileInputProps = form.getInputProps('file');
-            return (
-              <FileInput
-                label="File"
-                placeholder="Select file"
-                withAsterisk
-                accept="*/*"
-                {...fileInputProps}
-                onChange={(file) => {
-                  fileInputProps.onChange(file);
-                  if (file) {
-                    if (!form.values.name) {
-                      form.setFieldValue('name', file.name);
+        <FormSection title="File">
+          <Stack gap="md">
+            {prefix ? <Text size="xs" c="dimmed">{t('browse.uploadsTo', { path: prefix })}</Text> : null}
+            {(() => {
+              const fileInputProps = form.getInputProps('file');
+              return (
+                <FileInput
+                  label="File"
+                  placeholder="Select file"
+                  withAsterisk
+                  accept="*/*"
+                  {...fileInputProps}
+                  onChange={(file) => {
+                    fileInputProps.onChange(file);
+                    if (file) {
+                      if (!form.values.name) {
+                        form.setFieldValue('name', file.name);
+                      }
+                      if (!form.values.contentType) {
+                        form.setFieldValue('contentType', file.type);
+                      }
                     }
-                    if (!form.values.contentType) {
-                      form.setFieldValue('contentType', file.type);
-                    }
-                  }
-                }}
-              />
-            );
-          })()}
-          <TextInput
-            label="Name"
-            placeholder="marketing-assets.pdf"
-            withAsterisk
-            {...form.getInputProps('name')}
-          />
-          <TextInput
-            label="Content type"
-            placeholder="application/pdf"
-            {...form.getInputProps('contentType')}
-          />
-          <Checkbox
-            label="Convert to markdown"
-            {...form.getInputProps('convertToMarkdown', { type: 'checkbox' })}
-          />
-          <Group justify="flex-end" gap="sm">
-            <Button variant="default" onClick={() => setUploadModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" loading={uploadMutation.isPending}>
-              Upload
-            </Button>
-          </Group>
-        </Stack>
+                  }}
+                />
+              );
+            })()}
+            <TextInput
+              label="Name"
+              placeholder="marketing-assets.pdf"
+              withAsterisk
+              {...form.getInputProps('name')}
+            />
+            <TextInput
+              label="Content type"
+              placeholder="application/pdf"
+              {...form.getInputProps('contentType')}
+            />
+            <Checkbox
+              label="Convert to markdown"
+              {...form.getInputProps('convertToMarkdown', { type: 'checkbox' })}
+            />
+          </Stack>
+        </FormSection>
       </form>
-    </Modal>
+    </FormShell>
   );
 
   const markdownBadgeColor = (status?: string | null) => {
