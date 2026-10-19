@@ -4,6 +4,12 @@ import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { invalidateEnterpriseLicenseCache } from '@/lib/license/enterprise-license-cache';
 import { TokenManager } from '@/lib/license/token-manager';
+import { listSwitchableServices } from '@/lib/services/availability/catalog';
+import {
+  clearServiceAvailabilityMemo,
+  getDisabledServices,
+  unknownLicenseServiceIds,
+} from '@/lib/services/availability/serviceAvailability';
 import {
   readJsonBody,
   requireSessionContext,
@@ -30,11 +36,17 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
       await db.switchToTenant(tenant.dbName);
       const projects = await db.listProjects(session.tenantId);
       const license = LicenseManager.getEffectiveLicenseForTenant(tenant);
+      const disabled = await getDisabledServices(session.tenantId);
 
       return reply.code(200).send({
         canManage: canManageLicense(session.userRole),
         license,
         projectCount: projects.length,
+        // Which services are on for this workspace, and what switched each one off (environment or license).
+        services: {
+          switchable: listSwitchableServices(),
+          disabled: [...disabled.values()],
+        },
         tenantSlug: tenant.slug,
       });
     } catch (error) {
@@ -82,6 +94,7 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
       // every already-logged-in session (not just this request's re-issued
       // cookie) sees the new license on its very next request.
       await invalidateEnterpriseLicenseCache(session.tenantId);
+      clearServiceAvailabilityMemo(session.tenantId);
 
       await db.switchToTenant(updatedTenant.dbName);
       const user = await db.findUserById(session.userId);
@@ -105,7 +118,15 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      return reply.code(200).send({ license: verified });
+      // Ids this release does not know are ignored (a license made for a newer release keeps working); say so.
+      const unknownServices = unknownLicenseServiceIds(verified.services);
+      if (unknownServices.length > 0) {
+        logger.warn('License names services this release does not know; they are ignored', { unknownServices });
+      }
+      return reply.code(200).send({
+        license: verified,
+        ...(unknownServices.length > 0 ? { warnings: { unknownServices } } : {}),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'License validation failed';
       logger.warn('Apply license failed', { error: message });
@@ -147,6 +168,7 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
       // every already-logged-in session (not just this request's re-issued
       // cookie) loses enterprise access on its very next request.
       await invalidateEnterpriseLicenseCache(session.tenantId);
+      clearServiceAvailabilityMemo(session.tenantId);
 
       await db.switchToTenant(updatedTenant.dbName);
       const user = await db.findUserById(session.userId);

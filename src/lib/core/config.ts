@@ -37,6 +37,15 @@ class EnvConfigSource implements ConfigSource {
 export interface AppConfig {
   nodeEnv: string;
 
+  /**
+   * Services switched off for the whole deployment (see
+   * src/lib/services/availability/serviceAvailability.ts). Both empty = nothing off.
+   */
+  services: {
+    disabled: string[];
+    enabled: string[];
+  };
+
   deployment: {
     /** saas = Cognipeer-hosted, onprem = customer-hosted. */
     mode: 'saas' | 'onprem';
@@ -693,6 +702,11 @@ function buildConfig(source: ConfigSource): AppConfig {
     deployment: {
       mode: deploymentMode,
       isOnPrem: deploymentMode === 'onprem',
+    },
+
+    services: {
+      disabled: list(source, 'CONSOLE_DISABLED_SERVICES', []),
+      enabled: list(source, 'CONSOLE_ENABLED_SERVICES', []),
     },
 
     license: {

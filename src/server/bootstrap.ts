@@ -1,4 +1,5 @@
 import { getConfig, validateConfig } from '@/lib/core/config';
+import { validateServiceSwitchConfig } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { configureOutboundProxy } from '@/lib/core/outboundProxyBootstrap';
 import { initLifecycle, registerShutdownHandler } from '@/lib/core/lifecycle';
@@ -152,7 +153,7 @@ async function runBootstrap(): Promise<void> {
   // As early as possible, and unconditionally before any provider/CRM call
   // has a chance to fire: those all use the plain `fetch()` this configures.
   configureOutboundProxy();
-  const errors = validateConfig(cfg);
+  const errors = [...validateConfig(cfg), ...validateServiceSwitchConfig(cfg.services)];
 
   if (errors.length > 0) {
     for (const error of errors) {
