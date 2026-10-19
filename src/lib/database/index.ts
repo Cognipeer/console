@@ -408,6 +408,8 @@ export type {
   IConfigGroup,
   IConfigItem,
   IConfigAuditLog,
+  IConfigValueRef,
+  IConfigGroupRef,
   ConfigValueType,
   IMcpServer,
   IMcpTool,

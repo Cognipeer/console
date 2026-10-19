@@ -17,7 +17,9 @@
  *
  * Secrets are decrypted per run and passed to each command as environment
  * variables — never set on the instance, so they are not stored on its row —
- * and scrubbed from every output before the model sees it.
+ * and scrubbed from every output before the model sees it. So are the values
+ * the sandbox's own launch carries (its template's secrets, secret Config
+ * items): the agent never passes those, so only output could show them.
  *
  * Enterprise only: the sandbox module ships in the enterprise overlay
  * (`agentSandboxRunner` seam) AND the tenant needs an active Enterprise
@@ -49,6 +51,8 @@ import {
 import { resolveAttachmentsConfig } from './sessionFilesConfig';
 import { resolveUploadMimeType, saveAgentOutputFile } from './sessionFiles';
 import { readAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
+import { resolveAgentSandboxConfigVars } from './agentSandboxConfigVars';
+import { blockingConfigRefProblems, describeConfigRefProblems } from '@/lib/services/config/configRefs';
 
 const logger = createLogger('agent-sandbox');
 
@@ -111,6 +115,11 @@ function tail(text: string, limit: number): string {
 
 /** Told to the model (and so the transcript) when the stored secrets cannot be decrypted. */
 const SECRETS_UNAVAILABLE_NOTICE = 'The sandbox secrets configured for this agent are unavailable (the encryption key has changed), so commands run without them. Tell the user to re-enter them in the agent settings.';
+
+/** Told to the model with the command results when variables configured from Config could not be read. */
+function configVarsUnavailableNotice(detail: string): string {
+    return `These sandbox variables configured from Config are unavailable: ${detail} Commands run without them.`;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
@@ -176,10 +185,47 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         ...(sessionConversationId ? { conversationId: sessionConversationId } : {}),
     };
     const timeoutSec = clampTimeout(config.commandTimeoutSec);
-    const { secrets, unreadable: secretsUnreadable } = readAgentSandboxSecrets(config);
-    const scrub = (text: string) => scrubSecretValues(text, secrets);
-    /** Said with every command result: stored secrets that cannot be opened mean commands run without them. */
-    const secretsNotice = secretsUnreadable ? SECRETS_UNAVAILABLE_NOTICE : undefined;
+    const { secrets: typedSecrets, unreadable: secretsUnreadable } = readAgentSandboxSecrets(config);
+    // Config-sourced variables, read once per run: values from Config join the typed ones (secrets per command,
+    // the rest on the machine). A reference that cannot be read is left out; the run goes on and says so.
+    const configVars = await resolveAgentSandboxConfigVars({
+        sandbox: config,
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        secrets: typedSecrets,
+    });
+    const secrets = configVars.secrets;
+    const machineEnv = configVars.machineEnv;
+    const configProblems = configVars.problems;
+    if (configProblems.length > 0) input.onWarning(describeConfigRefProblems(configProblems));
+    const unavailableConfig = blockingConfigRefProblems(configProblems);
+    const configNotice = unavailableConfig.length > 0
+        ? configVarsUnavailableNotice(describeConfigRefProblems(unavailableConfig))
+        : undefined;
+    /** Launch values of the sandbox (see `readLaunchSecrets`); known once the machine exists. */
+    let launchSecrets: readonly string[] = [];
+    const scrub = (text: string) => scrubSecretValues(text, secrets, launchSecrets);
+    /** An error the model (and the trace) reads must not carry a secret value in its text either. */
+    const scrubbedError = (error: unknown): unknown => {
+        const text = error instanceof Error ? error.message : String(error);
+        const clean = scrub(text);
+        if (clean === text) return error;
+        const masked = new Error(clean);
+        if (error instanceof Error) masked.name = error.name;
+        return masked;
+    };
+    /** Runs a tool body so that what it throws is masked like what it returns. */
+    const guarded = <A, R>(body: (args: A) => Promise<R>) => async (args: A): Promise<R> => {
+        try {
+            return await body(args);
+        } catch (error) {
+            throw scrubbedError(error);
+        }
+    };
+    /** Said with every command result: variables that cannot be read mean commands run without them. */
+    const secretsNotice = [secretsUnreadable ? SECRETS_UNAVAILABLE_NOTICE : undefined, configNotice].filter(Boolean).join(' ') || undefined;
     const preview = config.preview?.enabled
         ? {
             public: config.preview.public === true,
@@ -233,6 +279,24 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         });
     };
 
+    /**
+     * What the machine's launch carries and the agent never passes (the secret Config items it takes):
+     * the model could only meet those in output. Asked once per run, right after the machine exists. A runner that
+     * cannot tell (an older module) or fails leaves the agent's own secrets as the whole set; it never stops a run.
+     */
+    const readLaunchSecrets = async (instanceId: string): Promise<string[]> => {
+        try {
+            return (await runner.launchSecretValues?.(ref, instanceId)) ?? [];
+        } catch (error) {
+            logger.warn('Could not read the sandbox launch values to mask in output', {
+                agentKey: input.agentKey,
+                instanceId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return [];
+        }
+    };
+
     const provision = async (): Promise<string> => {
         let previous: ConversationSandboxRecord | undefined;
         if (sessionConversationId) {
@@ -257,13 +321,14 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             persist: false,
             ...(config.resources ? { resources: config.resources } : {}),
             ...(config.blockNetwork ? { blockNetwork: true } : {}),
-            ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
+            ...(Object.keys(machineEnv).length > 0 ? { env: machineEnv } : {}),
             ...(previous?.instanceId ? { instanceId: previous.instanceId } : {}),
             preview: { enabled: Boolean(preview), public: preview?.public ?? false },
             // A previewing machine is stopped by the sandbox module's reaper
             // once idle, not by this run — see `cleanup`.
             idleStopSeconds: preview ? preview.keepAliveSeconds : null,
         });
+        launchSecrets = await readLaunchSecrets(instanceId);
         createdAt = created || !previous ? new Date().toISOString() : previous.createdAt;
         logger.info('Agent sandbox ready', {
             agentKey: input.agentKey,
@@ -325,20 +390,23 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         seedNotice = undefined;
         return {
             exitCode: result.exitCode,
-            stdout: scrub(tail(result.stdout ?? '', MAX_STREAM_CHARS)),
-            stderr: scrub(tail(result.stderr ?? '', MAX_STREAM_CHARS)),
-            ...(notice ? { notice } : {}),
+            // Masked before cut: a value the cut would split is not left half visible.
+            stdout: tail(scrub(result.stdout ?? ''), MAX_STREAM_CHARS),
+            stderr: tail(scrub(result.stderr ?? ''), MAX_STREAM_CHARS),
+            ...(notice ? { notice: scrub(notice) } : {}),
         };
     };
 
     const lifetime = session
         ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
         : 'The sandbox is discarded when this reply is finished.';
-    const secretNote = secretsUnreadable
-        ? ` ${SECRETS_UNAVAILABLE_NOTICE}`
-        : Object.keys(secrets).length > 0
-        ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
-        : '';
+    const secretNote = [
+        secretsUnreadable ? ` ${SECRETS_UNAVAILABLE_NOTICE}` : '',
+        configNotice ? ` ${configNotice}` : '',
+        Object.keys(secrets).length > 0
+            ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
+            : '',
+    ].join('');
 
     const z = input.zod;
     const toolsEnabled = { exec: true, code: true, files: true, ...(config.tools ?? {}) };
@@ -357,7 +425,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 command: z.string().min(1).describe('The shell command to run, e.g. "ls -la" or "pip install pandas && python main.py".'),
                 cwd: z.string().optional().describe(`Working directory. Default ${WORKDIR}.`),
             }),
-            func: async (args: { command: string; cwd?: string }) => {
+            func: guarded(async (args: { command: string; cwd?: string }) => {
                 const instanceId = await getInstance();
                 return shapeExec(await runner.exec(ref, instanceId, {
                     command: args.command,
@@ -366,7 +434,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                     timeoutSec,
                     ...turnSignalField(),
                 }));
-            },
+            }),
         }));
     }
     if (toolsEnabled.code) {
@@ -377,7 +445,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 language: z.enum(['python', 'javascript', 'typescript', 'bash']),
                 code: z.string().min(1),
             }),
-            func: async (args: { language: 'python' | 'javascript' | 'typescript' | 'bash'; code: string }) => {
+            func: guarded(async (args: { language: 'python' | 'javascript' | 'typescript' | 'bash'; code: string }) => {
                 const instanceId = await getInstance();
                 return shapeExec(await runner.runCode(ref, instanceId, {
                     language: args.language,
@@ -386,7 +454,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                     timeoutSec,
                     ...turnSignalField(),
                 }));
-            },
+            }),
         }));
     }
     if (toolsEnabled.files) {
@@ -394,34 +462,34 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             name: 'sandbox_read_file',
             description: `Read a text file from your sandbox. Relative paths are under ${WORKDIR}.`,
             schema: z.object({ path: z.string().min(1) }),
-            func: async (args: { path: string }) => {
+            func: guarded(async (args: { path: string }) => {
                 const instanceId = await getInstance();
-                const content = await runner.readFile(ref, instanceId, resolvePath(args.path));
-                const clipped = content.length > MAX_FILE_CHARS
+                const content = scrub(await runner.readFile(ref, instanceId, resolvePath(args.path)));
+                return content.length > MAX_FILE_CHARS
                     ? `${content.slice(0, MAX_FILE_CHARS)}\n… [truncated: ${content.length.toLocaleString()} characters in total]`
                     : content;
-                return scrub(clipped);
-            },
+            }),
         }));
         add(input.createToolFn({
             name: 'sandbox_write_file',
             description: `Write a text file in your sandbox, creating parent folders. Relative paths are under ${WORKDIR}. Overwrites an existing file.`,
             schema: z.object({ path: z.string().min(1), content: z.string() }),
-            func: async (args: { path: string; content: string }) => {
+            func: guarded(async (args: { path: string; content: string }) => {
                 const instanceId = await getInstance();
                 const path = resolvePath(args.path);
                 await runner.writeFile(ref, instanceId, path, args.content);
                 return { ok: true, path, bytes: Buffer.byteLength(args.content, 'utf8') };
-            },
+            }),
         }));
         add(input.createToolFn({
             name: 'sandbox_list_files',
             description: `List a folder in your sandbox. Default ${WORKDIR}.`,
             schema: z.object({ path: z.string().optional() }),
-            func: async (args: { path?: string }) => {
+            func: guarded(async (args: { path?: string }) => {
                 const instanceId = await getInstance();
-                return runner.listFiles(ref, instanceId, resolvePath(args.path || WORKDIR));
-            },
+                const entries = await runner.listFiles(ref, instanceId, resolvePath(args.path || WORKDIR));
+                return entries.map((entry) => ({ ...entry, name: scrub(entry.name), path: scrub(entry.path) }));
+            }),
         }));
     }
 
@@ -434,7 +502,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             schema: z.object({
                 port: z.number().int().min(1).max(65535).describe('The port the server listens on inside the sandbox.'),
             }),
-            func: async (args: { port: number }) => {
+            func: guarded(async (args: { port: number }) => {
                 const instanceId = await getInstance();
                 const link = await runner.previewLink(ref, instanceId, {
                     port: args.port,
@@ -448,7 +516,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                         warning: `Nothing answered on port ${args.port} yet — start the server (bound to 0.0.0.0) before sharing the link.`,
                     }),
                 };
-            },
+            }),
         }));
     }
 

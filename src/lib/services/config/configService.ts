@@ -55,6 +55,15 @@ function decrypt(ciphertext: string): string {
 
 const MASK = '••••••••';
 
+/**
+ * The plain value of a stored item: decrypted when it is a secret. Throws when a secret cannot be decrypted
+ * (the encryption key changed). For the server-side resolution of config references only; never send the
+ * result to a client.
+ */
+export function openConfigItemValue(item: Pick<IConfigItem, 'value' | 'isSecret'>): string {
+  return item.isSecret ? decrypt(item.value) : item.value;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 const SLUG_OPTIONS = { lower: true, strict: true, trim: true };

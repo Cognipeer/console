@@ -662,6 +662,14 @@ export class SQLiteProviderBase {
     for (const table of ['sandbox_templates', 'sandbox_instances']) {
       this.ensureTableColumn(db, table, 'envSealed', 'envSealed TEXT');
       this.ensureTableColumn(db, table, 'envKeys', 'envKeys TEXT');
+      // Config references (ids only, never values), resolved at launch.
+      this.ensureTableColumn(db, table, 'envRefs', 'envRefs TEXT');
+      this.ensureTableColumn(db, table, 'groupRefs', 'groupRefs TEXT');
+    }
+    // How launch values reach a sandbox; snapshots of a 'file' sandbox carry its sealed env and references.
+    this.ensureTableColumn(db, 'sandbox_instances', 'envDelivery', 'envDelivery TEXT');
+    for (const column of ['envDelivery', 'envSealed', 'envKeys', 'envRefs', 'groupRefs']) {
+      this.ensureTableColumn(db, 'sandbox_snapshots', column, `${column} TEXT`);
     }
     this.ensureTableColumn(
       db,

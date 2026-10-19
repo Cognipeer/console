@@ -42,7 +42,8 @@ const agentIn = (projectId: string | null) => rec({ type: 'agent', id: 'a', key:
 const tool = (id: string, projectId: string | null, over: Partial<ResourceRecord> = {}) =>
   rec({ type: 'tool', id, key: 'crm', projectId, status: 'active', statusTone: 'ok', ...over });
 
-// Enterprise types a community referrer may point at: registered only by the overlay.
+// Enterprise types the registry may name: registered only by the overlay (a community referrer points at them;
+// the overlay's own template mapper emits the sandboxTemplate.* kinds declared here).
 const ENTERPRISE_TARGET_TYPES = new Set(['sandbox-template']);
 
 describe('edge kind registry', () => {
@@ -50,7 +51,7 @@ describe('edge kind registry', () => {
 
   it('only references registered resource types (or an enterprise target type)', () => {
     for (const def of Object.values(EDGE_KINDS)) {
-      expect(typeIds.has(def.fromType), `${def.kind} fromType`).toBe(true);
+      expect(typeIds.has(def.fromType) || ENTERPRISE_TARGET_TYPES.has(def.fromType), `${def.kind} fromType`).toBe(true);
       expect(typeIds.has(def.toType) || ENTERPRISE_TARGET_TYPES.has(def.toType), `${def.kind} toType`).toBe(true);
     }
   });

@@ -184,6 +184,7 @@ describe('type definitions', () => {
     listAnalysisDefinitions: vi.fn().mockResolvedValue(rows()),
     listAlertRules: vi.fn().mockResolvedValue(rows()),
     listConfigGroups: vi.fn().mockResolvedValue(rows()),
+    listConfigItems: vi.fn().mockResolvedValue(rows()),
     listQuotaPolicies: vi.fn().mockResolvedValue(rows({ label: 'Daily cap' })),
   };
   const ctx = { db: db as unknown as DatabaseProvider, tenantId: 'ten', tenantDbName: 'd' } satisfies ResourceProviderContext;
@@ -191,7 +192,7 @@ describe('type definitions', () => {
   it('registers every expected type id', () => {
     expect(modelsSafetyResourceTypes.map((d) => d.type)).toEqual(['provider', 'inference-server', 'guardrail', 'guardrail-word-list', 'pii-policy']);
     expect(qualityResourceTypes.map((d) => d.type)).toEqual(['evaluation-target', 'evaluation-dataset', 'evaluation-suite', 'redteam-campaign', 'redteam-custom-probe', 'analysis-definition']);
-    expect(operationsResourceTypes.map((d) => d.type)).toEqual(['alert-rule', 'config-group', 'quota-policy']);
+    expect(operationsResourceTypes.map((d) => d.type)).toEqual(['alert-rule', 'config-group', 'config-item', 'quota-policy']);
   });
 
   it('lists with no project filter and yields records of the declared type', async () => {
