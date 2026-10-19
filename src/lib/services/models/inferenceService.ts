@@ -30,6 +30,7 @@ import {
   ttsMimeType,
 } from '@/lib/providers/contracts/audioStream';
 import { getModelByKey } from './modelService';
+import { primaryReplicaModel } from './replicaPool';
 import {
   openAIStreamRoleChunk,
   openAIStreamStopChunk,
@@ -331,6 +332,19 @@ function sseStream(outcome: ModelCallOutcome, hangUp: AbortController): Readable
 }
 
 
+/**
+ * Non-chat paths do not balance across replicas, but they must still skip a
+ * replica the operator switched off, so they serve from the first enabled one.
+ */
+async function getServingModel(
+  tenantDbName: string,
+  modelKey: string,
+  projectId: string,
+): Promise<IModel | null> {
+  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  return model ? primaryReplicaModel(model) : null;
+}
+
 export async function handleEmbeddingRequest(params: {
   tenantDbName: string;
   modelKey: string;
@@ -348,7 +362,7 @@ export async function handleEmbeddingRequest(params: {
   const requestId = body?.request_id || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -545,7 +559,7 @@ export async function handleTranscriptionRequest(params: {
   };
   throwIfCallerAborted();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -661,7 +675,7 @@ export async function handleSpeechRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -801,7 +815,7 @@ export async function handleSpeechStreamRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -1081,7 +1095,7 @@ export async function handleTranscriptionStreamRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -1248,7 +1262,7 @@ export async function handleImageRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -1341,7 +1355,7 @@ export async function handleModerationRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }
@@ -1410,7 +1424,7 @@ export async function handleOcrRequest(params: {
   const requestId = params.requestId || crypto.randomUUID();
   const start = Date.now();
 
-  const model = await getModelByKey(tenantDbName, modelKey, projectId);
+  const model = await getServingModel(tenantDbName, modelKey, projectId);
   if (!model) {
     throw new Error(`Model with key ${modelKey} not found`);
   }

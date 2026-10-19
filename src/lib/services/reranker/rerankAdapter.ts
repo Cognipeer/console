@@ -14,7 +14,7 @@
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { safeFetch } from '@/lib/security/outboundFetch';
-import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
+import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { IModel } from '@/lib/database';
 
 const logger = createLogger('rerank-adapter');
@@ -68,6 +68,7 @@ async function resolveProviderInfo(ctx: ProviderCallContext) {
     key: ctx.model.providerKey,
     projectId: ctx.projectId,
   });
+  assertProviderEnabled(record);
   return { runtime: record, credentials };
 }
 

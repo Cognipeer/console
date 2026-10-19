@@ -19,7 +19,7 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { DatabaseProvider, IAgentTrigger } from '@/lib/database';
-import { fireTrigger, resolveTriggerVariables, triggerAgentConfig, type TriggerTenant } from './agentTriggers';
+import { fireTrigger, resolveTriggerVariables, triggerAgentConfig, triggerTargetAvailability, type TriggerTenant } from './agentTriggers';
 import { planDueTrigger } from './agentTriggerSchedule';
 
 const logger = createLogger('agent-trigger-scheduler');
@@ -58,6 +58,20 @@ async function fireDueTrigger(
       result.skipped += 1;
       logger.warn('Trigger slot missed (older than the misfire grace); skipped', {
         triggerId, slot: plan.slot.toISOString(), next: plan.next?.toISOString() ?? null,
+      });
+    }
+    return;
+  }
+
+  // A target that is switched off: nothing is claimed and no fire is recorded as failed. A
+  // one-shot stays pending, so it still fires if the target is back on within the grace (else
+  // the missed path above closes it); a schedule skips this slot and waits for the next one.
+  const availability = await triggerTargetAvailability(db, trigger);
+  if (!availability.ok) {
+    if (plan.next && await db.advanceTriggerNextFire(triggerId, dueAt, plan.next)) {
+      result.skipped += 1;
+      logger.info('Trigger slot skipped: its target is not available', {
+        triggerId, slot: plan.fireAt.toISOString(), reason: availability.reason, next: plan.next.toISOString(),
       });
     }
     return;

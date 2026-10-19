@@ -26,6 +26,9 @@ import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('ocr-job:runner');
 
+/** Set on a pending item whose queue message arrived while its job was paused. */
+export const OCR_ITEM_HELD_WHILE_PAUSED = 'Waiting: the job was paused';
+
 async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -128,6 +131,14 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     await db.updateOcrJobItem(itemId, { status: 'failed', errorMessage: 'Job archived', endedAt: new Date() });
     await db.incrementOcrJobAggregates(item.jobId, { itemsFailed: 1 }, { lastItemAt: new Date() });
     return null;
+  }
+
+  // A paused job keeps its queued items pending rather than failing them. The
+  // marker tells the resume which items lost their queue message here, so it
+  // re-enqueues exactly those (items still waiting in the queue are left alone).
+  if (job.status === 'paused') {
+    logger.info('OCR job is paused, leaving item pending', { itemId, jobId: item.jobId });
+    return db.updateOcrJobItem(itemId, { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
   }
 
   await db.updateOcrJobItem(itemId, { status: 'running', startedAt: new Date() });

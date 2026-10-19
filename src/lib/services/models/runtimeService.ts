@@ -2,7 +2,7 @@ import {
   providerRegistry,
   type ModelProviderRuntime,
 } from '@/lib/providers';
-import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
+import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { IProviderRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
@@ -22,6 +22,8 @@ export async function buildModelRuntime(
     tenantDbName,
     { tenantId, key: providerKey, projectId },
   );
+
+  assertProviderEnabled(record);
 
   const allowedTypes = new Set(['model', 'embedding', 'stt', 'tts', 'ocr']);
   if (!allowedTypes.has(record.type)) {

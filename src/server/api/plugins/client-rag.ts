@@ -18,6 +18,7 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
+import { RagModuleInactiveError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import {
   getApiTokenContextForRequest,
@@ -255,6 +256,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(statusCode).send({ document: withoutSourceText(document) });
     } catch (error) {
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Ingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -412,6 +416,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Reingest client RAG document error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',
@@ -441,6 +448,9 @@ export const clientRagApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
+      }
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Query client RAG module error', { error });
       return reply.code(500).send({

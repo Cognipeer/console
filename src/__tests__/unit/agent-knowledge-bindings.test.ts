@@ -60,7 +60,7 @@ describe('buildAgentKnowledgeTools', () => {
     mocks.queryRag.mockReset();
     mocks.getRagDocument.mockReset();
     mocks.resolve.mockReset();
-    mocks.resolve.mockImplementation(async (_db: string, key: string) => (key === 'hidden' ? null : { key, projectId: 'p1' }));
+    mocks.resolve.mockImplementation(async (_db: string, key: string) => (key === 'hidden' ? null : { key, projectId: 'p1', status: key === 'off' ? 'disabled' : 'active' }));
   });
 
   it('keeps the historical tools for one plain legacy key', async () => {
@@ -71,6 +71,20 @@ describe('buildAgentKnowledgeTools', () => {
     mocks.queryRag.mockResolvedValue({ matches: [] });
     await run(built.tools[0], { query: 'q' });
     expect(mocks.queryRag.mock.calls[0][3]).toMatchObject({ topK: 5 });
+  });
+
+  it('gives no knowledge tools for a single knowledge engine that is switched off', async () => {
+    const built = await buildAgentKnowledgeTools('db', 't', 'p1', { knowledgeEngineKey: 'off' }, guard);
+    expect(built.tools).toEqual([]);
+    expect(built.toolDefinitions).toEqual([]);
+  });
+
+  it('leaves a switched-off knowledge engine out of the combined tools', async () => {
+    const built = await buildAgentKnowledgeTools('db', 't', 'p1', {
+      knowledgeBindings: [{ key: 'a' }, { key: 'off' }],
+    }, guard);
+    expect(built.toolDefinitions[0].description).toContain('- a');
+    expect(built.toolDefinitions[0].description).not.toContain('- off');
   });
 
   it('separate mode suffixes names and adds the directive', async () => {

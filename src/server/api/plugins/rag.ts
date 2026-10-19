@@ -22,6 +22,7 @@ import {
   updateRagModule,
   shapeRagQueryResponse,
 } from '@/lib/services/rag/ragService';
+import { RagModuleInactiveError } from '@/lib/services/rag/errors';
 import type { CreateRagModuleRequest, UpdateRagModuleRequest } from '@/lib/services/rag/types';
 import { validateChunkConfig } from '@/lib/services/rag/chunking';
 import {
@@ -496,6 +497,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ document: withoutSourceText(document) });
     } catch (error) {
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Ingest RAG document error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -671,6 +675,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ document: withoutSourceText(document) });
     } catch (error) {
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Reingest RAG document error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
@@ -701,6 +708,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (error instanceof VectorFilterError) {
         return reply.code(400).send({ error: error.message });
+      }
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Query RAG module error', { error });
       return sendProjectContextError(reply, error)
@@ -736,6 +746,9 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ result });
     } catch (error) {
+      if (error instanceof RagModuleInactiveError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Answer RAG module error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({

@@ -138,6 +138,17 @@ export function modelForReplica(model: IModel, replica: ResolvedReplica): IModel
 }
 
 /**
+ * The model as served by its first enabled replica, in stored order.
+ *
+ * For paths that do not load-balance (embeddings, audio, image, moderation,
+ * OCR, evaluation runs). A model without replicas comes back unchanged, so
+ * only operators who opened the Replicas tab see any difference.
+ */
+export function primaryReplicaModel(model: IModel): IModel {
+  return modelForReplica(model, listReplicas(model)[0]);
+}
+
+/**
  * Whether a failure should move to the next replica.
  *
  * Capacity and availability faults travel; the caller's own mistakes do not. A

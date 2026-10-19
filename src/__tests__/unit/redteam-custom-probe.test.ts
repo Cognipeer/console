@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { buildProbes } from '@/lib/services/redteam/probes';
 import { buildCustomProbe, validateCustomProbe, CustomProbeError } from '@/lib/services/redteam/probes/customProbe';
 import { compareRedTeamRuns } from '@/lib/services/redteam/compare';
 import type { IRedTeamCustomProbe, IRedTeamRun, IRedTeamAttemptResult, RedTeamOutcome } from '@/lib/database';
@@ -131,5 +132,21 @@ describe('compareRedTeamRuns', () => {
     expect(cmp.summary.added).toBe(1);
     expect(cmp.summary.removed).toBe(0);
     expect(cmp.deltas.vulnerable).toBe(1);
+  });
+});
+
+describe('buildProbes with custom probes', () => {
+  it('runs an enabled custom probe selected by key', () => {
+    const probes = buildProbes(['custom:my-probe'], [customProbe()]);
+    expect(probes.map((p) => p.key)).toEqual(['custom:my-probe']);
+  });
+
+  it('does not run a disabled custom probe that is selected by key', () => {
+    const probes = buildProbes(['custom:my-probe'], [customProbe({ enabled: false })]);
+    expect(probes).toEqual([]);
+  });
+
+  it('still rejects a custom key that does not exist', () => {
+    expect(() => buildProbes(['custom:missing'], [customProbe()])).toThrow(/Unknown red-team probe/);
   });
 });

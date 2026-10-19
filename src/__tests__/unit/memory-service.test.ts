@@ -298,6 +298,30 @@ describe('updateMemoryStore', () => {
     expect(result.name).toBe('Updated Name');
   });
 
+  it('rejects a status that an operator cannot set', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+
+    await expect(
+      updateMemoryStore(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, {
+        status: 'error' as never,
+        updatedBy: USER_ID,
+      }),
+    ).rejects.toMatchObject({ name: 'MemoryStoreInputError', statusCode: 400 });
+    expect(db.updateMemoryStore).not.toHaveBeenCalled();
+  });
+
+  it('accepts switching a store to inactive', async () => {
+    db.findMemoryStoreByKey.mockResolvedValue(makeStore());
+    db.updateMemoryStore.mockResolvedValue(makeStore({ status: 'inactive' }));
+
+    await updateMemoryStore(TENANT_DB, TENANT_ID, PROJECT_ID, STORE_KEY, {
+      status: 'inactive',
+      updatedBy: USER_ID,
+    });
+
+    expect(db.updateMemoryStore).toHaveBeenCalledWith('store-1', expect.objectContaining({ status: 'inactive' }));
+  });
+
   it('throws when store not found', async () => {
     db.findMemoryStoreByKey.mockResolvedValue(null);
 

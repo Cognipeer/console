@@ -50,6 +50,7 @@ import {
   fireTrigger,
   resetTriggerEventThrottle,
   serializeAgentTrigger,
+  triggerTargetAvailability,
   updateAgentTrigger,
   type NewTriggerWrite,
   type TriggerFields,
@@ -332,6 +333,52 @@ describe('the scheduler tick (§2.5)', () => {
     expect(await tickAgentTriggers(new Date('2026-10-18T06:00:30.000Z'))).toMatchObject({ fired: 0 });
     expect(await triggerRuns(String(trigger._id))).toHaveLength(0);
     expect(new Date((await reload(trigger)).nextFireAt!).toISOString()).toBe('2026-10-18T07:00:00.000Z');
+  });
+
+  it('a once trigger whose agent is off stays pending, records no failed fire, and fires when the agent is back on', async () => {
+    const trigger = await newTrigger({ type: 'once', once: { runAt: new Date('2026-10-18T06:00:00.000Z') } }, new Date('2026-10-18T05:00:00.000Z'));
+    await db.updateAgent(agentId, { status: 'inactive' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T06:00:10.000Z'))).toMatchObject({ fired: 0, skipped: 0 });
+    const waiting = await reload(trigger);
+    expect(new Date(waiting.nextFireAt!).toISOString()).toBe('2026-10-18T06:00:00.000Z');
+    expect(waiting.lastStatus ?? null).toBeNull();
+    expect(events()).toEqual([]);
+
+    await db.updateAgent(agentId, { status: 'active' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T06:30:00.000Z'))).toMatchObject({ fired: 1 });
+    expect(await triggerRuns(String(trigger._id))).toHaveLength(1);
+    expect((await reload(trigger)).nextFireAt ?? null).toBeNull();
+  });
+
+  it('a once trigger whose agent stayed off past the grace is closed as missed', async () => {
+    const trigger = await newTrigger({ type: 'once', once: { runAt: new Date('2026-10-18T06:00:00.000Z') } }, new Date('2026-10-18T05:00:00.000Z'));
+    await db.updateAgent(agentId, { status: 'inactive' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T06:00:10.000Z'))).toMatchObject({ skipped: 0 });
+    await db.updateAgent(agentId, { status: 'active' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T07:30:00.000Z'))).toMatchObject({ fired: 0, skipped: 1 });
+    expect(await triggerRuns(String(trigger._id))).toHaveLength(0);
+    expect((await reload(trigger)).nextFireAt ?? null).toBeNull();
+  });
+
+  it('a schedule slot of an agent that is off is skipped without a failed fire, and the next slot fires', async () => {
+    const trigger = await newTrigger({ type: 'schedule', schedule: { cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
+    await db.updateAgent(agentId, { status: 'inactive' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T06:00:01.000Z'))).toMatchObject({ fired: 0, skipped: 1 });
+    const after = await reload(trigger);
+    expect(new Date(after.nextFireAt!).toISOString()).toBe('2026-10-18T07:00:00.000Z');
+    expect(after.lastStatus ?? null).toBeNull();
+    expect(events()).toEqual([]);
+
+    await db.updateAgent(agentId, { status: 'active' } as never);
+    expect(await tickAgentTriggers(new Date('2026-10-18T07:00:01.000Z'))).toMatchObject({ fired: 1 });
+  });
+
+  it('triggerTargetAvailability says why a target cannot run', async () => {
+    const trigger = await newTrigger({ type: 'manual' });
+    expect(await triggerTargetAvailability(db, trigger)).toEqual({ ok: true });
+    await db.updateAgent(agentId, { status: 'draft' } as never);
+    expect(await triggerTargetAvailability(db, trigger)).toEqual({ ok: false, reason: 'agent is not active' });
+    expect(await triggerTargetAvailability(db, { ...trigger, agentKey: 'gone' })).toEqual({ ok: false, reason: 'agent is not active' });
   });
 
   it('disabled and manual triggers never fire on their own', async () => {

@@ -16,6 +16,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import { queryRag } from './ragService';
+import { RagModuleInactiveError } from './errors';
 import type { RagQueryMatch } from './types';
 import {
   DEFAULT_RAG_SYSTEM_PROMPT,
@@ -382,6 +383,7 @@ export async function answerWithRag(
   await db.switchToTenant(tenantDbName);
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`RAG module "${request.ragModuleKey}" not found`);
+  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
 
   const ctx: AnswerContext = {
     tenantDbName,

@@ -5,6 +5,7 @@
  * retrieval (query → embed → vector query) using existing services.
  */
 
+import { RagModuleInactiveError } from './errors';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -1267,6 +1268,9 @@ async function runRagQuery(
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  // A switched-off module is not queried. Checked before moduleFound is set so
+  // the refusal is not recorded as a health fault of the knowledge base.
+  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
   state.moduleFound = true;
   state.key = ragModule.key;
   state.projectId = ragModule.projectId;
@@ -1917,3 +1921,5 @@ export async function aggregateRagQueryScoreDistribution(
   await db.switchToTenant(tenantDbName);
   return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
 }
+
+export { RagModuleInactiveError };

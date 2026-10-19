@@ -45,7 +45,8 @@ import type {
   TokenUsage as SdkTokenUsage,
   UnifiedMessage,
 } from '@cognipeer/agent-sdk';
-import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
+import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
+import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import type { IModel } from '@/lib/database';
@@ -130,9 +131,10 @@ export async function resolveSdkProviderConfig(
 
   const { record, credentials } = await loadProviderRuntimeData(tenantDbName, {
     tenantId: model.tenantId,
-    key: model.providerKey,
+    key: primaryReplicaModel(model).providerKey,
     projectId: projectId ?? model.projectId,
   });
+  assertProviderEnabled(record);
   const creds = asRecord(credentials);
   const settings = asRecord(record.settings);
 
@@ -355,7 +357,7 @@ export async function invokeChatViaSdk(
   const tools = toSdkTools(opts?.tools);
 
   const request: ChatCompletionRequest = {
-    model: model.modelId,
+    model: primaryReplicaModel(model).modelId,
     messages: toUnifiedMessages(wireMessages),
     ...(typeof settings.temperature === 'number' ? { temperature: settings.temperature } : {}),
     ...(typeof opts?.maxTokens === 'number'

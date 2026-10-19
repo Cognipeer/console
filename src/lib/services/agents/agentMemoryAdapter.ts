@@ -28,7 +28,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import type { IAgentMemoryConfig } from '@/lib/database';
 import type { MemoryScope as ConsoleMemoryScope } from '@/lib/database/provider/types.extended';
-import { addMemory, listMemoryItems, searchMemories, updateMemoryItem } from '@/lib/services/memory/memoryService';
+import { addMemory, getMemoryStore, listMemoryItems, searchMemories, updateMemoryItem } from '@/lib/services/memory/memoryService';
 import { normalizeMemoryMounts, type ResolvedMemoryMount } from './agentMemoryMounts';
 import { createLogger } from '@/lib/core/logger';
 
@@ -94,6 +94,23 @@ function toFact(item: { _id?: unknown; content: string; summary?: string; import
     };
 }
 
+/**
+ * A store an operator switched off (or that is in error) is neither read nor
+ * written by agents. The run carries on without memory instead of warning on
+ * every turn: an inactive store is a deliberate state, not a failure.
+ */
+async function storeIsActive(ctx: AgentMemoryContext): Promise<boolean> {
+    try {
+        const store = await getMemoryStore(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey);
+        if (store.status === 'active') return true;
+        logger.debug('Skipping memory store that is not active', { storeKey: ctx.storeKey, status: store.status });
+        return false;
+    } catch {
+        // Lookup failures fall through to the operation itself, which reports them.
+        return true;
+    }
+}
+
 export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
     const where = (sdkScope: SdkMemoryScope) => ({
         scope: toConsoleScope(sdkScope),
@@ -102,6 +119,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
     });
     return {
         async get(sdkScope, options) {
+            if (!(await storeIsActive(ctx))) return [];
             const { scope, scopeId } = where(sdkScope);
             try {
                 const { items } = await listMemoryItems(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
@@ -120,6 +138,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
         },
 
         async upsert(sdkScope, facts) {
+            if (!(await storeIsActive(ctx))) return;
             const { scope, scopeId } = where(sdkScope);
             try {
                 const { items: existing } = await listMemoryItems(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
@@ -157,6 +176,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
         },
 
         async markObsolete(sdkScope, keys) {
+            if (!(await storeIsActive(ctx))) return;
             const { scope, scopeId } = where(sdkScope);
             try {
                 const keySet = new Set(keys);
@@ -179,6 +199,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
         },
 
         async semanticSearch(sdkScope, query, options) {
+            if (!(await storeIsActive(ctx))) return [];
             const { scope, scopeId } = where(sdkScope);
             try {
                 const result = await searchMemories(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {

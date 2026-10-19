@@ -17,6 +17,7 @@ import type {
   AgentResponseFormat,
   AgentTriggerTypeSettings,
   IAgentConfig,
+  DatabaseProvider,
   IAgentTrigger,
   IAgentTriggerBase,
   IAgentRun,
@@ -281,6 +282,25 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
     await publishTriggerEvent(trigger, tenant, 'trigger.failed', { trigger: input.trigger, event: input.event, reason: result.reason });
   }
   return result;
+}
+
+// ── Can the target run now ───────────────────────────────────────────────
+
+export type TriggerTargetAvailability = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Whether the thing a trigger runs may run right now. The scheduler asks before it
+ * claims a due slot, so a slot that cannot run is skipped (or, for a one-shot, left
+ * pending) instead of being spent on a refused fire. One place for every "off"
+ * condition: today the agent's status.
+ */
+export async function triggerTargetAvailability(
+  db: Pick<DatabaseProvider, 'findAgentByKey'>,
+  trigger: Pick<IAgentTrigger, 'agentKey' | 'projectId'>,
+): Promise<TriggerTargetAvailability> {
+  const agent = await db.findAgentByKey(trigger.agentKey, trigger.projectId);
+  if (!agent || agent.status !== 'active') return { ok: false, reason: 'agent is not active' };
+  return { ok: true };
 }
 
 // ── Variables at fire time ───────────────────────────────────────────────

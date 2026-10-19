@@ -1,4 +1,4 @@
-export { InferenceMonitoringService } from './inferenceMonitoringService';
+export { InferenceMonitoringService, InferenceServerDisabledError } from './inferenceMonitoringService';
 export { pollVllmServer, snapshotToMetrics } from './vllmPoller';
 export { pollLlamaCppServer } from './llamacppPoller';
 export { sanitizeServer, isValidBaseUrl, normalizeBaseUrl } from './utils';

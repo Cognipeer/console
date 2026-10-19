@@ -1169,6 +1169,10 @@ async function buildKnowledgeTools(
         logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: ragModuleKey, projectId });
         return { tools: [], toolDefinitions: [] };
     }
+    if (knowledgeModule.status !== 'active') {
+        logger.warn('Skipping knowledge engine that is switched off', { key: ragModuleKey, projectId });
+        return { tools: [], toolDefinitions: [] };
+    }
     // Every later read re-resolves the module by key; pinning the scope it was
     // found in keeps those reads on this same row ('' = tenant-wide only).
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
@@ -1361,6 +1365,10 @@ async function buildCombinedKnowledgeTools(
         const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
         if (!mod) {
             logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: binding.key, projectId });
+            continue;
+        }
+        if (mod.status !== 'active') {
+            logger.warn('Skipping knowledge engine that is switched off', { key: binding.key, projectId });
             continue;
         }
         visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
