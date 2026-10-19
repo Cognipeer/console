@@ -176,6 +176,19 @@ describe('import: tenant scope, permission order and shape rules', () => {
     expect(result.warnings[1].message).toMatch(/KEY[\s\S]*also set in secrets/);
   });
 
+  it('drops a secret ref whose name is a typed secret the overwritten agent keeps', async () => {
+    db.findAgentByKey.mockResolvedValue({
+      _id: 'ex', key: 'support',
+      config: { modelKey: 'gpt', sandbox: { enabled: true, secretsSealed: encryptObject({ KEY: 'v' }) } },
+    });
+    // A real manifest carries no secrets: the stored ones stay, so a Config ref under the same name would lose.
+    const result = await apply(manifestWith({ secretRefs: { KEY: { configId: 'i2', key: 'api-key' } } }));
+    const stored = updated.mock.calls[0][0].config.sandbox;
+    expect(stored).not.toHaveProperty('secretRefs');
+    expect(stored.secretsSealed).toBeTruthy();
+    expect(result.warnings.map((w) => w.message).join(' ')).toMatch(/KEY[\s\S]*also set in secrets/);
+  });
+
   it('deletes refs that are not plain objects / arrays, with a warning', async () => {
     const result = await apply(manifestWith({ envRefs: ['a'], secretRefs: 'x', groupRefs: { groupId: 'g1' } }));
     const stored = created.mock.calls[0][0].config.sandbox;

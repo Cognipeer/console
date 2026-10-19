@@ -429,11 +429,13 @@ export class ConfigReferenceForbiddenError extends Error {
  * Re-binds the sandbox's Config references to the target project: a reference keeps its item (or group) when
  * that id is in the project, else it is looked up by key. What cannot be resolved (no such key, the key is in
  * two groups, a secret under `envRefs`) is dropped and reported; an import never fails over a reference.
+ * `storedSecretNames`: the typed secrets the target agent keeps (a manifest carries none, so they stay).
  */
 async function rebindSandboxConfigRefs(
     db: DatabaseProvider,
     projectId: string,
     config: IAgentConfig,
+    storedSecretNames: string[] = [],
 ): Promise<{ config: IAgentConfig; warnings: Array<{ code: string; message: string }> }> {
     const sandbox = config.sandbox;
     if (!sandbox || (sandbox.envRefs === undefined && sandbox.secretRefs === undefined && sandbox.groupRefs === undefined)) {
@@ -459,6 +461,7 @@ async function rebindSandboxConfigRefs(
         }
         // A name that is also a typed value is set in one place only (the write path refuses it); the typed value stays.
         const typedNames = new Set(Object.keys((field === 'envRefs' ? sandbox.env : sandbox.secrets) ?? {}));
+        if (field === 'secretRefs' && sandbox.secrets === undefined) storedSecretNames.forEach((name) => typedNames.add(name));
         const kept: NonNullable<typeof stored> = {};
         for (const [name, ref] of Object.entries(stored)) {
             if (typedNames.has(name)) {
@@ -588,7 +591,8 @@ async function importManifest(
         if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`, [], 'agent_key_conflict');
         const spec = sanitizeConfig(manifest.spec);
         await assertMayReferenceConfigRaw(spec, existing.config, options.canReferenceConfig);
-        const rebound = await rebindSandboxConfigRefs(db, projectId, spec);
+        const storedSecretNames = Object.keys(maskAgentSandboxConfig(existing.config?.sandbox)?.secrets ?? {});
+        const rebound = await rebindSandboxConfigRefs(db, projectId, spec, storedSecretNames);
         const incoming = rebound.config;
         await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
         await assertMayReferenceConfig(incoming, existing.config, options.canReferenceConfig);

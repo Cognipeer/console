@@ -20,6 +20,8 @@ export interface EditorRow {
   ref?: IConfigValueRef;
   /** The typed value this row had before it was switched to Config; kept until an item is picked. */
   prevValue?: string;
+  /** Loaded from the stored config (not added in this edit): its value is kept even when empty. */
+  stored?: boolean;
 }
 
 let rowSeq = 0;
@@ -29,9 +31,9 @@ export function rowsFromMaps(
   values: Record<string, string> | undefined,
   refs: Record<string, IConfigValueRef> | undefined,
 ): EditorRow[] {
-  const rows: EditorRow[] = Object.entries(values ?? {}).map(([key, value]) => ({ id: nextRowId(), key, source: 'value', value }));
+  const rows: EditorRow[] = Object.entries(values ?? {}).map(([key, value]) => ({ id: nextRowId(), key, source: 'value', value, stored: true }));
   for (const [key, ref] of Object.entries(refs ?? {})) {
-    if (ref?.configId) rows.push({ id: nextRowId(), key, source: 'config', value: '', ref });
+    if (ref?.configId) rows.push({ id: nextRowId(), key, source: 'config', value: '', ref, stored: true });
   }
   return rows;
 }
@@ -53,7 +55,7 @@ export function rowsToMaps(rows: EditorRow[]): RowMaps {
     if (!key) continue;
     if (row.source === 'config') {
       if (row.ref?.configId) refs[key] = row.ref;
-      else if (row.prevValue) values[key] = row.prevValue;
+      else if (row.prevValue !== undefined && (row.stored || row.prevValue !== '')) values[key] = row.prevValue;
     } else {
       values[key] = row.value;
     }

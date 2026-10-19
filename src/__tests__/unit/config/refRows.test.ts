@@ -37,6 +37,11 @@ describe('refRows', () => {
     expect(rowsToMaps([cfg])).toEqual({ values: undefined, refs: undefined });
   });
 
+  it('a stored empty value is kept while its row is on Config without an item', () => {
+    const [stored] = rowsFromMaps({ EMPTY: '' }, undefined);
+    expect(rowsToMaps([switchRowSource(stored, 'config')]).values).toEqual({ EMPTY: '' });
+  });
+
   it('flags empty, invalid and duplicate names', () => {
     const taken = new Set(['A']);
     expect(nameProblem('', taken)).toBe('empty');

@@ -12,7 +12,7 @@
  * and entering values again replaces them.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
     ActionIcon,
@@ -34,7 +34,7 @@ import {
 } from '@mantine/core';
 import { IconAlertTriangle, IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
-import type { IConfigGroupRef, IConfigValueRef } from '@/lib/config/configRefShared';
+import { envNameFromConfigKey, type IConfigGroupRef, type IConfigValueRef } from '@/lib/config/configRefShared';
 import AddFromConfigPopover from '@/components/config/refs/AddFromConfigPopover';
 import BoundGroupsList from '@/components/config/refs/BoundGroupsList';
 import ConfigItemPicker, { CONFIG_FORBIDDEN_HINT } from '@/components/config/refs/ConfigItemPicker';
@@ -82,7 +82,15 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
     const catalog = useConfigCatalog(enabled);
     const mode = resolveSandboxMode(value?.mode);
     const tools = { exec: true, code: true, files: true, ...(value?.tools ?? {}) };
-    const patch = (next: Partial<IAgentSandboxConfig>) => onChange({ ...(value ?? {}), ...next });
+    // Patches made in one event (Add from Config adds rows and binds groups at once) build on each other, not
+    // each on the value this render got — the parent keeps only the last one it is handed.
+    const pending = useRef<{ base: IAgentSandboxConfig | undefined; merged: IAgentSandboxConfig } | null>(null);
+    const patch = (next: Partial<IAgentSandboxConfig>) => {
+        const base = pending.current && pending.current.base === value ? pending.current.merged : value;
+        const merged = { ...(base ?? {}), ...next };
+        pending.current = { base: value, merged };
+        onChange(merged);
+    };
     const patchPreview = (next: Partial<NonNullable<IAgentSandboxConfig['preview']>>) =>
         patch({ preview: { ...(value?.preview ?? {}), ...next } });
     const patchResources = (next: Partial<NonNullable<IAgentSandboxConfig['resources']>>) =>
@@ -456,7 +464,7 @@ function KeyValueEditor({
                                     <ConfigItemPicker
                                         catalog={catalog}
                                         value={row.ref}
-                                        onChange={(ref) => setRow(row.id, { ref })}
+                                        onChange={(ref) => setRow(row.id, row.key.trim() ? { ref } : { ref, key: envNameFromConfigKey(ref.key) ?? '' })}
                                         disableSecret={!secret}
                                     />
                                     {!row.ref ? <Text size="xs" c="red.7" mt={2}>Pick a config item — until then the current value is kept.</Text> : null}
