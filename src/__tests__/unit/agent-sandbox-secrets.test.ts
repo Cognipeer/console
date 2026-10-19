@@ -66,6 +66,36 @@ describe('sandbox secrets', () => {
         expect(scrubSecretValues('v=abcd-efgh', { SHORT: 'abcd', LONG: 'abcd-efgh' })).toBe(`v=${MASK}`);
     });
 
+    it('masks extra values (what a sandbox launch carries) like the agent\'s own, under the same length rule', () => {
+        expect(scrubSecretValues('a=alpha-1 l=launch-token s=ab', { A: 'alpha-1' }, ['launch-token', 'ab', ''])).toBe(`a=${MASK} l=${MASK} s=ab`);
+    });
+
+    it('masks the longest of the agent\'s own and the extra values whole', () => {
+        expect(scrubSecretValues('v=abcd-efgh', { SHORT: 'abcd' }, ['abcd-efgh'])).toBe(`v=${MASK}`);
+        expect(scrubSecretValues('v=abcd-efgh', { LONG: 'abcd-efgh' }, ['abcd'])).toBe(`v=${MASK}`);
+    });
+
+    it('works with extra values alone, and without any', () => {
+        expect(scrubSecretValues('x launch-token y', {}, ['launch-token'])).toBe(`x ${MASK} y`);
+        expect(scrubSecretValues('x launch-token y', {}, [])).toBe('x launch-token y');
+        expect(scrubSecretValues('x launch-token y', {})).toBe('x launch-token y');
+    });
+
+    it('masks a value as a sandbox env file stores it, single quotes and all', () => {
+        const value = "it's-a-s3cret";
+        const envFile = `export TOKEN='it'\\''s-a-s3cret'\n`;
+        expect(scrubSecretValues(envFile, {}, [value])).toBe(`export TOKEN='${MASK}'\n`);
+        expect(scrubSecretValues(`echo ${value}`, {}, [value])).toBe(`echo ${MASK}`);
+    });
+
+    it('masks a value of several lines whole, and each of its lines where it shows up alone', () => {
+        const pem = '-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0\nAQEFAASCBKcwggSjAgEAAo\n-----END KEY-----';
+        expect(scrubSecretValues(`key=${pem}`, {}, [pem])).toBe(`key=${MASK}`);
+        expect(scrubSecretValues('line: MIIEvQIBADANBgkqhkiG9w0 done', {}, [pem])).toBe(`line: ${MASK} done`);
+        // Lines are trimmed, and a line shorter than the minimum is left alone like any short value.
+        expect(scrubSecretValues('  x  ', {}, ['first-line\n  x  '])).toBe('  x  ');
+    });
+
     it('an exported manifest carries the secret keys, never the sealed values', () => {
         const manifest = buildAgentManifest(
             { key: 'builder', name: 'Builder', status: 'active' } as never,

@@ -348,6 +348,12 @@ export interface AgentSandboxRunner {
   listTemplates(tenantDbName: string, tenantId: string): Promise<AgentSandboxTemplateInfo[]>;
   /** Returns a running, exec-ready instance; `created` when a new one was made. */
   ensureInstance(ref: AgentSandboxRef, spec: AgentSandboxSpec): Promise<{ instanceId: string; created: boolean }>;
+  /**
+   * Values the model must never see: what the instance's launch carries and the agent did not pass itself
+   * (its secret Config items). The platform masks them in every tool result and error,
+   * next to the agent's own secrets. Optional: a runner without it leaves the agent's own secrets as the whole set.
+   */
+  launchSecretValues?(ref: AgentSandboxRef, instanceId: string): Promise<string[]>;
   exec(
     ref: AgentSandboxRef,
     instanceId: string,
