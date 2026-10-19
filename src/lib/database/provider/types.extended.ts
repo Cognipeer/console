@@ -135,6 +135,31 @@ export interface IGuardrailEvalAggregate {
 
 export type ConfigValueType = 'string' | 'number' | 'boolean' | 'json';
 
+/**
+ * A reference to one config item, stored where a value would otherwise be typed (agent sandbox env and
+ * secrets, sandbox template and instance env). Resolved by id when the value is used, so a value changed
+ * in Config reaches the next run or launch. See `lib/services/config/configRefs.ts`.
+ */
+export interface IConfigValueRef {
+  /** Config item id: what the reference resolves by (an item key is unique only within its group). */
+  configId: string;
+  /** The item's key when the reference was saved: shown in the UI and used to find the item again on import. */
+  key: string;
+  /** The item's group (items never move between groups), so "used by" on the group finds this reference too. */
+  groupId?: string;
+}
+
+/**
+ * A whole config group bound at once: every item in it, including items added later, becomes a variable
+ * named after the item key (`cfg-openai-api-key` -> `OPENAI_API_KEY`). A variable set by name wins.
+ */
+export interface IConfigGroupRef {
+  /** Config group id: what the reference resolves by. */
+  groupId: string;
+  /** The group's key when the reference was saved. */
+  key: string;
+}
+
 export interface IConfigGroup {
   _id?: ObjectId | string;
   tenantId: string;
@@ -904,6 +929,10 @@ export interface ISandboxTemplate {
   envSealed?: string | null;
   /** Names of the sealed env vars (not secret), for display and PATCH semantics. */
   envKeys?: string[];
+  /** Variables taken from config items, resolved at each launch in the sandbox's project. Not secret (ids only). */
+  envRefs?: Record<string, IConfigValueRef> | null;
+  /** Whole config groups bound to the env, resolved at each launch; a variable set by name wins. */
+  groupRefs?: IConfigGroupRef[] | null;
   entrypoint: string[] | null;
   toolboxPort: number;
   previewPorts: Array<Record<string, unknown>>;
@@ -995,6 +1024,10 @@ export interface ISandboxInstance extends IUsageAttributionFields {
   envSealed?: string | null;
   /** Names of the sealed env vars (not secret). */
   envKeys?: string[];
+  /** Variables taken from config items, resolved at each launch in this sandbox's project; override the template's. */
+  envRefs?: Record<string, IConfigValueRef> | null;
+  /** Whole config groups bound to this sandbox's env, resolved at each launch; a variable set by name wins. */
+  groupRefs?: IConfigGroupRef[] | null;
   /**
    * Persistent sandbox: the control plane keeps it alive across node/daemon
    * failures (boot reconcile recreates the container and re-mounts the same

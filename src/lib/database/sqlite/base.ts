@@ -662,6 +662,9 @@ export class SQLiteProviderBase {
     for (const table of ['sandbox_templates', 'sandbox_instances']) {
       this.ensureTableColumn(db, table, 'envSealed', 'envSealed TEXT');
       this.ensureTableColumn(db, table, 'envKeys', 'envKeys TEXT');
+      // Config references (ids only, never values), resolved at launch.
+      this.ensureTableColumn(db, table, 'envRefs', 'envRefs TEXT');
+      this.ensureTableColumn(db, table, 'groupRefs', 'groupRefs TEXT');
     }
     this.ensureTableColumn(
       db,

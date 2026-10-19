@@ -1,5 +1,6 @@
 import type { ObjectId } from 'mongodb';
 import type { EntityMetricType, IUsageAttributionFields } from './types.base';
+import type { IConfigGroupRef, IConfigValueRef } from './types.extended';
 
 // ── Guardrail types ────────────────────────────────────────────────────────
 
@@ -2957,6 +2958,18 @@ export interface IAgentSandboxConfig {
   secretsSealed?: string;
   /** Set on agent reads only (never stored): secrets are stored but cannot be decrypted, see `agentSandboxSecrets.ts`. */
   secretsUnreadable?: boolean;
+  /**
+   * Environment variables whose value comes from a config item. Set on the sandbox machine like `env`, so only
+   * non-secret items are accepted (a secret item belongs in `secretRefs`). A name is set here or in `env`, not both.
+   */
+  envRefs?: Record<string, IConfigValueRef>;
+  /** Secrets whose value comes from a config item; passed to each command like `secrets`. A name is set here or in `secrets`, not both. */
+  secretRefs?: Record<string, IConfigValueRef>;
+  /**
+   * Whole config groups: every item becomes a variable named after its key. Secret items are passed like
+   * `secrets`, the others are set like `env`. A variable set by name in any of the fields above wins.
+   */
+  groupRefs?: IConfigGroupRef[];
   /** Which tool groups to give the agent. All on by default. */
   tools?: { exec?: boolean; code?: boolean; files?: boolean };
   /**
