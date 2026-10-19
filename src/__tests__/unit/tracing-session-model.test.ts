@@ -22,6 +22,7 @@ import {
 } from '@/components/tracing/sessionModel';
 import { classifySections, createToolTurnKeys, eventResponse, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
 import { stepBadge } from '@/components/tracing/stepDisplay';
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 
 const T0 = Date.parse('2026-10-15T12:03:06.301Z');
 const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -389,5 +390,91 @@ describe('context summarization steps', () => {
         ],
       },
     ]);
+  });
+});
+
+// ─── agent-sdk ≥ 0.18: a sub-agent paused for approval is ONE span ──────────
+// Written `pending` at each pause and again, same spanId, when it ends. The
+// Console feed (?includeEventContent=false) carries no `sections`, only the
+// precomputed `human` summary, so these fixtures have none either.
+describe('a sub-agent that paused and resumed', () => {
+  const sub = (sequence: number, status: string, parentSpanId: string, ts: number, durationMs?: number): TraceEventInput => ({
+    id: `sa${sequence}`, sequence, type: 'span', label: 'Sub-agent helper', status, spanId: 'sa', parentSpanId, timestamp: at(ts), durationMs,
+  });
+  const iter = (id: string, sequence: number, n: number, ts: number): TraceEventInput => ({
+    id, sequence, type: 'agent_iteration', label: `Iteration ${n} #${sequence}`, spanId: id, parentSpanId: 'sa', timestamp: at(ts),
+  });
+  const request: TraceEventInput = { id: 'rq', sequence: 5, type: 'tool_approval', label: 'Approval lookup', status: 'pending', spanId: 'rq', parentSpanId: 'ci1', timestamp: at(300), human: { kind: 'approval', key: 'ap1', state: 'pending' } };
+  const decision: TraceEventInput = { id: 'dc', sequence: 8, type: 'tool_approval', label: 'Approval lookup', status: 'success', spanId: 'dc', parentSpanId: 'ci1', timestamp: at(5300), durationMs: 5000, human: { kind: 'approval', key: 'ap1', state: 'approved' } };
+  const head: TraceEventInput[] = [
+    { id: 'pi1', sequence: 1, type: 'agent_iteration', label: 'Iteration 1 #1', spanId: 'pi1', parentSpanId: 'root', timestamp: at(0) },
+    iter('ci1', 4, 1, 100),
+    { id: 'm1', sequence: 3, type: 'ai_call', label: 'Assistant Response #3', model: 'gpt-6-luna', spanId: 'm1', parentSpanId: 'ci1', timestamp: at(280), durationMs: 180, finishReason: 'tool_calls' },
+    request,
+  ];
+  const paused: TraceEventInput[] = [...head, sub(6, 'pending', 'pi1', 310, 310)];
+  const resumed: TraceEventInput[] = [
+    ...paused,
+    decision,
+    iter('ci2', 9, 2, 5400),
+    { id: 'm2', sequence: 10, type: 'ai_call', label: 'Assistant Response #10', model: 'gpt-6-luna', spanId: 'm2', parentSpanId: 'ci2', timestamp: at(5700), durationMs: 280, finishReason: 'stop' },
+    { id: 'dt', sequence: 11, type: 'tool_call', label: 'Tool Execution - delegate_to #11', toolName: 'delegate_to', spanId: 'dt', parentSpanId: 'pi1', timestamp: at(5710), durationMs: 5700 },
+    sub(12, 'success', 'dt', 5710, 5710),
+  ];
+
+  const trails = (nodes: TraceNode[], trail: string[] = []): Array<{ node: TraceNode; trail: string[] }> =>
+    nodes.flatMap((node) => {
+      const here = [...trail, ...node.foldedLabels, node.label];
+      return [{ node, trail: here }, ...trails(node.children, here)];
+    });
+  const groups = (model: ReturnType<typeof buildSessionModel>) =>
+    trails(model.tree).filter(({ node }) => node.label === 'Sub-agent helper' || node.foldedLabels.includes('Sub-agent helper'));
+
+  it('is drawn as one Sub-agent group once finished, with the approval request and decision folded to one step in order', () => {
+    const model = buildSessionModel(resumed, { startedAt: at(0), durationMs: 5710 });
+    const found = groups(model);
+    expect(found).toHaveLength(1);
+    expect(found[0].node.event?.status).toBe('success');
+    const inside = trails(found[0].node.children).map(({ node }) => node);
+    expect(inside.filter((node) => node.event?.type === 'agent_iteration').map((node) => node.label)).toEqual(['Iteration 1', 'Iteration 2']);
+    const humans = inside.filter((node) => node.human);
+    expect(humans).toHaveLength(1);
+    expect(humans[0].human?.state).toBe('approved');
+    const all = trails(model.tree).map(({ node }) => node);
+    expect(all.some((node) => node.waiting)).toBe(false);
+    expect(all.some((node) => node.event?.type === 'span' && node.event.status === 'pending')).toBe(false);
+  });
+
+  it('keeps the approval request and its decision in order inside the group when they are not folded', () => {
+    const unkeyed = resumed.map((event) => (event.human ? { ...event, human: { ...event.human, key: undefined } } : event));
+    const model = buildSessionModel(unkeyed, { startedAt: at(0), durationMs: 5710 });
+    const found = groups(model);
+    expect(found).toHaveLength(1);
+    const humans = trails(found[0].node.children).map(({ node }) => node).filter((node) => node.human);
+    expect(humans.map((node) => node.human?.state)).toEqual(['pending', 'approved']);
+  });
+
+  it('shows one group and one waiting row while it is still paused', () => {
+    const model = buildSessionModel(paused, { startedAt: at(0), durationMs: 310 });
+    expect(groups(model)).toHaveLength(1);
+    const waiting = trails(model.tree).filter(({ node }) => node.waiting);
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].trail.join(' › ')).toContain('Sub-agent helper');
+  });
+
+  it('shows one group after a second pause, however many pending records were written', () => {
+    const twice = [...paused, { ...sub(7, 'pending', 'pi1', 5000, 5000) }];
+    const model = buildSessionModel(twice, { startedAt: at(0), durationMs: 5000 });
+    expect(groups(model)).toHaveLength(1);
+    expect(trails(model.tree).filter(({ node }) => node.event?.type === 'span' && node.event.status === 'pending').length).toBeLessThanOrEqual(1);
+  });
+
+  it('does not change a session without a repeated span id', () => {
+    // Against the input itself, not against a second pass through the fold: a fold that drops a record fails here.
+    expect(new Set(agentSdk.map((event) => event.spanId)).size).toBe(agentSdk.length);
+    expect(foldSupersededSpans(agentSdk)).toEqual(agentSdk);
+    // Every record of the input is still a step of the model.
+    const stepCount = (nodes: TraceNode[]): number => nodes.reduce((total, node) => total + (node.event ? 1 : 0) + stepCount(node.children), 0);
+    expect(stepCount(buildSessionModel(agentSdk).tree)).toBeGreaterThanOrEqual(agentSdk.length);
   });
 });

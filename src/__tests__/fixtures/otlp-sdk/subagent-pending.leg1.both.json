@@ -1,0 +1,611 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "Support Agent"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.2.0"
+            }
+          },
+          {
+            "key": "cognipeer.session.id",
+            "value": {
+              "stringValue": "sess_fixture_subagent"
+            }
+          },
+          {
+            "key": "cognipeer.thread.id",
+            "value": {
+              "stringValue": "thread_42"
+            }
+          },
+          {
+            "key": "cognipeer.agent.model",
+            "value": {
+              "stringValue": "gpt-4o"
+            }
+          },
+          {
+            "key": "cognipeer.agent.provider",
+            "value": {
+              "stringValue": "openai"
+            }
+          },
+          {
+            "key": "cognipeer.metadata.tenant",
+            "value": {
+              "stringValue": "acme"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "cognipeer-agent-sdk"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "<sdk-version>"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "cognipeer-agent-sdk",
+            "version": "<sdk-version>"
+          },
+          "spans": [
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "a000000000000014",
+              "parentSpanId": "b7ad6b7169203331",
+              "flags": 257,
+              "name": "Iteration 1",
+              "kind": 1,
+              "startTimeUnixNano": "1792411200000000000",
+              "endTimeUnixNano": "1792411202000000000",
+              "attributes": [
+                {
+                  "key": "cognipeer.event.type",
+                  "value": {
+                    "stringValue": "agent_iteration"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.label",
+                  "value": {
+                    "stringValue": "Iteration 1 #1"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.sequence",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.scope",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.name",
+                  "value": {
+                    "stringValue": "Support Agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.role",
+                  "value": {
+                    "stringValue": "orchestrator"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.id",
+                  "value": {
+                    "stringValue": "evt_0001_fx1"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.status",
+                  "value": {
+                    "stringValue": "success"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "a000000000000015",
+              "parentSpanId": "a000000000000014",
+              "flags": 257,
+              "name": "chat gpt-4o",
+              "kind": 3,
+              "startTimeUnixNano": "1792411200200000000",
+              "endTimeUnixNano": "1792411202000000000",
+              "attributes": [
+                {
+                  "key": "cognipeer.event.type",
+                  "value": {
+                    "stringValue": "ai_call"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.label",
+                  "value": {
+                    "stringValue": "Assistant Response #2"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.sequence",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.scope",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.name",
+                  "value": {
+                    "stringValue": "Support Agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "cognipeer.model",
+                  "value": {
+                    "stringValue": "gpt-4o"
+                  }
+                },
+                {
+                  "key": "cognipeer.finish_reason",
+                  "value": {
+                    "stringValue": "tool_calls"
+                  }
+                },
+                {
+                  "key": "cognipeer.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.input",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.output",
+                  "value": {
+                    "intValue": "25"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.total",
+                  "value": {
+                    "intValue": "125"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.cached_input",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.id",
+                  "value": {
+                    "stringValue": "evt_0002_fx2"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.status",
+                  "value": {
+                    "stringValue": "success"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-2024-08-06"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-su002"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_calls"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "25"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "thread_42"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "a000000000000017",
+              "parentSpanId": "5555555555555555",
+              "flags": 257,
+              "name": "Iteration 1",
+              "kind": 1,
+              "startTimeUnixNano": "1792411202100000000",
+              "endTimeUnixNano": "1792411204100000000",
+              "attributes": [
+                {
+                  "key": "cognipeer.event.type",
+                  "value": {
+                    "stringValue": "agent_iteration"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.label",
+                  "value": {
+                    "stringValue": "Iteration 1 #3"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.sequence",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.scope",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.name",
+                  "value": {
+                    "stringValue": "researcher"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.role",
+                  "value": {
+                    "stringValue": "orchestrator"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.id",
+                  "value": {
+                    "stringValue": "evt_0003_fx3"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.status",
+                  "value": {
+                    "stringValue": "success"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "a000000000000018",
+              "parentSpanId": "a000000000000017",
+              "flags": 257,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1792411202200000000",
+              "endTimeUnixNano": "1792411204000000000",
+              "attributes": [
+                {
+                  "key": "cognipeer.event.type",
+                  "value": {
+                    "stringValue": "ai_call"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.label",
+                  "value": {
+                    "stringValue": "Assistant Response #4"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.sequence",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.scope",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.name",
+                  "value": {
+                    "stringValue": "researcher"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "cognipeer.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "cognipeer.finish_reason",
+                  "value": {
+                    "stringValue": "tool_calls"
+                  }
+                },
+                {
+                  "key": "cognipeer.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.input",
+                  "value": {
+                    "intValue": "60"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.output",
+                  "value": {
+                    "intValue": "15"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.total",
+                  "value": {
+                    "intValue": "75"
+                  }
+                },
+                {
+                  "key": "cognipeer.tokens.cached_input",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.id",
+                  "value": {
+                    "stringValue": "evt_0004_fx4"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.status",
+                  "value": {
+                    "stringValue": "success"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-su004"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_calls"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "60"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "15"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "thread_42"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "a000000000000019",
+              "parentSpanId": "a000000000000017",
+              "flags": 257,
+              "name": "Tool approval - web_search",
+              "kind": 1,
+              "startTimeUnixNano": "1792411204100000000",
+              "endTimeUnixNano": "1792411204100000000",
+              "attributes": [
+                {
+                  "key": "cognipeer.event.type",
+                  "value": {
+                    "stringValue": "tool_approval"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.label",
+                  "value": {
+                    "stringValue": "Tool approval - web_search #5"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.sequence",
+                  "value": {
+                    "intValue": "5"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.scope",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.name",
+                  "value": {
+                    "stringValue": "web_search"
+                  }
+                },
+                {
+                  "key": "cognipeer.actor.role",
+                  "value": {
+                    "stringValue": "approval"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.id",
+                  "value": {
+                    "stringValue": "evt_0005_fx5"
+                  }
+                },
+                {
+                  "key": "cognipeer.event.status",
+                  "value": {
+                    "stringValue": "pending"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
