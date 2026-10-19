@@ -14,6 +14,7 @@ import type {
   IAgentTracingEvent,
 } from '@/lib/database/provider/types.base';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { humanStep, isHumanEventType, type SectionShell } from '@/lib/shared/tracingSections';
 import {
   buildResponseFormatSection,
   normalizeSectionListResponseFormat,
@@ -589,20 +590,23 @@ const SPAN_FLAGS_PARENT_IS_REMOTE = 0x200;
  * A run started under an upstream caller's W3C `traceparent` has a root whose parent lives in another
  * service, so the root has a `parentSpanId` and is not "parentless". The SDK says so with the remote-parent
  * span flag and always stamps its root-only `cognipeer.session.status`. A span that is one of the SDK's own
- * events is never taken for the root, whatever its flags say.
+ * events is never taken for the root, whatever its flags say. The flag alone only counts in a trace the Cognipeer
+ * SDK exported (`fromSdk`): newer OTel SDKs set it on every entry span behind an upstream `traceparent`, so in
+ * anyone else's trace it would turn a plain server span into the session root.
  */
-function isRemoteParentRoot(span: OtlpSpan): boolean {
+function isRemoteParentRoot(span: OtlpSpan, fromSdk: boolean): boolean {
   if (getStringAttr(span.attributes, 'cognipeer.event.type')) return false;
   if (getStringAttr(span.attributes, 'cognipeer.session.status') !== undefined) return true;
+  if (!fromSdk) return false;
   const flags = Number(span.flags ?? 0);
   return Number.isFinite(flags) && (flags & SPAN_FLAGS_PARENT_IS_REMOTE) !== 0;
 }
 
 /** Check if a span is a Cognipeer root session span */
-function isCognipeerRootSpan(span: OtlpSpan): boolean {
+function isCognipeerRootSpan(span: OtlpSpan, fromSdk: boolean): boolean {
   const eventType = getStringAttr(span.attributes, 'cognipeer.event.type');
   const sessionId = getStringAttr(span.attributes, 'cognipeer.session.id');
-  if (isRemoteParentRoot(span)) return true;
+  if (isRemoteParentRoot(span, fromSdk)) return true;
   // Root if: name starts with agent_session OR has cognipeer.session.id, AND no parent
   if (!span.parentSpanId && sessionId) return true;
   if (span.name?.startsWith('agent_session')) return true;
@@ -622,10 +626,43 @@ export interface OtlpMappedResult {
    * exported once it finishes, so its arrival is what makes a session terminal.
    */
   endedSessionIds: string[];
+  /**
+   * Events numbered by their position in this request, because the span carries no `cognipeer.event.sequence`
+   * (a gen_ai-only export). The position restarts at 1 in every request, so the ingest route renumbers the
+   * ones it stores after the session's existing events.
+   */
+  positionalSequence: Set<OtlpMappedResult['events'][number]>;
 }
 
-function hasRealRootSpan(spans: OtlpSpan[]): boolean {
-  return spans.some((span) => !span.parentSpanId || isRemoteParentRoot(span));
+function hasRealRootSpan(spans: OtlpSpan[], fromSdk: boolean): boolean {
+  return spans.some((span) => !span.parentSpanId || isRemoteParentRoot(span, fromSdk));
+}
+
+/**
+ * An approval or a question and its outcome are two events that share an id. The SDK writes the id into a
+ * metadata section of `cognipeer.sections`, which a run with content logging off does not export, so it also
+ * stamps it as `cognipeer.approval.id` / `cognipeer.question.id`. When the sections do not carry the id, this
+ * puts it back as a metadata section, so the session view pairs the request with its decision either way.
+ */
+function withHumanStepId(
+  sections: Array<Record<string, unknown>> | undefined,
+  span: OtlpSpan,
+  eventType: string,
+  eventStatus: string,
+): Array<Record<string, unknown>> | undefined {
+  const approvalId = getStringAttr(span.attributes, 'cognipeer.approval.id');
+  const questionId = getStringAttr(span.attributes, 'cognipeer.question.id');
+  if (!approvalId && !questionId) return sections;
+  if (!isHumanEventType(eventType)) return sections;
+  if (humanStep({ type: eventType, status: eventStatus, sections: sections as SectionShell[] | undefined })?.key) return sections;
+  return [
+    ...(sections ?? []),
+    {
+      kind: 'metadata',
+      label: questionId ? 'Question' : 'Approval',
+      data: questionId ? { questionId } : { approvalId },
+    },
+  ];
 }
 
 /**
@@ -646,9 +683,10 @@ export function mapOtlpToInternalModels(
   const sessions: OtlpMappedResult['sessions'] = [];
   const events: OtlpMappedResult['events'] = [];
   const endedSessionIds: string[] = [];
+  const positionalSequence: OtlpMappedResult['positionalSequence'] = new Set();
 
   if (!request.resourceSpans?.length) {
-    return { sessions, events, endedSessionIds };
+    return { sessions, events, endedSessionIds, positionalSequence };
   }
 
   // Collect all spans grouped by traceId, with resource context
@@ -671,8 +709,9 @@ export function mapOtlpToInternalModels(
 
   // Process each trace
   for (const [traceId, { spans, resourceAttrs }] of traceMap) {
+    const fromCognipeerSdk = getStringAttr(resourceAttrs, 'telemetry.sdk.name') === 'cognipeer-agent-sdk';
     // Find root span — prioritize Cognipeer root, then any span without parent, then longest span
-    let rootSpan = spans.find((s) => isCognipeerRootSpan(s));
+    let rootSpan = spans.find((s) => isCognipeerRootSpan(s, fromCognipeerSdk));
     if (!rootSpan) {
       rootSpan = spans.find((s) => !s.parentSpanId);
     }
@@ -687,10 +726,9 @@ export function mapOtlpToInternalModels(
 
     if (!rootSpan) continue;
 
-    const realRootExists = hasRealRootSpan(spans);
+    const realRootExists = hasRealRootSpan(spans, fromCognipeerSdk);
 
     // Extract session info from resource + root span attributes
-    const fromCognipeerSdk = getStringAttr(resourceAttrs, 'telemetry.sdk.name') === 'cognipeer-agent-sdk';
     const serviceName = getStringAttr(resourceAttrs, 'service.name');
     const serviceVersion = getStringAttr(resourceAttrs, 'service.version');
     const sessionId = getStringAttr(resourceAttrs, 'cognipeer.session.id')
@@ -716,7 +754,7 @@ export function mapOtlpToInternalModels(
     const status = otlpStatusToString(rootSpan.status?.code);
     // The chosen span is the session's root (not just the longest span of a
     // partial batch) and carries an end time: the run is over.
-    const rootEnded = (!rootSpan.parentSpanId || isCognipeerRootSpan(rootSpan))
+    const rootEnded = (!rootSpan.parentSpanId || isCognipeerRootSpan(rootSpan, fromCognipeerSdk))
       && Number(rootSpan.endTimeUnixNano) > 0;
     if (rootEnded) endedSessionIds.push(sessionId);
 
@@ -816,6 +854,7 @@ export function mapOtlpToInternalModels(
         : undefined;
 
       const eventStatus = otlpEventStatus(span);
+      sections = withHumanStepId(sections, span, eventType, eventStatus);
 
       // Extract errors from span events
       let eventError: Record<string, unknown> | undefined;
@@ -846,7 +885,7 @@ export function mapOtlpToInternalModels(
         });
       }
 
-      events.push({
+      const mappedEvent: OtlpMappedResult['events'][number] = {
         sessionId,
         traceId,
         spanId: span.spanId,
@@ -877,7 +916,9 @@ export function mapOtlpToInternalModels(
         requestBytes,
         responseBytes,
         error: eventError,
-      });
+      };
+      events.push(mappedEvent);
+      if (explicitSequence === undefined) positionalSequence.add(mappedEvent);
     }
 
     // Extract root span errors
@@ -938,7 +979,7 @@ export function mapOtlpToInternalModels(
     eventCount: events.length,
   });
 
-  return { sessions, events, endedSessionIds };
+  return { sessions, events, endedSessionIds, positionalSequence };
 }
 
 // ─── Section Synthesis ──────────────────────────────────────────────────────

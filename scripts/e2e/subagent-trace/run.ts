@@ -2,7 +2,7 @@
  * Sub-agent tracing — end to end through the real console API, against a
  * scripted mock model (no network, no real LLM).
  *
- * Verifies that @cognipeer/agent-sdk >= 0.17.1 records sub-agent runs as a nested
+ * Verifies that @cognipeer/agent-sdk >= 0.18.0 records sub-agent runs as a nested
  * tree inside the parent's single trace session (a run that pauses for a person
  * and resumes is ONE span, written pending and again when it ends), and that
  * Console stores, totals and renders that tree correctly:
@@ -30,7 +30,7 @@
  */
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startMockLlm, usageOf, type IssuedCall, type Json } from './mockLlm';
@@ -42,6 +42,20 @@ const ONLY = arg('only')?.toUpperCase();
 const DUMP = flag('dump');
 const DEBUG = flag('debug');
 const SELFTEST = flag('selftest');
+
+// The single-span behaviour this harness checks ships in agent-sdk 0.18.0. On an older SDK most checks fail with
+// "0 researcher record(s)", which says nothing about the cause: stop here and say it.
+{
+    let installed = 'unknown';
+    try {
+        installed = JSON.parse(readFileSync(join(process.cwd(), 'node_modules/@cognipeer/agent-sdk/package.json'), 'utf8')).version ?? installed;
+    } catch { /* fall through: treated as too old */ }
+    const [major, minor] = installed.split('.').map((part) => Number.parseInt(part, 10));
+    if (!(major > 0 || minor >= 18)) {
+        console.error(`This harness needs @cognipeer/agent-sdk >= 0.18.0 (installed: ${installed}). Put a 0.18 build in node_modules (the pin is not bumped until 0.18.0 is published).`);
+        process.exit(2);
+    }
+}
 
 const STAMP = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 const dataDir = mkdtempSync(join(tmpdir(), 'cognipeer-e2e-subtrace-'));

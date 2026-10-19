@@ -22,6 +22,7 @@ import {
 } from '@/components/tracing/sessionModel';
 import { classifySections, createToolTurnKeys, eventResponse, sectionToolArgs, sectionToolResult } from '@/lib/shared/tracingSections';
 import { stepBadge } from '@/components/tracing/stepDisplay';
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 
 const T0 = Date.parse('2026-10-15T12:03:06.301Z');
 const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -469,7 +470,11 @@ describe('a sub-agent that paused and resumed', () => {
   });
 
   it('does not change a session without a repeated span id', () => {
-    const before = JSON.stringify(labels(buildSessionModel(agentSdk).tree));
-    expect(JSON.stringify(labels(buildSessionModel([...agentSdk]).tree))).toBe(before);
+    // Against the input itself, not against a second pass through the fold: a fold that drops a record fails here.
+    expect(new Set(agentSdk.map((event) => event.spanId)).size).toBe(agentSdk.length);
+    expect(foldSupersededSpans(agentSdk)).toEqual(agentSdk);
+    // Every record of the input is still a step of the model.
+    const stepCount = (nodes: TraceNode[]): number => nodes.reduce((total, node) => total + (node.event ? 1 : 0) + stepCount(node.children), 0);
+    expect(stepCount(buildSessionModel(agentSdk).tree)).toBeGreaterThanOrEqual(agentSdk.length);
   });
 });

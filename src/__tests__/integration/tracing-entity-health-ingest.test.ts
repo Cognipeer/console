@@ -71,6 +71,7 @@ import sdkLegsLeg1 from '../fixtures/otlp-sdk/legs-paused.leg1.both.json';
 import sdkLegsLeg2 from '../fixtures/otlp-sdk/legs-paused.leg2.both.json';
 import sdkSubagentLeg1 from '../fixtures/otlp-sdk/subagent-pending.leg1.both.json';
 import sdkSubagentLeg2 from '../fixtures/otlp-sdk/subagent-pending.leg2.both.json';
+import sdkGenAiRun from '../fixtures/otlp-sdk/run-success.gen_ai.json';
 
 const DAY_MS = 86_400_000;
 
@@ -813,6 +814,119 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
     await sweepStaleTracingSessions(quietLater());
     await settle();
     expect(await session(sessionId)).toMatchObject({ status: 'success' });
+  });
+
+  it('otlp sdk legs: an approval stays open when another record is written after the request', async () => {
+    const sessionId = `sdk-wait-late-${sequence}`;
+    const traceId = `4af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    // A sibling tool (or a parallel sub-agent) finishes after the approval was recorded: the request is not the last event.
+    const request = sdkLeg(sdkLegsLeg1, sessionId, traceId);
+    const spans = request.resourceSpans[0].scopeSpans[0].spans as Array<{ spanId: string; attributes: Array<{ key: string; value: Record<string, string> }> }>;
+    const model = JSON.parse(JSON.stringify(spans.find((span) => span.attributes.some((a) => a.key === 'cognipeer.event.type' && a.value.stringValue === 'ai_call')))) as typeof spans[number];
+    model.spanId = 'a0000000000000f1';
+    for (const attribute of model.attributes) {
+      if (attribute.key === 'cognipeer.event.sequence') attribute.value = { intValue: '4' };
+      if (attribute.key === 'cognipeer.event.id') attribute.value = { stringValue: 'evt_late_ai_call' };
+    }
+    spans.push(model);
+    expect((await exportTraces(request)).statusCode).toBe(200);
+    await settle();
+    const stored = await eventsOf(sessionId);
+    expect(stored.map((event) => [event.sequence, event.type, event.status])).toEqual([
+      [1, 'agent_iteration', 'success'], [2, 'ai_call', 'success'], [3, 'tool_approval', 'pending'], [4, 'ai_call', 'success'],
+    ]);
+
+    await sweepStaleTracingSessions(quietLater());
+    await sweepStaleTracingSessions(later());
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'in_progress' });
+
+    // The answer lands in the same session.
+    expect((await exportTraces(sdkLeg(sdkLegsLeg2, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success' });
+  });
+
+  it('otlp sdk legs: a waiting session costs one small read per sweep, not an event list, and is not read again in the stale pass', async () => {
+    const sessionId = `sdk-wait-cost-${sequence}`;
+    const traceId = `8af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg1, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    const proto = Object.getPrototypeOf(db) as { getAgentTracingWaitState: (...args: unknown[]) => unknown; listAgentTracingEvents: (...args: unknown[]) => unknown };
+    const waitState = vi.spyOn(proto, 'getAgentTracingWaitState');
+    const eventList = vi.spyOn(proto, 'listAgentTracingEvents');
+    try {
+      // Past the quiet window AND the stale window: both passes meet the session.
+      await sweepStaleTracingSessions(later());
+      const forSession = waitState.mock.calls.filter((call) => call[0] === sessionId);
+      expect(forSession).toHaveLength(1);
+      expect(eventList.mock.calls.filter((call) => call[0] === sessionId)).toHaveLength(0);
+    } finally {
+      waitState.mockRestore();
+      eventList.mockRestore();
+    }
+    expect(await session(sessionId)).toMatchObject({ status: 'in_progress' });
+  });
+
+  it('otlp sdk legs: a resolved approval followed by later work does not keep the session open', async () => {
+    const sessionId = `sdk-wait-done-${sequence}`;
+    const traceId = `5af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    // Both legs without the root: the person answered, the run went on, and the root never arrived.
+    const second = sdkLeg(sdkLegsLeg2, sessionId, traceId);
+    second.resourceSpans[0].scopeSpans[0].spans = second.resourceSpans[0].scopeSpans[0].spans
+      .filter((span) => (span.spanId as string) !== sdkRootSpanId(sdkLegsLeg2));
+    expect((await exportTraces(sdkLeg(sdkLegsLeg1, sessionId, traceId))).statusCode).toBe(200);
+    expect((await exportTraces(second)).statusCode).toBe(200);
+    await settle();
+    await sweepStaleTracingSessions(quietLater());
+    await settle();
+    expect(await session(sessionId)).toMatchObject({ status: 'success' });
+  });
+
+  it('otlp sdk legs: the session total counts the parent run only, not the delegated work', async () => {
+    const sessionId = `sdk-total-${sequence}`;
+    const traceId = `6af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg1, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    expect((await exportTraces(sdkLeg(sdkSubagentLeg2, sessionId, traceId))).statusCode).toBe(200);
+    await settle();
+    const events = await eventsOf(sessionId);
+    const ms = (event: (typeof events)[number]) => event.durationMs ?? 0;
+    // The parent's own model calls (leg 1 and the closing one); the delegation call, the child span and everything under it are the child's.
+    const parentCalls = events.filter((event) => event.type === 'ai_call' && event.model === 'gpt-4o');
+    expect(parentCalls).toHaveLength(2);
+    const delegation = events.find((event) => event.toolName === 'delegate_to')!;
+    expect(ms(delegation)).toBeGreaterThan(30_000);
+    expect((await session(sessionId))?.summary?.totalDurationMs).toBe(parentCalls.reduce((total, event) => total + ms(event), 0));
+  });
+
+  it('otlp gen_ai-only legs: a later request continues the numbering instead of colliding with the first', async () => {
+    const traceId = `7af7651916cd43dd8448eb211c${String(sequence).padStart(6, '0')}`;
+    const sessionId = `otlp_${traceId.slice(0, 16)}`;
+    type Raw = { spanId: string; parentSpanId?: string };
+    const leg = (suffix: string) => {
+      const request = sdkLeg(sdkGenAiRun, sessionId, traceId);
+      const scope = request.resourceSpans[0].scopeSpans[0];
+      const root = (sdkGenAiRun.resourceSpans[0].scopeSpans[0].spans as Raw[])[0].spanId;
+      // No root (a leg that ends in a pause has none), and span ids of their own for this leg.
+      scope.spans = (scope.spans as Raw[]).filter((span) => span.spanId !== root).map((span) => ({
+        ...span,
+        spanId: `${suffix}${span.spanId.slice(1)}`,
+        ...(span.parentSpanId && span.parentSpanId !== root ? { parentSpanId: `${suffix}${span.parentSpanId.slice(1)}` } : {}),
+      }));
+      return request;
+    };
+    expect((await exportTraces(leg('0'))).statusCode).toBe(200);
+    await settle();
+    expect((await exportTraces(leg('1'))).statusCode).toBe(200);
+    await settle();
+    const stored = await eventsOf(sessionId);
+    expect(stored).toHaveLength(10);
+    expect(stored.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // The same request again is deduplicated by span and does not move the numbering on.
+    expect((await exportTraces(leg('1'))).statusCode).toBe(200);
+    await settle();
+    expect((await eventsOf(sessionId)).map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
   // ── hosted-agent sink ─────────────────────────────────────────────────────

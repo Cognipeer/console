@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest, type OtlpSpan } from '@/lib/services/otlpMapper';
 import { buildSessionModel, type TraceEventInput, type TraceNode } from '@/components/tracing/sessionModel';
 import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
+import { humanStep, type SectionShell } from '@/lib/shared/tracingSections';
 
 import runSuccessBoth from '../fixtures/otlp-sdk/run-success.both.json';
 import runSuccessGenAi from '../fixtures/otlp-sdk/run-success.gen_ai.json';
@@ -281,5 +282,142 @@ describe('a paused run with a sub-agent (two legs)', () => {
     expect(groups[0].children.length).toBeGreaterThan(0);
     // The sub-agent never appears twice, nor as a second pending copy of itself.
     expect(walk(model.tree).some((node) => node.event?.type === 'span' && node.event.status === 'pending')).toBe(false);
+  });
+});
+
+// ─── approval / question ids that do not depend on content logging ──────────
+// The golden legs were exported with content logging off, so their approval events carry no sections at all.
+// The SDK stamps the id as `cognipeer.approval.id` / `cognipeer.question.id` for exactly this case (a metadata
+// section of `cognipeer.sections` is the other way it reaches Console, and keeps working).
+describe('an approval or a question whose only id is an attribute', () => {
+  const stamp = (fixture: unknown, key: string, value: string, type = 'tool_approval') => {
+    const request = asRequest(fixture);
+    const span = spansOf(request).find((candidate) => attrOf(candidate, 'cognipeer.event.type')?.stringValue === type)!;
+    expect(span.attributes?.some((attribute) => attribute.key === 'cognipeer.sections')).toBe(false);
+    span.attributes = [...(span.attributes ?? []), { key, value: { stringValue: value } }];
+    return request;
+  };
+  /** The feed the UI reads: no sections, the `human` summary computed from the stored ones, as the list route does. */
+  const feedOf = (...legs: OtlpExportTraceServiceRequest[]): TraceEventInput[] =>
+    legs.flatMap((leg) => mapOtlpToInternalModels(leg, TENANT, PROJECT).events).map((event) => ({
+      id: String(event.id),
+      sequence: event.sequence,
+      type: event.type,
+      label: event.label,
+      status: event.status,
+      spanId: event.spanId,
+      parentSpanId: event.parentSpanId,
+      timestamp: event.timestamp?.toISOString(),
+      human: humanStep({ type: event.type, status: event.status, sections: event.sections as SectionShell[] | undefined }),
+    }));
+  const approvals = (nodes: TraceNode[]): TraceNode[] =>
+    nodes.flatMap((node) => [...(node.human ? [node] : []), ...approvals(node.children)]);
+
+  it('gives the request and its decision the same key, so the request folds into the decision', () => {
+    const feed = feedOf(
+      stamp(legsLeg1, 'cognipeer.approval.id', 'ap_1'),
+      stamp(legsLeg2, 'cognipeer.approval.id', 'ap_1'),
+    );
+    const humans = feed.filter((event) => event.human);
+    expect(humans.map((event) => [event.human?.kind, event.human?.key, event.human?.state])).toEqual([
+      ['approval', 'ap_1', 'pending'],
+      ['approval', 'ap_1', 'approved'],
+    ]);
+    const rows = approvals(buildSessionModel(feed).tree);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].human?.state).toBe('approved');
+    expect(rows[0].waiting).toBeFalsy();
+  });
+
+  it('shows one waiting row while the request has no decision yet', () => {
+    const rows = approvals(buildSessionModel(feedOf(stamp(legsLeg1, 'cognipeer.approval.id', 'ap_1'))).tree);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].waiting).toBe(true);
+  });
+
+  it('without the attribute (and without sections) the request stays next to its decision, unpaired', () => {
+    const rows = approvals(buildSessionModel(feedOf(asRequest(legsLeg1), asRequest(legsLeg2))).tree);
+    expect(rows).toHaveLength(2);
+  });
+
+  it('pairs a question the same way', () => {
+    const asQuestion = (fixture: unknown, id: string) => {
+      const request = stamp(fixture, 'cognipeer.question.id', id);
+      const span = spansOf(request).find((candidate) => attrOf(candidate, 'cognipeer.event.type')?.stringValue === 'tool_approval')!;
+      span.attributes = span.attributes!.map((attribute) =>
+        attribute.key === 'cognipeer.event.type' ? { key: attribute.key, value: { stringValue: 'user_question' } } : attribute);
+      return request;
+    };
+    const feed = feedOf(asQuestion(legsLeg1, 'q_1'), asQuestion(legsLeg2, 'q_1'));
+    expect(feed.filter((event) => event.human).map((event) => [event.human?.kind, event.human?.key, event.human?.state])).toEqual([
+      ['question', 'q_1', 'pending'],
+      ['question', 'q_1', 'answered'],
+    ]);
+    expect(approvals(buildSessionModel(feed).tree)).toHaveLength(1);
+  });
+
+  it('leaves an id that the sections already carry alone', () => {
+    const request = stamp(legsLeg1, 'cognipeer.approval.id', 'ap_attr');
+    const span = spansOf(request).find((candidate) => attrOf(candidate, 'cognipeer.event.type')?.stringValue === 'tool_approval')!;
+    span.attributes!.push({
+      key: 'cognipeer.sections',
+      value: { stringValue: JSON.stringify([{ kind: 'metadata', label: 'Approval', data: { approvalId: 'ap_section', status: 'pending' } }]) },
+    });
+    const event = mapOtlpToInternalModels(request, TENANT, PROJECT).events.find((candidate) => candidate.type === 'tool_approval')!;
+    expect(event.sections).toHaveLength(1);
+    expect(humanStep({ type: event.type, status: event.status, sections: event.sections as SectionShell[] })?.key).toBe('ap_section');
+  });
+});
+
+// ─── a trace somebody else exported ────────────────────────────────────────
+
+describe('a third-party trace with remote-parent flags', () => {
+  const hex = (n: number, width: number) => n.toString(16).padStart(width, '0');
+  const span = (n: number, name: string, extra: Partial<OtlpSpan> = {}): OtlpSpan => ({
+    traceId: hex(77, 32),
+    spanId: hex(n, 16),
+    name,
+    startTimeUnixNano: String(1_700_000_000_000_000_000 + n * 1_000_000),
+    endTimeUnixNano: String(1_700_000_000_000_000_000 + n * 1_000_000 + 500_000),
+    ...extra,
+  });
+  // Newer OTel SDKs set 0x200 on every entry span behind an upstream traceparent, an HTTP server span among them.
+  const server = span(1, 'GET /chat', { parentSpanId: hex(999, 16), flags: 0x301 });
+  const chat = span(2, 'chat gpt-4o', {
+    parentSpanId: server.spanId,
+    flags: 0x101,
+    attributes: [{ key: 'gen_ai.operation.name', value: { stringValue: 'chat' } }, { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
+  });
+  const request = (resource: Array<{ key: string; value: { stringValue: string } }>): OtlpExportTraceServiceRequest => ({
+    resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ spans: [server, chat] }] }],
+  });
+
+  it('keeps every span an event and the session open: the flag alone is not a root marker', () => {
+    const mapped = mapOtlpToInternalModels(request([{ key: 'service.name', value: { stringValue: 'web' } }]), TENANT, PROJECT);
+    expect(mapped.events.map((event) => event.spanId)).toEqual([server.spanId, chat.spanId]);
+    expect(mapped.sessions[0].totalEvents).toBe(2);
+    expect(mapped.endedSessionIds).toEqual([]);
+  });
+
+  it('is still the root when the Cognipeer SDK exported it', () => {
+    const mapped = mapOtlpToInternalModels(request([
+      { key: 'service.name', value: { stringValue: 'web' } },
+      { key: 'telemetry.sdk.name', value: { stringValue: 'cognipeer-agent-sdk' } },
+    ]), TENANT, PROJECT);
+    expect(mapped.sessions[0].rootSpanId).toBe(server.spanId);
+    expect(mapped.events.map((event) => event.spanId)).toEqual([chat.spanId]);
+    expect(mapped.endedSessionIds).toHaveLength(1);
+  });
+});
+
+describe('spans without cognipeer.event.sequence (a gen_ai-only export)', () => {
+  it('are marked as numbered by position, so the ingest route can continue the numbering', () => {
+    const mapped = map(runSuccessGenAi);
+    expect(attrOf(spansOf(asRequest(runSuccessGenAi))[0], 'cognipeer.event.sequence')).toBeUndefined();
+    expect(mapped.positionalSequence.size).toBe(mapped.events.length);
+  });
+
+  it('are not marked when the SDK numbered them', () => {
+    expect(map(runSuccessBoth).positionalSequence.size).toBe(0);
   });
 });

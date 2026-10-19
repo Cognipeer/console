@@ -11,9 +11,9 @@
  *     stale window) they are FINALIZED from what was received: 'error' when any
  *     error was recorded, else 'success', and booked as that outcome. Spans
  *     arriving later correct the booking like any late event.
- *     A run that is waiting for a person is not finished and not abandoned: an OTLP session whose latest event
- *     is `pending` (an approval or a question, which the SDK marks with `cognipeer.event.status`) is left open
- *     until it becomes history, so the leg that follows the answer lands in the same session.
+ *     A run that is waiting for a person is not finished and not abandoned: an OTLP session whose latest approval
+ *     or question event is `pending` (the SDK marks it with `cognipeer.event.status`), or whose latest event is,
+ *     is left open until it becomes history, so the leg that follows the answer lands in the same session.
  *  2. Every other session whose last activity is older than
  *     `health.tracingStaleSessionMinutes` is marked 'abandoned' (not an error)
  *     and booked as such. A late `/end` or root span revives the session and is
@@ -31,7 +31,6 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { DatabaseProvider } from '@/lib/database';
 import type { IAgentTracingSession } from '@/lib/database/provider/types.base';
-import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { createTraceModelPricerLoader, type TraceModelPricerLoader } from '@/lib/services/agentTracing';
 import { recordAgentSessionOutcome } from './traceEntityMetrics';
 
@@ -84,28 +83,19 @@ function deriveOtlpFinalStatus(session: IAgentTracingSession): 'error' | 'succes
 }
 
 /**
- * True while an OTLP run is parked on a person: after the sub-agent records are folded, the latest event
- * (highest sequence, then newest) is still `pending`. The SDK exports a paused run's spans but not its root, so
- * this is the only signal the Console has that a quiet session is waiting rather than gone. A failed read counts
- * as "not waiting", which is what the sweep did before this check existed.
+ * True while an OTLP run is parked on a person: the latest approval or question event is still `pending` (a
+ * sibling tool or sub-agent may finish after the request was recorded, so the last event overall says nothing),
+ * or the latest event of any kind is `pending` (a paused sub-agent record). The SDK exports a paused run's spans
+ * but not its root, so this is the only signal the Console has that a quiet session is waiting rather than gone.
+ * Two single-row reads, never the event list. A failed read counts as "not waiting", which is what the sweep did
+ * before this check existed.
  */
 async function isAwaitingPerson(db: DatabaseProvider, session: IAgentTracingSession): Promise<boolean> {
   try {
-    const events = foldSupersededSpans(await db.listAgentTracingEvents(
-      session.sessionId,
-      session.projectId || undefined,
-      { projection: { sections: 0, metadata: 0, actor: 0 } },
-    ));
-    let latest: (typeof events)[number] | undefined;
-    const stamp = (event: (typeof events)[number]) => (event.timestamp ? new Date(event.timestamp).getTime() : 0);
-    for (const event of events) {
-      if (!latest) { latest = event; continue; }
-      const bySequence = (event.sequence ?? 0) - (latest.sequence ?? 0);
-      if (bySequence > 0 || (bySequence === 0 && stamp(event) >= stamp(latest))) latest = event;
-    }
-    return latest?.status === 'pending';
+    const state = await db.getAgentTracingWaitState(session.sessionId, session.projectId || undefined);
+    return state.latestHumanStatus === 'pending' || state.latestStatus === 'pending';
   } catch (error) {
-    logger.warn('Could not read the latest event of an OTLP session', {
+    logger.warn('Could not read the wait state of an OTLP session', {
       sessionId: session.sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -154,11 +144,16 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
         // The source filter is applied by the database: idle runs of other sources (waiting for the stale window)
         // must not use up the page limit and starve the OTLP sessions behind them.
         const quiet = await db.listStaleAgentTracingSessions({ updatedBefore: otlpQuietBefore, limit: OTLP_PASS_LIMIT, source: 'otlp' });
+        // Sessions pass 1 found waiting on a person: pass 2 does not look at them again.
+        const waiting = new Set<string>();
         for (const candidate of quiet) {
           if (Date.now() > deadline) break;
           const projectId = candidate.projectId ?? '';
           // Waiting for an approval or an answer: not finished, not gone, until it is history.
-          if (!isHistory(candidate.updatedAt) && await isAwaitingPerson(db, candidate)) continue;
+          if (!isHistory(candidate.updatedAt) && await isAwaitingPerson(db, candidate)) {
+            waiting.add(`${projectId}\u0001${candidate.sessionId}`);
+            continue;
+          }
           // The abandon CAS is the atomic claim (a late span or an overlapping sweep wins or loses here);
           // the final status is then written over 'abandoned', keeping its endedAt/durationMs (last activity).
           const claimed = await db.abandonAgentTracingSession({
@@ -185,9 +180,13 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
 
         for (let page = 0; page < MAX_PAGES_PER_TENANT; page += 1) {
           const stale = await db.listStaleAgentTracingSessions({ updatedBefore, limit: PAGE_SIZE });
+          let closed = 0;
           for (const candidate of stale) {
             // The stale window is shorter than a person may take to answer; the same guard as the OTLP pass.
-            if (candidate.source === 'otlp' && !isHistory(candidate.updatedAt) && await isAwaitingPerson(db, candidate)) continue;
+            if (candidate.source === 'otlp') {
+              if (waiting.has(`${candidate.projectId ?? ''}\u0001${candidate.sessionId}`)) continue;
+              if (!isHistory(candidate.updatedAt) && await isAwaitingPerson(db, candidate)) continue;
+            }
             const abandoned = await db.abandonAgentTracingSession({
               projectId: candidate.projectId ?? '',
               sessionId: candidate.sessionId,
@@ -195,6 +194,7 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
             });
             // null: a late event or /end won the race.
             if (!abandoned) continue;
+            closed += 1;
             result.abandoned += 1;
             if (isHistory(candidate.updatedAt)) continue;
             await recordAgentSessionOutcome({
@@ -210,7 +210,8 @@ export async function sweepStaleTracingSessions(now = Date.now()): Promise<Traci
               pricerLoader: pricerLoaderFor(tenantDbName, abandoned.projectId ?? candidate.projectId ?? ''),
             });
           }
-          if (stale.length < PAGE_SIZE || Date.now() > deadline) break;
+          // A page that closed nothing is the same head again (waiting sessions stay in_progress): stop paging.
+          if (stale.length < PAGE_SIZE || closed === 0 || Date.now() > deadline) break;
         }
       });
     } catch (error) {

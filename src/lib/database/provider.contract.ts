@@ -209,6 +209,15 @@ export interface DatabaseProvider {
       projection?: Record<string, 0 | 1>;
     },
   ): Promise<IAgentTracingEvent[]>;
+  /**
+   * Where a session stands on a person: the status of its latest event, and of its latest approval or question
+   * event (`tool_approval` / `user_question`). Two single-row reads (highest sequence), no sections: the
+   * finalizer's "is it waiting" check does not need the event list.
+   */
+  getAgentTracingWaitState(
+    sessionId: string,
+    projectId?: string,
+  ): Promise<{ latestStatus?: string; latestHumanStatus?: string }>;
   deleteAgentTracingEvents(
     sessionId: string,
     projectId?: string,

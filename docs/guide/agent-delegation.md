@@ -71,6 +71,7 @@ A [session budget](/guide/agent-session-budgets) and the per-turn cost limit see
 - A child's **answer text** is never streamed into the parent's answer, and a child's **thinking** is not shown as the turn's reasoning. A child compacting its own context is not recorded as a compaction of the turn.
 - The delegation call is a tool call: `delegate_to`, `spawn_subagent` or `spawn_subagents_parallel`. Its `agent.tool_use` / `agent.tool_result` events and its step in Studio name the sub-agent (`subagent`). Tool calls a child makes are forwarded with the same field.
 - A delegation whose child failed or was cancelled (and a parallel call where every task failed) is a failed tool call: `ok: false` with the reason. A parallel call where only some tasks failed is a success whose result lists each task's status.
+- In the trace, a child's work is a **Sub-agent** group with its model calls, tool calls and approvals as steps inside it. With agent-sdk 0.18 and later, a child that paused for an approval and was approved stays that one group: the pause is recorded with the same span, and the trace draws the latest record only. Older SDK versions record the resumed child as a second span, so it shows as a second group.
 
 ## Run warnings
 
@@ -83,6 +84,6 @@ A child that cannot run, or runs short of what its author set up, never fails th
 
 ## Not supported yet
 
-- **A child's own tool calls in the call row.** The trace shows a child's work as a **Sub-agent** group of its own, with its model calls, tool calls and approvals as steps inside it. The delegation call itself stays one row, and a child that paused for an approval and was approved stays that one group: the pause is recorded with the same span, and the trace draws the latest record only.
+- **A child's own tool calls in the call row.** The delegation call stays one row in the trace; the child's model calls, tool calls and approvals are the steps of its own **Sub-agent** group, not part of that row.
 - **Re-authorisation of a referenced agent at run time.** Who may use the referenced agent is decided when the entry is saved. At run time the child runs under the delegating agent's identity and does not check the caller's access to the referenced agent again.
 - **Version pinning of a paused child.** A child that paused for an approval is not guaranteed to continue on the very definition it paused on if the agent or the referenced agent is edited and published while the request is open.
