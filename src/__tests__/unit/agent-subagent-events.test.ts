@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { __testables, extractPlaygroundSteps } from '@/lib/services/agents/agentService';
-import { isSubagentEvent } from '@/lib/services/agents/subagentEvents';
+import { isSubagentEvent, resumedDelegationIds, subagentStampOf } from '@/lib/services/agents/subagentEvents';
 import type { IAgentTurnCompaction } from '@/lib/database';
 
 const child = { subagentName: 'helper', subagentId: 'sa_1' };
@@ -26,6 +26,34 @@ describe('isSubagentEvent', () => {
     expect(isSubagentEvent({ type: 'tool_call', subagentName: '' })).toBe(false);
     expect(isSubagentEvent(undefined)).toBe(false);
     expect(isSubagentEvent(null)).toBe(false);
+  });
+});
+
+describe('subagentStampOf', () => {
+  it('reads the name and id off a stamped event', () => {
+    expect(subagentStampOf({ subagentId: 's1', subagentName: 'helper' })).toEqual({ id: 's1', name: 'helper' });
+    expect(subagentStampOf({ delegatedTo: 'worker' })).toEqual({ name: 'worker' });
+    expect(subagentStampOf({ subagentId: 's1' })).toEqual({ id: 's1', name: 's1' });
+  });
+
+  it('is undefined where isSubagentEvent is false', () => {
+    for (const input of [{}, null, undefined, { subagentName: '' }]) {
+      expect(subagentStampOf(input)).toBeUndefined();
+      expect(isSubagentEvent(input)).toBe(false);
+    }
+  });
+});
+
+describe('resumedDelegationIds', () => {
+  it('is the delegation calls the state still holds a pending child for', () => {
+    expect(resumedDelegationIds({ ctx: { __subagentPending: { d1: {}, d2: {} } } })).toEqual(new Set(['d1', 'd2']));
+  });
+
+  it('is empty without any', () => {
+    expect(resumedDelegationIds(undefined).size).toBe(0);
+    expect(resumedDelegationIds({}).size).toBe(0);
+    expect(resumedDelegationIds({ ctx: {} }).size).toBe(0);
+    expect(resumedDelegationIds({ ctx: { __subagentPending: 'x' } }).size).toBe(0);
   });
 });
 

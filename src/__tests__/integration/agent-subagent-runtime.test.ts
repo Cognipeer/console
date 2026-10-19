@@ -61,7 +61,8 @@ import { getDatabase } from '@/lib/database';
 import type { IAgentConfig, IAgentConversation } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
-import { executeAgentChatLocal, executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
+import { executeAgentChatLocal, executePlaygroundChatLocal, type AgentToolCallEvent } from '@/lib/services/agents/agentService';
+import { resolveAgentPendingAction } from '@/lib/services/agents/agentActionResolution';
 import { destroyCache } from '@/lib/core/cache';
 
 const DB_NAME = 'tenant_delegation';
@@ -740,6 +741,39 @@ describe.skipIf(!SDK_HAS_DELEGATION_HARDENING)('delegation at run time', () => {
       expect(actionsOf(result)[0]).toMatchObject({ kind: 'tool_approval', tool_name: 'lookup', subagent: 'helper' });
       const message = (await stored(id)).messages.at(-1)!;
       expect(message.pendingActions?.[0]).toMatchObject({ toolName: 'lookup', subagent: 'helper' });
+    });
+
+    it('stamps the child\'s tool events, marks the re-entered delegation on resume, and carries the delegating call id on the pending action', async () => {
+      await createAgent({ subagents: [withTool()], humanInTheLoop: asking });
+      script('main', (call) => (call === 0 ? delegateTo('d1', 'helper', 'find them') : call === 1 ? delegateTo('d2', 'helper', 'and again') : answer('done')));
+      childCallsLookup();
+      const id = await freshConv();
+      const first: AgentToolCallEvent[] = [];
+
+      await playground(id, 'who is acme', { onToolEvent: (e: AgentToolCallEvent) => first.push(e) });
+
+      const delegation = first.filter((e) => e.name === 'delegate_to');
+      expect(delegation.map((e) => e.id)).toEqual(['d1']);
+      expect(delegation[0]).not.toHaveProperty('subagent');
+      expect(delegation[0]).not.toHaveProperty('resumed');
+      const lookups = first.filter((e) => e.name === 'lookup');
+      expect(lookups.every((e) => e.subagent?.name === 'helper')).toBe(true);
+
+      const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
+      expect(action).toMatchObject({ subagent: 'helper', delegationToolCallId: 'd1' });
+
+      const second: AgentToolCallEvent[] = [];
+      await resolveAgentPendingAction({
+        tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId: String(action._id),
+        body: { decision: 'allow' }, actor: { userId: OWNER, channel: 'api' }, authorize: async () => ({ allowed: true }),
+        mode: 'sync', stream: { onToolEvent: (e) => second.push(e) },
+      });
+
+      const starts = second.filter((e) => e.name === 'delegate_to' && e.phase === 'start');
+      expect(starts.find((e) => e.id === 'd1')).toMatchObject({ resumed: true });
+      expect(starts.find((e) => e.id === 'd2')).not.toHaveProperty('resumed');
+      expect(second.filter((e) => e.name === 'lookup').every((e) => e.subagent?.name === 'helper')).toBe(true);
+      expect(second.some((e) => e.name === 'lookup')).toBe(true);
     });
 
     it('refuses the call on a run nobody can answer, and the sub-agent carries on without the tool', async () => {

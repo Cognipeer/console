@@ -48,6 +48,8 @@ export interface PublicPendingAction {
     toolName?: string;
     /** The sub-agent whose tool call or question this is; absent for the agent's own. */
     subagent?: string;
+    /** The delegation tool call the sub-agent's pause belongs to. */
+    delegationToolCallId?: string;
     args?: unknown;
     questions?: IAgentPendingAction['questions'];
     allowFreeText?: boolean;
@@ -64,6 +66,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -81,6 +84,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -97,6 +101,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         kind: action.kind,
         ...(action.toolName ? { toolName: action.toolName } : {}),
         ...(action.subagent ? { subagent: action.subagent } : {}),
+        ...(action.delegationToolCallId ? { delegationToolCallId: action.delegationToolCallId } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
@@ -220,6 +225,8 @@ interface PauseEntry {
     toolName?: string;
     /** The sub-agent that asked, when the SDK surfaced a child's pause. */
     subagent?: string;
+    /** The delegating tool call the child's pause belongs to (`__subagent.parentToolCallId`). */
+    delegationToolCallId?: string;
     args?: unknown;
     questions?: IAgentUserQuestion[];
     allowFreeText?: boolean;
@@ -228,9 +235,13 @@ interface PauseEntry {
 }
 
 /** The sub-agent the SDK tagged a surfaced child pause with. */
-function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string } {
-    const tag = entry.metadata?.__subagent as { name?: unknown } | undefined;
-    return typeof tag?.name === 'string' && tag.name ? { subagent: tag.name } : {};
+function subagentField(entry: { metadata?: Record<string, unknown> }): { subagent?: string; delegationToolCallId?: string } {
+    const tag = entry.metadata?.__subagent as { name?: unknown; parentToolCallId?: unknown } | undefined;
+    if (typeof tag?.name !== 'string' || !tag.name) return {};
+    return {
+        subagent: tag.name,
+        ...(typeof tag.parentToolCallId === 'string' && tag.parentToolCallId ? { delegationToolCallId: tag.parentToolCallId } : {}),
+    };
 }
 
 /** The approvals, questions and client tool calls the SDK state is waiting on. */
@@ -341,6 +352,7 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         ...(entry.toolCallId ? { toolCallId: entry.toolCallId } : {}),
         ...(entry.toolName ? { toolName: entry.toolName } : {}),
         ...(entry.subagent ? { subagent: entry.subagent } : {}),
+        ...(entry.delegationToolCallId ? { delegationToolCallId: entry.delegationToolCallId } : {}),
         ...(entry.args !== undefined ? { args: entry.args } : {}),
         ...(entry.questions ? { questions: entry.questions } : {}),
         ...(entry.allowFreeText !== undefined ? { allowFreeText: entry.allowFreeText } : {}),
