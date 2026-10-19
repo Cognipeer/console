@@ -69,7 +69,7 @@ vi.mock('@/lib/services/agents/sessionFiles', async (importOriginal) => {
 import { agentSandboxRunner, type AgentSandboxRunner } from '@/enterprise/registry';
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { buildAgentSandboxTools, destroyConversationSandbox } from '@/lib/services/agents/agentSandboxTools';
-import { sealAgentSandboxConfig } from '@/lib/services/agents/agentSandboxSecrets';
+import { AGENT_SANDBOX_SECRET_MASK, sealAgentSandboxConfig } from '@/lib/services/agents/agentSandboxSecrets';
 import type { IAgentSandboxConfig } from '@/lib/database';
 
 function fakeRunner() {
@@ -282,6 +282,202 @@ describe('secrets — seed files, outputs and an unreadable store', () => {
         expect(out.notice).toMatch(/secrets .* unavailable/);
         expect(out.notice).toMatch(/encryption key/);
         expect((fake.calls[1]!.args[2] as { env: Record<string, string> }).env).toEqual({});
+    });
+});
+
+describe('values the sandbox launch carries', () => {
+    // What the machine was started with (its template's typed env, secret Config items): the agent never passes these,
+    // so the model could only meet them in what a command, a file or an error shows.
+    const LAUNCH = 'launch-secret-7f3a';
+    const OTHER = 'template-db-pass-91';
+    const MASK = AGENT_SANDBOX_SECRET_MASK;
+    const answering = (stdout: string, stderr = '') => async (...args: Parameters<AgentSandboxRunner['exec']>) => {
+        fake.calls.push({ op: 'exec', args });
+        return { exitCode: 0, stdout, stderr };
+    };
+
+    beforeEach(() => {
+        fake.runner.launchSecretValues = async (...args) => {
+            fake.calls.push({ op: 'launchSecretValues', args });
+            return [LAUNCH, OTHER];
+        };
+    });
+
+    it('asks the runner once per run, for the machine it just ensured, before the first command', async () => {
+        const { byName } = await build({ enabled: true });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        await byName('sandbox_read_file').invoke({ path: 'a.txt' });
+
+        expect(fake.ops()).toEqual(['ensureInstance', 'launchSecretValues', 'exec', 'exec', 'readFile']);
+        const [ref, instanceId] = fake.calls[1].args as [Record<string, unknown>, string];
+        expect(instanceId).toBe('sbx-1');
+        // The same reference every other runner call carries: the tenant database and the agent.
+        expect(ref).toEqual(fake.calls[0].args[0]);
+        expect(ref).toMatchObject({ tenantDbName: 'tenant_acme', agentKey: 'builder' });
+    });
+
+    it('asks again for the machine of the next run', async () => {
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
+        for (let run = 0; run < 2; run++) {
+            const { byName, cleanup } = await build({ enabled: true }, { conversation: { _id: 'conv-1' } });
+            await byName('sandbox_exec').invoke({ command: 'true' });
+            await cleanup();
+        }
+        expect(fake.ops()).toEqual(['ensureInstance', 'launchSecretValues', 'exec', 'ensureInstance', 'launchSecretValues', 'exec']);
+        expect(fake.calls[4].args[1]).toBe('sbx-1');
+    });
+
+    it('masks them in the stdout and stderr of a command and of run_code', async () => {
+        fake.runner.exec = answering(`env: TOKEN=${LAUNCH}`, `db password ${OTHER} rejected`);
+        fake.runner.runCode = async (...args) => {
+            fake.calls.push({ op: 'runCode', args });
+            return { exitCode: 0, stdout: `${LAUNCH}${OTHER}`, stderr: LAUNCH };
+        };
+        const { byName } = await build({ enabled: true });
+
+        const exec = await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string; stderr: string };
+        expect(exec.stdout).toBe(`env: TOKEN=${MASK}`);
+        expect(exec.stderr).toBe(`db password ${MASK} rejected`);
+        const code = await byName('sandbox_run_code').invoke({ language: 'python', code: 'print(1)' }) as { stdout: string; stderr: string };
+        expect(code).toMatchObject({ stdout: `${MASK}${MASK}`, stderr: MASK });
+    });
+
+    it('masks them together with the agent\'s own secrets', async () => {
+        fake.runner.exec = answering(`a=s3cr3t-value b=${LAUNCH}`);
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: 's3cr3t-value' } }, undefined)!;
+        const { byName } = await build(sandbox);
+        expect((await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string }).stdout).toBe(`a=${MASK} b=${MASK}`);
+    });
+
+    it('masks a value before the output is cut, so that a cut cannot leave half of it showing', async () => {
+        // 16,000 characters are kept; the front of the value would be cut off and its back left readable.
+        const padding = 'x'.repeat(15_990);
+        fake.runner.exec = answering(`${LAUNCH}${padding}`, `${padding}${OTHER}`);
+        const { byName } = await build({ enabled: true });
+        const out = await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string; stderr: string };
+        expect(out.stdout).toBe(`${MASK}${padding}`);
+        expect(out.stdout).not.toContain(LAUNCH.slice(8));
+        expect(out.stderr).toBe(`${padding}${MASK}`);
+    });
+
+    it('masks them in a file the model reads, and before the file is clipped', async () => {
+        fake.runner.readFile = async (...args) => {
+            fake.calls.push({ op: 'readFile', args });
+            // 100,007 characters before masking, 99,982 after: the clip at 100,000 would land inside the value.
+            return `PASSWORD=${OTHER}\n${'y'.repeat(99_960)}${LAUNCH}`;
+        };
+        const { byName } = await build({ enabled: true });
+        const content = await byName('sandbox_read_file').invoke({ path: 'config.env' }) as string;
+        expect(content).toBe(`PASSWORD=${MASK}\n${'y'.repeat(99_960)}${MASK}`);
+        expect(content).not.toContain(LAUNCH.slice(5));
+    });
+
+    it('masks them in the names and paths of a listing and leaves the rest of an entry alone', async () => {
+        fake.runner.listFiles = async (...args) => {
+            fake.calls.push({ op: 'listFiles', args });
+            return [
+                { name: `backup-${LAUNCH}.tar`, path: `/workspace/backup-${LAUNCH}.tar`, type: 'file', size: 10 },
+                { name: 'src', path: '/workspace/src', type: 'directory', size: 0 },
+            ];
+        };
+        const { byName } = await build({ enabled: true });
+        expect(await byName('sandbox_list_files').invoke({})).toEqual([
+            { name: `backup-${MASK}.tar`, path: `/workspace/backup-${MASK}.tar`, type: 'file', size: 10 },
+            { name: 'src', path: '/workspace/src', type: 'directory', size: 0 },
+        ]);
+    });
+
+    it('masks them in the text files collected from /outputs', async () => {
+        savedOutputs.length = 0;
+        conversations.set('conv-1', { _id: 'conv-1', agentKey: 'builder', projectId: 'p1', metadata: {} });
+        const files: Record<string, Buffer> = { '/outputs/report.txt': Buffer.from(`key: ${LAUNCH}\nend`) };
+        fake.runner.exec = async (...args) => {
+            fake.calls.push({ op: 'exec', args });
+            const command = (args[2] as { command: string }).command;
+            return command.startsWith('find ')
+                ? { exitCode: 0, stdout: Object.entries(files).map(([path, data]) => `10|${data.length}|${path}`).join('\n'), stderr: '' }
+                : { exitCode: 0, stdout: 'ok', stderr: '' };
+        };
+        fake.runner.readFileBytes = async (_ref, _id, path) => files[path]!;
+        const { byName, collectOutputs } = await build({ enabled: true }, {
+            conversation: { _id: 'conv-1', metadata: {} },
+            outputs: { agentConfig: undefined, actorId: 'user-1' },
+        });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        await collectOutputs();
+        expect(savedOutputs.find((f) => f.fileName === 'report.txt')!.data.toString('utf8')).toBe(`key: ${MASK}\nend`);
+    });
+
+    it('masks them in the error a tool call ends with, and keeps what kind of error it was', async () => {
+        class ExecError extends Error {
+            constructor(message: string) {
+                super(message);
+                this.name = 'ExecError';
+            }
+        }
+        fake.runner.exec = async () => { throw new ExecError(`connect to db failed: password=${OTHER}`); };
+        const { byName } = await build({ enabled: true });
+        const failure = await byName('sandbox_exec').invoke({ command: 'x' }).catch((error: Error) => error) as Error;
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.message).toBe(`connect to db failed: password=${MASK}`);
+        expect(failure.name).toBe('ExecError');
+        // The stack goes to the trace: it holds the message, so it must not hold the value either.
+        expect(failure.stack ?? '').not.toContain(OTHER);
+    });
+
+    it('lets an error that carries nothing to mask go on as the same object', async () => {
+        const original = new Error('The sandbox is not running (exec)');
+        fake.runner.exec = async () => { throw original; };
+        const { byName } = await build({ enabled: true });
+        await expect(byName('sandbox_exec').invoke({ command: 'x' })).rejects.toBe(original);
+    });
+
+    it.each([
+        ['sandbox_run_code', { language: 'python', code: 'print(1)' }, 'runCode'],
+        ['sandbox_read_file', { path: 'a.txt' }, 'readFile'],
+        ['sandbox_write_file', { path: 'a.txt', content: 'x' }, 'writeFile'],
+        ['sandbox_list_files', {}, 'listFiles'],
+        ['sandbox_preview_link', { port: 3000 }, 'previewLink'],
+    ] as const)('masks them in the error of %s', async (tool, args, method) => {
+        (fake.runner as unknown as Record<string, unknown>)[method] = async () => { throw new Error(`failed with ${LAUNCH}`); };
+        const { byName } = await build({ enabled: true, preview: { enabled: true } });
+        const failure = await byName(tool).invoke({ ...args }).catch((error: Error) => error) as Error;
+        expect(failure.message).toBe(`failed with ${MASK}`);
+    });
+
+    it('masks the agent\'s own secrets in the error of a machine that would not start', async () => {
+        // The launch values are not known yet at this point: only the agent's own are.
+        fake.runner.ensureInstance = async () => { throw new Error('The sandbox failed to start: image pull denied for s3cr3t-value'); };
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: 's3cr3t-value' } }, undefined)!;
+        const { byName } = await build(sandbox);
+        await expect(byName('sandbox_exec').invoke({ command: 'ls' })).rejects.toThrow(`The sandbox failed to start: image pull denied for ${MASK}`);
+    });
+
+    it('applies the same length rule as for the agent\'s own secrets: short and empty values are left alone', async () => {
+        fake.runner.launchSecretValues = async () => ['abc', '', LAUNCH];
+        fake.runner.exec = answering(`abc ${LAUNCH} abc`);
+        const { byName } = await build({ enabled: true });
+        expect((await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string }).stdout).toBe(`abc ${MASK} abc`);
+    });
+
+    it('goes on without them when the runner cannot tell, and still masks the agent\'s own secrets', async () => {
+        fake.runner.launchSecretValues = async () => { throw new Error('instance store unavailable'); };
+        fake.runner.exec = answering(`a=s3cr3t-value b=${LAUNCH}`);
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: 's3cr3t-value' } }, undefined)!;
+        const { byName } = await build(sandbox);
+        const out = await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string };
+        expect(out.stdout).toBe(`a=${MASK} b=${LAUNCH}`);
+    });
+
+    it('behaves as before with a runner that cannot name them (an older module)', async () => {
+        delete fake.runner.launchSecretValues;
+        fake.runner.exec = answering(`a=s3cr3t-value b=${LAUNCH}`);
+        const sandbox = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: 's3cr3t-value' } }, undefined)!;
+        const { byName } = await build(sandbox);
+        const out = await byName('sandbox_exec').invoke({ command: 'env' }) as { stdout: string };
+        expect(out.stdout).toBe(`a=${MASK} b=${LAUNCH}`);
+        expect(fake.ops()).toEqual(['ensureInstance', 'exec']);
     });
 });
 

@@ -1029,6 +1029,12 @@ export interface ISandboxInstance extends IUsageAttributionFields {
   /** Whole config groups bound to this sandbox's env, resolved at each launch; a variable set by name wins. */
   groupRefs?: IConfigGroupRef[] | null;
   /**
+   * How the launch values reach the sandbox, fixed when it is created. 'file': written after each start to a
+   * memory-only file inside the sandbox that console commands read, so the container or pod definition holds
+   * none of them. 'legacy' (or absent, rows from before): set on the container or pod definition at launch.
+   */
+  envDelivery?: 'file' | 'legacy' | null;
+  /**
    * Persistent sandbox: the control plane keeps it alive across node/daemon
    * failures (boot reconcile recreates the container and re-mounts the same
    * volume) and exempts it from the idle reaper. Ephemeral boxes (`false`) are
@@ -1173,6 +1179,15 @@ export interface ISandboxSnapshot {
   resources: Record<string, unknown> | null;
   /** Pre-started "warm" sandboxes kept ready to resume from this snapshot (0/null = off; only for volume-less snapshots). */
   warmPoolSize: number | null;
+  /**
+   * The source sandbox's delivery mode. A 'file' sandbox's image holds no launch values, so the snapshot carries
+   * them for restores and forks: its own sealed env and Config references (resolved again at each launch).
+   */
+  envDelivery?: 'file' | 'legacy' | null;
+  envSealed?: string | null;
+  envKeys?: string[];
+  envRefs?: Record<string, IConfigValueRef> | null;
+  groupRefs?: IConfigGroupRef[] | null;
   sizeBytes: number | null;
   status: SandboxSnapshotStatus;
   lastError: string | null;
