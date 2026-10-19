@@ -356,6 +356,22 @@ describe('an approval or a question whose only id is an attribute', () => {
     expect(approvals(buildSessionModel(feed).tree)).toHaveLength(1);
   });
 
+  it('pairs the identity sections the SDK exports with content capture off (the shape agent-sdk 0.18 emits), with the real decision', () => {
+    const withSection = (fixture: unknown, section: Record<string, unknown>) => {
+      const request = asRequest(fixture);
+      const span = spansOf(request).find((candidate) => attrOf(candidate, 'cognipeer.event.type')?.stringValue === 'tool_approval')!;
+      span.attributes = [...(span.attributes ?? []), { key: 'cognipeer.sections', value: { stringValue: JSON.stringify([section]) } }];
+      return request;
+    };
+    const feed = feedOf(
+      withSection(legsLeg1, { kind: 'metadata', label: 'Approval ids', identity: true, data: { approvalId: 'ap_9', toolCallId: 'tc_1', status: 'pending' } }),
+      withSection(legsLeg2, { kind: 'metadata', label: 'Decision ids', identity: true, data: { approvalId: 'ap_9', toolCallId: 'tc_1', decision: 'rejected' } }),
+    );
+    const rows = approvals(buildSessionModel(feed).tree);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].human).toMatchObject({ kind: 'approval', key: 'ap_9', state: 'rejected' });
+  });
+
   it('leaves an id that the sections already carry alone', () => {
     const request = stamp(legsLeg1, 'cognipeer.approval.id', 'ap_attr');
     const span = spansOf(request).find((candidate) => attrOf(candidate, 'cognipeer.event.type')?.stringValue === 'tool_approval')!;
