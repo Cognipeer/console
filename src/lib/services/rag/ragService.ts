@@ -5,6 +5,8 @@
  * retrieval (query → embed → vector query) using existing services.
  */
 
+import { assertServiceEnabled, ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
+import { RagModuleInactiveError } from './errors';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -839,6 +841,7 @@ export async function ingestDocument(
   projectId: string | undefined,
   request: RagIngestRequest,
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -973,6 +976,17 @@ export async function indexPendingRagDocument(
   }
   if (doc.status === 'indexed') return;
 
+  // A queued document whose service has been switched off is failed, not
+  // retried: the job is acknowledged and re-ingesting is the operator's call
+  // once the service is back.
+  const off = await serviceOffReason({ tenantDbName, tenantId }, 'rag');
+  if (off) {
+    const refusal = new ServiceDisabledError(off);
+    await db.updateRagDocument(documentId, { status: 'failed', errorMessage: `${refusal.code}: ${refusal.message}` });
+    logger.warn('Deferred Knowledge Engine ingest refused: service is off', { documentId, ragModuleKey, code: refusal.code });
+    return;
+  }
+
   const ragModule = await db.findRagModuleByKey(ragModuleKey, projectId);
   if (!ragModule) {
     await db.updateRagDocument(documentId, {
@@ -1099,6 +1113,7 @@ export async function ingestFile(
     createdBy: string;
   },
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const isPlainText = isPlainTextFile(request.fileName, request.contentType);
 
   let textContent: string;
@@ -1216,6 +1231,7 @@ export async function queryRag(
   request: RagQueryRequest,
   options?: { signal?: AbortSignal },
 ): Promise<RagQueryResult> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const startTime = Date.now();
   const state: RagQueryState = { moduleFound: false };
   try {
@@ -1267,6 +1283,9 @@ async function runRagQuery(
 
   const ragModule = await db.findRagModuleByKey(request.ragModuleKey, projectId);
   if (!ragModule) throw new Error(`Knowledge Engine module "${request.ragModuleKey}" not found`);
+  // A switched-off module is not queried. Checked before moduleFound is set so
+  // the refusal is not recorded as a health fault of the knowledge base.
+  if (ragModule.status !== 'active') throw new RagModuleInactiveError();
   state.moduleFound = true;
   state.key = ragModule.key;
   state.projectId = ragModule.projectId;
@@ -1715,6 +1734,7 @@ export async function reingestDocument(
     updatedBy: string;
   },
 ): Promise<RagDocument> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
 
@@ -1917,3 +1937,5 @@ export async function aggregateRagQueryScoreDistribution(
   await db.switchToTenant(tenantDbName);
   return db.aggregateRagQueryScoreDistribution(ragModuleKey, options);
 }
+
+export { RagModuleInactiveError };

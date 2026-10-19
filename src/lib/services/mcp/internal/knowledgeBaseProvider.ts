@@ -25,6 +25,7 @@ import {
   getRagModule,
   queryRag,
 } from '@/lib/services/rag/ragService';
+import { RagModuleInactiveError } from '@/lib/services/rag/errors';
 import type {
   InternalMcpInstanceOption,
   InternalMcpProvider,
@@ -192,15 +193,21 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
           ? (args.filter as Record<string, unknown>)
           : undefined;
       // topK is intentionally omitted — queryRag falls back to the module's default.
-      const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
-        ragModuleKey: instanceKey,
-        query,
-        filter,
-      }, { signal: currentTurnSignal() });
-      return {
-        query: result.query,
-        matches: result.matches,
-      };
+      try {
+        const result = await queryRag(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+          ragModuleKey: instanceKey,
+          query,
+          filter,
+        }, { signal: currentTurnSignal() });
+        return {
+          query: result.query,
+          matches: result.matches,
+        };
+      } catch (error) {
+        // A switched-off knowledge base is a caller-visible state, not a server fault.
+        if (error instanceof RagModuleInactiveError) throw new McpToolInputError(error.message);
+        throw error;
+      }
     }
 
     if (toolName === READ_TOOL_NAME || toolName === READ_LINES_TOOL_NAME) {

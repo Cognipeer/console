@@ -11,6 +11,7 @@
  * otherwise a prompt-injected URL would receive the crawler's secrets.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import type { ICrawler } from '@/lib/database';
 import { crawl } from './engine';
@@ -84,6 +85,7 @@ export async function fetchPageWithCrawler(
   url: string,
   signal?: AbortSignal,
 ): Promise<FetchedPage> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const db = await withTenantDb(ctx.tenantDbName);
   const crawler = await loadCrawler(db, ctx, crawlerKey);
   if (!crawler) throw new Error(`Crawler "${crawlerKey}" not found`);

@@ -7,6 +7,7 @@
  * testable without live model calls.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -724,6 +725,7 @@ function assertTurnModeSupported(target: IEvaluationTarget, turnMode: Evaluation
 
 /** Resolve suite/target/dataset, guard against a concurrent run, create a pending run. */
 async function createPendingRun(params: RunSuiteParams, mode: IEvaluationRun['mode']): Promise<WithId<IEvaluationRun>> {
+  await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'evaluations');
   const { tenantDbName, tenantId, projectId, createdBy, suiteKey } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -779,6 +781,9 @@ export async function executeRun(
   await db.switchToTenant(tenantDbName);
 
   try {
+    // Inside the try so the run is recorded as failed rather than left pending
+    // when the service has been switched off since it was queued.
+    await assertServiceEnabled({ tenantDbName, tenantId }, 'evaluations');
     const suite = await db.findEvaluationSuiteByKey(suiteKey, projectId);
     if (!suite) throw new Error(`Evaluation suite "${suiteKey}" not found`);
     const target = await db.findEvaluationTargetByKey(suite.targetKey, projectId);

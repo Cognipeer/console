@@ -37,6 +37,8 @@ import { auditLevelOf } from '@/lib/iam/denialAudit';
 import { serviceDenialReason } from '@/lib/iam/denialReason';
 import type { IamResource } from '@/lib/iam/entities';
 import { canonicalRoute } from '@/lib/iam/routePattern';
+import { getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
+import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
 import { isTenantRole } from '@/lib/iam/identity';
 import {
@@ -411,6 +413,13 @@ export async function authorizeServiceForRequest(
   service: PermissionService,
   options: ServiceAuthzOptions & { rbac?: SessionRbacHint } = {},
 ): Promise<ServiceAuthzResult> {
+  // The resource a route serves can belong to a switched-off service even when the route's own service is on
+  // (`/responses` with an agent while agents are off): refused before any permission is asked.
+  const tenantId = request.apiTokenContext?.tenantId ?? getSessionContext(request)?.tenantId;
+  if (tenantId) {
+    const off = await serviceOffReason({ tenantId }, service);
+    if (off) throw serviceDisabledRefusal(new ServiceDisabledError(off));
+  }
   const result = await decideServiceForRequest(request, service, options);
   if (!result.allowed && result.decisionId) {
     if (result.unavailable) {
@@ -906,6 +915,42 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
   if (!verdict.allowed) throw refusalError(request, verdict);
 }
 
+/** A switched-off service refuses like the gate does, so every API surface and dialect renders it the same way. */
+function serviceDisabledRefusal(error: ServiceDisabledError): RbacAuthorizationError {
+  return new RbacAuthorizationError(error.message, error.status, error.toBody());
+}
+
+/**
+ * Refuses a request whose service is switched off for the tenant (environment
+ * or license, see serviceAvailability.ts). It runs for every declared service
+ * route, whatever the RBAC settings of the wrapper, and also checks the
+ * enterprise module that owns the path, so a module such as `mcp-hub` can be
+ * off while `mcp` stays on. A route open to several services (`anyOf`) is
+ * refused here only when all of them are off; otherwise its handler checks the
+ * one it resolved (authorizeServiceForRequest).
+ */
+async function enforceServiceAvailability(request: FastifyRequest, tenantId: string): Promise<void> {
+  const pathname = getRequestPathname(request);
+  const target = resolveRequestAuthz(request, pathname).effective;
+  const scope = { tenantId };
+
+  const enterpriseModule = getEnterpriseModuleForPath(pathname);
+  if (enterpriseModule) {
+    const off = await serviceOffReason(scope, enterpriseModule);
+    if (off) throw serviceDisabledRefusal(new ServiceDisabledError(off));
+  }
+  if (target.kind !== 'service') return;
+
+  const services = [target.service, ...(target.anyOf ?? [])];
+  let first: Awaited<ReturnType<typeof serviceOffReason>> = null;
+  for (const service of services) {
+    const off = await serviceOffReason(scope, service);
+    if (!off) return;
+    first ??= off;
+  }
+  if (first) throw serviceDisabledRefusal(new ServiceDisabledError(first));
+}
+
 async function enforceApiTokenRbac(
   request: FastifyRequest,
   context: ApiTokenContext,
@@ -1036,6 +1081,7 @@ export function withApiRequestContext<
 
     try {
       if (session) {
+        await enforceServiceAvailability(request, session.tenantId);
         await enforceSessionRbac(request, session);
         applyGateLoadedRole(request, session);
       }
@@ -1378,6 +1424,7 @@ export function withClientApiRequestContext<
       // A call that carries a user token acts for that person: from here on they are the principal (capped by this
       // token's scope and project), and this token stays the actor.
       apiToken = await applyDelegation(request, apiToken);
+      await enforceServiceAvailability(request, apiToken.tenantId);
       if (enforceRbac) {
         await enforceApiTokenRbac(request, apiToken);
       }

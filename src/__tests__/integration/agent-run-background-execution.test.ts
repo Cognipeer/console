@@ -73,6 +73,7 @@ import {
 } from '@/lib/services/agents/agentRunService';
 import { queueAgentRun } from '../helpers/agent-runs';
 import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
+import { clearServiceAvailabilityMemo, isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -968,5 +969,69 @@ describe('queued runs through startAgentRun (§4.3–§4.8)', () => {
       stopReason: 'error',
     });
     await job;
+  });
+  describe('the agents service switched off', () => {
+    /** Runs `fn` with the agents service off for the deployment, and puts the environment back. */
+    async function withAgentsOff<T>(fn: () => Promise<T>): Promise<T> {
+      process.env.CONSOLE_DISABLED_SERVICES = 'agents';
+      reloadConfig();
+      clearServiceAvailabilityMemo();
+      try {
+        return await fn();
+      } finally {
+        delete process.env.CONSOLE_DISABLED_SERVICES;
+        reloadConfig();
+        clearServiceAvailabilityMemo();
+      }
+    }
+
+    it('a queued run of such a tenant fails service_disabled at the worker, without invoking, and is not retried', async () => {
+      const run = await createRun('conv-agents-off');
+
+      await withAgentsOff(() => runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName }));
+
+      expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+      expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
+        status: 'failed',
+        errorReason: 'service_disabled',
+        stopReason: 'error',
+      });
+      // A second delivery of the same job finds a finished run and leaves it alone.
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+      expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+    });
+
+    it('a new run, a resume and a continue are refused before anything is queued', async () => {
+      await withAgentsOff(async () => {
+        const started = await startAgentRun({
+          tenantId, tenantDbName: dbName, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+          conversationId: 'conv-agents-off-start', userMessage: 'hello', userId: 'user-1',
+          channel: 'runs', execution: { kind: 'queued' },
+        }).catch((error) => error);
+        expect(isServiceDisabledError(started)).toBe(true);
+        expect(started).toMatchObject({ status: 403, code: 'service_disabled', service: 'agents' });
+
+        const resumeInput = {
+          tenantId, tenantDbName: dbName, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+          conversationId: 'conv-agents-off-resume', userId: 'user-1',
+        };
+        expect(isServiceDisabledError(await queueAgentRunResume({ ...resumeInput, resumeActionIds: ['a1'] }).catch((e) => e))).toBe(true);
+        expect(isServiceDisabledError(await queueAgentRunContinue(resumeInput).catch((e) => e))).toBe(true);
+      });
+      expect(hoisted.publish).not.toHaveBeenCalled();
+    });
+
+    it('a run whose precondition check cannot be made fails closed instead of executing', async () => {
+      const run = await createRun('conv-precondition-unreadable');
+      vi.spyOn(db, 'findAgentByKey').mockRejectedValue(new Error('db blip'));
+
+      await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+      expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+      expect(await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id))).toMatchObject({
+        status: 'failed',
+        errorReason: 'precondition_failed',
+      });
+    });
   });
 });

@@ -11,6 +11,12 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 const hoisted = vi.hoisted(() => ({ safeFetch: vi.fn() }));
 
 vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
+// The tool service asks whether the tools service is on; with no database in a
+// unit test that lookup would try to reach one on every call.
+vi.mock('@/lib/services/availability/serviceAvailability', async (importActual) => ({
+  ...(await importActual<typeof import('@/lib/services/availability/serviceAvailability')>()),
+  assertServiceEnabled: async () => undefined,
+}));
 
 vi.mock('@/lib/services/tools', async (importActual) => ({
   ...(await importActual<typeof import('@/lib/services/tools')>()),

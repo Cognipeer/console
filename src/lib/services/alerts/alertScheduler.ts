@@ -10,6 +10,7 @@
  * predictable across tenant databases.
  */
 
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
@@ -83,6 +84,9 @@ async function runOnce(manual = false): Promise<{ firedCount: number; processedT
 
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      // Switched off for this tenant: skip the tick without claiming or advancing
+      // anything, so the work runs on a later tick once the service is back on.
+      if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'alerts'))) continue;
       if (Date.now() - startedAt.getTime() > SWEEP_BUDGET_MS) {
         logger.warn('Sweep budget exhausted; the remaining tenants are evaluated on the next tick', {
           processedTenants,

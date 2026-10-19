@@ -7,6 +7,7 @@
  *  - CRUD for tenant-scoped reusable PII policies
  */
 
+import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -360,7 +361,9 @@ export async function scanWithPolicy(params: {
   if (!policy) {
     throw new Error(`PII policy with key "${params.policyKey}" not found`);
   }
-  if (!policy.enabled) {
+  // Fail OPEN when the PII service is switched off for the tenant: the text
+  // comes back unchanged, exactly as for a disabled policy.
+  if (!policy.enabled || await safetyCheckSkipped({ tenantDbName: params.tenantDbName }, 'pii', { policyKey: params.policyKey })) {
     return {
       inputLength: params.text.length,
       findings: [],

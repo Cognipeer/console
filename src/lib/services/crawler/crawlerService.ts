@@ -6,6 +6,7 @@
  * the queue consumer).
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall, queueNameFor } from '@/lib/core/cluster';
@@ -366,6 +367,7 @@ export async function runCrawler(
   idOrKey: string,
   options: RunCrawlerOptions,
 ): Promise<CrawlRunSummary> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const db = await withTenantDb(ctx.tenantDbName);
   const crawler = await loadCrawler(db, ctx, idOrKey);
   if (!crawler) throw new Error(`Crawler "${idOrKey}" not found`);
@@ -417,6 +419,7 @@ export async function runAdhocCrawl(
   ctx: CrawlerContext,
   input: AdhocCrawlInput,
 ): Promise<CrawlRunSummary> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
   const db = await withTenantDb(ctx.tenantDbName);
   const plan: ICrawlPlanSnapshot = {
     seeds: input.seeds,

@@ -28,7 +28,7 @@ import type {
 } from '@/lib/database';
 import { countRequest } from '@/lib/services/auth/sharedRateCounter';
 import type { VariableIssue } from './agentVariables';
-import { fireTrigger, triggerAgentConfig, type FireTriggerResult, type TriggerTenant } from './agentTriggers';
+import { fireTrigger, triggerAgentConfig, triggerTargetAvailability, type FireTriggerResult, type TriggerTenant } from './agentTriggers';
 import { apiErrorBody, isAgentRunActive, publicAgentRunId } from './agentRunService';
 import {
   allowedHeaders,
@@ -400,9 +400,10 @@ export async function processWebhookDelivery(db: DatabaseProvider, input: Webhoo
       await record({ outcome: 'ignored', httpStatus: 200, reason: 'test' });
       return { status: 200, body: { ok: true, event: 'test' } };
     }
-    const agent = trigger.enabled ? await db.findAgentByKey(trigger.agentKey, trigger.projectId) : null;
-    if (!trigger.enabled || !agent || agent.status !== 'active') {
-      await record({ outcome: 'ignored', httpStatus: 200, reason: trigger.enabled ? 'agent is not active' : 'trigger is disabled' });
+    // A disabled trigger, an inactive agent and an agents service that is switched off all answer alike.
+    const target = trigger.enabled ? await triggerTargetAvailability(db, trigger) : null;
+    if (!target?.ok) {
+      await record({ outcome: 'ignored', httpStatus: 200, reason: target ? target.reason : 'trigger is disabled' });
       return { status: 200, body: { accepted: false, reason: 'disabled' } };
     }
 

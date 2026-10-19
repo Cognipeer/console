@@ -1066,6 +1066,38 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
     expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
   });
 
+  it('leaves the request open when the channel needs the agent on and it is switched off', async () => {
+    const { id, actionId } = await paused();
+    const agent = await db.findAgentByKey(AGENT_KEY, PROJECT_ID);
+    await db.updateAgent(String(agent!._id), { status: 'inactive' } as never);
+    const modelCalls = hoisted.buildGatewayChatModel.mock.calls.length;
+    const eventsBefore = (await events(id)).length;
+
+    const client = { requireActiveAgent: true };
+    expect(await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    expect(await checkAgentPendingActionResolution({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    // Nothing was recorded: the same request is still open and the agent was not run.
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+    expect((await events(id)).length).toBe(eventsBefore);
+    expect(hoisted.buildGatewayChatModel.mock.calls.length).toBe(modelCalls);
+
+    // The dashboard does not ask for it, so a draft agent can still be tested.
+    expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
+
+    // Switched back on, the same approval goes through on the client channel.
+    await db.updateAgent(String(agent!._id), { status: 'active' } as never);
+    expect((await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).kind).toBe('resumed');
+  });
+
   it('says invalid for a body the resolve flow would refuse', async () => {
     const { id, actionId } = await paused();
     expect(await check(id, actionId, {})).toMatchObject({ kind: 'invalid' });

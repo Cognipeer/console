@@ -14,6 +14,7 @@ import {
   getMemoryStore,
   listMemoryItems,
   listMemoryStores,
+  MemoryStoreInputError,
   recallForChat,
   searchMemories,
   updateMemoryItem,
@@ -106,6 +107,9 @@ export const clientMemoryApiPlugin: FastifyPluginAsync = async (app) => {
       });
       return reply.code(200).send({ store });
     } catch (error) {
+      if (error instanceof MemoryStoreInputError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       logger.error('Update client memory store error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

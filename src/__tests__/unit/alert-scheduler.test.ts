@@ -7,6 +7,9 @@ const cache = {
 };
 const mainDb = { listTenants: vi.fn() };
 
+vi.mock('@/lib/services/availability/serviceAvailability', () => ({
+  isServiceEnabled: vi.fn(async () => true),
+}));
 vi.mock('@/lib/core/cache', () => ({ getCache: vi.fn(async () => cache) }));
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => mainDb),
@@ -102,6 +105,8 @@ describe('alert scheduler', () => {
     vi.mocked(evaluateTenantAlerts).mockImplementationOnce(() => new Promise<number>((resolve) => { release = () => resolve(0); }));
     const first = triggerAlertSchedulerRun();
     await vi.waitFor(() => expect(getAlertSchedulerStatus().running).toBe(true));
+    // The sweep awaits the tenant's service switch before it evaluates.
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
     expect(await triggerAlertSchedulerRun()).toEqual({ firedCount: 0, processedTenants: 0 });
     release();
     await first;

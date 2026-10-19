@@ -7,6 +7,7 @@
  * and end-of-run webhooks, and updates job counters as work progresses.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { ICrawlJob, ICrawlPlanSnapshot } from '@/lib/database';
@@ -142,6 +143,9 @@ async function runCrawlJobInner(
   }, 250);
 
   try {
+    // After the claim and inside the try: a queued job whose service has been
+    // switched off ends as failed (summary webhook included) and is not retried.
+    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'crawler');
     for await (const page of crawl(plan, {
       logger: {
         info: (m, meta) => logger.info(m, { jobId, ...meta }),

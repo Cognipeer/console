@@ -8,6 +8,7 @@
  * on a miss.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getDatabase, type IWebSearchRunLog } from '@/lib/database';
@@ -276,6 +277,7 @@ export async function runWebSearch(
   projectId: string | undefined,
   options: RunWebSearchOptions,
 ): Promise<WebSearchResult> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'websearch');
   const query = options.query?.trim();
   if (!query) throw new Error('`query` is required.');
 

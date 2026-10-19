@@ -18,6 +18,7 @@ import type {
   QueueProvider,
   QueuePayload,
 } from './queueProvider.interface';
+import { isNonRetryableJobError } from './queueProvider.interface';
 
 const log = createLogger('queue.memory');
 
@@ -202,7 +203,7 @@ export class MemoryQueueProvider implements QueueProvider {
       job.resolve?.(result);
       if (job.dedupKey) this.dedup.delete(job.dedupKey);
     } catch (error) {
-      if (job.attemptsMade < job.attempts) {
+      if (job.attemptsMade < job.attempts && !isNonRetryableJobError(error)) {
         job.availableAt = Date.now() + job.backoffMs * 2 ** (job.attemptsMade - 1);
         const list = this.queues.get(job.queueName) ?? [];
         list.push(job);

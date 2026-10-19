@@ -37,6 +37,34 @@ export class ProviderCredentialDecryptError extends Error {
   }
 }
 
+/**
+ * The operator switched this provider off. Carries `status`/`code` so the
+ * inference error normaliser and API error handlers answer 403 rather than
+ * a generic 500.
+ */
+export class ProviderDisabledError extends Error {
+  readonly status = 403;
+  readonly code = 'provider_disabled';
+  readonly providerKey: string;
+
+  constructor(providerKey: string) {
+    super(`Provider "${providerKey}" is disabled`);
+    this.name = 'ProviderDisabledError';
+    this.providerKey = providerKey;
+  }
+}
+
+/**
+ * Only an explicit `disabled` blocks use. `errored` is left alone: it records
+ * a failed connection test, and the next call is how a recovered provider is
+ * noticed.
+ */
+export function assertProviderEnabled(record: Pick<IProviderRecord, 'key' | 'status'>): void {
+  if (record.status === 'disabled') {
+    throw new ProviderDisabledError(record.key);
+  }
+}
+
 export interface CreateProviderConfigInput {
   projectId?: string;
   /** Projects the provider is assigned to on creation (deduped; `projectId` is added when given). */

@@ -35,6 +35,16 @@ export type LicenseType =
 
 export type OfflineLicenseLimits = Pick<QuotaResourceCaps, 'maxProjects'>;
 
+/**
+ * The optional `services` claim of a license: `allow` keeps only the listed
+ * services on, `deny` switches the listed ones off. A license without it — every
+ * license issued before the claim existed — leaves every service as it is.
+ */
+export interface LicenseServiceClaim {
+  allow?: string[];
+  deny?: string[];
+}
+
 export interface OfflineLicensePayload extends JWTPayload {
   licenseId: string;
   licenseType: LicenseType;
@@ -43,6 +53,7 @@ export interface OfflineLicensePayload extends JWTPayload {
   tenantSlug?: string;
   features?: string[];
   limits?: OfflineLicenseLimits;
+  services?: LicenseServiceClaim;
 }
 
 export interface EffectiveLicense {
@@ -52,9 +63,53 @@ export interface EffectiveLicense {
   source: 'free' | 'offline';
   features: string[];
   limits: OfflineLicenseLimits;
+  /** The license's `services` claim; absent = no service is switched off by the license. */
+  services?: LicenseServiceClaim;
   payload?: OfflineLicensePayload;
   expiresAt?: Date;
   error?: string;
+}
+
+function serviceIdList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) {
+    throw new Error(`License services.${field} must be a list of service ids`);
+  }
+  return [...new Set(value.map((id: string) => id.trim()).filter(Boolean))];
+}
+
+/**
+ * Validates the `services` claim at activation. An empty `allow` is refused
+ * rather than read as "nothing is allowed": a license that switches every
+ * service off is almost certainly a mistake in the payload. Service ids are not
+ * checked here (an unknown id is ignored at runtime, so a license made for a
+ * newer release still works on an older one).
+ */
+export function normalizeLicenseServiceClaim(value: unknown): LicenseServiceClaim | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('License services must be an object with "allow" and/or "deny"');
+  }
+  const raw = value as Record<string, unknown>;
+  const claim: LicenseServiceClaim = {};
+  if (raw.allow !== undefined) {
+    const allow = serviceIdList(raw.allow, 'allow');
+    if (allow.length === 0) throw new Error('License services.allow must list at least one service');
+    claim.allow = allow;
+  }
+  if (raw.deny !== undefined) {
+    const deny = serviceIdList(raw.deny, 'deny');
+    if (deny.length > 0) claim.deny = deny;
+  }
+  return claim.allow || claim.deny ? claim : undefined;
+}
+
+/** The stored claim, read defensively: it was validated at activation, but a bad record must not lock a tenant out. */
+function storedServiceClaim(payload: OfflineLicensePayload): LicenseServiceClaim | undefined {
+  try {
+    return normalizeLicenseServiceClaim(payload.services);
+  } catch {
+    return undefined;
+  }
 }
 
 const FREE_PROJECT_LIMIT = 2;
@@ -246,6 +301,7 @@ export class LicenseManager {
       licenseId: tenant.licenseId || payload.licenseId,
       licenseType,
       limits,
+      services: storedServiceClaim(payload),
       payload,
       source: 'offline',
       status: 'active',
@@ -304,12 +360,14 @@ export class LicenseManager {
       throw new Error('License tenant slug does not match this tenant');
     }
 
+    const services = normalizeLicenseServiceClaim(payload.services);
     const normalizedPayload: OfflineLicensePayload = {
       ...payload,
       features: normalizeFeatureList(payload.features),
       licenseId: payload.licenseId,
       licenseType: payload.licenseType,
       limits: normalizeLimits(payload.limits),
+      services,
     };
 
     return {
@@ -318,6 +376,7 @@ export class LicenseManager {
       licenseId: normalizedPayload.licenseId,
       licenseType: normalizedPayload.licenseType,
       limits: mergeLicenseLimits(this.getFreeLimits(), normalizedPayload.limits),
+      services,
       payload: normalizedPayload,
       source: 'offline',
       status: 'active',

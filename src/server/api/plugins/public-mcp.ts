@@ -25,6 +25,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -106,6 +107,8 @@ async function resolvePublicServer(
   const db = await getDatabase();
   const tenant = await db.findTenantById(tenantId).catch(() => null);
   if (!tenant?.dbName) return null;
+  // A switched-off MCP service answers like an unknown server.
+  if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'mcp'))) return null;
 
   const server = await withTenantDb(db, tenant.dbName, async () =>
     db.findMcpServerByEndpointSlug(endpointSlug));

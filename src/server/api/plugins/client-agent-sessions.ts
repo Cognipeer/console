@@ -719,6 +719,8 @@ export async function resolveClientSessionAction(
       // May this token answer? The engine decides, as the token's owner within the token's scope.
       authorize: approvalAuthorizerFor(request, ctx.tenantDbName),
       mode: background ? 'background' : 'sync',
+      // A switched-off agent does not continue; the request stays open for when it is back on.
+      requireActiveAgent: true,
       runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
         userId: ctx.tokenRecord.userId,
         tokenId: apiTokenId,
@@ -797,6 +799,8 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
       return { status: 400, body: apiErrorBody('invalid_request_error', outcome.message, 'invalid_resolution') };
     case 'busy':
       return { status: 409, body: RUN_CONFLICT_BODY };
+    case 'agent_inactive':
+      return { status: 400, body: apiErrorBody('invalid_request_error', 'Agent is not active', 'agent_inactive') };
     default:
       return null;
   }

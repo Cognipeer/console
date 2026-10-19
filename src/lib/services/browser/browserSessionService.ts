@@ -7,6 +7,7 @@
  * routed through the configured file bucket.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
@@ -120,6 +121,7 @@ export async function createBrowserSession(
   ctx: SessionContext,
   input: CreateBrowserSessionInput,
 ): Promise<BrowserSessionView> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const cfg = getConfig().browser;
   const sessionKey = `bs_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
@@ -326,6 +328,29 @@ async function loadSessionForKey(
   return { id: String(record._id), record };
 }
 
+/**
+ * Like loadSessionForKey, but for entries that act on a live page: the parent
+ * browser is re-read so that disabling a browser also ends the sessions that
+ * were opened before it was disabled. Such a session is closed and the call is
+ * refused with the same "is not active" message that session creation uses.
+ */
+async function loadActiveSessionForKey(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<{ id: string; record: IBrowserSession }> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
+  const loaded = await loadSessionForKey(ctx, sessionKey);
+  const db = await withTenantDb(ctx.tenantDbName);
+  const browser = await db.findBrowserById(loaded.record.browserId);
+  if (browser && browser.status === 'active') return loaded;
+
+  await browserManager.closeSession(sessionKey, 'manual').catch(() => false);
+  await db
+    .updateBrowserSession(loaded.id, { status: 'closed', endedAt: new Date() })
+    .catch(() => undefined);
+  throw new Error(`Browser ${browser?.key ?? loaded.record.browserId} is not active`);
+}
+
 async function persistEvent(
   ctx: SessionContext,
   sessionId: string,
@@ -387,7 +412,7 @@ export async function runBrowserAction(
   // assigned node. We accept a small cost of double-loading the session
   // record (here + inside the local handler) in exchange for keeping
   // routing decisions outside of browserManager.
-  const { record } = await loadSessionForKey(ctx, sessionKey);
+  const { record } = await loadActiveSessionForKey(ctx, sessionKey);
   return routeInstanceCall(
     {
       entityType: 'browser',
@@ -404,7 +429,7 @@ export async function runBrowserActionLocal(
   sessionKey: string,
   action: BrowserAction,
 ): Promise<BrowserActionResult> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const result = await browserManager.runAction(sessionKey, action);
   const durationMs = Date.now() - start;
@@ -436,7 +461,7 @@ export async function extractFromBrowser(
   sessionKey: string,
   input: BrowserExtractInput,
 ): Promise<BrowserExtractResult> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const result = await browserManager.extract(sessionKey, input);
   const durationMs = Date.now() - start;
@@ -464,7 +489,7 @@ export async function searchPageText(
   text: string,
   options: { limit?: number } = {},
 ): Promise<{ ok: boolean; matches: Array<{ text: string; target: unknown }>; errorMessage?: string }> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.findText(sessionKey, text, options);
 }
 
@@ -473,7 +498,7 @@ export async function readSessionObservations(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<ReturnType<typeof browserManager.getObservations>> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.getObservations(sessionKey);
 }
 
@@ -488,7 +513,7 @@ export async function exportSessionStorageState(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<Record<string, unknown>> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.exportStorageState(sessionKey);
 }
 
@@ -496,7 +521,7 @@ export async function captureSnapshot(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<{ ariaSnapshot: string; url: string }> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const snapshot = await browserManager.captureAriaSnapshot(sessionKey);
   const url = browserManager.getLiveStatus(sessionKey)?.url ?? '';
@@ -522,7 +547,7 @@ export async function describeSessionElement(
   sessionKey: string,
   ref: string,
 ): Promise<{ target: BrowserTarget; path: string; tag: string; text?: string } | null> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.describeElement(sessionKey, ref);
 }
 
@@ -535,7 +560,7 @@ export async function captureLiveScreenshot(
   sessionKey: string,
   input?: BrowserScreenshotInput,
 ): Promise<{ buffer: Buffer; contentType: string }> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.screenshot(sessionKey, input);
 }
 
@@ -544,7 +569,7 @@ export async function captureScreenshot(
   sessionKey: string,
   input: BrowserScreenshotInput & { createdBy: string; bucketKeyOverride?: string } = { createdBy: 'system' },
 ): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
-  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const { id, record } = await loadActiveSessionForKey(ctx, sessionKey);
   const bucketKey =
     input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
   if (!bucketKey) {
@@ -600,7 +625,7 @@ export async function exportSessionPdf(
   sessionKey: string,
   input: BrowserPdfInput & { createdBy: string; bucketKeyOverride?: string } = { createdBy: 'system' },
 ): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
-  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const { id, record } = await loadActiveSessionForKey(ctx, sessionKey);
   const bucketKey =
     input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
   if (!bucketKey) {

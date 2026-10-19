@@ -55,6 +55,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   db.findRagModuleByKey.mockResolvedValue({
     key: 'kb',
+    status: 'active',
     embeddingModelKey: 'embed-1',
     vectorProviderKey: 'vp',
     vectorIndexKey: 'idx',
@@ -96,6 +97,17 @@ describe('answerWithRag — stuff strategy', () => {
     expect(handleChatCompletion).not.toHaveBeenCalled();
     expect(result.usedChunks).toHaveLength(0);
     expect(result.answer).toMatch(/could not find/i);
+  });
+});
+
+describe('answerWithRag — inactive module', () => {
+  it('does not retrieve or generate for a module that is not active', async () => {
+    db.findRagModuleByKey.mockResolvedValue({ key: 'kb', status: 'disabled' });
+    await expect(
+      answerWithRag('tenant', 'tid', 'proj', { ragModuleKey: 'kb', question: 'Q?', answerModelKey: 'gpt' }),
+    ).rejects.toThrow(/not active/i);
+    expect(queryRag).not.toHaveBeenCalled();
+    expect(handleChatCompletion).not.toHaveBeenCalled();
   });
 });
 

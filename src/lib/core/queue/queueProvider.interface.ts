@@ -22,6 +22,15 @@
 
 export type QueuePayload = Record<string, unknown>;
 
+/**
+ * A handler error that retrying cannot fix (a switched-off service, say) sets
+ * `retryable = false`: the provider then fails the job at once instead of
+ * running it again and again until its attempts are spent.
+ */
+export function isNonRetryableJobError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { retryable?: unknown }).retryable === false;
+}
+
 export interface JobOptions {
   /** Target node name. Omit or pass 'auto' to load-balance across nodes. */
   targetNode?: string;

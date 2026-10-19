@@ -23,6 +23,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import type { AgentTriggerOfType, IAgentTrigger, ITenant } from '@/lib/database';
 import { authz } from '@/lib/iam/routeAuthz';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
@@ -156,6 +157,8 @@ async function resolveHook(request: FastifyRequest, reply: FastifyReply): Promis
     return unavailable(reply);
   }
   if (!tenant?.dbName) return miss();
+  // A switched-off agents service answers like an unknown hook: no run is started.
+  if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'agents'))) return miss();
 
   let trigger: IAgentTrigger | null;
   try {

@@ -9,6 +9,32 @@ function generateServerKey(name: string): string {
   return slugify(name, { lower: true, strict: true, trim: true }) + '-' + Date.now().toString(36);
 }
 
+/**
+ * The status a finished poll may write. The server is re-read first because the
+ * operator can disable it while the poll is in flight, and a poll result must
+ * not switch it back on.
+ */
+async function pollStatusUpdate(
+  db: Awaited<ReturnType<typeof getTenantDatabase>>,
+  tenantId: string,
+  serverKey: string,
+  status: 'active' | 'errored',
+): Promise<{ status?: IInferenceServer['status'] }> {
+  const current = await db.findInferenceServerByKey(tenantId, serverKey);
+  return current?.status === 'disabled' ? {} : { status };
+}
+
+/** A poll was asked for on a server the operator switched off. */
+export class InferenceServerDisabledError extends Error {
+  readonly status = 409;
+  readonly code = 'inference_server_disabled';
+
+  constructor(serverKey: string) {
+    super(`Inference server "${serverKey}" is disabled`);
+    this.name = 'InferenceServerDisabledError';
+  }
+}
+
 export class InferenceMonitoringService {
   /**
    * List all inference servers for a tenant.
@@ -115,6 +141,7 @@ export class InferenceMonitoringService {
     const db = await getTenantDatabase(tenantDbName);
     const server = await db.findInferenceServerByKey(tenantId, serverKey);
     if (!server) throw new Error('Server not found');
+    if (server.status === 'disabled') throw new InferenceServerDisabledError(serverKey);
 
     // Decrypt the apiKey only for this outbound poll call — never persisted
     // or logged in plaintext.
@@ -132,7 +159,7 @@ export class InferenceMonitoringService {
       await db.updateInferenceServer(String(server._id), {
         lastPolledAt: new Date(),
         lastError: undefined,
-        status: 'active',
+        ...(await pollStatusUpdate(db, tenantId, serverKey, 'active')),
       });
 
       return metrics;
@@ -141,7 +168,7 @@ export class InferenceMonitoringService {
       await db.updateInferenceServer(String(server._id), {
         lastPolledAt: new Date(),
         lastError: errorMessage,
-        status: 'errored',
+        ...(await pollStatusUpdate(db, tenantId, serverKey, 'errored')),
       });
       throw error;
     }

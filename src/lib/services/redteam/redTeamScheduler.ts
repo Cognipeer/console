@@ -8,6 +8,7 @@
  * scans run on the queue, so the tick stays cheap.
  */
 
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { getCache } from '@/lib/core/cache';
 import { createLogger } from '@/lib/core/logger';
@@ -35,6 +36,9 @@ async function runOnce(): Promise<void> {
     const tenants = await mainDb.listTenants();
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      // Switched off for this tenant: skip the tick without claiming or advancing
+      // anything, so the work runs on a later tick once the service is back on.
+      if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'redteam'))) continue;
       try {
         // Timer context: bind the tenant for the whole per-tenant run (see
         // runWithTenantScope — switchToTenant alone races cross-tenant).

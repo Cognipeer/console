@@ -5,6 +5,7 @@
  * Tools are registered centrally and can be bound to agents or called via API.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { currentTurnSignal } from '@/lib/core/turnSignal';
 import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
@@ -477,6 +478,7 @@ export async function executeToolAction(
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
 ): Promise<ExecuteToolActionResult> {
+  await assertServiceEnabled({ tenantId: tool.tenantId }, 'tools');
   const action = tool.actions.find((a) => a.key === actionKey);
   if (!action) {
     throw new Error(`Action "${actionKey}" not found on tool "${tool.name}"`);
