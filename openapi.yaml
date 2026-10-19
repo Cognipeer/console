@@ -887,6 +887,7 @@ paths:
               - chat_completions
               - a2a
               - trigger
+              - reminder
         - name: trigger
           in: query
           required: false
@@ -1795,6 +1796,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/reminders:
+    get:
+      tags:
+        - Agent Sessions
+      summary: List a session's reminders
+      description: "Reminders the agent set itself in this session with its `reminder_set` tool (an agent that has `reminders.enabled`). Each is a scheduled run of the session (`channel: reminder`) and its id is that run's id. When one comes due the session continues with a turn that starts with the reminder's note (a user message with `origin: reminder`). Newest first, at most 200."
+      operationId: listAgentSessionReminders
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: status
+          in: query
+          required: false
+          description: "`active` (default): the reminders still waiting to fire. `all`: every reminder of the session that is still kept, fired, canceled or failed too."
+          schema:
+            type: string
+            enum:
+              - active
+              - all
+      responses:
+        "200":
+          description: The session's reminders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum:
+                      - list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentReminder"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/reminders/{reminderId}:
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Cancel a reminder
+      description: Cancels a reminder of this session that has not fired yet. A reminder of another session is not found; one that is running or done is a conflict.
+      operationId: cancelAgentSessionReminder
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: reminderId
+          in: path
+          required: true
+          description: The reminder id (`run_…`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The reminder was canceled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reminder:
+                    $ref: "#/components/schemas/AgentReminder"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
@@ -16342,9 +16426,9 @@ components:
         One event of the session's log. `data` depends on `type` (field names snake_case):
 
 
-        - `user.message` `{ content }`
+        - `user.message` `{ content, origin?, reminder? }` (`origin: reminder` and `reminder: { run_id, message, set_at }` on a reminder's wake turn: `content` is the note as the model reads it, show `reminder.message`)
 
-        - `session.status_running` `{ trigger: message | resume | timeout }` (`resume`: a person answered the request the turn paused on; `timeout`: the request timed out and the agent's `onTimeout` of `deny` or `allow` let the turn go on, recorded with the actor `system` and the channel `timeout`)
+        - `session.status_running` `{ trigger: message | resume | timeout | reminder }` (`resume`: a person answered the request the turn paused on; `timeout`: the request timed out and the agent's `onTimeout` of `deny` or `allow` let the turn go on, recorded with the actor `system` and the channel `timeout`; `reminder`: a reminder the agent set itself came due)
 
         - `agent.tool_use` `{ tool_call_id, name, args, subagent? }`
 
@@ -17251,7 +17335,8 @@ components:
             - chat_completions
             - a2a
             - trigger
-          description: Which API started the run.
+            - reminder
+          description: "Which API started the run. `reminder`: a reminder the agent set itself (`reminder_set`), started when it came due."
         trigger:
           type: string
           nullable: true
@@ -27480,6 +27565,82 @@ components:
           description: 'Only on a message that carries agent-created files: those files (`origin: agent_output`).'
           items:
             $ref: '#/components/schemas/AgentSessionMessageFile'
+        origin:
+          type: string
+          enum:
+            - reminder
+          description: 'Only on the user message a reminder''s wake turn starts with: `content` is the note as the model read it; show `reminder.message`.'
+        reminder:
+          type: object
+          description: With `origin`, the reminder that started the turn.
+          properties:
+            id:
+              type: string
+            message:
+              type: string
+            set_at:
+              type: string
+              format: date-time
+              nullable: true
+    AgentReminder:
+      type: object
+      description: A reminder an agent set itself in a session. It is a scheduled run of the session; `id` is that run's id.
+      properties:
+        id:
+          type: string
+          description: The reminder id (`run_…`, the run's id).
+        object:
+          type: string
+          enum:
+            - agent.reminder
+        agent:
+          type: string
+        session_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - scheduled
+            - queued
+            - running
+            - requires_action
+            - succeeded
+            - failed
+            - canceled
+          description: '`scheduled`: waiting to fire. A reminder that came due is a run of the session from there on.'
+        fire_at:
+          type: integer
+          nullable: true
+          description: When it fires (or fired), epoch seconds.
+        message:
+          type: string
+          description: The note the agent left itself; the wake turn starts with it.
+        reason:
+          type: string
+          nullable: true
+          description: A short label the agent gave it.
+        set_by_run:
+          type: string
+          nullable: true
+          description: The run whose turn set it.
+        chain:
+          type: integer
+          description: How many reminders in a row led to this one (1 = set by an ordinary turn).
+        created_at:
+          type: integer
+          nullable: true
+        completed_at:
+          type: integer
+          nullable: true
+        error:
+          type: object
+          nullable: true
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+              nullable: true
     AgentSessionMessageFile:
       type: object
       properties:

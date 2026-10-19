@@ -20,6 +20,7 @@
  */
 
 import { useTranslations } from '@/lib/i18n';
+import { reminderOfMessage } from '../studio/reminderUi';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -137,7 +138,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig; reminders?: { enabled?: boolean } };
 }
 
 interface VersionOption {
@@ -1190,6 +1191,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         {messages.map((msg, i) => {
                                             if (matchedIndexes && !matchedIndexes.has(i)) return null;
                                             const previous = messages[i - 1];
+                                            const reminder = msg.role === 'user' ? reminderOfMessage(msg) : null;
                                             return (
                                                 <Box
                                                     key={i}
@@ -1208,6 +1210,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 }
                                                                 : undefined}
                                                         />
+                                                    ) : reminder ? (
+                                                        <ReminderNote message={reminder.message} at={reminder.setAt ?? msg.timestamp} />
                                                     ) : (
                                                         <>
                                                             <Group gap={6} mb={4} align="center">
@@ -1436,6 +1440,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             publishedVersion={agent.publishedVersion ?? null}
                             sessionContext={sessionContext}
                             agentConfig={agent.config}
+                            remindersEnabled={!isConnected && agent.config?.reminders?.enabled === true}
+                            readOnly={readOnly}
                             messages={messages}
                             onGoToTurn={goToTurn}
                             // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
@@ -1474,6 +1480,22 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
                 />
             </DetailShell>
+    );
+}
+
+/** A reminder's wake-up turn: the agent's own earlier note, so it is a muted card, not a user bubble. */
+function ReminderNote({ message, at }: { message: string; at?: string }) {
+    const tRem = useTranslations('agents.reminders');
+    return (
+        <Box p="sm" style={{ background: 'var(--mantine-color-gray-light)', borderRadius: 'var(--mantine-radius-sm)' }}>
+            <Group gap={6} mb={4}>
+                <IconClock size={12} color="var(--mantine-color-dimmed)" />
+                <Text size="xs" c="dimmed">
+                    {tRem('transcriptHeader', { time: at ? new Date(at).toLocaleString() : '—' })}
+                </Text>
+            </Group>
+            <Text size="sm" className={classes.preWrap}>{message}</Text>
+        </Box>
     );
 }
 

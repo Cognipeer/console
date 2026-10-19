@@ -29,7 +29,8 @@ import {
   AgentRunConflictError,
   AgentRunIdempotencyKeyTakenError,
 } from '@/lib/database';
-import type { AgentResponseFormat, AgentRunClass, IAgentRun } from '@/lib/database';
+import type { AgentResponseFormat, AgentRunClass, IAgent, IAgentConfig, IAgentRun } from '@/lib/database';
+import { resolveRemindersConfig, type ResolvedRemindersConfig } from './agentRemindersConfig';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getThisNodeName } from '@/lib/core/cluster/nodeRegistry';
 import { runWithRequestContext } from '@/lib/core/requestContext';
@@ -1743,9 +1744,25 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     ...(run.responseFormat ? { responseFormat: run.responseFormat } : {}),
     ...(run.variables ? { variables: run.variables } : {}),
     ...runFlags(run),
+    ...(run.channel === 'reminder'
+      ? {
+        reminder: {
+          runId: `run_${String(run._id)}`,
+          message: run.userMessage,
+          setAt: new Date(run.createdAt ?? Date.now()).toISOString(),
+          chain: reminderChainOf(run),
+        },
+      }
+      : {}),
     cancellationCell,
     runId: String(run._id),
   };
+}
+
+/** How many reminders in a row led to this one (`reminder_chain`, agentReminders.ts). */
+function reminderChainOf(run: Pick<IAgentRun, 'metadata'>): number {
+  const value = Number(run.metadata?.reminder_chain);
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
 }
 
 /**
@@ -1765,7 +1782,37 @@ async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promis
       if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now()) return 'The API token that started this run has expired.';
     }
   }
+  if (run.channel === 'reminder' && !(await reminderSettingsForRun(db, run, agent))?.available) return REMINDERS_OFF_MESSAGE;
   return null;
+}
+
+export const REMINDERS_OFF_MESSAGE = 'Reminders are turned off for this agent.';
+
+/**
+ * The reminder settings of the config a reminder's turn will run on (its pinned
+ * version, the published one, or the draft), clamped by the platform. A reminder
+ * only wakes the agent while they are `available`. Null when the agent is gone.
+ */
+export async function reminderSettingsForRun(
+  db: DatabaseProvider,
+  run: Pick<IAgentRun, 'agentKey' | 'projectId' | 'version' | 'usePublished'>,
+  knownAgent?: IAgent,
+): Promise<ResolvedRemindersConfig | null> {
+  const agent = knownAgent ?? await db.findAgentByKey(run.agentKey, run.projectId);
+  if (!agent) return null;
+  const platform = getConfig().agent.reminders;
+  let config: IAgentConfig | undefined = agent.config;
+  if (run.version != null) {
+    const snapshot = await db.findAgentVersion(String(agent._id), run.version).catch(() => null);
+    config = snapshot?.snapshot.config;
+  } else if (run.usePublished) {
+    const latest = agent.publishedVersion ?? null;
+    if (latest != null) {
+      const snapshot = await db.findAgentVersion(String(agent._id), latest).catch(() => null);
+      config = snapshot?.snapshot.config;
+    }
+  }
+  return resolveRemindersConfig(config?.reminders, platform);
 }
 
 

@@ -100,4 +100,27 @@ describe('agent run engine config', () => {
     expect(agent({ AGENT_RUN_DRAIN_TIMEOUT_MS: '2000', SHUTDOWN_TIMEOUT_MS: '60000' }).runDrainTimeoutMs).toBe(2_000);
     expect(agent({ SHUTDOWN_TIMEOUT_MS: '1000' }).runDrainTimeoutMs).toBe(0);
   });
+
+  it('reads the reminder ceilings and clamps them', () => {
+    expect(agent().reminders).toEqual({
+      enabled: true,
+      minDelaySeconds: 60,
+      maxHorizonHours: 168,
+      maxActivePerSession: 10,
+      maxFiresPerSession: 100,
+    });
+    expect(agent({
+      AGENT_REMINDERS_ENABLED: 'false',
+      AGENT_REMINDER_MIN_DELAY_SECONDS: '5',
+      AGENT_REMINDER_MAX_HORIZON_HOURS: '5000',
+      AGENT_REMINDER_MAX_ACTIVE_PER_SESSION: '0',
+      AGENT_REMINDER_MAX_FIRES_PER_SESSION: '3',
+    }).reminders).toEqual({
+      enabled: false,
+      minDelaySeconds: 30,
+      maxHorizonHours: 720,
+      maxActivePerSession: 1,
+      maxFiresPerSession: 3,
+    });
+  });
 });

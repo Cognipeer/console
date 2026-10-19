@@ -73,6 +73,11 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     };
 });
 
+vi.mock('@/lib/services/agents/agentReminders', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentReminders')>();
+    return { ...actual, activeRemindersBySession: vi.fn(async () => new Map()) };
+});
+
 vi.mock('@/lib/services/agents/manifestResources', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/manifestResources')>();
     return {
@@ -225,6 +230,7 @@ describe('code export', () => {
 
 describe('sessions', () => {
     it('GET /agents/:agentId/sessions returns summaries, not transcripts', async () => {
+        mockFn(listAgentRuns).mockResolvedValue([]);
         mockFn(listConversations).mockResolvedValue([{
             _id: 'c1', title: 'Incident', agentKey: 'field-ops', projectId: 'proj-1', metadata: {},
             messages: [

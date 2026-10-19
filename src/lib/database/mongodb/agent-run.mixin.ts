@@ -654,12 +654,14 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
 
     async countAgentRunsByStatus(
       tenantId: string,
-      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
     ): Promise<Record<string, number>> {
       const entries = await Promise.all(opts.statuses.map(async (status) => {
         const and: Record<string, unknown>[] = [{ tenantId, status }];
         if (opts.projectId) and.push({ projectId: opts.projectId });
         if (opts.runClass) and.push(runClassFilter(opts.runClass));
+        if (opts.channel) and.push({ channel: opts.channel });
+        if (opts.createdAfter) and.push({ createdAt: { $gt: opts.createdAfter } });
         return [status, await this.agentRunsCollection().countDocuments({ $and: and })] as const;
       }));
       return Object.fromEntries(entries);

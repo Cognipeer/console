@@ -78,7 +78,7 @@ const AGENT_CONFIG_KEYS: Record<keyof IAgentConfig, true> = {
   connection: true, runtime: true, structuredOutput: true, subagents: true,
   subagentPolicy: true, skills: true, skillPolicy: true, memory: true, sandbox: true,
   callback: true, budget: true, variables: true, humanInTheLoop: true,
-  attachments: true, clientTools: true, clientToolSurfaces: true,
+  attachments: true, clientTools: true, clientToolSurfaces: true, reminders: true,
 };
 
 /**

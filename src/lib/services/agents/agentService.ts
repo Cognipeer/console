@@ -172,6 +172,9 @@ import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
+import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
+import { resolveRemindersConfig } from './agentRemindersConfig';
+import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
@@ -3374,6 +3377,11 @@ export interface AgentChatRequest {
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
     /**
+     * The reminder this turn is the wake-up of (a run of `channel: 'reminder'`): the turn starts
+     * with a note framed as the agent's own (`reminderNoteText`), stored with `metadata.origin`.
+     */
+    reminder?: ReminderWake;
+    /**
      * No interactive user on this turn (a schedule, an eval or red-team case, an
      * OpenAI-shaped client). An approval-gated tool call or a
      * question then follows the agent's `humanInTheLoop.unattended` setting —
@@ -3961,6 +3969,19 @@ async function buildLocalAgentRun(input: {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
     literalVariables?: string[];
+    /**
+     * What the reminder tools need about this turn (agentReminderTools.ts): the run it is, whose it
+     * is, the version a reminder runs on, the reminder that woke it, and whether it starts having
+     * read outside content.
+     */
+    reminders?: {
+        runId?: string;
+        accountableUserId?: string;
+        version?: number;
+        usePublished?: boolean;
+        wake?: ReminderWake;
+        startsTainted?: boolean;
+    };
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
@@ -4209,6 +4230,41 @@ async function buildLocalAgentRun(input: {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
     }
 
+    // Reminders the agent sets itself (`reminder_set` / `_list` / `_cancel`): off unless the agent turns them on,
+    // and only for a run with a session to come back to. Built last of the agent's own tools so the watch over the
+    // others (outside content, see agentReminderTools.ts) covers all of them; before the client tools' name reservation.
+    let reminderTools: ReminderTools | undefined;
+    const remindersOn = resolveRemindersConfig(config.reminders, getConfig().agent.reminders);
+    // A wake turn runs as a person (the owner checks need one): never offered to a run without one.
+    if (input.conversation && remindersOn.available && input.userId) {
+        reminderTools = buildReminderTools({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            scope: { tenantDbName, tenantId, projectId },
+            agentKey,
+            conversationId: String(input.conversation._id),
+            agentConfig: config,
+            settings: remindersOn,
+            creator: {
+                userId: input.userId,
+                ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
+                ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
+                ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
+                ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
+                ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
+            },
+            ...(input.reminders?.wake ? { wake: input.reminders.wake } : {}),
+            startsTainted: input.reminders?.startsTainted === true,
+            approvalMode: reminderApprovalMode(hitl, { unattended: input.unattended, canPause: input.canPause }),
+        });
+        tools.push(...reminderTools.tools);
+        toolDefinitions.push(...reminderTools.definitions);
+        const note = remindersPrompt(remindersOn, input.reminders?.wake);
+        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${note}` : note;
+    }
+
     // Tools the CALLER runs. Two sources: the ones the agent declares itself
     // (`config.clientTools` — any channel: a portal page, an API client answering on the
     // actions endpoint, or a backend answering the agent's callback) and the ones a portal
@@ -4339,11 +4395,14 @@ async function buildLocalAgentRun(input: {
     // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
     // gets an error result, the tool never runs) or runs them as they are
     // (`allow`, the owner's explicit choice).
-    const gatedTools = hitlMode === 'ask'
-        ? applyToolApprovals(tools, hitl, allowedTools)
+    const ownTools = reminderTools ? reminderTools.watchTools(tools) : tools;
+    const policyGated = hitlMode === 'ask'
+        ? applyToolApprovals(ownTools, hitl, allowedTools)
         : hitlMode === 'deny'
-            ? denyUnattendedTools(tools, hitl, allowedTools)
-            : tools;
+            ? denyUnattendedTools(ownTools, hitl, allowedTools)
+            : ownTools;
+    const gatedTools = reminderTools ? reminderTools.gate(policyGated) : policyGated;
+    if (reminderTools) clientTools = reminderTools.watchTools(clientTools);
 
     const sdkAgent = createSmartAgent({
         name: agent.name,
@@ -4387,6 +4446,7 @@ async function buildLocalAgentRun(input: {
         /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
         /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
         noteSdkEvent: (event: AgentSdkEvent) => {
+            reminderTools?.noteSdkEvent(event);
             const e = event as { type?: string; id?: unknown; subagentName?: unknown };
             if ((e.type === 'tool_approval' || e.type === 'user_question') && typeof e.id === 'string' && typeof e.subagentName === 'string') {
                 approvalSubagents.set(e.id, e.subagentName);
@@ -4831,8 +4891,16 @@ async function runAgentChatTurn(
     // user turn like the words themselves: it is what the model reads, what the
     // transcript stores and what a resume replays.
     const userMessage = neutralizeAttachmentMarker(
-        composeUserMessageWithVariables(request.userMessage, request.variables, { externalContent: request.externalContent }),
+        composeUserMessageWithVariables(
+            request.reminder ? reminderNoteText(request.reminder) : request.userMessage,
+            request.variables,
+            { externalContent: request.externalContent },
+        ),
     );
+    // A reminder's wake turn: screens show the note itself, not the framing the model reads.
+    const reminderMeta = request.reminder
+        ? { origin: 'reminder' as const, reminder: { runId: request.reminder.runId, message: request.reminder.message, setAt: request.reminder.setAt } }
+        : undefined;
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4923,7 +4991,8 @@ async function runAgentChatTurn(
         conversationId,
         ...(request.runId ? { runId: request.runId } : {}),
         userMessage: () => rewriteLedger.resolve(userMessage),
-        trigger: 'message',
+        trigger: request.reminder ? 'reminder' : 'message',
+        ...(reminderMeta ? { userMessageData: reminderMeta } : {}),
         ...(modelChoice ? { model: modelChoice } : {}),
         superseded: () => request.cancellationCell?.abandoned === true,
     });
@@ -5038,6 +5107,14 @@ async function runAgentChatTurn(
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(request.version !== undefined ? { version: request.version } : {}),
+            ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
+            ...(request.reminder ? { wake: request.reminder } : {}),
+            startsTainted: request.externalContent === true,
+        },
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5104,7 +5181,7 @@ async function runAgentChatTurn(
             const outcome = { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL };
             const partialMessages: IAgentConversation['messages'] = [
                 ...(conversation.messages || []),
-                { role: 'user', content: rewriteLedger.resolve(userMessage), timestamp: now },
+                { role: 'user', content: rewriteLedger.resolve(userMessage), ...(reminderMeta ? { metadata: reminderMeta } : {}), timestamp: now },
                 { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
             ];
             logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
@@ -5213,6 +5290,7 @@ async function runAgentChatTurn(
                 role: 'user',
                 content: persistedUserMessage,
                 ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+                ...(reminderMeta ? { metadata: reminderMeta } : {}),
                 timestamp: now,
             },
             {
@@ -5777,6 +5855,8 @@ async function runPlaygroundChatTurn(
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
         ...(request.revealReasoning ? { revealReasoning: true } : {}),
         ...(request.onReasoningChunk ? { onReasoningChunk: request.onReasoningChunk } : {}),
+        // A reminder set here wakes the session on the config this turn ran: the draft, or the version picked.
+        reminders: ranVersion !== null ? { version: ranVersion, usePublished: true } : { usePublished: false },
     });
 
     const attached = await assembleMessageAttachments({
@@ -6426,6 +6506,13 @@ async function runAgentResumeTurn(
         ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
+        // A continued turn already holds tool results and answers from outside.
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(version != null ? { version, usePublished: true } : { usePublished: false }),
+            startsTainted: true,
+        },
     });
 
     try {

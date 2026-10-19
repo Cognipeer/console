@@ -306,6 +306,44 @@ describe('agent-run reconciler: scheduled, deferred and expired runs (§4.4–§
     expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('queued');
   });
 
+  describe('a due reminder', () => {
+    async function reminderIn(runtimeStatus: string | undefined, whenBusy: 'postpone' | 'skip') {
+      await db.createAgent({
+        tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Support', status: 'active', createdBy: 'user-1',
+        config: { modelKey: 'gpt-4o', reminders: { enabled: true, whenBusy } },
+      });
+      const conversation = await db.createAgentConversation({
+        tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, title: 'S', messages: [], createdBy: 'user-1',
+        ...(runtimeStatus ? { runtimeStatus: runtimeStatus as never } : {}),
+      });
+      return db.createAgentRun({
+        ...baseRecord(String(conversation._id)), channel: 'reminder', status: 'scheduled', notBefore: new Date(Date.now() - 1_000),
+      });
+    }
+
+    it('waits while its session waits on a person (postpone), and is promoted once it does not', async () => {
+      const run = await reminderIn('requires_action', 'postpone');
+      expect((await triggerAgentRunReconcilerRun()).promotedRuns).toBe(0);
+      expect((await db.getAgentRunById(String(run._id), tenantId, PROJECT_ID))?.status).toBe('scheduled');
+
+      await db.updateAgentConversationRuntime(run.conversationId, { runtimeStatus: 'idle' });
+      expect((await triggerAgentRunReconcilerRun()).promotedRuns).toBe(1);
+      expect((await db.getAgentRunById(String(run._id), tenantId, PROJECT_ID))?.status).toBe('queued');
+    });
+
+    it('is dropped when the agent says skip a busy session', async () => {
+      const run = await reminderIn('budget_paused', 'skip');
+      expect((await triggerAgentRunReconcilerRun()).promotedRuns).toBe(0);
+      expect((await db.getAgentRunById(String(run._id), tenantId, PROJECT_ID))?.status).toBe('canceled');
+    });
+
+    it('is dropped when its session is gone', async () => {
+      const run = await db.createAgentRun({ ...baseRecord('conv-gone'), channel: 'reminder', status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
+      await triggerAgentRunReconcilerRun();
+      expect((await db.getAgentRunById(String(run._id), tenantId, PROJECT_ID))?.status).toBe('canceled');
+    });
+  });
+
   it('a promoted deferred run is not published directly: the dispatcher hands it out', async () => {
     const run = await db.createAgentRun({ ...baseRecord('conv-deferred-due'), runClass: 'deferred', status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
 

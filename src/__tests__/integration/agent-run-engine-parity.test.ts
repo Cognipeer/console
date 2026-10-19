@@ -122,6 +122,17 @@ describeForEachProvider('AgentRun — run engine data layer', (getDb) => {
     expect(defaults).toEqual({ queued: 1 });
   });
 
+  it('countAgentRunsByStatus narrows by channel and creation time (the reminder quotas)', async () => {
+    const db = getDb();
+    const before = new Date(Date.now() - 1000);
+    await db.createAgentRun(rec({ channel: 'reminder', status: 'scheduled', notBefore: new Date(Date.now() + 60_000) }));
+    await db.createAgentRun(rec({ channel: 'reminder', status: 'succeeded' }));
+    await db.createAgentRun(rec({ channel: 'runs', status: 'scheduled', notBefore: new Date(Date.now() + 60_000) }));
+    expect(await db.countAgentRunsByStatus(tenantId, { statuses: ['scheduled', 'succeeded'], channel: 'reminder' })).toEqual({ scheduled: 1, succeeded: 1 });
+    expect(await db.countAgentRunsByStatus(tenantId, { statuses: ['scheduled'], channel: 'reminder', createdAfter: before })).toEqual({ scheduled: 1 });
+    expect(await db.countAgentRunsByStatus(tenantId, { statuses: ['scheduled'], channel: 'reminder', createdAfter: new Date(Date.now() + 60_000) })).toEqual({ scheduled: 0 });
+  });
+
   describe('listAgentRuns', () => {
     it('filters by mode (single / array / excluded), class, channel, trigger, metadata pairs and created window', async () => {
       const db = getDb();

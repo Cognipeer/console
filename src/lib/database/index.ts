@@ -481,6 +481,7 @@ export type {
   AgentResponseFormat,
   IAgentVariable,
   IAgentAttachmentsConfig,
+  IAgentRemindersConfig,
   IAgentClientToolConfig,
   IAgentClientToolSurfaces,
   IAgentMessageAttachment,

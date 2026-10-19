@@ -234,6 +234,11 @@ Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS
 | `AGENT_TRIGGER_MISFIRE_GRACE_MS` | A missed trigger slot older than this is skipped; at most one catch-up run fires | `3600000` |
 | `AGENT_WEBHOOK_BODY_LIMIT_BYTES` | Largest body an incoming trigger webhook accepts (min 16384, max 26214400); larger deliveries get 413 | `5242880` |
 | `AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE` | Runs one webhook trigger starts per minute (`0` = off). Per node unless `RATE_LIMIT_PROVIDER=redis` | `60` |
+| `AGENT_REMINDERS_ENABLED` | Platform switch for agent reminders. `false`: no agent is offered the reminder tools and due reminders are not run | `true` |
+| `AGENT_REMINDER_MIN_DELAY_SECONDS` | Shortest reminder delay any agent may use (minimum `30`) | `60` |
+| `AGENT_REMINDER_MAX_HORIZON_HOURS` | Furthest ahead any agent may set a reminder (`1`..`720`) | `168` |
+| `AGENT_REMINDER_MAX_ACTIVE_PER_SESSION` | Scheduled reminders one session may hold at once | `10` |
+| `AGENT_REMINDER_MAX_FIRES_PER_SESSION` | Reminders one session may ever create (stops a reminder that keeps re-arming itself) | `100` |
 | `AGENT_CHAT_CONCURRENCY` | Concurrent agent chat turns per node | `4` |
 | `AGENT_RUN_RETENTION_DAYS` | How long run records (`userMessage`, result) are kept, counted from when the run finished (a scheduled or deferred run is also kept until it was due) | `30` |
 | `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | How often a worker stamps the heartbeat of a running run (minimum `1000`) | `15000` |

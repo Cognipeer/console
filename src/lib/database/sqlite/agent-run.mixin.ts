@@ -578,7 +578,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
 
     async countAgentRunsByStatus(
       tenantId: string,
-      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
     ): Promise<Record<string, number>> {
       const result: Record<string, number> = Object.fromEntries(opts.statuses.map((status) => [status, 0]));
       if (opts.statuses.length === 0) return result;
@@ -587,6 +587,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       let sql = `SELECT status, COUNT(*) AS cnt FROM ${TABLES.agentRuns} WHERE tenantId = @tenantId AND status IN (${keys.join(', ')})`;
       if (opts.projectId) { sql += ' AND projectId = @projectId'; params.projectId = opts.projectId; }
       if (opts.runClass) sql += ` AND ${this.runClassCondition(opts.runClass)}`;
+      if (opts.channel) { sql += ' AND channel = @channel'; params.channel = opts.channel; }
+      if (opts.createdAfter) { sql += ' AND createdAt > @createdAfter'; params.createdAfter = opts.createdAfter.toISOString(); }
       sql += ' GROUP BY status';
       for (const row of this.getTenantDb().prepare(sql).all(params) as Array<{ status: string; cnt: number }>) {
         result[row.status] = Number(row.cnt);
