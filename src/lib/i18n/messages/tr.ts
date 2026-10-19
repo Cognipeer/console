@@ -3593,6 +3593,7 @@ export const tr: typeof en = {
       loadFailed: 'Oturumlar yüklenemedi',
       retry: 'Tekrar dene',
       partialScopeNotice: 'Bazı ajanlarda yalnızca kendi başlattığınız oturumları, diğerlerinde herkesinkini görüyorsunuz.',
+      activeTruncated: 'İlk 100 aktif oturum gösteriliyor, çalışanlar önce. Daha eski bekleyen oturumlar Tümü altında.',
       autoRefresh: 'Otomatik yenilenir',
       live: 'Canlı',
       liveTooltip: 'Ajan çalıştıkça kendiliğinden yenilenir.',

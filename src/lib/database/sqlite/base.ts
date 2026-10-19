@@ -1188,6 +1188,8 @@ export class SQLiteProviderBase {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_transcript ON ${TABLES.agentConversations}(projectId, agentKey, createdBy, transcriptHash, updatedAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
+    // The dashboard's cross-agent Sessions list: a project's sessions by last activity.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_updated ON ${TABLES.agentConversations}(projectId, updatedAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique

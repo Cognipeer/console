@@ -3639,6 +3639,14 @@ export interface IAgentConversation {
   updatedAt?: Date;
 }
 
+/** What a summary counts of one message - never its content, steps' arguments or outputs. */
+export type IAgentConversationMessageTally =
+  Pick<IAgentConversationMessage, 'role' | 'usage' | 'latencyMs' | 'stopReason' | 'outputError'>
+  & { steps?: Array<Pick<IAgentConversationStep, 'status' | 'error'>> };
+
+/** A list row that carries what a summary counts (one tally per message, so the same length), never the transcript itself. */
+export type IAgentConversationActivityRow = Omit<IAgentConversation, 'messages'> & { messages: IAgentConversationMessageTally[] };
+
 /** A conversation as a list shows it: no transcript, just how many messages it holds. */
 export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
 

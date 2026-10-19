@@ -5018,6 +5018,7 @@ export const en = {
       loadFailed: 'Could not load sessions',
       retry: 'Retry',
       partialScopeNotice: 'For some agents you see only the sessions you started; for the others you see everyone’s.',
+      activeTruncated: 'Showing the first 100 active sessions, running ones first. Older waiting sessions are under All.',
       autoRefresh: 'Refreshes automatically',
       live: 'Live',
       liveTooltip: 'Refreshes on its own while the agent works.',

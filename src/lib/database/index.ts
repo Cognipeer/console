@@ -439,6 +439,8 @@ export type {
   IAgent,
   IAgentConfig,
   IAgentConversation,
+  IAgentConversationActivityRow,
+  IAgentConversationMessageTally,
   IAgentConversationListItem,
   IAgentConversationSearchHit,
   IAgentConversationSearchMatch,

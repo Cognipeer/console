@@ -11,6 +11,7 @@ import type {
   AgentStatus,
   AgentSessionRuntimeStatus,
   IAgentConversation,
+  IAgentConversationActivityRow,
   IAgentConversationListItem,
   IAgentConversationSearchHit,
   IAgentConversationState,
@@ -200,7 +201,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     /**
      * The client API's session list (a project's sessions newest first, optionally
-     * one agent's or one status). Ensured on the write path as well as in the boot
+     * one agent's or one status) and the dashboard's (by last activity). Ensured on the write path as well as in the boot
      * manifest, for a tenant whose first conversation is created after it was bound.
      * Names/keys are IDENTICAL to the manifest's.
      */
@@ -213,6 +214,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
         coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
         coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
+        coll.createIndex({ projectId: 1, updatedAt: -1, _id: -1 }, { name: 'idx_project_updatedAt' }),
         coll.createIndex({ projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, { name: 'idx_transcript_hash' }),
       ]);
       this.conversationListIndexesReady.add(dbName);
@@ -428,6 +430,85 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         ])
         .toArray();
       return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationListItem[];
+    }
+
+    async listProjectAgentConversations(filters: {
+      projectId: string;
+      runtimeStatuses?: AgentSessionRuntimeStatus[];
+      ids?: string[];
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+      before?: { updatedAt: Date; id: string };
+      limit: number;
+    }): Promise<IAgentConversationActivityRow[]> {
+      const match: Record<string, unknown> = { projectId: filters.projectId };
+      // Narrowing lists that cannot match anything need no query.
+      if (filters.runtimeStatuses?.length === 0 || filters.ids?.length === 0) return [];
+      if (filters.ids) {
+        const objectIds = filters.ids.filter((id) => ObjectId.isValid(id)).map((id) => new ObjectId(id));
+        if (objectIds.length === 0) return [];
+        match._id = { $in: objectIds };
+      }
+      // Conditions that are themselves a $or, so they are combined with $and rather than overwriting each other.
+      const all: Record<string, unknown>[] = [];
+      if (filters.runtimeStatuses) {
+        // A conversation that never ran has no status: "idle" covers it.
+        const statuses: (string | null)[] = [...filters.runtimeStatuses];
+        if (statuses.includes('idle')) statuses.push(null);
+        all.push({ runtimeStatus: { $in: statuses } });
+      }
+      if (filters.ownOnly) {
+        // The caller's own sessions, and every session of the agents they may view; nothing else.
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) match.createdBy = filters.ownOnly.userId;
+        else all.push({ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $in: keys } }] });
+      }
+      if (filters.before) {
+        // Keyset on (updatedAt, _id), newest first.
+        all.push({
+          $or: ObjectId.isValid(filters.before.id)
+            ? [
+              { updatedAt: { $lt: filters.before.updatedAt } },
+              { updatedAt: filters.before.updatedAt, _id: { $lt: new ObjectId(filters.before.id) } },
+            ]
+            : [{ updatedAt: { $lt: filters.before.updatedAt } }],
+        });
+      }
+      if (all.length > 0) match.$and = all;
+      // Sorted and limited BEFORE the transcript is touched; each message is cut down to what a summary counts.
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .aggregate([
+          { $match: match },
+          { $sort: { updatedAt: -1, _id: -1 } },
+          { $limit: filters.limit },
+          {
+            $addFields: {
+              messages: {
+                $map: {
+                  input: { $cond: [{ $isArray: '$messages' }, '$messages', []] },
+                  as: 'm',
+                  in: {
+                    role: '$$m.role',
+                    usage: '$$m.usage',
+                    latencyMs: '$$m.latencyMs',
+                    stopReason: '$$m.stopReason',
+                    outputError: '$$m.outputError',
+                    steps: {
+                      $map: {
+                        input: { $cond: [{ $isArray: '$$m.steps' }, '$$m.steps', []] },
+                        as: 's',
+                        in: { status: '$$s.status', error: '$$s.error' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          { $project: { runtimeTurnId: 0 } },
+        ])
+        .toArray();
+      return docs.map((doc) => withoutTurnOwner({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationActivityRow[];
     }
 
     async searchAgentConversations(filters: {

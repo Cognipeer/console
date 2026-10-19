@@ -82,7 +82,8 @@ import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/comm
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { IAgentAttachmentsConfig, IAgentConfig, IAgentHumanInTheLoopConfig, IAgentSessionBudget } from '@/lib/database/provider/types.domain';
 import { agentTakesAttachments, resolveAttachmentsConfig } from '@/lib/services/agents/sessionFilesConfig';
-import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
+import { isContinuableSession, sessionSourceLabel, sessionSourceOf } from '../studio/SessionList';
+import { sessionInspectorHref } from './sessionLinks';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
 import SessionSidePanel from './SessionSidePanel';
@@ -220,6 +221,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const ta = useTranslations('agents.attachments');
     const tp = useTranslations('agents.sessionPage');
     const tsa = useTranslations('agents.sessionAccess');
+    const tall = useTranslations('agents.allSessions');
     const router = useRouter();
     const tConfirm = useTranslations('common.confirm');
     const deleteResource = useDeleteResource();
@@ -232,6 +234,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [agentModels, setAgentModels] = useState<Array<{ key: string; label: string; default: boolean }>>([]);
     const [pickedModel, setPickedModel] = useState('');
     const [loading, setLoading] = useState(true);
+    // The session is not one this page shows: the inspector is being opened instead.
+    const [redirecting, setRedirecting] = useState(false);
     // Why the page could not be shown: the session is not there, or the person may not open it.
     const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
 
@@ -242,8 +246,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // API / A2A / scheduled sessions are real traffic: shown, never extended
     // from here. Only console sessions (or legacy ones without a source) take
     // new messages — the same rule the Sessions panel applies to Continue.
-    const source = session?.metadata?.source;
-    const sessionSource = typeof source === 'string' ? source : undefined;
+    const sessionSource = sessionSourceOf(session?.metadata);
     const readOnly = !isContinuableSession(sessionSource);
     const sessionContext = session?.metadata?.runtimeContext as Record<string, unknown> | undefined;
     const [search, setSearch] = useState('');
@@ -454,6 +457,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     const load = useCallback(async () => {
         setLoading(true);
+        setRedirecting(false);
+        // Leaving for the inspector: `loading` stays true so every effect waiting for it stays idle until the route changes.
+        let leaving = false;
         try {
             const [agentRes, sessionRes] = await Promise.all([
                 fetch(`/api/agents/${agentId}`, { cache: 'no-store' }),
@@ -467,6 +473,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLoadFailure(null);
             const agentData = await agentRes.json();
             const sessionData = await sessionRes.json();
+            // This page is the chat for sessions started from the console. Any other is real traffic: the
+            // inspector shows it, and nothing below (follow, stream, composer) may start for it.
+            if (!isContinuableSession(sessionSourceOf(sessionData.session?.metadata))) {
+                leaving = true;
+                setRedirecting(true);
+                router.replace(sessionInspectorHref(agentId, sessionId));
+                return;
+            }
             setAgent(agentData.agent);
             setAgentModels(Array.isArray(agentData.models) ? agentData.models : []);
             // The session remembers the model its last turn ran on: the picker starts there.
@@ -488,9 +502,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             console.error('Failed to load session', err);
             setLoadFailure('notFound');
         } finally {
-            setLoading(false);
+            if (!leaving) setLoading(false);
         }
-    }, [agentId, sessionId]);
+    }, [agentId, sessionId, router]);
 
     useEffect(() => {
         void load();
@@ -1060,7 +1074,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    if (loading) return <LoadingState label="Loading session..." minHeight={400} />;
+    if (loading || redirecting) return <LoadingState label={redirecting ? tall('openingInspector') : 'Loading session...'} minHeight={400} />;
     if (loadFailure || !agent) {
         const refused = loadFailure === 'forbidden';
         return (

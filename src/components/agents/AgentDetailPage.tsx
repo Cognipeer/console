@@ -74,6 +74,8 @@ import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
+import { isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
+import { SESSION_QUERY_PARAM } from './session/sessionLinks';
 import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
 import AgentVariablesEditor from './studio/AgentVariablesEditor';
 import AgentFilesPanel from './studio/AgentFilesPanel';
@@ -613,13 +615,33 @@ export default function AgentDetailPage() {
     }
   }, [activeTab, agent, loadSessions]);
 
-  // A queued or running run changes without anyone touching the page.
-  const hasActiveRun = sessions.some((row) => row.activeRun);
+  // A session whose turn runs (a background run, or one answering a caller right now) changes without anyone touching the page.
+  const hasOngoingSession = sessions.some(isSessionOngoing);
   useEffect(() => {
-    if (activeTab !== 'sessions' || !hasActiveRun) return;
+    if (activeTab !== 'sessions' || !hasOngoingSession) return;
     const timer = setInterval(() => { void loadSessions(true); }, 5_000);
     return () => clearInterval(timer);
-  }, [activeTab, hasActiveRun, loadSessions]);
+  }, [activeTab, hasOngoingSession, loadSessions]);
+
+  // `?session=` opens that session's inspector (the Sessions lists link here), on arrival and whenever the link changes.
+  // The value ends up in API paths, so anything but a plain id is ignored.
+  const rawLinkedSession = searchParams.get(SESSION_QUERY_PARAM);
+  const linkedSessionId = rawLinkedSession && /^[A-Za-z0-9_-]{1,128}$/.test(rawLinkedSession) ? rawLinkedSession : null;
+  useEffect(() => {
+    if (!linkedSessionId) return;
+    setActiveTab('sessions');
+    setViewedSessionId(linkedSessionId);
+  }, [linkedSessionId]);
+
+  const closeSession = useCallback(() => {
+    setViewedSessionId(null);
+    if (!linkedSessionId) return;
+    // Leave the link behind, or reloading the page would open the session again.
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete(SESSION_QUERY_PARAM);
+    next.set('tab', 'sessions');
+    router.replace(`/dashboard/agents/${encodeURIComponent(agentId)}?${next.toString()}`, { scroll: false });
+  }, [linkedSessionId, searchParams, router, agentId]);
 
   useEffect(() => {
     if (activeTab === 'sessions' && agent && agent.config?.kind !== 'external') void loadReminderSummary();
@@ -1320,11 +1342,12 @@ export default function AgentDetailPage() {
             <SessionDetailDrawer
               agentId={agentId}
               session={viewedSessionId
-                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId, source: 'api' }
+                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId }
                 : null}
-              onClose={() => setViewedSessionId(null)}
+              onClose={closeSession}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
               onResolved={() => void loadSessions()}
+              onSessionChanged={() => void loadSessions(true)}
             />
           </SectionCard>
         </Tabs.Panel>

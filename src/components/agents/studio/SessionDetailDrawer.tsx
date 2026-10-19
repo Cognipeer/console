@@ -17,7 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Badge, Box, Button, Code, Collapse, Group, Stack, Text, UnstyledButton } from '@mantine/core';
+import { Alert, Badge, Box, Button, Code, Collapse, Group, Loader, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconChevronDown, IconChevronRight, IconHandStop, IconPlayerPlay } from '@tabler/icons-react';
 import LlmRequestDetailModal, {
@@ -29,6 +29,7 @@ import TokenStats from '@/components/common/ui/TokenStats';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { useTranslations } from '@/lib/i18n';
+import { isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
 import PendingActionList from '../session/PendingActionCards';
 import SessionActivity from '../session/SessionActivity';
 import SessionStatusBadge from '../session/SessionStatusBadge';
@@ -41,7 +42,12 @@ import AgentRunsTable from './AgentRunsTable';
 import { cancelReminder, fireReminderNow } from './reminderActions';
 import { formatUntil, isUpcomingReminder, reminderOfMessage } from './reminderUi';
 import { useSessionReminders } from './useSessionReminders';
-import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
+import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, sessionSourceOf, type SessionListItem } from './SessionList';
+
+/** How often an open session that is still running is read again. */
+const REFRESH_MS = 4000;
+/** A read that never answers is given up after this long, or it would hold the refresh timer off for good. */
+const READ_TIMEOUT_MS = 30_000;
 
 export interface SessionDetailDrawerProps {
     agentId: string;
@@ -51,6 +57,8 @@ export interface SessionDetailDrawerProps {
     onContinue: (sessionId: string) => void;
     /** A request was answered here, so the session list behind the drawer is out of date. */
     onResolved?: () => void;
+    /** The session moved on by itself (its status or last activity changed between two reads), so the list behind the drawer is out of date. */
+    onSessionChanged?: () => void;
 }
 
 /** What links a message's files to the session's content route, and which of them are gone. */
@@ -102,11 +110,12 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
     return items;
 }
 
-export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, onResolved }: SessionDetailDrawerProps) {
+export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, onResolved, onSessionChanged }: SessionDetailDrawerProps) {
     const th = useTranslations('agents.hitl');
     const tsa = useTranslations('agents.sessionAccess');
     const ta = useTranslations('agents.activity');
     const tr = useTranslations('agents.reminders');
+    const tall = useTranslations('agents.allSessions');
     const [record, setRecord] = useState<SessionRecord | null>(null);
     // What the server says the viewer may do with the open requests (its own rule, not guessed from the agent's setting).
     const [serverActions, setServerActions] = useState<ServerPendingAction[]>([]);
@@ -120,10 +129,36 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const [runsOpen, setRunsOpen] = useState(false);
     const loadedFor = useRef<string | undefined>(undefined);
     const sessionId = session?._id;
+    // What the effect below needs from the row and the host without re-reading the session when they change.
+    const rowOngoing = session ? isSessionOngoing(session) : false;
+    const rowOngoingRef = useRef(rowOngoing);
+    rowOngoingRef.current = rowOngoing;
+    const onSessionChangedRef = useRef(onSessionChanged);
+    onSessionChangedRef.current = onSessionChanged;
+    const previousRecord = useRef<SessionRecord | null>(null);
+    // Whether the Activity panel was already opened (or deliberately left shut) for this session.
+    const activityDecided = useRef(false);
+    // A read is in flight: the timer must not start another (it would cancel this one, so a slow read would never land).
+    const reading = useRef(false);
+
+    // The record's own status wins once it is loaded (an absent one is idle); the row's run covers what the record cannot know.
+    const ongoing = isSessionOngoing({
+        runtimeStatus: record ? record.runtimeStatus ?? 'idle' : session?.runtimeStatus,
+        activeRun: session?.activeRun,
+    });
+    // The transcript only changes when a turn settles, so the session is read again on a timer while one runs.
+    useEffect(() => {
+        if (!sessionId || !ongoing) return undefined;
+        const timer = setInterval(() => {
+            if (document.visibilityState !== 'hidden' && !reading.current) setReloadKey((key) => key + 1);
+        }, REFRESH_MS);
+        return () => clearInterval(timer);
+    }, [sessionId, ongoing]);
 
     useEffect(() => {
         if (!sessionId) {
             loadedFor.current = undefined;
+            previousRecord.current = null;
             return;
         }
         let cancelled = false;
@@ -132,17 +167,34 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             loadedFor.current = sessionId;
             setRecord(null);
             setFiles(null);
-            setActivityOpen(false);
+            // A running session opens on its live step log.
+            setActivityOpen(rowOngoingRef.current);
+            activityDecided.current = rowOngoingRef.current;
+            previousRecord.current = null;
             setRunsOpen(false);
+            setError(null);
         }
-        setError(null);
-        fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' })
+        reading.current = true;
+        const controller = new AbortController();
+        const giveUp = setTimeout(() => controller.abort(new Error('The session took too long to load')), READ_TIMEOUT_MS);
+        fetch(`/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}`, { cache: 'no-store', signal: controller.signal })
             .then(async (res) => {
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (cancelled) return;
                 const loaded = data.session as SessionRecord;
                 setRecord(loaded);
+                setError(null);
+                const previous = previousRecord.current;
+                previousRecord.current = loaded;
+                if (previous && ((previous.runtimeStatus ?? 'idle') !== (loaded.runtimeStatus ?? 'idle') || previous.updatedAt !== loaded.updatedAt)) {
+                    onSessionChangedRef.current?.();
+                }
+                // A link carries no row to say the session runs; the record does.
+                if (!activityDecided.current) {
+                    activityDecided.current = true;
+                    if (loaded.runtimeStatus === 'running') setActivityOpen(true);
+                }
                 setServerActions(Array.isArray(data.pendingActions) ? (data.pendingActions as ServerPendingAction[]) : []);
                 // Which of the files its messages name still exist. Asked only when a message carries any, and
                 // beside the transcript, never part of it: a list that cannot be read only means no file is
@@ -152,7 +204,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                     return;
                 }
                 try {
-                    const filesRes = await fetch(sessionFilesUrl(agentId, sessionId), { cache: 'no-store' });
+                    const filesRes = await fetch(sessionFilesUrl(agentId, sessionId), { cache: 'no-store', signal: controller.signal });
                     if (!filesRes.ok) throw new Error(`HTTP ${filesRes.status}`);
                     const filesData = await filesRes.json();
                     if (!cancelled) setFiles(Array.isArray(filesData.files) ? (filesData.files as SessionFileItem[]) : []);
@@ -162,8 +214,17 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             })
             .catch((err: unknown) => {
                 if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+            })
+            .finally(() => {
+                clearTimeout(giveUp);
+                if (!cancelled) reading.current = false;
             });
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+            clearTimeout(giveUp);
+            controller.abort();
+            reading.current = false;
+        };
     }, [agentId, sessionId, reloadKey]);
 
     /**
@@ -175,7 +236,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         if (!sessionId || resolvingId) return;
         setResolvingId(actionId);
         try {
-            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/actions/${actionId}/resolve`, {
+            const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/actions/${actionId}/resolve`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -221,7 +282,12 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const data = useMemo<LlmRequestDetailData | null>(() => {
         if (!session) return null;
         const messages = record?.messages ?? [];
-        const continuable = isContinuableSession(session.source);
+        // The rule reads the stored record; a row (or a bare link's placeholder) can be missing or stale on the source.
+        const recordSource = record ? sessionSourceOf(record.metadata) : undefined;
+        const continuable = record ? isContinuableSession(recordSource) : false;
+        const shownSource = record ? recordSource : session.source;
+        const createdAt = session.createdAt ?? record?.createdAt;
+        const updatedAt = session.updatedAt ?? record?.updatedAt;
         const steps = messages.flatMap((m) => m.steps ?? []);
         const toolNames = [...new Set(steps.map((step) => step.name))];
         const failedSteps = steps.filter(stepFailed).length;
@@ -229,7 +295,8 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         const status = sessionStatusKind({
             live: false,
             openActions: openActions.length,
-            runtimeStatus: record?.runtimeStatus ?? session.runtimeStatus,
+            // Once loaded the record decides: an absent status is idle, whatever the row last said.
+            runtimeStatus: record ? record.runtimeStatus : session.runtimeStatus,
         });
         // A settled session says how its last run ended; a waiting or paused one is already saying more.
         const stopBadge = status === 'idle' ? stopReasonBadge(record?.stopReason) : null;
@@ -238,10 +305,10 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         const blockedById = answerBlockedById(openServerActions);
 
         const properties: PropertyRow[] = [
-            { key: 'created', label: 'Created', value: <Text size="sm">{session.createdAt ? new Date(session.createdAt).toLocaleString() : '—'}</Text> },
-            { key: 'updated', label: 'Last activity', value: <Text size="sm">{formatRelativeTime(session.updatedAt ?? session.createdAt)}</Text> },
+            { key: 'created', label: 'Created', value: <Text size="sm">{createdAt ? new Date(createdAt).toLocaleString() : '—'}</Text> },
+            { key: 'updated', label: 'Last activity', value: <Text size="sm">{formatRelativeTime(updatedAt ?? createdAt)}</Text> },
             { key: 'id', label: 'Session ID', value: <Code style={{ fontSize: 11, wordBreak: 'break-all' }}>{session._id}</Code> },
-            { key: 'source', label: 'Source', value: <Text size="sm">{sessionSourceLabel(session.source)}</Text> },
+            { key: 'source', label: 'Source', value: <Text size="sm">{sessionSourceLabel(shownSource)}</Text> },
             { key: 'turns', label: 'Turns', value: <Text size="sm">{session.turns ?? 0} · {session.messageCount ?? 0} messages</Text> },
             {
                 key: 'tokens',
@@ -271,7 +338,14 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                 <Group gap="xs" wrap="wrap">
                     <SessionStatusBadge status={status} size="xs" waitingElsewhere={Boolean(blocked)} />
                     {stopBadge ? <Badge size="xs" variant="light" color={stopBadge.color}>{ta(stopBadge.key)}</Badge> : null}
-                    <SessionSourceBadge source={session.source} />
+                    {ongoing ? (
+                        <Tooltip label={tall('liveTooltip')} withArrow>
+                            <Badge size="xs" variant="light" color="teal" leftSection={<Loader size={8} color="teal" />}>
+                                {tall('live')}
+                            </Badge>
+                        </Tooltip>
+                    ) : null}
+                    <SessionSourceBadge source={shownSource} />
                     <span className="ds-badge ds-badge-info">{session.turns ?? 0} turn{session.turns === 1 ? '' : 's'}</span>
                     {session.activeMs ? <span className="ds-badge">{formatDuration(session.activeMs)}</span> : null}
                     {toolNames.length > 0 ? <span className="ds-badge">{toolNames.length} tools</span> : null}
@@ -287,10 +361,10 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
 
         const notices = error ? (
             <Alert color="red" variant="light">Could not load the transcript: {error}</Alert>
-        ) : !continuable ? (
+        ) : record && !continuable ? (
             <Alert color="gray" variant="light" p="xs">
                 <Text size="xs">
-                    Read-only — this session came in via {sessionSourceLabel(session.source)}. Only sessions started
+                    Read-only — this session came in via {sessionSourceLabel(shownSource)}. Only sessions started
                     from the console can be continued here.
                 </Text>
             </Alert>
@@ -363,13 +437,13 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, files, error, onContinue, agentId, serverActions, th, tsa, ta, resolvingId, resolveAction, activityOpen, runsOpen, reloadKey, tr, nextReminder, reminderAction]);
+    }, [session, record, files, error, ongoing, onContinue, agentId, serverActions, th, tsa, ta, tall, resolvingId, resolveAction, activityOpen, runsOpen, reloadKey, tr, nextReminder, reminderAction]);
 
     return (
         <LlmRequestDetailModal
             opened={Boolean(session)}
             onClose={onClose}
-            title={session?.title || 'New session'}
+            title={session?.title || record?.title || 'New session'}
             data={data}
             labels={{
                 request: 'Session metadata',
