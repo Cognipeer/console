@@ -69,6 +69,7 @@ import LlmRequestDetailModal, {
   type LlmRequestDetailData,
   type LlmRequestItem,
 } from '@/components/common/llm/LlmRequestDetail';
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { buildSessionModel, outcomeText, stepCategory } from '@/components/tracing/sessionModel';
 import EventListGrouped from '@/components/tracing/EventListGrouped';
 
@@ -431,7 +432,7 @@ export default function ThreadDetailPage({
       }
 
       const data: SessionDetailResponse = await response.json();
-      const events = (data.events || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+      const events = foldSupersededSpans((data.events || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)));
       setSelectedSessionEvents(events);
       setSelectedEventId(events[0]?.id ?? null);
     } catch (err) {

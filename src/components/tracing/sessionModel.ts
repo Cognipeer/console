@@ -20,6 +20,7 @@
  *      such sessions get gap-based estimates, marked as estimates.
  */
 
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { eventResponse, humanStep, isHumanEventType, type HumanStep, type SectionShell } from '@/lib/shared/tracingSections';
 
 export interface TraceEventInput {
@@ -656,7 +657,7 @@ export function buildSessionModel(
   session?: { startedAt?: string; durationMs?: number },
 ): SessionModel {
   const legacyHandler = isLegacyHandlerSession(events);
-  const steps = foldHumanSteps(events);
+  const steps = foldHumanSteps(foldSupersededSpans(events));
   const timings = resolveTimings(steps, session?.startedAt);
   const tree = buildTraceTree(steps, timings.timings);
   const breakdown = legacyHandler ? undefined : computeBreakdown(tree, session);

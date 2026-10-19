@@ -83,6 +83,6 @@ A child that cannot run, or runs short of what its author set up, never fails th
 
 ## Not supported yet
 
-- **Separate trace steps for a child run.** A child's work is not shown as steps of its own in the trace; you see the delegation call and the forwarded tool calls.
+- **A child's own tool calls in the call row.** The trace shows a child's work as a **Sub-agent** group of its own, with its model calls, tool calls and approvals as steps inside it. The delegation call itself stays one row, and a child that paused for an approval and was approved stays that one group: the pause is recorded with the same span, and the trace draws the latest record only.
 - **Re-authorisation of a referenced agent at run time.** Who may use the referenced agent is decided when the entry is saved. At run time the child runs under the delegating agent's identity and does not check the caller's access to the referenced agent again.
 - **Version pinning of a paused child.** A child that paused for an approval is not guaranteed to continue on the very definition it paused on if the agent or the referenced agent is edited and published while the request is open.
