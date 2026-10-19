@@ -37,6 +37,10 @@ import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
 import { sessionFilesUrl, toAttachmentViews, type SessionFileItem } from '../session/sessionFilesUi';
+import AgentRunsTable from './AgentRunsTable';
+import { cancelReminder, fireReminderNow } from './reminderActions';
+import { formatUntil, isUpcomingReminder, reminderOfMessage } from './reminderUi';
+import { useSessionReminders } from './useSessionReminders';
 import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
 
 export interface SessionDetailDrawerProps {
@@ -76,7 +80,11 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
             const attachments = transcriptFiles && message.attachments?.length
                 ? toAttachmentViews(message.attachments, transcriptFiles)
                 : undefined;
-            items.push({ itemType: 'message', role: 'user', content: message.content, ...(attachments ? { attachments } : {}) });
+            // A reminder's wake-up turn is the agent's own note, not something a person wrote.
+            const reminder = reminderOfMessage(message);
+            items.push(reminder
+                ? { itemType: 'message', role: 'user', roleLabel: 'Reminder', content: reminder.message }
+                : { itemType: 'message', role: 'user', content: message.content, ...(attachments ? { attachments } : {}) });
             return;
         }
         (message.steps ?? []).forEach((step, stepIndex) => {
@@ -98,6 +106,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const th = useTranslations('agents.hitl');
     const tsa = useTranslations('agents.sessionAccess');
     const ta = useTranslations('agents.activity');
+    const tr = useTranslations('agents.reminders');
     const [record, setRecord] = useState<SessionRecord | null>(null);
     // What the server says the viewer may do with the open requests (its own rule, not guessed from the agent's setting).
     const [serverActions, setServerActions] = useState<ServerPendingAction[]>([]);
@@ -108,6 +117,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const [reloadKey, setReloadKey] = useState(0);
     const [resolvingId, setResolvingId] = useState<string | null>(null);
     const [activityOpen, setActivityOpen] = useState(false);
+    const [runsOpen, setRunsOpen] = useState(false);
     const loadedFor = useRef<string | undefined>(undefined);
     const sessionId = session?._id;
 
@@ -123,6 +133,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             setRecord(null);
             setFiles(null);
             setActivityOpen(false);
+            setRunsOpen(false);
         }
         setError(null);
         fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' })
@@ -192,6 +203,20 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             setResolvingId(null);
         }
     }, [agentId, sessionId, resolvingId, th, onResolved]);
+
+    // Asked only for a session the list says holds reminders.
+    const { reminders: sessionReminders, reload: reloadReminders } = useSessionReminders(agentId, sessionId, Boolean(session?.reminders?.active), 'active');
+    const nextReminder = (sessionReminders ?? []).find(isUpcomingReminder);
+    const reminderAction = useCallback(async (kind: 'fire' | 'cancel', id: string) => {
+        const done = kind === 'fire'
+            ? await fireReminderNow(agentId, id, tr('fireFailed'))
+            : await cancelReminder(agentId, id, tr('cancelFailed'));
+        if (done) {
+            void reloadReminders();
+            setReloadKey((key) => key + 1);
+            onResolved?.();
+        }
+    }, [agentId, tr, reloadReminders, onResolved]);
 
     const data = useMemo<LlmRequestDetailData | null>(() => {
         if (!session) return null;
@@ -287,6 +312,15 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                         />
                     </Alert>
                 ) : null}
+                {nextReminder ? (
+                    <Group gap="xs" wrap="nowrap">
+                        <Text size="xs" c="dimmed" lineClamp={1} style={{ flex: 1 }}>
+                            {tr('sessionRow', { time: new Date(nextReminder.fire_at * 1000).toLocaleString(), until: formatUntil(nextReminder.fire_at, tr), message: nextReminder.message })}
+                        </Text>
+                        <Button size="compact-xs" variant="subtle" color="gray" onClick={() => void reminderAction('fire', nextReminder.id)}>{tr('fireNow')}</Button>
+                        <Button size="compact-xs" variant="subtle" color="gray" onClick={() => void reminderAction('cancel', nextReminder.id)}>{tr('cancel')}</Button>
+                    </Group>
+                ) : null}
                 <Box>
                     <UnstyledButton onClick={() => setActivityOpen((open) => !open)} aria-expanded={activityOpen}>
                         <Group gap={4}>
@@ -306,6 +340,19 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                         </Box>
                     </Collapse>
                 </Box>
+                <Box>
+                    <UnstyledButton onClick={() => setRunsOpen((open) => !open)} aria-expanded={runsOpen}>
+                        <Group gap={4}>
+                            {runsOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+                            <Text size="xs" fw={600}>{tr('runs')}</Text>
+                        </Group>
+                    </UnstyledButton>
+                    <Collapse in={runsOpen}>
+                        <Box mt="xs">
+                            {runsOpen ? <AgentRunsTable key={session._id} agentId={agentId} conversationId={session._id} /> : null}
+                        </Box>
+                    </Collapse>
+                </Box>
             </Stack>
         );
 
@@ -316,7 +363,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, files, error, onContinue, agentId, serverActions, th, tsa, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
+    }, [session, record, files, error, onContinue, agentId, serverActions, th, tsa, ta, resolvingId, resolveAction, activityOpen, runsOpen, reloadKey, tr, nextReminder, reminderAction]);
 
     return (
         <LlmRequestDetailModal

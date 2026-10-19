@@ -33,6 +33,8 @@ import { formatCompactTokens, formatCost, summariseSession } from './sessionUsag
 import ContextCompactionCard, { compactionShrinkLabel } from './ContextCompactionCard';
 import SessionActivity from './SessionActivity';
 import SessionFilesPanel from './SessionFilesPanel';
+import SessionRemindersPanel from './SessionRemindersPanel';
+import { useSessionReminders } from '../studio/useSessionReminders';
 import type { SessionFileItem } from './sessionFilesUi';
 import { stopReasonBadge, type SessionStatusKind } from './sessionActivityUi';
 import {
@@ -64,6 +66,10 @@ export interface SessionSidePanelProps {
     sessionContext?: Record<string, unknown>;
     /** The agent's stored config — what it CAN call, versus what it did. */
     agentConfig?: AgentToolConfig;
+    /** The agent has reminders switched on — its session shows the Reminders tab even before the first one. */
+    remindersEnabled?: boolean;
+    /** The viewer may not act on the session (reminders are listed, not editable). */
+    readOnly?: boolean;
     messages: ChatMessage[];
     /** Jumps the transcript to the turn an event belongs to. */
     onGoToTurn: (index: number) => void;
@@ -100,6 +106,8 @@ export default function SessionSidePanel({
     publishedVersion,
     sessionContext,
     agentConfig,
+    remindersEnabled = false,
+    readOnly,
     messages,
     onGoToTurn,
     files,
@@ -110,7 +118,12 @@ export default function SessionSidePanel({
     const tf = useTranslations('agents.attachments');
     const tp = useTranslations('agents.sessionPage');
     const tsa = useTranslations('agents.sessionAccess');
+    const tr = useTranslations('agents.reminders');
     const [tab, setTab] = useState<string | null>('session');
+    // Asked for every session: the tab shows only when the agent uses reminders or this session has some.
+    const { reminders, reload: reloadReminders } = useSessionReminders(agentId, sessionId, true, 'all');
+    const showReminders = remindersEnabled || (reminders?.length ?? 0) > 0;
+    const activeReminders = (reminders ?? []).filter((reminder) => reminder.status === 'scheduled').length;
     const statusLabel = status === 'running'
         ? th('running')
         : status === 'waiting'
@@ -244,6 +257,11 @@ export default function SessionSidePanel({
                 {files ? (
                     <Tabs.Tab value="files">
                         {tf('tab')}{files.items && files.items.length > 0 ? <span className={classes.tabCount}>{files.items.length}</span> : null}
+                    </Tabs.Tab>
+                ) : null}
+                {showReminders ? (
+                    <Tabs.Tab value="reminders">
+                        {tr('tab')}{activeReminders > 0 ? <span className={classes.tabCount}>{activeReminders}</span> : null}
                     </Tabs.Tab>
                 ) : null}
             </Tabs.List>
@@ -462,6 +480,12 @@ export default function SessionSidePanel({
                             onDelete={files.onDelete}
                             onRetry={files.onRetry}
                         />
+                    </Tabs.Panel>
+                ) : null}
+
+                {showReminders ? (
+                    <Tabs.Panel value="reminders" p="md">
+                        <SessionRemindersPanel agentId={agentId} reminders={reminders} onChanged={() => void reloadReminders()} readOnly={readOnly} />
                     </Tabs.Panel>
                 ) : null}
 

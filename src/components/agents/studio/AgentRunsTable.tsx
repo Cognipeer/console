@@ -1,13 +1,13 @@
 'use client';
 
 /**
- * Background runs of one agent — the queue side of Sessions.
+ * The runs of one agent, or of one of its sessions.
  *
- * A background run is an API turn that was queued instead of held open
- * (docs/guide/agent-background-execution.md). Its conversation is an
- * ordinary session; this table adds what the session cannot show: the run's
- * lifecycle, why it failed, whether its callback landed, and a way to stop
- * it. Polls while anything is still queued or running.
+ * Every turn is a run, and every run belongs to a session. The session list
+ * says what a conversation holds; this table adds what it cannot show: each
+ * run's lifecycle, why it failed, whether its callback landed, and a way to
+ * stop it. In the session drawer it is filtered to that session
+ * (`conversationId`). Polls while anything is still queued or running.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -52,8 +52,10 @@ const POLL_MS = 5_000;
 
 export interface AgentRunsTableProps {
     agentId: string;
-    /** Open the run's conversation in the session inspector. */
-    onOpenConversation: (conversationId: string) => void;
+    /** Open the run's conversation in the session inspector; omitted where the table already is one. */
+    onOpenConversation?: (conversationId: string) => void;
+    /** Only this session's runs (compact: no trigger chip, newest 50). */
+    conversationId?: string;
     /** Reports how many runs are queued/running, for a badge elsewhere. */
     onActiveCountChange?: (count: number) => void;
     /** Only the runs this trigger started (its history), with a way back to all runs. */
@@ -67,23 +69,26 @@ function durationOf(run: AgentRunRow): number | null {
     return Math.max(0, end - run.started_at) * 1000;
 }
 
-export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCountChange, trigger, onClearTrigger }: AgentRunsTableProps) {
+export default function AgentRunsTable({ agentId, onOpenConversation, conversationId, onActiveCountChange, trigger, onClearTrigger }: AgentRunsTableProps) {
     const tTriggers = useTranslations('agents.triggers');
+    const tr = useTranslations('agents.reminders');
     const [runs, setRuns] = useState<AgentRunRow[] | null>(null);
     const [filter, setFilter] = useState<Filter>('all');
     const [canceling, setCanceling] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         try {
-            const triggerQuery = trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : '';
-            const res = await fetch(`/api/agents/${agentId}/runs?limit=200${triggerQuery}`, { cache: 'no-store' });
+            const query = conversationId
+                ? `conversationId=${encodeURIComponent(conversationId)}&limit=50`
+                : `limit=200${trigger ? `&triggerId=${encodeURIComponent(trigger.id)}` : ''}`;
+            const res = await fetch(`/api/agents/${agentId}/runs?${query}`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json() as { runs: AgentRunRow[] };
             setRuns(data.runs ?? []);
         } catch {
             setRuns((prev) => prev ?? []);
         }
-    }, [agentId, trigger]);
+    }, [agentId, trigger, conversationId]);
 
     useEffect(() => { void load(); }, [load]);
 
@@ -122,7 +127,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
         return <Stack gap="xs">{[0, 1, 2].map((i) => <Skeleton key={i} h={36} />)}</Stack>;
     }
 
-    const triggerFilter = trigger ? (
+    const triggerFilter = trigger && !conversationId ? (
         <Group gap={6}>
             <Badge
                 variant="light"
@@ -146,10 +151,13 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                 </Stack>
             );
         }
+        if (conversationId) {
+            return <Text size="sm" c="dimmed" py="xs">{tr('noRunsForSession')}</Text>;
+        }
         return (
             <EmptyState
-                title="No background runs yet"
-                description="API calls with background: true are queued and show up here with their status, callback and result."
+                title="No runs yet"
+                description="Every turn is recorded as a run, with its status, callback and result."
                 minHeight={200}
             />
         );
@@ -208,10 +216,12 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                         </Group>
                                     </Table.Td>
                                     <Table.Td>
-                                        <UnstyledButton onClick={() => onOpenConversation(run.conversation_id)}>
-                                            <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>
-                                            <Text size="xs" c="teal" td="underline">Open conversation</Text>
-                                        </UnstyledButton>
+                                        {onOpenConversation ? (
+                                            <UnstyledButton onClick={() => onOpenConversation(run.conversation_id)}>
+                                                <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>
+                                                <Text size="xs" c="teal" td="underline">Open conversation</Text>
+                                            </UnstyledButton>
+                                        ) : <Text size="xs" ff="monospace" c="dimmed">{run.id}</Text>}
                                     </Table.Td>
                                     <Table.Td>
                                         <Text size="xs" c="dimmed">
