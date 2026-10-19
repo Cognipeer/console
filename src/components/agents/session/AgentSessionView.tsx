@@ -20,7 +20,8 @@
  */
 
 import { useTranslations } from '@/lib/i18n';
-import { reminderOfMessage } from '../studio/reminderUi';
+import { isPendingWake, reminderOfMessage } from '../studio/reminderUi';
+import { useSessionReminders } from '../studio/useSessionReminders';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -259,7 +260,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // Following a turn this page did not start: it shows the same live view as
     // one it ran itself, fed from the session event log instead.
     const [following, setFollowing] = useState(false);
-    const [followedUser, setFollowedUser] = useState<string | null>(null);
+    const [followedUser, setFollowedUser] = useState<{ content: string; reminder?: { message: string; setAt?: string } } | null>(null);
     const [followDismissed, setFollowDismissed] = useState(false);
     const liveActive = sending || following;
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
@@ -909,8 +910,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // operator sees it live instead of an idle page that suddenly changes.
     const followedStatus = session?.runtimeStatus;
     const followedSeq = session?.lastEventSeq ?? 0;
+    /** Where the next follow starts when the wake watcher below saw the turn begin (so its first events are not missed). */
+    const followFromSeq = useRef<number | null>(null);
     useEffect(() => {
         if (loading || sending || followDismissed || followedStatus !== 'running') return undefined;
+        const after = followFromSeq.current ?? followedSeq;
+        followFromSeq.current = null;
         const controller = new AbortController();
         let active = true;
         setFollowing(true);
@@ -921,7 +926,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const stopped = { current: false };
         void (async () => {
             try {
-                const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${followedSeq}`, {
+                const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${after}`, {
                     headers: { Accept: 'text/event-stream' },
                     signal: controller.signal,
                     cache: 'no-store',
@@ -930,7 +935,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 await consumeSse(res.body, (event, frame) => {
                     if (!active) return;
                     const step = interpretSessionEvent(event, frame);
-                    if (step.kind === 'user') setFollowedUser(step.content);
+                    if (step.kind === 'user') setFollowedUser({ content: step.content, ...(step.reminder ? { reminder: step.reminder } : {}) });
                     else if (step.kind === 'tool') setLiveSegments((current) => applyLiveToolEvent(current, step.event));
                     else if (step.kind === 'text') setLiveSegments((current) => appendLiveText(current, step.text));
                     else if (step.kind === 'reasoning') setLiveSegments((current) => appendLiveReasoning(current, step.text));
@@ -971,6 +976,63 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLiveCompactions([]);
         };
     }, [loading, sending, followDismissed, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
+
+    // The session's reminders: the inspector lists them, and while a wake is still to come the page
+    // watches the event log, so the turn a reminder starts shows up live instead of after a reload.
+    const { reminders: sessionReminders, reload: reloadSessionReminders } = useSessionReminders(agentId, sessionId, true, 'all');
+    const wakePending = (sessionReminders ?? []).some(isPendingWake);
+    const remindersKey = `${followedStatus ?? ''}:${messages.length}`;
+    const lastRemindersKey = useRef<string | null>(null);
+    useEffect(() => {
+        // A turn ended (or the transcript changed): a reminder may have been set, fired or used up.
+        if (lastRemindersKey.current !== null && lastRemindersKey.current !== remindersKey) void reloadSessionReminders();
+        lastRemindersKey.current = remindersKey;
+    }, [remindersKey, reloadSessionReminders]);
+
+    useEffect(() => {
+        if (!wakePending || loading || sending || followedStatus === 'running') return undefined;
+        let active = true;
+        let controller = new AbortController();
+        void (async () => {
+            let after = followedSeq;
+            while (active) {
+                controller = new AbortController();
+                let firstSeq: number | null = null;
+                try {
+                    const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${after}`, {
+                        headers: { Accept: 'text/event-stream' },
+                        signal: controller.signal,
+                        cache: 'no-store',
+                    });
+                    if (!res.ok || !res.body) return;
+                    await consumeSse(res.body, (_event, frame) => {
+                        const seq = Number((frame as { seq?: unknown } | null)?.seq);
+                        if (firstSeq !== null || !Number.isFinite(seq)) return;
+                        firstSeq = seq;
+                        controller.abort();
+                    });
+                } catch {
+                    // Aborted on the first event (or by the cleanup), or the connection dropped.
+                }
+                if (!active) return;
+                if (firstSeq !== null) {
+                    // Something happened on the idle session: if a turn runs now, follow it from its first event.
+                    followFromSeq.current = firstSeq - 1;
+                    const fresh = await refreshSession();
+                    if (fresh?.runtimeStatus === 'running') return;
+                    followFromSeq.current = null;
+                    after = Math.max(firstSeq, fresh?.lastEventSeq ?? 0);
+                    continue;
+                }
+                // The stream ended on its own (its time cap): open it again shortly.
+                await new Promise((resolve) => { setTimeout(resolve, 3000); });
+            }
+        })();
+        return () => {
+            active = false;
+            controller.abort();
+        };
+    }, [wakePending, loading, sending, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
 
     const deleteSession = async () => {
         setDeleting(true);
@@ -1253,12 +1315,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                             </Text>
                                         ) : null}
                                         {following && followedUser ? (
-                                            <Box>
-                                                <Group gap={6} mb={4}>
-                                                    <RoleBadge user agentName={agent.name} />
-                                                </Group>
-                                                <Text size="sm" className={classes.preWrap}>{followedUser}</Text>
-                                            </Box>
+                                            followedUser.reminder ? (
+                                                <ReminderNote message={followedUser.reminder.message} at={followedUser.reminder.setAt} />
+                                            ) : (
+                                                <Box>
+                                                    <Group gap={6} mb={4}>
+                                                        <RoleBadge user agentName={agent.name} />
+                                                    </Group>
+                                                    <Text size="sm" className={classes.preWrap}>{followedUser.content}</Text>
+                                                </Box>
+                                            )
                                         ) : null}
                                         {liveActive ? (
                                             <Box>
@@ -1441,6 +1507,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             sessionContext={sessionContext}
                             agentConfig={agent.config}
                             remindersEnabled={!isConnected && agent.config?.reminders?.enabled === true}
+                            reminders={sessionReminders}
+                            onRemindersChanged={() => void reloadSessionReminders()}
                             readOnly={readOnly}
                             messages={messages}
                             onGoToTurn={goToTurn}

@@ -21,6 +21,7 @@ import { CONFIG_SECTION_KEYS } from '@/components/agents/studio/configSections';
 import {
   filterReminders,
   formatUntil,
+  isPendingWake,
   patchReminders,
   reminderOfMessage,
   reminderQueryStatus,
@@ -28,6 +29,7 @@ import {
   type AgentReminderView,
 } from '@/components/agents/studio/reminderUi';
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
+import { interpretSessionEvent } from '@/components/agents/session/sessionFollow';
 
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -53,6 +55,26 @@ describe('reminder rules', () => {
 
   it('keeps Runtime owning the reminders config key', () => {
     expect(CONFIG_SECTION_KEYS.advanced).toEqual(['runtime', 'reminders']);
+  });
+
+  it('watches for a wake while one is still to come, fired or not', () => {
+    expect(['scheduled', 'queued', 'running'].map((status) => isPendingWake(reminder({ status: status as AgentReminderView['status'] })))).toEqual([true, true, true]);
+    expect(['succeeded', 'failed', 'canceled', 'requires_action'].some((status) => isPendingWake(reminder({ status: status as AgentReminderView['status'] })))).toBe(false);
+  });
+
+  it('a followed wake turn opens with the reminder card, not the framed note as a user bubble', () => {
+    const frame = (data: Record<string, unknown>) => ({ seq: 7, type: 'user.message', data });
+    expect(interpretSessionEvent('user.message', frame({
+      content: '[Reminder] You scheduled this for yourself at …',
+      origin: 'reminder',
+      reminder: { runId: 'run_1', message: 'Check the deploy.', setAt: '2026-10-19T15:00:00.000Z' },
+    }))).toEqual({
+      kind: 'user',
+      content: '[Reminder] You scheduled this for yourself at …',
+      reminder: { message: 'Check the deploy.', setAt: '2026-10-19T15:00:00.000Z' },
+    });
+    expect(interpretSessionEvent('user.message', frame({ content: 'hi', origin: 'reminder' }))).toEqual({ kind: 'user', content: 'hi' });
+    expect(interpretSessionEvent('user.message', frame({ content: 'hi' }))).toEqual({ kind: 'user', content: 'hi' });
   });
 
   it('words a time ahead', () => {

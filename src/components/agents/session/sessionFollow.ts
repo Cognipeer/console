@@ -10,7 +10,8 @@
  */
 
 export type FollowStep =
-    | { kind: 'user'; content: string }
+    /** `reminder`: the turn is a reminder waking the session — `content` is the framed note the model read. */
+    | { kind: 'user'; content: string; reminder?: { message: string; setAt?: string } }
     | {
         kind: 'tool';
         event: { phase: 'start' | 'success' | 'error'; name: string; id?: string; args?: unknown; durationMs?: number; error?: string };
@@ -32,8 +33,17 @@ function asRecord(value: unknown): Record<string, unknown> {
 export function interpretSessionEvent(event: string, frame: unknown): FollowStep {
     const data = asRecord(asRecord(frame).data);
     switch (event) {
-        case 'user.message':
-            return typeof data.content === 'string' ? { kind: 'user', content: data.content } : IGNORE;
+        case 'user.message': {
+            if (typeof data.content !== 'string') return IGNORE;
+            const reminder = asRecord(data.reminder);
+            return data.origin === 'reminder' && typeof reminder.message === 'string'
+                ? {
+                    kind: 'user',
+                    content: data.content,
+                    reminder: { message: reminder.message, ...(typeof reminder.setAt === 'string' ? { setAt: reminder.setAt } : {}) },
+                }
+                : { kind: 'user', content: data.content };
+        }
         case 'agent.tool_use':
             return typeof data.name === 'string'
                 ? {

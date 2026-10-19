@@ -37,6 +37,11 @@ export function isUpcomingReminder(reminder: Pick<AgentReminderView, 'status'>):
     return reminder.status === 'scheduled';
 }
 
+/** A reminder whose wake turn is still to come: waiting, or fired and queued or running now. */
+export function isPendingWake(reminder: Pick<AgentReminderView, 'status'>): boolean {
+    return reminder.status === 'scheduled' || reminder.status === 'queued' || reminder.status === 'running';
+}
+
 /**
  * The Reminders view sits next to the sessions list only for an agent that
  * uses reminders: switched on (draft or published), or one that has ever set
