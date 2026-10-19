@@ -963,15 +963,10 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     };
 
     try {
-      const { email, slug } = readJsonBody<{
-        email?: string;
-        slug?: string;
-      }>(request);
+      const { email } = readJsonBody<{ email?: string }>(request);
 
-      if (!email || !slug) {
-        return reply.code(400).send({
-          error: 'Email and organization slug are required',
-        });
+      if (!email) {
+        return reply.code(400).send({ error: 'Email is required' });
       }
 
       const clientIp = getClientIp(request);
@@ -987,30 +982,34 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // The organizations come from the address, as on login: one message
+      // carries a reset link for each organization the account belongs to.
       const db = await getDatabase();
-      const tenant = await db.findTenantBySlug(slug);
-      if (!tenant) {
-        // Avoid logging slugs that miss to prevent log-based enumeration.
-        return finishWithSuccess();
-      }
+      const secret = new TextEncoder().encode(getConfig().auth.jwtSecret);
+      const organizations: Array<{ name: string; resetUrl: string }> = [];
+      let recipient: IUser | null = null;
 
-      return await withTenantScope(db, tenant.dbName, async () => {
-        const user = await db.findUserByEmail(email);
-        // A login-disabled (service) account has no password to reset: treat it
-        // exactly like an unknown email — same generic 200, no token minted, no
-        // mail sent — so the flow neither burns a reset token nor lets a
-        // user-chosen password be planted on a no-login record. The same goes for
-        // an account its directory (LDAP, SSO) manages: its password is the
-        // directory's, and a local one planted here would open a second door.
-        if (!user || isUserLoginBlocked(user) || isDirectoryManaged(user)) {
-          return finishWithSuccess();
+      for (const entry of await db.listTenantsForUser(email)) {
+        const tenant = await db.findTenantById(entry.tenantId);
+        if (!tenant) {
+          continue;
         }
 
-        const secret = new TextEncoder().encode(getConfig().auth.jwtSecret);
+        const user = await withTenantScope(db, tenant.dbName, () => db.findUserByEmail(email));
+        // A login-disabled (service) account has no password to reset: treat it
+        // exactly like an unknown email — no token minted, no link mailed — so
+        // the flow neither burns a reset token nor lets a user-chosen password
+        // be planted on a no-login record. The same goes for an account its
+        // directory (LDAP, SSO) manages: its password is the directory's, and a
+        // local one planted here would open a second door.
+        if (!user || isUserLoginBlocked(user) || isDirectoryManaged(user)) {
+          continue;
+        }
+
         const resetToken = await new SignJWT({
           email: user.email,
           purpose: 'password-reset',
-          slug,
+          slug: tenant.slug,
           sub: String(user._id),
         })
           .setProtectedHeader({ alg: 'HS256' })
@@ -1029,23 +1028,30 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // on a machine with no mail transport configured. Never in any other
         // environment — the token is a live credential for this account.
         if (getConfig().nodeEnv === 'development') {
-          console.info(`\n[dev] Password reset link for ${user.email} (${slug}):\n${resetUrl}\n`);
+          console.info(`\n[dev] Password reset link for ${user.email} (${tenant.slug}):\n${resetUrl}\n`);
         }
 
-        const emailSent = await sendEmail(email, 'password-reset', {
-          expiryTime: '1 hour',
-          name: user.name,
-          resetUrl,
-        });
+        organizations.push({ name: tenant.companyName, resetUrl });
+        recipient ??= user;
+      }
 
-        if (!emailSent) {
-          logger.warn('Password reset email failed to send', {
-            userId: String(user._id),
-          });
-        }
-
+      if (!recipient) {
         return finishWithSuccess();
+      }
+
+      const emailSent = await sendEmail(recipient.email, 'password-reset', {
+        expiryTime: '1 hour',
+        name: recipient.name,
+        organizations,
       });
+
+      if (!emailSent) {
+        logger.warn('Password reset email failed to send', {
+          userId: String(recipient._id),
+        });
+      }
+
+      return finishWithSuccess();
     } catch (error) {
       logger.error('Forgot password error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
