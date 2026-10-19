@@ -481,13 +481,13 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
-    async promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null> {
+    async promoteScheduledAgentRun(runId: string, tenantId: string, options: { notBefore?: Date } = {}): Promise<IAgentRun | null> {
       try {
         // The partial unique index takes the conversation's slot as the row turns active.
         return await this.updateAgentRunIf(runId, `
-          UPDATE ${TABLES.agentRuns} SET status = 'queued', updatedAt = @updatedAt
+          UPDATE ${TABLES.agentRuns} SET status = 'queued', updatedAt = @updatedAt${options.notBefore ? ', notBefore = @notBefore' : ''}
           WHERE id = @id AND tenantId = @tenantId AND status = 'scheduled'
-        `, { id: runId, tenantId, updatedAt: this.now() });
+        `, { id: runId, tenantId, updatedAt: this.now(), ...(options.notBefore ? { notBefore: options.notBefore.toISOString() } : {}) });
       } catch (error) {
         if (isSqliteUniqueConstraintError(error)) {
           const held = await this.findAgentRunByIdRaw(runId);
