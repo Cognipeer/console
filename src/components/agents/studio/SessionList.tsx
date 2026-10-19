@@ -33,12 +33,14 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
+import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
     IconArrowDown,
     IconArrowUp,
     IconCheck,
     IconCalendar,
+    IconClock,
     IconCopy,
     IconExternalLink,
     IconCoin,
@@ -46,6 +48,7 @@ import {
     IconInfoCircle,
     IconMessageCircle,
     IconPlayerPlay,
+    IconPlayerStop,
     IconPlus,
     IconRefresh,
     IconSearch,
@@ -53,12 +56,14 @@ import {
     IconX,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { AnswerBlockedReason } from '../session/pendingActions';
 import { waitingFor } from '../session/sessionActivityUi';
 import type { SessionOwnerView } from '../session/sessionTypes';
+import { reminderRowHint } from './reminderUi';
 import classes from './SessionList.module.css';
 
 
@@ -171,6 +176,16 @@ export interface SessionListItem {
      */
     canResolve?: boolean;
     resolveBlockedReason?: AnswerBlockedReason;
+    /** The newest run that is waiting for its time, queued or running on this session. */
+    activeRun?: {
+        id: string;
+        status: 'scheduled' | 'queued' | 'running' | 'requires_action';
+        /** Epoch seconds. */
+        scheduledFor?: number;
+        cancelRequested?: boolean;
+    };
+    /** Present only while the session holds scheduled reminders. */
+    reminders?: { active: number; nextAt: string };
 }
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -221,6 +236,8 @@ export function sessionOwnerText(session: Pick<SessionListItem, 'owner' | 'creat
 }
 
 export interface SessionListProps {
+    /** Needed to stop a run from the list. */
+    agentId?: string;
     sessions: SessionListItem[];
     /** The caller sees only the sessions they started (the permission to view others' is not theirs). */
     ownOnly?: boolean;
@@ -233,11 +250,14 @@ export interface SessionListProps {
     /** Reload the list (Sessions tab). */
     onRefresh?: () => void;
     refreshing?: boolean;
+    /** A run was stopped from the list, so the rows are out of date. */
+    onRunStopped?: () => void;
     /** The same runs as traces — span-level detail lives in Tracing. */
     tracesHref?: string;
 }
 
 export default function SessionList({
+    agentId,
     sessions,
     ownOnly,
     loading,
@@ -246,11 +266,14 @@ export default function SessionList({
     onStart,
     onRefresh,
     refreshing,
+    onRunStopped,
     tracesHref,
 }: SessionListProps) {
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
     const ts = useTranslations('agents.sessionAccess');
+    const tr = useTranslations('agents.reminders');
+    const [stopping, setStopping] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -260,6 +283,22 @@ export default function SessionList({
     const [source, setSource] = useState<string>('all');
     const [range, setRange] = useState<DateRange>([null, null]);
     const [sort, setSort] = useState<SortState>({ column: 'updatedAt', direction: 'desc' });
+
+    const stopRun = async (runId: string) => {
+        if (!agentId) return;
+        setStopping(runId);
+        try {
+            const res = await fetch(`/api/agents/${agentId}/runs/${runId}/cancel`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+            notifications.show({ color: 'teal', message: tr('runStopRequested') });
+            onRunStopped?.();
+        } catch (error) {
+            notifications.show({ color: 'red', message: `${tr('runStopFailed')}: ${error instanceof Error ? error.message : String(error)}` });
+        } finally {
+            setStopping(null);
+        }
+    };
 
     const filtered = useMemo(() => {
         const needle = query.trim().toLowerCase();
@@ -543,6 +582,39 @@ export default function SessionList({
                                                     <Badge size="xs" variant="light" color="orange" leftSection={<IconCoin size={10} />}>
                                                         {tb('pausedBadge')}
                                                     </Badge>
+                                                </Tooltip>
+                                            ) : null}
+                                            {session.activeRun && session.activeRun.status !== 'requires_action' ? (
+                                                <Group gap={2} wrap="nowrap">
+                                                    <Tooltip
+                                                        label={session.activeRun.status === 'scheduled' && session.activeRun.scheduledFor
+                                                            ? tr('runScheduledFor', { time: new Date(session.activeRun.scheduledFor * 1000).toLocaleString() })
+                                                            : session.activeRun.id}
+                                                        withArrow
+                                                    >
+                                                        <span>
+                                                            <StatusBadge status={session.activeRun.cancelRequested ? 'canceling' : session.activeRun.status} label={session.activeRun.cancelRequested ? tr('runCanceling') : undefined} />
+                                                        </span>
+                                                    </Tooltip>
+                                                    {agentId && !session.activeRun.cancelRequested ? (
+                                                        <Tooltip label={tr('stopRun')} withArrow>
+                                                            <ActionIcon
+                                                                size="xs"
+                                                                variant="subtle"
+                                                                color="gray"
+                                                                loading={stopping === session.activeRun.id}
+                                                                onClick={() => void stopRun(session.activeRun!.id)}
+                                                                aria-label={tr('stopRun')}
+                                                            >
+                                                                <IconPlayerStop size={12} />
+                                                            </ActionIcon>
+                                                        </Tooltip>
+                                                    ) : null}
+                                                </Group>
+                                            ) : null}
+                                            {session.reminders && session.reminders.active > 0 ? (
+                                                <Tooltip label={reminderRowHint(session.reminders, tr)} withArrow>
+                                                    <IconClock size={13} color="var(--mantine-color-dimmed)" aria-label={tr('rowHintLabel')} />
                                                 </Tooltip>
                                             ) : null}
                                             {session.status === 'error' ? (
