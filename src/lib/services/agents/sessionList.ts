@@ -10,8 +10,8 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { getDatabase, type AgentSessionRuntimeStatus, type IAgentConversationListItem } from '@/lib/database';
-import { normalizeStaleRunningStatuses } from './sessionRuntime';
+import { getDatabase, type AgentSessionRuntimeStatus, type IAgentConversationActivityRow, type IAgentConversationListItem } from '@/lib/database';
+import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 
 export const SESSION_LIST_DEFAULT_LIMIT = 20;
 export const SESSION_LIST_MAX_LIMIT = 100;
@@ -31,7 +31,10 @@ export function decodeSessionCursor(cursor: string): { createdAt: Date; id: stri
         if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || typeof id !== 'string' || id.length === 0 || id.length > 128) {
             return null;
         }
-        return { createdAt: new Date(createdAt), id };
+        // A finite number can still be no date at all (1e20): the databases would choke on it, so it is no cursor.
+        const date = new Date(createdAt);
+        if (Number.isNaN(date.getTime())) return null;
+        return { createdAt: date, id };
     } catch {
         return null;
     }
@@ -71,4 +74,55 @@ export async function listSessionPage(tenantDbName: string, filters: SessionList
     const sessions = await normalizeStaleRunningStatuses(db, page);
     const last = page[page.length - 1];
     return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeSessionCursor(last) } : {}) };
+}
+
+/**
+ * The dashboard's cross-agent Sessions list pages by last activity (`updatedAt`), not by creation, so a
+ * session that just ran moves to the top; its cursor is the (updatedAt, id) of the last row.
+ */
+export function encodeActivityCursor(row: { updatedAt?: Date | string; _id?: unknown }): string {
+    const updatedAt = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
+    return Buffer.from(JSON.stringify([updatedAt, String(row._id)]), 'utf8').toString('base64url');
+}
+
+/** The keyset an activity cursor stands for, or null when it is not one this service issued. */
+export function decodeActivityCursor(cursor: string): { updatedAt: Date; id: string } | null {
+    const keyset = decodeSessionCursor(cursor);
+    return keyset ? { updatedAt: keyset.createdAt, id: keyset.id } : null;
+}
+
+export interface ProjectSessionFilters {
+    projectId: string;
+    /** Only sessions in one of these states (an empty list matches nothing; 'idle' also matches one that never ran). */
+    runtimeStatuses?: AgentSessionRuntimeStatus[];
+    /** Only these sessions (an empty list matches nothing). */
+    ids?: string[];
+    /** The caller may view other people's sessions of only these agents (none when no keys). */
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+    before?: { updatedAt: Date; id: string };
+    limit: number;
+    /** Ids of sessions with a queued or running run: their "running" status is not questioned (no stale-run lookup). */
+    knownInFlight?: ReadonlySet<string>;
+}
+
+/** A page of a project's sessions as summary rows (message tallies, never transcripts), most recently active first. */
+export async function listProjectSessions(
+    tenantDbName: string,
+    filters: ProjectSessionFilters,
+): Promise<{ sessions: IAgentConversationActivityRow[]; hasMore: boolean; nextCursor?: string }> {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    // Not a provider filter.
+    const { knownInFlight, ...query } = filters;
+    // One more than asked, to know whether there is a next page.
+    const rows = await db.listProjectAgentConversations({ ...query, limit: filters.limit + 1 });
+    const hasMore = rows.length > filters.limit;
+    const page = rows.slice(0, filters.limit);
+    // A "running" row whose turn died reads as ended, like everywhere else a session's state is read - except one
+    // the caller knows has a run in flight, which needs no lookup.
+    const sessions = await Promise.all(page.map((row) => (
+        knownInFlight?.has(String(row._id)) ? row : normalizeStaleRunningStatus(db, row)
+    )));
+    const last = page[page.length - 1];
+    return { sessions, hasMore, ...(hasMore && last ? { nextCursor: encodeActivityCursor(last) } : {}) };
 }

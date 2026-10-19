@@ -130,10 +130,10 @@ export async function listReminders(scope: ReminderScope, filter: ListRemindersF
   }));
 }
 
-/** Active reminders per session (and the next one), for the sessions list. */
+/** Active reminders per session (and the next one), for the sessions list — of one agent, or of the whole project. */
 export async function activeRemindersBySession(
   scope: ReminderScope,
-  agentKey: string,
+  agentKey?: string,
 ): Promise<Map<string, { active: number; nextAt: Date }>> {
   const runs = await listReminders(scope, { agentKey, active: true, limit: 500 });
   const out = new Map<string, { active: number; nextAt: Date }>();

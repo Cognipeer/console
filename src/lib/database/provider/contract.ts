@@ -7,6 +7,7 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentConversationActivityRow,
   IAgentConversationListItem,
   IAgentConversationSearchHit,
   AgentSessionRuntimeStatus,
@@ -1712,6 +1713,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
      */
     ownOnly?: { userId: string; viewableAgentKeys?: string[] };
   }): Promise<IAgentConversationListItem[]>;
+  /**
+   * A project's conversations, most recently updated first (`updatedAt`, then id) - the dashboard's cross-agent
+   * Sessions list, which summarises each row like one agent's list does. The messages are tallies (one per
+   * transcript message, so the same length), never message bodies or step payloads. `runtimeStatuses` and `ids`
+   * narrow it (both given = both apply; an empty list matches nothing; 'idle' also matches a conversation that
+   * never ran); `ownOnly` as in `listAgentConversationPage`; `before` is the keyset of the last row of the
+   * previous page.
+   */
+  listProjectAgentConversations(filters: {
+    projectId: string;
+    runtimeStatuses?: AgentSessionRuntimeStatus[];
+    ids?: string[];
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+    before?: { updatedAt: Date; id: string };
+    limit: number;
+  }): Promise<IAgentConversationActivityRow[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
   /** Upsert by `conversationId`. */

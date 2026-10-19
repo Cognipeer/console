@@ -2,8 +2,20 @@
   font-size: var(--mantine-font-size-sm);
 }
 
+.row {
+  cursor: pointer;
+}
+
 .row td {
   vertical-align: middle;
+}
+
+.agentLink {
+  color: inherit;
+}
+
+.agentLink:hover {
+  text-decoration: underline;
 }
 
 .nameButton {

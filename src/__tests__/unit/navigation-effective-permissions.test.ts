@@ -72,7 +72,7 @@ describe('getDashboardServices with the engine\'s answer for the active project'
     // ...and a rule that takes it away from an admin hides it
     expect(sees({ role: 'admin', servicePermissions: {}, effectivePermissions: { webhooks: 'none' } })).toBe(false);
     // the rest of the Agents menu is not affected
-    expect(visibleSubNavItems(SUBNAV_CONFIG.agents, (service) => canUseDashboardService(asUser, service))!.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills']);
+    expect(visibleSubNavItems(SUBNAV_CONFIG.agents, (service) => canUseDashboardService(asUser, service))!.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills', 'sessions-active', 'sessions-all']);
   });
 
   it('hides a service the active project narrowed to none, instead of leaving a link that answers 403', () => {
