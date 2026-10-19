@@ -421,6 +421,15 @@ export interface AppConfig {
       /** Runs one trigger's webhook starts per minute; 0 = off. */
       rateLimitPerMinute: number;
     };
+    /** Reminders agents set for themselves (`reminder_set`): the platform ceilings over every agent's own settings. */
+    reminders: {
+      /** Off = the reminder tools are never offered and due reminders are not run. */
+      enabled: boolean;
+      minDelaySeconds: number;
+      maxHorizonHours: number;
+      maxActivePerSession: number;
+      maxFiresPerSession: number;
+    };
   };
 
   /**
@@ -539,6 +548,14 @@ function boundedAgentRunConfig(source: ConfigSource) {
     webhooks: {
       bodyLimitBytes: Math.min(atLeast(int(source, 'AGENT_WEBHOOK_BODY_LIMIT_BYTES', 5_242_880), 16_384), 26_214_400),
       rateLimitPerMinute: atLeast(int(source, 'AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE', 60), 0),
+    },
+    reminders: {
+      enabled: bool(source, 'AGENT_REMINDERS_ENABLED', true),
+      minDelaySeconds: atLeast(int(source, 'AGENT_REMINDER_MIN_DELAY_SECONDS', 60), 30),
+      // A scheduled run may start at most 30 days ahead.
+      maxHorizonHours: Math.min(atLeast(int(source, 'AGENT_REMINDER_MAX_HORIZON_HOURS', 168), 1), 720),
+      maxActivePerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_ACTIVE_PER_SESSION', 10), 1),
+      maxFiresPerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_FIRES_PER_SESSION', 100), 1),
     },
   };
 }
