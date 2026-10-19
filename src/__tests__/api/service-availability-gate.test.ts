@@ -7,7 +7,9 @@
  *     one the tenant's license leaves out answers 402 `service_not_licensed`,
  *     in every error dialect;
  *   - a route open to several services (`anyOf`) passes while one of them is on,
- *     and its handler refuses the off one through `authorizeServiceForRequest`;
+ *     and its handler refuses the off one (`authorizeServiceForRequest` resolves
+ *     it as not allowed, `serviceRefusalError` answers `service_disabled`);
+ *   - a handler that only filters by service leaves an off one out and answers;
  *   - an enterprise module can be off while the permission service it shares
  *     stays on (`/mcp/hubs` vs `/mcp/servers`);
  *   - a route that only asks for a signed-in caller, or none, is never refused.
@@ -60,6 +62,7 @@ import { authz } from '@/lib/iam/routeAuthz';
 import { clearServiceAvailabilityMemo } from '@/lib/services/availability/serviceAvailability';
 import {
   authorizeServiceForRequest,
+  serviceRefusalError,
   withApiRequestContext,
   withClientApiRequestContext,
   withOpenAiApiRequestContext,
@@ -103,9 +106,16 @@ async function buildApp() {
       withClientApiRequestContext(async (req, reply) => {
         const which = (req.params as { which: 'rag' | 'models' }).which;
         const result = await authorizeServiceForRequest(req, which, { level: 'read' });
-        return reply.send({ ok: result.allowed });
+        if (!result.allowed) throw serviceRefusalError(req, result);
+        return reply.send({ ok: true });
       }),
     );
+    // A handler that only filters by service (the overview, a list): what it may not read, it leaves out.
+    app.get('/client/v1/probe-filter', { config: authz.authenticated() }, withClientApiRequestContext(async (req, reply) => {
+      const [rag, models] = await Promise.all((['rag', 'models'] as const).map((service) =>
+        authorizeServiceForRequest(req, service, { level: 'read' })));
+      return reply.send({ rag: rag.allowed, models: models.allowed, off: rag.off?.service ?? null });
+    }));
     app.get('/client/v1/mcp/hubs', { config: authz.service('mcp') }, withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     app.get('/client/v1/mcp/servers', { config: authz.service('mcp') }, withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
   });
@@ -191,6 +201,16 @@ describe('a route open to several services (anyOf)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/client/v1/probe-any/models', headers: TOKEN_HEADERS });
     expect(res.statusCode).toBe(403);
     expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'service_disabled' });
+  });
+});
+
+describe('a handler that filters by service', () => {
+  it('reads a switched-off service as one the caller may not read, and still answers', async () => {
+    hoisted.services = { disabled: ['rag'], enabled: [] };
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/api/client/v1/probe-filter', headers: TOKEN_HEADERS });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(parseJsonBody(res.body)).toEqual({ rag: false, models: true, off: 'rag' });
   });
 });
 

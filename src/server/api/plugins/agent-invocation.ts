@@ -60,7 +60,7 @@ import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/se
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { createLogger } from '@/lib/core/logger';
-import { authorizeServiceForRequest, getHeaderValue, readJsonBody, serviceRefusalError } from '../fastify-utils';
+import { authorizeServiceForRequest, getHeaderValue, readJsonBody, serviceOffRefusal, serviceRefusalError } from '../fastify-utils';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import {
   AgentModelError,
@@ -256,10 +256,16 @@ export async function resolveInvocationTarget(
  * request resolved to decides what it needs: `agents` for an agent, `models` for a model, at the level of its
  * method. The engine is asked again only when the gate admitted the caller on the other service. A refusal
  * throws the gate's 403 (503 when the engine cannot decide), which the route's wrapper answers in its dialect.
+ * The service it needs being switched off is checked either way: the gate refuses an `anyOf` route only when
+ * all of its services are off.
  */
 export async function authorizeInvocationTarget(request: FastifyRequest, kind: 'agent' | 'model'): Promise<void> {
   const service = kind === 'agent' ? 'agents' : 'models';
-  if (request.iamGateService === service) return;
+  if (request.iamGateService === service) {
+    const off = await serviceOffRefusal(request, service, { method: request.method });
+    if (off) throw serviceRefusalError(request, off);
+    return;
+  }
   const result = await authorizeServiceForRequest(request, service, { method: request.method });
   if (!result.allowed) throw serviceRefusalError(request, result);
   request.iamGateService = service;

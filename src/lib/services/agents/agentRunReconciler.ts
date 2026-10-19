@@ -66,6 +66,7 @@ import {
 import type { ResolvedRemindersConfig } from './agentRemindersConfig';
 import { cleanupWebhookDeliveries, sweepDueWebhookDeliveries } from '@/lib/services/webhooks/webhookService';
 import { sweepExpiredPendingActions } from './agentActionResolution';
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { cleanupExpiredSessionFiles } from './sessionFiles';
 
 const logger = createLogger('agent-run:reconcile');
@@ -279,7 +280,9 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
           return limits;
         };
-        const due = await tenantDb.listDueScheduledAgentRuns(tenantId, new Date(now), SCHEDULED_BATCH);
+        // While agents are switched off a scheduled run (a reminder too) stays scheduled: it is not consumed.
+        const agentsOn = await isServiceEnabled({ tenantDbName: tenant.dbName!, tenantId }, 'agents');
+        const due = agentsOn ? await tenantDb.listDueScheduledAgentRuns(tenantId, new Date(now), SCHEDULED_BATCH) : [];
         const reminderSettings = new Map<string, Promise<ResolvedRemindersConfig | null>>();
         const reminderSettingsFor = (run: IAgentRun) => {
           const key = `${run.projectId}:${run.agentKey}:${run.version ?? ''}:${run.usePublished ? 1 : 0}`;

@@ -407,6 +407,10 @@ type SessionRbacHint = { user: IUser; groupGrants: GroupTenantGrant[]; groups?: 
  * which `withApiRequestContext` / `withClientApiRequestContext` turn into the
  * response - so a handler that merely tests `.allowed` can never read an outage
  * as an answer.
+ *
+ * A service switched off for the tenant resolves `{ allowed: false, off }` before
+ * any permission is asked: a handler filtering by service hides it like one the
+ * caller may not read, and serviceRefusalError answers it as `service_disabled`.
  */
 export async function authorizeServiceForRequest(
   request: FastifyRequest,
@@ -414,12 +418,9 @@ export async function authorizeServiceForRequest(
   options: ServiceAuthzOptions & { rbac?: SessionRbacHint } = {},
 ): Promise<ServiceAuthzResult> {
   // The resource a route serves can belong to a switched-off service even when the route's own service is on
-  // (`/responses` with an agent while agents are off): refused before any permission is asked.
-  const tenantId = request.apiTokenContext?.tenantId ?? getSessionContext(request)?.tenantId;
-  if (tenantId) {
-    const off = await serviceOffReason({ tenantId }, service);
-    if (off) throw serviceDisabledRefusal(new ServiceDisabledError(off));
-  }
+  // (`/responses` with an agent while agents are off).
+  const off = await serviceOffRefusal(request, service, options);
+  if (off) return off;
   const result = await decideServiceForRequest(request, service, options);
   if (!result.allowed && result.decisionId) {
     if (result.unavailable) {
@@ -429,6 +430,23 @@ export async function authorizeServiceForRequest(
     request.iamDecisionId = result.decisionId;
   }
   return result;
+}
+
+/**
+ * The refusal a handler-level check resolves when `service` is switched off for the request's tenant, or null
+ * when it is on. Also for a service the gate admitted the caller on (`request.iamGateService`): that skips the
+ * second permission question, but the gate refuses an `anyOf` route only when all of its services are off.
+ */
+export async function serviceOffRefusal(
+  request: FastifyRequest,
+  service: PermissionService,
+  options: Pick<ServiceAuthzOptions, 'level' | 'method'> = {},
+): Promise<ServiceAuthzResult | null> {
+  const tenantId = request.apiTokenContext?.tenantId ?? getSessionContext(request)?.tenantId;
+  if (!tenantId) return null;
+  const off = await serviceOffReason({ tenantId }, service);
+  if (!off) return null;
+  return { allowed: false, service, required: options.level ?? getRequiredPermissionLevel(options.method ?? 'GET', service), off };
 }
 
 async function decideServiceForRequest(
@@ -708,9 +726,11 @@ export function resourceRefusalError(request: FastifyRequest, input: ResourceRef
 
 /**
  * What a handler throws when the engine refused a SERVICE it asked about itself (`authorizeServiceForRequest`
- * resolved `allowed: false`): the gate's 403, so the dialect mappers answer it as they answer the gate.
+ * resolved `allowed: false`): the gate's 403, so the dialect mappers answer it as they answer the gate. A switched-off
+ * service answers as the gate does for one: 403 `service_disabled` / 402 `service_not_licensed`.
  */
 export function serviceRefusalError(request: FastifyRequest, refusal: ServiceAuthzResult): RbacAuthorizationError {
+  if (refusal.off) return serviceDisabledRefusal(new ServiceDisabledError(refusal.off));
   const decisionId = refusal.decisionId ?? randomUUID();
   request.iamDecisionId = decisionId;
   const body = forbiddenBody({ service: refusal.service, required: refusal.required, decisionId });

@@ -39,6 +39,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 import { getDatabase } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
+import { clearServiceAvailabilityMemo } from '@/lib/services/availability/serviceAvailability';
 import {
   reconcileOrphanedAgentRuns,
   triggerAgentRunReconcilerRun,
@@ -303,6 +304,23 @@ describe('agent-run reconciler: scheduled, deferred and expired runs (§4.4–§
     await db.finalizeAgentRun(String(busy._id), tenantId, { status: 'succeeded', completedAt: new Date() });
     const second = await triggerAgentRunReconcilerRun();
     expect(second.promotedRuns).toBe(1);
+    expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('queued');
+  });
+
+  it('while agents are switched off a due scheduled run stays scheduled (not consumed), and is promoted once they are back', async () => {
+    const waiting = await db.createAgentRun({ ...baseRecord('conv-off'), status: 'scheduled', notBefore: new Date(Date.now() - 1_000) });
+    process.env.CONSOLE_DISABLED_SERVICES = 'agents';
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+    try {
+      expect((await triggerAgentRunReconcilerRun()).promotedRuns).toBe(0);
+      expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('scheduled');
+    } finally {
+      delete process.env.CONSOLE_DISABLED_SERVICES;
+      reloadConfig();
+      clearServiceAvailabilityMemo();
+    }
+    expect((await triggerAgentRunReconcilerRun()).promotedRuns).toBe(1);
     expect((await db.getAgentRunById(String(waiting._id), tenantId, PROJECT_ID))?.status).toBe('queued');
   });
 

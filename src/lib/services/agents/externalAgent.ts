@@ -28,7 +28,7 @@
 import { createLogger } from '@/lib/core/logger';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
+import { assertProviderEnabled, loadProviderRuntimeData, ProviderDisabledError } from '@/lib/services/providers/providerService';
 import type { ExternalAgentProtocol, IExternalAgentConnection } from '@/lib/database';
 import {
   createA2aAccumulator,
@@ -177,7 +177,7 @@ async function resolveApiKey(
 ): Promise<string | undefined> {
   if (connection.credentialProviderKey) {
     try {
-      const { credentials } = await loadProviderRuntimeData<Record<string, unknown>>(
+      const { record, credentials } = await loadProviderRuntimeData<Record<string, unknown>>(
         ctx.tenantDbName,
         {
           key: connection.credentialProviderKey,
@@ -185,9 +185,12 @@ async function resolveApiKey(
           projectId: ctx.projectId,
         },
       );
+      // A provider an operator switched off lends its credentials to nobody, the inline key included.
+      assertProviderEnabled(record);
       const fromProvider = pickCredentialValue(credentials);
       if (fromProvider) return fromProvider;
     } catch (error) {
+      if (error instanceof ProviderDisabledError) throw error;
       logger.warn('Failed to resolve provider credentials for connected agent', {
         providerKey: connection.credentialProviderKey,
         error,

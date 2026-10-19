@@ -20,6 +20,7 @@
  */
 
 import type { IGroup } from '@/lib/database';
+import type { ServiceOff } from '@/lib/services/availability/serviceAvailability';
 import {
   getRequiredPermissionLevel,
   type GroupTenantGrant,
@@ -78,6 +79,12 @@ export interface ServiceAuthzResult {
    * should answer 503 `authorization_unavailable`, not 403).
    */
   unavailable?: true;
+  /**
+   * Set when the service is switched off for the tenant (environment or license): nobody may use it, so no
+   * decision is asked. A handler filtering by service only reads `allowed`; a route refusing the request answers
+   * it as `service_disabled` / `service_not_licensed` (serviceRefusalError).
+   */
+  off?: ServiceOff;
 }
 
 export async function authorizeServiceAccess(
