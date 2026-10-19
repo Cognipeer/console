@@ -2998,6 +2998,10 @@ export async function publishAgent(
     );
     const nextVersion = latestKnownVersion + 1;
 
+    // An imported agent waits as a draft until someone reviews and publishes it, so
+    // publishing turns it on. An agent someone switched off stays inactive.
+    const status = agent.status === 'draft' ? 'active' : agent.status;
+
     const version = await db.createAgentVersion({
         tenantId: agent.tenantId,
         projectId: agent.projectId,
@@ -3008,7 +3012,7 @@ export async function publishAgent(
             name: agent.name,
             description: agent.description,
             config: agent.config,
-            status: agent.status,
+            status,
         },
         changelog,
         publishedBy: userId,
@@ -3018,6 +3022,7 @@ export async function publishAgent(
     await db.updateAgent(agentId, {
         publishedVersion: nextVersion,
         latestVersion: nextVersion,
+        ...(status !== agent.status ? { status } : {}),
         updatedBy: userId,
     });
 
