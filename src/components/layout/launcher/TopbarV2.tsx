@@ -26,6 +26,7 @@ import {
   IconUserCircle,
 } from '@tabler/icons-react';
 import ProjectPill from '@/components/projects/ProjectPill';
+import PortalSwitcher from './PortalSwitcher';
 import { useTranslations } from '@/lib/i18n';
 import classes from './LauncherShell.module.css';
 
@@ -133,6 +134,8 @@ export default function TopbarV2({
       </UnstyledButton>
 
       <ProjectPill />
+
+      <PortalSwitcher />
 
       <Tooltip label={isDark ? 'Light mode' : 'Dark mode'} withArrow>
         <ActionIcon

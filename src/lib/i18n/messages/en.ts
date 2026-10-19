@@ -273,6 +273,7 @@ export const en = {
     dashboardOverview: 'Dashboard',
     services: 'Services',
     servicesLabel: 'All services',
+    portalsYours: 'Your portals',
     globalSearchPlaceholder: 'Search across services, docs, and data',
     servicesHome: 'Services Home',
     servicesHomeDescription: 'Browse every available module',
