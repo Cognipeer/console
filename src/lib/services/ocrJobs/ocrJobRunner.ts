@@ -8,6 +8,7 @@
  * and fires a per-file callback.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
@@ -145,6 +146,10 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
   const startedAt = Date.now();
 
   try {
+    // Inside the try so a switched-off service fails this item (recorded,
+    // webhook sent, job completion counted) instead of throwing into the queue
+    // and being retried. A paused job was already held above.
+    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
     const projectId = ctx.projectId ?? '';
     const document = await resolveDocument(ctx, item);
 

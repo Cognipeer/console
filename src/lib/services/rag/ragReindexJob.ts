@@ -21,6 +21,7 @@
  *     across nodes (the in-memory set only makes it instant on this node).
  */
 
+import { assertServiceEnabled, isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IRagDocument, IRagModule } from '@/lib/database';
@@ -301,6 +302,9 @@ async function reindexDocuments(
 ): Promise<void> {
   const { runKey, tenantDbName, tenantId, projectId } = payload;
 
+  // Thrown into the job's failure path: the run is recorded as failed once.
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'rag');
+
   const ragModule = await db.findRagModuleByKey(run.ragModuleKey, projectId);
   if (!ragModule) {
     throw new Error(`Knowledge Engine module "${run.ragModuleKey}" not found.`);
@@ -524,6 +528,8 @@ export async function resumeInterruptedRagReindexRuns(): Promise<number> {
 
   for (const tenant of tenants) {
     if (!tenant.dbName) continue;
+    // Left for the next boot once the service is back on; nothing is consumed here.
+    if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'rag'))) continue;
     try {
       const pending = await runWithTenantScope(tenant.dbName, (db) =>
         db.listRagReindexRuns({ statuses: ['queued', 'running'] }),

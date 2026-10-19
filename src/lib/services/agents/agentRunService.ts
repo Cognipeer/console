@@ -54,6 +54,8 @@ import {
 import { createSessionEventWriter, toSessionStopReason, type SessionEventType } from './sessionEvents';
 import { cancelPendingForNewMessage } from './agentPendingActions';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
+import { assertAgentsEnabled } from './agentServiceAvailability';
+import { ServiceDisabledError, serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { abortLocalTurns, watchTurnCancellation } from './turnWatch';
 
 export { agentDefaultCallback } from './agentCallbackConfig';
@@ -758,6 +760,9 @@ export async function startAgentRun(input: StartAgentRunInput): Promise<StartAge
   if (runClass === 'deferred' && input.execution.kind === 'inline') {
     throw new Error('A deferred run is always queued');
   }
+  // Every API run, trigger fire, A2A task and background run starts here: none of them is
+  // admitted for a tenant whose agents service is off, so nothing is queued to fail later.
+  await assertAgentsEnabled(input);
   const limits = input.limits ?? envRunLimits();
   const cfg = getConfig();
 
@@ -1326,6 +1331,7 @@ export async function queueAgentRunResume(input: {
   /** From `resolveAgentRunLimits`; resolved here (env ∧ tenant quota) when absent. */
   limits?: AgentRunLimits;
 }): Promise<QueueAgentRunResumeOutcome> {
+  await assertAgentsEnabled(input);
   const db = await withTenantDb(input.tenantDbName);
   const trigger = input.trigger ?? (input.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume');
   let run: IAgentRun | null = null;
@@ -1879,7 +1885,18 @@ async function runAgentJobInTenant(payload: AgentRunJobPayload, settled: Promise
       afterDeferred();
     };
 
-    const blocked = await preconditionFailure(db, claimed).catch(() => null);
+    // A run queued before the agents service was switched off (or taken off the tenant's license)
+    // ends here, failed and not retried, with the code the API would have answered with.
+    const serviceOff = await serviceOffReason({ tenantId, tenantDbName }, 'agents');
+    if (serviceOff) {
+      const errorReason = serviceOff.source === 'env' ? 'service_disabled' : 'service_not_licensed';
+      const message = new ServiceDisabledError(serviceOff).message;
+      await finalize('failed', { errorReason, errorMessage: message }, { errorReason, message });
+      return;
+    }
+
+    // Fails closed: a check that cannot be made does not let the run execute.
+    const blocked = await preconditionFailure(db, claimed).catch(() => 'The agent could not be verified before the run started.');
     if (blocked) {
       await finalize('failed', { errorReason: 'precondition_failed', errorMessage: blocked }, { errorReason: 'precondition_failed', message: blocked });
       return;

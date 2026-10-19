@@ -57,6 +57,7 @@ import {
 } from '@/lib/services/agents/agentTriggers';
 import { triggerSlotKey, tickAgentTriggers } from '@/lib/services/agents/agentTriggerScheduler';
 import { encryptObject } from '@/lib/utils/crypto';
+import { clearServiceAvailabilityMemo } from '@/lib/services/availability/serviceAvailability';
 
 const DB_NAME = 'tenant_triggers';
 const PROJECT_ID = 'proj-1';
@@ -348,6 +349,32 @@ describe('the scheduler tick (§2.5)', () => {
     expect(await tickAgentTriggers(new Date('2026-10-18T06:30:00.000Z'))).toMatchObject({ fired: 1 });
     expect(await triggerRuns(String(trigger._id))).toHaveLength(1);
     expect((await reload(trigger)).nextFireAt ?? null).toBeNull();
+  });
+
+  it('with the agents service switched off a once trigger stays pending and a schedule skips its slot, without a failed fire', async () => {
+    const once = await newTrigger({ type: 'once', once: { runAt: new Date('2026-10-18T06:00:00.000Z') } }, new Date('2026-10-18T05:00:00.000Z'));
+    const cron = await newTrigger({ type: 'schedule', schedule: { cron: '0 * * * *', timezone: 'UTC' } }, new Date('2026-10-18T05:30:00.000Z'));
+    process.env.CONSOLE_DISABLED_SERVICES = 'agents';
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+    try {
+      expect(await triggerTargetAvailability(db, once)).toEqual({ ok: false, reason: 'agents service is switched off' });
+      expect(await tickAgentTriggers(new Date('2026-10-18T06:00:10.000Z'))).toMatchObject({ fired: 0, skipped: 1 });
+      // The one-shot waits; the schedule moved on to its next slot.
+      expect(new Date((await reload(once)).nextFireAt!).toISOString()).toBe('2026-10-18T06:00:00.000Z');
+      expect(new Date((await reload(cron)).nextFireAt!).toISOString()).toBe('2026-10-18T07:00:00.000Z');
+      expect((await reload(once)).lastStatus ?? null).toBeNull();
+      expect(await triggerRuns(String(once._id))).toHaveLength(0);
+      expect(events()).toEqual([]);
+      // Run now and every other fire refuse too.
+      expect(await fireTrigger(once, tenant(), { trigger: 'manual', message: 'now' })).toMatchObject({ kind: 'failed', reason: 'agents service is switched off' });
+    } finally {
+      delete process.env.CONSOLE_DISABLED_SERVICES;
+      reloadConfig();
+      clearServiceAvailabilityMemo();
+    }
+    expect(await tickAgentTriggers(new Date('2026-10-18T06:30:00.000Z'))).toMatchObject({ fired: 1 });
+    expect(await triggerRuns(String(once._id))).toHaveLength(1);
   });
 
   it('a once trigger whose agent stayed off past the grace is closed as missed', async () => {

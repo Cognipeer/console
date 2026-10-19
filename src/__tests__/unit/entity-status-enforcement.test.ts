@@ -5,6 +5,12 @@ const { loadProviderRuntimeData, getTenantDatabase } = vi.hoisted(() => ({
   getTenantDatabase: vi.fn(),
 }));
 
+// buildModelRuntime asks whether the models service is on before it loads the provider.
+vi.mock('@/lib/services/availability/serviceAvailability', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/availability/serviceAvailability')>()),
+  assertServiceEnabled: vi.fn(async () => undefined),
+}));
+
 vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/lib/services/providers/providerService')>();
   return { ...original, loadProviderRuntimeData };

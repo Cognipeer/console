@@ -4,7 +4,7 @@ import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { invalidateEnterpriseLicenseCache } from '@/lib/license/enterprise-license-cache';
 import { TokenManager } from '@/lib/license/token-manager';
-import { listSwitchableServices } from '@/lib/services/availability/catalog';
+import { listSwitchableServices, serviceLabel } from '@/lib/services/availability/catalog';
 import {
   clearServiceAvailabilityMemo,
   getDisabledServices,
@@ -42,11 +42,17 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
         canManage: canManageLicense(session.userRole),
         license,
         projectCount: projects.length,
-        // Which services are on for this workspace, and what switched each one off (environment or license).
-        services: {
-          switchable: listSwitchableServices(),
-          disabled: [...disabled.values()],
-        },
+        // Every switchable service, on or off for this workspace, and what switched it off (environment or license).
+        services: listSwitchableServices().map((service) => {
+          const off = disabled.get(service);
+          return {
+            service,
+            label: serviceLabel(service),
+            enabled: !off,
+            ...(off ? { source: off.source } : {}),
+            ...(off?.via ? { via: off.via } : {}),
+          };
+        }),
         tenantSlug: tenant.slug,
       });
     } catch (error) {

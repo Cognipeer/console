@@ -68,6 +68,19 @@ export function isAlwaysOnService(service: string): boolean {
   return ALWAYS_ON_SERVICES.includes(service);
 }
 
+/** Names for the enterprise modules that are not permission services (those carry their own label). */
+const MODULE_LABELS: Readonly<Record<string, string>> = {
+  health: 'Entity Health',
+  'mcp-hub': 'MCP Hub catalogs',
+  'prompt-optimizer': 'Prompt Optimizer',
+  reports: 'Service Reports',
+};
+
+export function serviceLabel(service: string): string {
+  const definition = RBAC_SERVICE_DEFINITIONS.find((candidate) => candidate.id === service);
+  return definition?.label ?? MODULE_LABELS[service] ?? service;
+}
+
 /** Every service a switch can turn off, sorted. */
 export function listSwitchableServices(): string[] {
   return [...allKnownServices()].filter((service) => !isAlwaysOnService(service)).sort();

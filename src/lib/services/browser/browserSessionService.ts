@@ -7,6 +7,7 @@
  * routed through the configured file bucket.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
@@ -120,6 +121,7 @@ export async function createBrowserSession(
   ctx: SessionContext,
   input: CreateBrowserSessionInput,
 ): Promise<BrowserSessionView> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const cfg = getConfig().browser;
   const sessionKey = `bs_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
@@ -336,6 +338,7 @@ async function loadActiveSessionForKey(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<{ id: string; record: IBrowserSession }> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const loaded = await loadSessionForKey(ctx, sessionKey);
   const db = await withTenantDb(ctx.tenantDbName);
   const browser = await db.findBrowserById(loaded.record.browserId);

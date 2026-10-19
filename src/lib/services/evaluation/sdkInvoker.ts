@@ -49,6 +49,7 @@ import { primaryReplicaModel } from '@/lib/services/models/replicaPool';
 import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import type { IModel } from '@/lib/database';
 import type { EvalToolDefinition, NormalizedToolCall } from './types';
 
@@ -119,6 +120,7 @@ export async function resolveSdkProviderConfig(
   model: IModel,
   projectId?: string,
 ): Promise<ProviderConfig> {
+  await assertServiceEnabled({ tenantId: model.tenantId, tenantDbName }, 'models');
   if (getDynamicRoutingConfig(model)) {
     throw new SdkProviderMappingError('dynamic', 'dynamic-routing models resolve through the gateway');
   }

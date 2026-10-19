@@ -20,6 +20,7 @@
  * the executing process. Dataset metadata never records it either way.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomBytes } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
@@ -190,6 +191,8 @@ export async function runSnapshotJob(payload: SnapshotJobPayload): Promise<void>
   await writeSnapshotStatus(payload, pendingSnapshotMeta(payload, 'running', { startedAt }));
 
   try {
+    // Snapshots build evaluation datasets, so they follow that service.
+    await assertServiceEnabled({ tenantDbName: payload.tenantDbName, tenantId: payload.tenantId }, 'evaluations');
     const filters: SnapshotFilters = {
       from: payload.filters.from ? new Date(payload.filters.from) : undefined,
       to: payload.filters.to ? new Date(payload.filters.to) : undefined,

@@ -89,8 +89,11 @@ export function computeDisabledServices(input: ServiceSwitchInput): ReadonlyMap<
   return off;
 }
 
+const NO_ENV_SWITCHES: ServiceSwitchInput['env'] = { disabled: [], enabled: [] };
+
 function envSwitches(): ServiceSwitchInput['env'] {
-  return getConfig().services;
+  // Absent only in a hand-built config (a test's partial mock): nothing is off.
+  return getConfig().services ?? NO_ENV_SWITCHES;
 }
 
 /**
@@ -181,7 +184,8 @@ export interface ServiceScope {
   tenantDbName?: string | null;
 }
 
-async function resolveTenantId(scope: ServiceScope): Promise<string | null> {
+/** The tenant id a scope stands for (the id itself, the request's, or looked up from its database name). */
+export async function resolveTenantId(scope: ServiceScope): Promise<string | null> {
   if (scope.tenantId) return String(scope.tenantId);
   const fromContext = getRequestContext()?.tenantId;
   if (fromContext) return fromContext;
@@ -217,6 +221,8 @@ export class ServiceDisabledError extends Error {
   readonly service: string;
   readonly source: ServiceSwitchSource;
   readonly via?: string;
+  /** Read by the queue providers: running the job again cannot make the service available. */
+  readonly retryable = false;
 
   constructor(off: ServiceOff) {
     const reason = off.source === 'env'
@@ -259,12 +265,19 @@ export function isServiceDisabledError(error: unknown): error is ServiceDisabled
 /**
  * Logged once per tenant and service per process when a guardrail or PII check
  * is skipped because its service is off: the operator chose to let traffic
- * through unchecked, and the log is the record of it.
+ * through unchecked, and the log is the record of it. Returns true only for the
+ * first report, which is also when `safetyCheckSkipped` writes its audit event.
  */
 const reportedSkips = new Set<string>();
-export function reportSkippedSafetyCheck(tenantKey: string, service: string, detail: Record<string, unknown> = {}): void {
+export function reportSkippedSafetyCheck(tenantKey: string, service: string, detail: Record<string, unknown> = {}): boolean {
   const key = `${tenantKey}:${service}`;
-  if (reportedSkips.has(key)) return;
+  if (reportedSkips.has(key)) return false;
   reportedSkips.add(key);
   logger.warn('Safety check skipped: its service is switched off', { tenant: tenantKey, service, ...detail });
+  return true;
+}
+
+/** Test hook: forget which skips were already reported. */
+export function resetReportedSafetyCheckSkipsForTests(): void {
+  reportedSkips.clear();
 }

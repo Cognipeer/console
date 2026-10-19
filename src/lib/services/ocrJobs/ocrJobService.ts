@@ -7,6 +7,7 @@
  * processed independently via per-item queue fan-out (concurrent, multi-node).
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
@@ -52,6 +53,7 @@ function validateRules(input: { ocrModelKey?: string; outputs?: OcrOutputKind[];
 }
 
 export async function createOcrJob(ctx: OcrJobContext, input: CreateOcrJobInput): Promise<IOcrJob> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
   validateRules(input);
   if (!input.bucketKey) throw new OcrJobValidationError('`bucketKey` is required (select a Document Store bucket)');
   const db = await withTenantDb(ctx.tenantDbName);

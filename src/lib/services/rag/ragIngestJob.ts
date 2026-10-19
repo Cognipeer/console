@@ -19,6 +19,7 @@
  * on the memory queue driver.
  */
 
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
@@ -93,6 +94,8 @@ export async function resumePendingRagIngests(): Promise<number> {
   for (const tenant of tenants) {
     if (!tenant.dbName) continue;
     if (resumed >= BOOT_RESUME_MAX) break;
+    // Its documents stay pending until the service is back on.
+    if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'rag'))) continue;
 
     try {
       const pending = await runWithTenantScope(tenant.dbName, async (db) => {

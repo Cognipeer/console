@@ -4647,6 +4647,9 @@ export type AgentRunErrorReason =
   | 'canceled_by_caller'
   /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
   | 'precondition_failed'
+  /** The agents service was switched off for the deployment (`service_disabled`) or left out of the tenant's license (`service_not_licensed`) before the worker started the run. */
+  | 'service_disabled'
+  | 'service_not_licensed'
   /** The user who started the run was disabled before the worker started it. */
   | 'owner_disabled'
   /** The owner's account state could not be read, so the run was refused (fail closed). */

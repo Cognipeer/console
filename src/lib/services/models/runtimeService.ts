@@ -5,6 +5,7 @@ import {
 import { assertProviderEnabled, loadProviderRuntimeData } from '@/lib/services/providers/providerService';
 import type { IProviderRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
 
 export interface ModelRuntimeContext {
@@ -18,6 +19,10 @@ export async function buildModelRuntime(
   providerKey: string,
   projectId?: string,
 ): Promise<ModelRuntimeContext> {
+  // Every model call from any service ends up here, so this is where an
+  // internal caller (agents, RAG, evaluations) meets a switched-off service.
+  await assertServiceEnabled({ tenantId, tenantDbName }, 'models');
+
   const { record, credentials } = await loadProviderRuntimeData(
     tenantDbName,
     { tenantId, key: providerKey, projectId },

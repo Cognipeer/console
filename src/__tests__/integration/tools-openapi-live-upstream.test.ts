@@ -8,11 +8,17 @@
  * refused or dropped, and for a redirect to another origin.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 process.env.OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK = 'false';
+
+// The tool service asks whether the tools service is on; there is no database here to read a license from.
+vi.mock('@/lib/services/availability/serviceAvailability', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/availability/serviceAvailability')>()),
+  assertServiceEnabled: async () => undefined,
+}));
 
 import { reloadConfig } from '@/lib/core/config';
 import type { ITool } from '@/lib/database';

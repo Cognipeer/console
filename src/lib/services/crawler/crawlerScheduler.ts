@@ -12,6 +12,7 @@
  * with discovery + dispatch.
  */
 
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { ICrawler } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -74,6 +75,9 @@ async function runOnce(manual = false): Promise<{
 
     for (const tenant of tenants) {
       if (!tenant.dbName) continue;
+      // Switched off for this tenant: skip the tick without claiming or advancing
+      // anything, so the work runs on a later tick once the service is back on.
+      if (!(await isServiceEnabled({ tenantDbName: tenant.dbName, tenantId: String(tenant._id) }, 'crawler'))) continue;
       processedTenants += 1;
 
       try {

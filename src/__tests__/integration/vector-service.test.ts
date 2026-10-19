@@ -21,6 +21,10 @@ vi.mock('@/lib/services/usage/usageEvents', () => ({
   })),
 }));
 
+vi.mock('@/lib/services/availability/serviceAvailability', () => ({
+  assertServiceEnabled: vi.fn(async () => undefined),
+}));
+
 vi.mock('@/lib/services/providers/providerService', () => ({
   loadProviderRuntimeData: vi.fn(),
   listProviderConfigs: vi.fn(),
@@ -47,6 +51,7 @@ import {
 } from '@/lib/services/providers/providerService';
 import { providerRegistry } from '@/lib/providers';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createMockDb } from '../helpers/db.mock';
 
 import {
@@ -56,6 +61,7 @@ import {
   createVectorIndex,
   queryVectorIndex,
   upsertVectors,
+  deleteVectors,
   VectorAttachRequiresDetailsError,
   VectorAttachNotFoundError,
 } from '@/lib/services/vector/vectorService';
@@ -700,5 +706,47 @@ describe('upsertVectors', () => {
         vectors: [{ id: 'v1', values: Array<number>(1536).fill(0.1), metadata: {} }],
       }),
     ).rejects.toThrow('Runtime failure');
+  });
+});
+
+// ── while the vector service is switched off ─────────────────────────────────
+
+describe('while the vector service is switched off', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const db = createMockDb({ findVectorIndexByKey: vi.fn().mockResolvedValue(MOCK_INDEX_RECORD) });
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    (loadProviderRuntimeData as ReturnType<typeof vi.fn>).mockResolvedValue({
+      record: MOCK_PROVIDER_RECORD,
+      credentials: MOCK_CREDENTIALS,
+    });
+    (providerRegistry.createRuntime as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_RUNTIME);
+    (assertServiceEnabled as ReturnType<typeof vi.fn>).mockImplementation(async (_scope: unknown, service: string) => {
+      if (service === 'vector') throw new Error('vector is switched off');
+    });
+  });
+
+  it('refuses writes and queries', async () => {
+    await expect(upsertVectors(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      vectors: [{ id: 'v1', values: Array<number>(1536).fill(0.1) }],
+    })).rejects.toThrow('switched off');
+    await expect(queryVectorIndex(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      query: { topK: 5, vector: Array<number>(1536).fill(0.1) },
+    })).rejects.toThrow('switched off');
+    expect(MOCK_RUNTIME.upsertVectors).not.toHaveBeenCalled();
+    expect(MOCK_RUNTIME.queryVectors).not.toHaveBeenCalled();
+  });
+
+  it('still deletes, so removing what owns the vectors cleans them up', async () => {
+    await deleteVectors(TENANT_DB, TENANT_ID, PROJECT_ID, {
+      providerKey: PROVIDER_KEY,
+      indexKey: 'my-index',
+      ids: ['v1'],
+    });
+    expect(MOCK_RUNTIME.deleteVectors).toHaveBeenCalledTimes(1);
   });
 });

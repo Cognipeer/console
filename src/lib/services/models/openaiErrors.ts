@@ -1,4 +1,5 @@
 import { redactDataUrls } from '@/lib/services/logRedaction';
+import { isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 
 export type OpenAIErrorBody = {
   message: string;
@@ -189,6 +190,12 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
       'output_token_limit_exceeded',
       'max_completion_tokens',
     );
+  }
+
+  // A switched-off service keeps its own status (403, or 402 when the license
+  // lacks it) and code rather than falling through to a generic 500.
+  if (isServiceDisabledError(error)) {
+    return normalized(error.status, error.message, 'permission_error', error.code);
   }
 
   const modelRequestError = asModelRequestError(error);

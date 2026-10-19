@@ -12,6 +12,7 @@ import {
   Paper,
   SimpleGrid,
   Stack,
+  Table,
   Text,
   Textarea,
   Tooltip,
@@ -22,9 +23,20 @@ import { IconCertificate, IconCheck, IconCopy, IconRefresh, IconTrash } from '@t
 import { useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm';
 
+type ServiceState = {
+  service: string;
+  label: string;
+  enabled: boolean;
+  /** Set when off: the deployment's environment or the workspace license switched it off. */
+  source?: 'env' | 'license';
+  /** Set when off only because a service it needs is off. */
+  via?: string;
+};
+
 type LicenseResponse = {
   canManage: boolean;
   projectCount: number;
+  services?: ServiceState[];
   tenantSlug: string;
   license: {
     error?: string;
@@ -160,6 +172,14 @@ export default function LicenseManagement() {
 
   const license = data?.license;
   const maxProjects = license?.limits?.maxProjects;
+  const services = [...(data?.services ?? [])].sort((a, b) => a.label.localeCompare(b.label));
+  const serviceLabels = new Map(services.map((item) => [item.service, item.label]));
+  const offReason = (item: ServiceState): string => {
+    const source = item.source === 'env' ? t('services.byDeployment') : t('services.byLicense');
+    return item.via
+      ? t('services.needs', { service: serviceLabels.get(item.via) ?? item.via, source })
+      : source;
+  };
   const statusColor = license?.status === 'active' ? 'teal' : license?.status === 'free' ? 'blue' : 'red';
 
   return (
@@ -293,6 +313,55 @@ export default function LicenseManagement() {
             {t('messages.readOnly')}
           </Text>
         )}
+
+        {services.length > 0 ? (
+          <Paper withBorder radius="md" p="md">
+            <Stack gap="xs">
+              <Text size="sm" fw={600}>
+                {t('services.title')}
+              </Text>
+              <Text size="sm" c="dimmed">
+                {t('services.subtitle')}
+              </Text>
+              <Table.ScrollContainer minWidth={520}>
+                <Table verticalSpacing="xs">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>{t('services.service')}</Table.Th>
+                      <Table.Th>{t('services.id')}</Table.Th>
+                      <Table.Th>{t('services.state')}</Table.Th>
+                      <Table.Th>{t('services.reason')}</Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {services.map((item) => (
+                      <Table.Tr key={item.service}>
+                        <Table.Td>
+                          <Text size="sm">{item.label}</Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm" ff="monospace" c="dimmed">
+                            {item.service}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <Badge color={item.enabled ? 'teal' : 'gray'} variant="light">
+                            {item.enabled ? t('services.on') : t('services.off')}
+                          </Badge>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm" c="dimmed">
+                            {item.enabled ? '—' : offReason(item)}
+                          </Text>
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+            </Stack>
+          </Paper>
+        ) : null}
       </Stack>
     </Box>
   );

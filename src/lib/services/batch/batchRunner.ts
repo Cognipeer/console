@@ -7,6 +7,7 @@
  * observes that transition and the finalizer never races.
  */
 
+import { assertServiceEnabled, isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
@@ -73,6 +74,9 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
   let patch: Partial<IBatchJobItem>;
 
   try {
+    // An item queued before 'models' was switched off fails here with its own
+    // status (403/402) rather than being retried by the queue.
+    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'models');
     const quotaContext = quotaContextFor(ctx, job, modelKey);
     if (quotaContext) {
       const budget = await checkBudget(quotaContext);
@@ -136,7 +140,9 @@ export async function processBatchItem(ctx: BatchContext, itemId: string): Promi
       ? error.statusCode
       : error instanceof GuardrailBlockError
         ? 400
-        : 500;
+        : isServiceDisabledError(error)
+          ? error.status
+          : 500;
     patch = {
       status: 'failed',
       responseStatusCode: statusCode,

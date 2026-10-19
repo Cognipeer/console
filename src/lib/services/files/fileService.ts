@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
 import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
@@ -157,6 +158,7 @@ async function requireBucketContext(
     tenantId: string,
     projectId: string,
     bucketKey: string,
+    options: { cleanup?: boolean } = {},
 ): Promise<{
     bucket: IFileBucketRecord;
     provider: IProviderRecord;
@@ -176,6 +178,7 @@ async function requireBucketContext(
         tenantId,
         bucket.providerKey,
         projectId,
+        options,
     );
 
     return {
@@ -200,7 +203,12 @@ async function buildRuntimeContext(
     tenantId: string,
     providerKey: string,
     projectId: string,
+    options: { cleanup?: boolean } = {},
 ): Promise<{ runtime: FileProviderRuntime; record: IProviderRecord }> {
+    // Deleting stays possible while the service is off, so expired session
+    // files and removed knowledge sources are still cleaned up.
+    if (!options.cleanup) await assertServiceEnabled({ tenantDbName, tenantId }, 'files');
+
     const { record, credentials } = await loadProviderRuntimeData(
         tenantDbName,
         {
@@ -943,6 +951,7 @@ async function requireFileRecord(
     projectId: string,
     bucketKey: string,
     key: string,
+    options: { cleanup?: boolean } = {},
 ): Promise<{
     bucket: IFileBucketRecord;
     provider: IProviderRecord;
@@ -954,6 +963,7 @@ async function requireFileRecord(
         tenantId,
         projectId,
         bucketKey,
+        options,
     );
 
     const db = await withTenantDb(tenantDbName);
@@ -1034,6 +1044,7 @@ export async function deleteFile(
         projectId,
         bucketKey,
         key,
+        { cleanup: true },
     );
 
     await withResilience(

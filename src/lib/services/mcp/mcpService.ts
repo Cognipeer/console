@@ -1,3 +1,4 @@
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { createHash, randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
@@ -2080,6 +2081,8 @@ export async function executeMcpTool(
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  // Refuse before queuing a remote call and before a failure row is logged.
+  await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const startedAt = Date.now();
   try {
     let outcome: { result: unknown; latencyMs: number };
@@ -2160,6 +2163,7 @@ export async function executeMcpToolLocal(
    */
   runtimeHeaders?: Record<string, string>,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const sourceType = resolveSourceType(server);
   const start = Date.now();
   // A caller may address the tool by its renamed (exposed) name — resolve

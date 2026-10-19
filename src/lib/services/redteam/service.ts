@@ -8,6 +8,7 @@
  * Target/judge invokers are injectable (RunCampaignDeps) for testability.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -464,6 +465,9 @@ export async function executeRun(
   await db.switchToTenant(tenantDbName);
 
   try {
+    // Inside the try so the run is recorded as failed rather than left pending
+    // when the service has been switched off since it was queued.
+    await assertServiceEnabled({ tenantDbName, tenantId }, 'redteam');
     const customProbes = await db.listRedTeamCustomProbes({ projectId });
     const probes = buildProbes(resolveProbeKeys(campaign, options), customProbes);
     const judgeModelKey = options?.judgeModelKey ?? campaign.judgeModelKey;
@@ -560,6 +564,7 @@ async function createPendingRun(
   params: CreateRunParams,
   mode: IRedTeamRun['mode'],
 ): Promise<{ campaign: IRedTeamCampaign; run: IRedTeamRun }> {
+  await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'redteam');
   const { tenantDbName, tenantId, projectId, createdBy, campaignKey } = params;
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

@@ -48,6 +48,8 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
+import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
+import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
@@ -1885,11 +1887,15 @@ type BuildSubagentsInput = {
  * edit in a leaf agent silently multiply every parent's tool surface. Nesting
  * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
  */
-async function buildAgentSubagents(
+export async function buildAgentSubagents(
     input: BuildSubagentsInput,
 ): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
     const entries = input.subagents;
     if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
+    // A child is an agent run of the same tenant: refused with the agents service,
+    // and its own knowledge and tools lose what a switched-off service provided.
+    await assertAgentsEnabled({ tenantId: input.tenantId, tenantDbName: input.tenantDbName });
+    const disabledServices = await getDisabledServices(input.tenantId);
 
     const subagents: AgentSdkSubagentDef[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
@@ -1943,6 +1949,7 @@ async function buildAgentSubagents(
         }
 
         const childTools: AgentSdkToolInterface[] = [];
+        ({ knowledge: knowledgeSource, toolBindings } = filterChildSources(knowledgeSource, toolBindings, disabledServices));
         if (hasKnowledgeConfigured(knowledgeSource)) {
             const knowledge = await buildAgentKnowledgeTools(
                 input.tenantDbName,
@@ -3784,6 +3791,7 @@ export async function executeAgentChat(
     // queue consumer and background worker call the Local variant instead, so
     // a run is never counted twice.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // The callback and the signal cannot be serialized over the queue —
@@ -3973,7 +3981,9 @@ async function buildLocalAgentRun(input: {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
-    const config = migrateAgentReasoning(input.config);
+    // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
+    // files, sandbox) are dropped here, so every builder below sees a config without them.
+    const config = await applyServiceAvailability(tenantId, migrateAgentReasoning(input.config), { agentKey });
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
 
@@ -4812,6 +4822,8 @@ export function routingCallerOf(request: AgentChatRequest): RoutingCallerContext
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // The last stop for a turn that arrives without the entry above (a queue worker, a background run).
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
@@ -4890,6 +4902,8 @@ async function runAgentChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -5317,6 +5331,7 @@ export async function executePlaygroundChat(
     // portals and realtime voice share; the caller is the one the server
     // stamped into the runtime context. See agentQuota.ts.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // Callbacks and the signal can't serialize over the queue — kept out of
@@ -5575,6 +5590,7 @@ function describeStructuredOutputError(error: unknown): string {
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         const runtime = request.runtimeContext;
@@ -5632,6 +5648,8 @@ async function runPlaygroundChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -6305,6 +6323,7 @@ export function executeAgentContinueLocal(
  * is no new user message.
  */
 export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         return await runAgentResumeTurn(request, scope);
