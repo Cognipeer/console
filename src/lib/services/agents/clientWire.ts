@@ -97,11 +97,13 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
 
 /**
  * The `data` of a logged event for a client: keys snake_cased, tool arguments
- * left alone, and — as on a pending action — no `tool_name` for a question.
+ * left alone, and — as on a pending action — no `tool_name` for a question and
+ * no `delegation_tool_call_id` (an internal link the portal uses).
  */
 export function toClientEventData(data: Record<string, unknown>): Record<string, unknown> {
     const wire = toSnakeCaseDeep<Record<string, unknown>>(data);
     if (data.kind === 'user_question') delete wire.tool_name;
+    delete wire.delegation_tool_call_id;
     return wire;
 }
 

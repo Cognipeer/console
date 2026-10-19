@@ -197,7 +197,7 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { delegatedSubagentName, delegationFailure, isSubagentEvent, nameSubagentOnApprovalStep } from './subagentEvents';
+import { delegatedSubagentName, delegationFailure, isDelegationTool, isSubagentEvent, nameSubagentOnApprovalStep, resumedDelegationIds, subagentStampOf } from './subagentEvents';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -1651,6 +1651,7 @@ export const __testables = {
     MessageRewriteLedger,
     persistedUserTurn,
     firstTurnTitle,
+    toToolCallEvent,
 };
 
 /**
@@ -3525,6 +3526,36 @@ export interface AgentToolCallEvent {
     durationMs?: number;
     /** Filled on `error`. */
     error?: string;
+    /**
+     * Set when a delegated child made the call (a step of its own loop). Absent
+     * on the agent's own calls and on the delegation call that handed the task
+     * over: a child cannot delegate, so it never emits a delegation tool event.
+     */
+    subagent?: { id?: string; name: string };
+    /**
+     * Set only on the `start` of a delegation call the SDK re-enters after a
+     * child's pause was answered (same call id as in the paused turn).
+     */
+    resumed?: true;
+}
+
+/** The notification for an SDK tool_call event, or undefined for any other event. */
+function toToolCallEvent(event: AgentSdkEvent, resumedCalls?: ReadonlySet<string>): AgentToolCallEvent | undefined {
+    if (event.type !== 'tool_call' || !event.name) return undefined;
+    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return undefined;
+    const subagent = subagentStampOf(event);
+    const resumed = event.phase === 'start' && !subagent && isDelegationTool(event.name)
+        && typeof event.id === 'string' && Boolean(resumedCalls?.has(event.id));
+    return {
+        phase: event.phase,
+        name: event.name,
+        id: event.id,
+        ...(event.args !== undefined ? { args: event.args } : {}),
+        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+        ...(event.error?.message ? { error: event.error.message } : {}),
+        ...(subagent ? { subagent } : {}),
+        ...(resumed ? { resumed: true as const } : {}),
+    };
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -5924,17 +5955,11 @@ async function runPlaygroundChatTurn(
                 noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
                 return;
             }
-            if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
-            if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+            if (!onToolEvent) return;
+            const payload = toToolCallEvent(event);
+            if (!payload) return;
             try {
-                onToolEvent({
-                    phase: event.phase,
-                    name: event.name,
-                    id: event.id,
-                    ...(event.args !== undefined ? { args: event.args } : {}),
-                    ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                    ...(event.error?.message ? { error: event.error.message } : {}),
-                });
+                onToolEvent(payload);
             } catch (callbackError) {
                 logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
             }
@@ -6627,6 +6652,8 @@ async function runAgentResumeTurn(
             throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
         }
 
+        // Read now: the SDK deletes each entry as its delegation completes.
+        const reEntered = resumedDelegationIds(state);
         const inputMessageCount = (state.messages ?? []).length;
         const compactions: IAgentTurnCompaction[] = [];
         const streamed = captureStreamedText(onTextChunk);
@@ -6641,17 +6668,11 @@ async function runAgentResumeTurn(
                     noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
                     return;
                 }
-                if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
-                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                if (!request.onToolEvent) return;
+                const payload = toToolCallEvent(event, reEntered);
+                if (!payload) return;
                 try {
-                    request.onToolEvent({
-                        phase: event.phase,
-                        name: event.name,
-                        id: event.id,
-                        ...(event.args !== undefined ? { args: event.args } : {}),
-                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                        ...(event.error?.message ? { error: event.error.message } : {}),
-                    });
+                    request.onToolEvent(payload);
                 } catch (callbackError) {
                     logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
                 }

@@ -3481,6 +3481,8 @@ export interface IAgentMessagePendingAction {
   toolName?: string;
   /** The sub-agent whose tool call or question this is. */
   subagent?: string;
+  /** The delegating tool call the sub-agent's pause belongs to. */
+  delegationToolCallId?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
@@ -3509,6 +3511,8 @@ export interface IAgentPendingAction {
   toolName?: string;
   /** The sub-agent whose tool call or question this is (a child's pause surfaced by the SDK). */
   subagent?: string;
+  /** The delegating tool call the sub-agent's pause belongs to. */
+  delegationToolCallId?: string;
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;

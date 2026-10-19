@@ -10,6 +10,7 @@
  * transcript alone, so each of those asks `isSubagentEvent` before it takes a
  * forwarded event as its own: a child's thinking is not the parent's thinking, and
  * a child compacting its own context did not shorten the parent's messages.
+ * The stamp also travels on `AgentToolCallEvent.subagent` (see `subagentStampOf`).
  */
 
 /** True for an event or stream chunk a delegated child produced. */
@@ -19,11 +20,30 @@ export function isSubagentEvent(event: object | null | undefined): boolean {
     return Boolean(stamp.subagentId || stamp.subagentName || stamp.delegatedTo);
 }
 
+/** Which sub-agent a forwarded event came from, or undefined for the parent's own. */
+export function subagentStampOf(event: object | null | undefined): { id?: string; name: string } | undefined {
+    if (!event) return undefined;
+    const stamp = event as { subagentId?: unknown; subagentName?: unknown; delegatedTo?: unknown };
+    const text = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+    const id = text(stamp.subagentId);
+    const name = text(stamp.subagentName) ?? text(stamp.delegatedTo) ?? id;
+    return name ? { ...(id ? { id } : {}), name } : undefined;
+}
+
 /** The SDK's delegation tools: a call to one of these hands a task to a sub-agent. */
 const DELEGATION_TOOLS = new Set(['delegate_to', 'spawn_subagent', 'spawn_subagents_parallel']);
 
 export function isDelegationTool(toolName: string | undefined): boolean {
     return Boolean(toolName && DELEGATION_TOOLS.has(toolName));
+}
+
+/**
+ * Ids of the delegation calls a resumed state re-enters: the keys of the SDK's
+ * `__subagentPending` (by parent tool call id), kept across pauses.
+ */
+export function resumedDelegationIds(state: { ctx?: unknown } | null | undefined): ReadonlySet<string> {
+    const pending = (state?.ctx as { __subagentPending?: unknown } | undefined)?.__subagentPending;
+    return new Set(pending && typeof pending === 'object' && !Array.isArray(pending) ? Object.keys(pending) : []);
 }
 
 const FAILED_CHILD = new Set(['error', 'cancelled']);

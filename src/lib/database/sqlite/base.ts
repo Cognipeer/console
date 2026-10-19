@@ -1191,6 +1191,7 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
     // The sub-agent a surfaced child pause belongs to.
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'subagent', 'subagent TEXT');
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'delegationToolCallId', 'delegationToolCallId TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
