@@ -1,40 +1,28 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ActionIcon,
-  Badge,
-  Button,
-  Center,
-  Group,
-  Loader,
-  Paper,
-  Stack,
-  Table,
-  Text,
-  TextInput,
-  Textarea,
-  ThemeIcon,
-  Tooltip,
-} from '@mantine/core';
-import { useForm } from '@mantine/form';
-import { useParams, useRouter } from 'next/navigation';
+import { Button, Center, Loader } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useParams, useRouter } from 'next/navigation';
 import {
+  IconCopy,
   IconEdit,
   IconFolder,
-  IconKey,
   IconLock,
   IconPlus,
-  IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import DetailShell from '@/components/common/ui/DetailShell';
+import PageContainer from '@/components/common/ui/PageContainer';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import PropertiesPanel from '@/components/common/ui/PropertiesPanel';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { useTableControls } from '@/components/common/ui/useTableControls';
 import CreateConfigItemModal from '@/components/config/CreateConfigItemModal';
 import EditConfigItemModal from '@/components/config/EditConfigItemModal';
+import EditConfigGroupModal from '@/components/config/EditConfigGroupModal';
 
 interface ConfigItem {
   _id: string;
@@ -61,21 +49,6 @@ interface ConfigGroup {
   updatedAt?: string;
 }
 
-function typeColor(type: string): string {
-  switch (type) {
-    case 'string':
-      return 'blue';
-    case 'number':
-      return 'orange';
-    case 'boolean':
-      return 'teal';
-    case 'json':
-      return 'grape';
-    default:
-      return 'gray';
-  }
-}
-
 function formatDate(value?: string | Date) {
   if (!value) return '—';
   const date = value instanceof Date ? value : new Date(value);
@@ -93,215 +66,210 @@ export default function ConfigGroupDetailPage() {
 
   const [group, setGroup] = useState<ConfigGroup | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [savingGroup, setSavingGroup] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [createItemOpen, setCreateItemOpen] = useState(false);
+  const [editGroupOpen, setEditGroupOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ConfigItem | null>(null);
 
-  const form = useForm({
-    initialValues: {
-      name: '',
-      description: '',
-      tags: '',
-    },
-    validate: {
-      name: (value) => (!value.trim() ? 'Name is required' : null),
-    },
-  });
+  const items = useMemo(() => group?.items ?? [], [group?.items]);
+  const totalSecrets = useMemo(() => items.filter((item) => item.isSecret).length, [items]);
 
-  const totalSecrets = useMemo(
-    () => (group?.items || []).filter((item) => item.isSecret).length,
-    [group?.items],
-  );
+  const ctl = useTableControls(items, {
+    searchText: (i) => `${i.name} ${i.key} ${i.description ?? ''}`,
+    searchPlaceholder: t('itemsSearchPlaceholder'),
+  });
 
   const loadGroup = useCallback(async () => {
     if (!groupId) return;
     try {
-      const res = await fetch(`/api/config/groups/${groupId}`, {
-        cache: 'no-store',
-      });
+      const res = await fetch(`/api/config/groups/${groupId}`, { cache: 'no-store' });
 
       if (!res.ok) {
         if (res.status === 404) {
-          notifications.show({
-            title: t('error'),
-            message: 'Config group not found',
-            color: 'red',
-          });
+          notifications.show({ title: t('error'), message: t('groupNotFound'), color: 'red' });
           router.push('/dashboard/config');
           return;
         }
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to load config group');
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || t('groupLoadFailed'));
       }
 
       const data = await res.json();
-      const nextGroup: ConfigGroup = data.group;
-      setGroup(nextGroup);
-      form.setValues({
-        name: nextGroup.name || '',
-        description: nextGroup.description || '',
-        tags: (nextGroup.tags || []).join(', '),
-      });
+      setGroup(data.group as ConfigGroup);
     } catch (error) {
       notifications.show({
         title: t('error'),
-        message: error instanceof Error ? error.message : 'Failed to load config group',
+        message: error instanceof Error ? error.message : t('groupLoadFailed'),
         color: 'red',
       });
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
-  }, [form, groupId, router, t]);
+  }, [groupId, router, t]);
 
   useEffect(() => {
-    loadGroup();
+    void loadGroup();
   }, [loadGroup]);
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    loadGroup();
-  };
-
-  const handleSaveGroup = async (values: typeof form.values) => {
-    if (!groupId) return;
-    setSavingGroup(true);
-    try {
-      const tags = values.tags
-        ? values.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
-        : undefined;
-
-      const res = await fetch(`/api/config/groups/${groupId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: values.name,
-          description: values.description || undefined,
-          tags,
-        }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('updateError'));
-      }
-
-      const data = await res.json();
-      const updated = data.group as ConfigGroup;
-      setGroup((prev) => (prev ? { ...prev, ...updated } : prev));
-
-      notifications.show({
-        title: t('editGroup'),
-        message: t('itemUpdatedMessage'),
-        color: 'teal',
-      });
-    } catch (error) {
-      notifications.show({
-        title: t('error'),
-        message: error instanceof Error ? error.message : t('updateError'),
-        color: 'red',
-      });
-    } finally {
-      setSavingGroup(false);
-    }
-  };
-
   const handleDeleteGroup = async () => {
-    if (!groupId) return;
+    if (!group) return;
     await deleteResource({
       noun: tSafe('nouns.configGroup'),
-      name: group?.name,
+      name: group.name,
       type: 'config-group',
-      id: group?._id,
+      id: group._id,
       extraWarning: tSafe('configGroupExtra'),
       action: async () => {
-        setDeletingId(groupId);
-        try {
-          const res = await fetch(`/api/config/groups/${groupId}`, {
-            method: 'DELETE',
-          });
-
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || t('deleteError'));
-          }
-
-          notifications.show({
-            title: t('groupDeleted'),
-            message: t('groupDeletedMessage'),
-            color: 'teal',
-          });
-          router.push('/dashboard/config');
-        } finally {
-          setDeletingId(null);
+        const res = await fetch(`/api/config/groups/${group._id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || t('deleteError'));
         }
+        notifications.show({
+          title: t('groupDeleted'),
+          message: t('groupDeletedMessage'),
+          color: 'teal',
+        });
+        router.push('/dashboard/config');
       },
     });
   };
 
-  const handleDeleteItem = async (itemId: string) => {
-    const item = group?.items.find((i) => i._id === itemId);
+  const handleDeleteItem = async (item: ConfigItem) => {
     await deleteResource({
       noun: tSafe('nouns.configItem'),
-      name: item?.name ?? item?.key,
+      name: item.name || item.key,
+      type: 'config-item',
+      id: item._id,
       action: async () => {
-        setDeletingId(itemId);
-        try {
-          const res = await fetch(`/api/config/items/${itemId}`, {
-            method: 'DELETE',
-          });
-
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || t('deleteError'));
-          }
-
-          notifications.show({
-            title: t('itemDeleted'),
-            message: t('itemDeletedMessage'),
-            color: 'teal',
-          });
-          handleRefresh();
-        } finally {
-          setDeletingId(null);
+        const res = await fetch(`/api/config/items/${item._id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || t('deleteError'));
         }
+        notifications.show({
+          title: t('itemDeleted'),
+          message: t('itemDeletedMessage'),
+          color: 'teal',
+        });
+        await loadGroup();
       },
     });
+  };
+
+  const handleCopyKey = async (item: ConfigItem) => {
+    try {
+      await navigator.clipboard.writeText(item.key);
+      notifications.show({ title: t('keyCopied'), message: item.key, color: 'teal' });
+    } catch {
+      notifications.show({ title: t('error'), message: item.key, color: 'red' });
+    }
   };
 
   if (loading) {
     return (
-      <Center py="xl">
-        <Loader size="md" />
-      </Center>
+      <PageContainer>
+        <Center mih={240}>
+          <Loader />
+        </Center>
+      </PageContainer>
     );
   }
 
   if (!group) {
     return (
-      <Center py="xl">
-        <Stack gap="sm" align="center">
-          <Text c="dimmed">Config group not found.</Text>
-          <Button onClick={() => router.push('/dashboard/config')}>
-            {t('backToGroups')}
-          </Button>
-        </Stack>
-      </Center>
+      <PageContainer>
+        <Center mih={240}>
+          <div className="ds-empty">
+            <div className="ds-empty-title">{t('groupNotFound')}</div>
+            <Button variant="default" onClick={() => router.push('/dashboard/config')}>
+              {t('backToGroups')}
+            </Button>
+          </div>
+        </Center>
+      </PageContainer>
     );
   }
+
+  const columns: DataGridColumn<ConfigItem>[] = [
+    {
+      key: 'name',
+      label: t('itemName'),
+      render: (item) => (
+        <div className="ds-col" style={{ gap: 2, whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>{item.name}</span>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{item.key}</span>
+          {item.description ? (
+            <span className="ds-faint" style={{ fontSize: 11.5, maxWidth: 320 }}>
+              {item.description.length > 60 ? `${item.description.slice(0, 60)}…` : item.description}
+            </span>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'type',
+      label: t('valueType'),
+      render: (item) => (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          <span className="ds-badge">{item.valueType}</span>
+          {item.isSecret ? (
+            <StatusBadge status="err" label={t('secretBadge')} withDot={false} />
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      key: 'value',
+      label: t('value'),
+      render: (item) =>
+        item.isSecret ? (
+          <span className="ds-badge">{t('masked')}</span>
+        ) : (
+          <span
+            className="ds-mono"
+            style={{
+              fontSize: 12,
+              display: 'inline-block',
+              maxWidth: 220,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              verticalAlign: 'bottom',
+            }}
+            title={item.value}
+          >
+            {item.value}
+          </span>
+        ),
+    },
+    {
+      key: 'version',
+      label: t('version'),
+      align: 'right',
+      render: (item) => (
+        <span className="ds-mono" style={{ fontSize: 12.5 }}>v{item.version}</span>
+      ),
+    },
+    {
+      key: 'updated',
+      label: t('updatedAt'),
+      render: (item) => (
+        <span className="ds-muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+          {formatDate(item.updatedAt || item.createdAt)}
+        </span>
+      ),
+    },
+  ];
 
   const actions = (
     <>
       <Button
         variant="default"
         size="sm"
-        leftSection={<IconRefresh size={14} stroke={1.7} />}
-        loading={refreshing}
-        onClick={handleRefresh}
+        leftSection={<IconEdit size={14} stroke={1.7} />}
+        onClick={() => setEditGroupOpen(true)}
       >
-        Refresh
+        {t('editGroup')}
       </Button>
       <Button
         size="sm"
@@ -310,24 +278,22 @@ export default function ConfigGroupDetailPage() {
       >
         {t('createItem')}
       </Button>
-      <ActionIcon
-        variant="default"
+      <Button
         color="red"
-        radius="md"
-        size="lg"
-        onClick={handleDeleteGroup}
-        loading={deletingId === groupId}
-        aria-label="Delete group"
+        variant="light"
+        size="sm"
+        leftSection={<IconTrash size={14} stroke={1.7} />}
+        onClick={() => void handleDeleteGroup()}
       >
-        <IconTrash size={15} stroke={1.7} />
-      </ActionIcon>
+        {t('deleteGroup')}
+      </Button>
     </>
   );
 
   return (
     <DetailShell
       backHref="/dashboard/config"
-      backLabel="Back to config"
+      backLabel={t('backToConfig')}
       icon={
         <div
           style={{
@@ -348,9 +314,17 @@ export default function ConfigGroupDetailPage() {
           <h1 className="ds-h2" style={{ margin: 0, whiteSpace: 'nowrap' }}>
             {group.name}
           </h1>
-          <StatusBadge status="info" label={`${group.items.length} items`} withDot={false} />
+          <StatusBadge
+            status="info"
+            label={`${items.length} ${t('items')}`}
+            withDot={false}
+          />
           {totalSecrets > 0 ? (
-            <StatusBadge status="err" label={`${totalSecrets} secrets`} withDot={false} />
+            <StatusBadge
+              status="err"
+              label={`${totalSecrets} ${t('secrets')}`}
+              withDot={false}
+            />
           ) : null}
         </>
       }
@@ -363,214 +337,111 @@ export default function ConfigGroupDetailPage() {
               <span>{group.description}</span>
             </>
           ) : null}
-          {group.updatedAt ? (
-            <>
-              <span className="ds-faint">·</span>
-              <span>Updated {formatDate(group.updatedAt)}</span>
-            </>
-          ) : null}
         </>
       }
       actions={actions}
     >
-      <Stack gap="md">
-        <Paper withBorder radius="md" p="md">
-          <Stack gap="md">
-            <Group justify="space-between" align="flex-start">
-              <Group gap="xs">
-                <ThemeIcon variant="light" color="violet">
-                  <IconFolder size={16} />
-                </ThemeIcon>
-                <Text fw={600}>{t('editGroup')}</Text>
-              </Group>
-              <Group gap="xs">
-                <Badge variant="light" color="blue">
-                  {group.items.length} {t('items')}
-                </Badge>
-                <Badge variant="light" color="red">
-                  {totalSecrets} {t('secrets')}
-                </Badge>
-              </Group>
-            </Group>
-
-            <form onSubmit={form.onSubmit(handleSaveGroup)}>
-              <Stack gap="sm">
-                <TextInput
-                  label={t('groupName')}
-                  required
-                  {...form.getInputProps('name')}
-                />
-                <TextInput
-                  label={t('groupKey')}
-                  value={group.key}
-                  readOnly
-                  leftSection={<IconKey size={14} />}
-                />
-                <Textarea
-                  label={t('description')}
-                  autosize
-                  minRows={2}
-                  {...form.getInputProps('description')}
-                />
-                <TextInput
-                  label={t('tags')}
-                  placeholder="Comma separated: api, credentials"
-                  {...form.getInputProps('tags')}
-                />
-                <Group justify="flex-end">
-                  <Button type="submit" loading={savingGroup} leftSection={<IconEdit size={14} />}>
-                    {t('save')}
-                  </Button>
-                </Group>
-              </Stack>
-            </form>
-          </Stack>
-        </Paper>
-
-        <Paper withBorder radius="md" p="md">
-          <Group justify="space-between" mb="sm">
-            <Group gap="xs">
-              <ThemeIcon variant="light" color="violet">
-                <IconLock size={16} />
-              </ThemeIcon>
-              <Text fw={600}>{t('items')}</Text>
-            </Group>
-            <Button
-              size="xs"
-              variant="light"
-              leftSection={<IconPlus size={14} />}
-              onClick={() => setCreateItemOpen(true)}
-            >
-              {t('createItem')}
-            </Button>
-          </Group>
-
-          {group.items.length === 0 ? (
-            <Stack align="center" py="lg" gap="xs">
-              <Text size="sm" c="dimmed">
-                {t('noItems')}
-              </Text>
+      <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 480px', minWidth: 0 }}>
+          <DataGrid<ConfigItem>
+            records={ctl.records}
+            rowKey={(item) => item._id}
+            columns={columns}
+            search={ctl.search}
+            pagination={ctl.pagination}
+            onRefresh={() => void loadGroup()}
+            toolbarRight={
               <Button
-                variant="light"
                 size="xs"
-                leftSection={<IconPlus size={12} />}
+                variant="light"
+                leftSection={<IconPlus size={13} stroke={1.7} />}
                 onClick={() => setCreateItemOpen(true)}
               >
-                {t('createFirstItem')}
+                {t('createItem')}
               </Button>
-            </Stack>
-          ) : (
-            <div className="ds-tbl-wrap">
-            <Table highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>{t('itemName')}</Table.Th>
-                  <Table.Th>{t('itemKey')}</Table.Th>
-                  <Table.Th>{t('value')}</Table.Th>
-                  <Table.Th>{t('valueType')}</Table.Th>
-                  <Table.Th>{t('version')}</Table.Th>
-                  <Table.Th>{t('updatedAt')}</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {group.items.map((item) => (
-                  <Table.Tr key={item._id}>
-                    <Table.Td>
-                      <Group gap="xs">
-                        {item.isSecret && (
-                          <ThemeIcon variant="light" color="red" size="xs">
-                            <IconLock size={12} />
-                          </ThemeIcon>
-                        )}
-                        <div>
-                          <Text fw={600} size="sm">
-                            {item.name}
-                          </Text>
-                          {item.description && (
-                            <Text size="xs" c="dimmed" lineClamp={1}>
-                              {item.description}
-                            </Text>
-                          )}
-                        </div>
-                      </Group>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm" ff="monospace">
-                        {item.key}
-                      </Text>
-                    </Table.Td>
-                    <Table.Td>
-                      {item.isSecret ? (
-                        <Badge size="sm" variant="light" color="gray">
-                          {t('masked')}
-                        </Badge>
-                      ) : (
-                        <Text size="sm" lineClamp={1} maw={200}>
-                          {item.value}
-                        </Text>
-                      )}
-                    </Table.Td>
-                    <Table.Td>
-                      <Badge size="sm" variant="light" color={typeColor(item.valueType)}>
-                        {item.valueType}
-                      </Badge>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">v{item.version}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Text size="sm">{formatDate(item.updatedAt || item.createdAt)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Group gap={4} justify="flex-end" wrap="nowrap">
-                        <Tooltip label={t('editItem')}>
-                          <ActionIcon
-                            variant="subtle"
-                            color="blue"
-                            size="sm"
-                            onClick={() => setEditingItem(item)}
-                          >
-                            <IconEdit size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                        <Tooltip label={t('deleteItem')}>
-                          <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            size="sm"
-                            loading={deletingId === item._id}
-                            onClick={() => handleDeleteItem(item._id)}
-                          >
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        </Tooltip>
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-            </div>
-          )}
-        </Paper>
-      </Stack>
+            }
+            empty={{
+              icon: <IconLock size={26} stroke={1.7} />,
+              title: t('noItems'),
+              description: t('noItemsDescription'),
+              primaryAction: {
+                label: t('createFirstItem'),
+                icon: <IconPlus size={14} stroke={1.7} />,
+                onClick: () => setCreateItemOpen(true),
+              },
+            }}
+            footerLeft={ctl.footerLeft(t('itemsNoun'))}
+            rowActions={(item) => [
+              {
+                id: 'edit',
+                label: t('editItem'),
+                icon: <IconEdit size={14} />,
+                onClick: () => setEditingItem(item),
+              },
+              {
+                id: 'copy',
+                label: t('copyKey'),
+                icon: <IconCopy size={14} />,
+                onClick: () => void handleCopyKey(item),
+              },
+              { divider: true },
+              {
+                id: 'delete',
+                label: t('deleteItem'),
+                icon: <IconTrash size={14} />,
+                color: 'red',
+                onClick: () => void handleDeleteItem(item),
+              },
+            ]}
+          />
+          <div style={{ marginTop: 16 }}>
+            <ResourceUsageSection type="config-group" id={group._id} />
+          </div>
+        </div>
+
+        <PropertiesPanel
+          title={t('properties')}
+          rows={[
+            { key: 'key', label: t('groupKey'), value: <span className="ds-mono">{group.key}</span> },
+            { key: 'description', label: t('description'), value: group.description || '—' },
+            {
+              key: 'tags',
+              label: t('tags'),
+              value: (group.tags ?? []).length ? (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  {(group.tags ?? []).map((tag) => (
+                    <span key={tag} className="ds-badge">{tag}</span>
+                  ))}
+                </div>
+              ) : (
+                '—'
+              ),
+            },
+            { key: 'created', label: t('createdAt'), value: formatDate(group.createdAt) },
+            { key: 'updated', label: t('updatedAt'), value: formatDate(group.updatedAt) },
+          ]}
+        />
+      </div>
 
       <CreateConfigItemModal
         opened={createItemOpen}
-        groupId={group?._id || null}
+        groupId={group._id}
         onClose={() => setCreateItemOpen(false)}
         onCreated={() => {
           setCreateItemOpen(false);
-          handleRefresh();
+          void loadGroup();
         }}
       />
 
-      {group ? (
-        <Paper withBorder radius="md" p="md" mt="md">
-          <ResourceUsageSection type="config-group" id={group._id} />
-        </Paper>
-      ) : null}
+      <EditConfigGroupModal
+        opened={editGroupOpen}
+        group={group}
+        onClose={() => setEditGroupOpen(false)}
+        onUpdated={() => {
+          setEditGroupOpen(false);
+          void loadGroup();
+        }}
+      />
 
       <EditConfigItemModal
         opened={editingItem !== null}
@@ -578,7 +449,7 @@ export default function ConfigGroupDetailPage() {
         onClose={() => setEditingItem(null)}
         onUpdated={() => {
           setEditingItem(null);
-          handleRefresh();
+          void loadGroup();
         }}
       />
     </DetailShell>

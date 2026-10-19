@@ -18,7 +18,7 @@
  */
 
 import {
-  getDatabase,
+  runWithTenantScope,
   type DatabaseProvider,
   type IConfigGroup,
   type IConfigGroupRef,
@@ -112,12 +112,8 @@ export async function normalizeConfigValueRefs(
         if (found && inProject(found, index.projectId)) {
           item = found;
         } else {
-          issues.push({
-            field: at,
-            message: found
-              ? `config item "${found.key}" belongs to another project`
-              : `config item ${configId} was not found`,
-          });
+          // Never name another project's item: the caller may have no access to that project.
+          issues.push({ field: at, message: `config item ${configId} was not found in this project` });
           continue;
         }
       }
@@ -182,10 +178,7 @@ export async function normalizeConfigGroupRefs(
         if (found && inProject(found, index.projectId)) {
           group = found;
         } else {
-          issues.push({
-            field: at,
-            message: found ? `config group "${found.key}" belongs to another project` : `config group ${groupId} was not found`,
-          });
+          issues.push({ field: at, message: `config group ${groupId} was not found in this project` });
           continue;
         }
       }
@@ -217,10 +210,50 @@ export function configRefTargets(input: {
 }): Set<string> {
   const targets = new Set<string>();
   for (const map of input.refs ?? []) {
-    for (const ref of Object.values(map ?? {})) if (ref?.configId) targets.add(`item:${ref.configId}`);
+    for (const ref of Object.values(map ?? {})) {
+      if (ref?.configId) targets.add(`item:${ref.configId}`);
+      if (ref?.key) targets.add(`item-key:${ref.key}`);
+    }
   }
   for (const list of input.groupRefs ?? []) {
-    for (const ref of list ?? []) if (ref?.groupId) targets.add(`group:${ref.groupId}`);
+    for (const ref of list ?? []) {
+      if (ref?.groupId) targets.add(`group:${ref.groupId}`);
+      if (ref?.key) targets.add(`group-key:${ref.key}`);
+    }
+  }
+  return targets;
+}
+
+/**
+ * The targets a write's raw (not yet normalized) references name: `item:<id>` / `group:<id>` for ids, and
+ * `item-key:<key>` / `group-key:<key>` for keys. Compared with `configRefTargets(stored)` before normalizing,
+ * so a caller without Config read is refused before any lookup can tell them what Config holds.
+ */
+export function rawConfigRefTargets(input: { refs?: unknown[]; groupRefs?: unknown[] }): Set<string> {
+  const targets = new Set<string>();
+  const record = (value: unknown) => (value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null);
+  for (const map of input.refs ?? []) {
+    const entries = record(map);
+    if (!entries) continue;
+    for (const raw of Object.values(entries)) {
+      const ref = record(raw);
+      if (!ref) continue;
+      const configId = asString(ref.configId);
+      const key = asString(ref.configKey) ?? asString(ref.key);
+      if (configId) targets.add(`item:${configId}`);
+      else if (key) targets.add(`item-key:${key}`);
+    }
+  }
+  for (const list of input.groupRefs ?? []) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      const ref = record(raw);
+      if (!ref) continue;
+      const groupId = asString(ref.groupId);
+      const key = asString(ref.groupKey) ?? asString(ref.key);
+      if (groupId) targets.add(`group:${groupId}`);
+      else if (key) targets.add(`group-key:${key}`);
+    }
   }
   return targets;
 }
@@ -245,7 +278,9 @@ export type ConfigRefProblemReason =
   /** An item of a bound group whose key gives no usable variable name. */
   | 'invalid_name'
   /** Two items of the bound groups give the same variable name; the first one is used. */
-  | 'name_collision';
+  | 'name_collision'
+  /** Left out because the target's limits (number of variables, value size) would be exceeded. */
+  | 'limit';
 
 export interface ConfigRefProblem {
   reason: ConfigRefProblemReason;
@@ -302,6 +337,11 @@ export async function resolveConfigRefs(input: ResolveConfigRefsInput): Promise<
   vars: Record<string, ResolvedConfigVar>;
   problems: ConfigRefProblem[];
 }> {
+  if (!input.db && hasAny(input) && input.projectId) {
+    // Bound for the whole resolution: a process-global switchToTenant can be overwritten by a concurrent
+    // request for another tenant between the reads (and the audit write) below.
+    return runWithTenantScope(input.tenantDbName, (db) => resolveConfigRefs({ ...input, db }));
+  }
   const vars: Record<string, ResolvedConfigVar> = {};
   const problems: ConfigRefProblem[] = [];
   if (!hasAny(input)) return { vars, problems };
@@ -317,11 +357,7 @@ export async function resolveConfigRefs(input: ResolveConfigRefsInput): Promise<
     return { vars, problems };
   }
 
-  let db = input.db;
-  if (!db) {
-    db = await getDatabase();
-    await db.switchToTenant(input.tenantDbName);
-  }
+  const db = input.db!;
 
   const explicitNames = new Set(Object.keys(input.refs ?? {}));
   const reserved = new Set(input.reservedNames ?? []);
@@ -332,7 +368,7 @@ export async function resolveConfigRefs(input: ResolveConfigRefsInput): Promise<
       const value = openConfigItemValue(item);
       if (item.isSecret && !audited.has(idOf(item))) {
         audited.add(idOf(item));
-        await db!.createConfigAuditLog({
+        await db.createConfigAuditLog({
           tenantId: input.tenantId,
           projectId,
           configKey: item.key,

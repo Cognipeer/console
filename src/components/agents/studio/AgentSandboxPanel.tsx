@@ -34,6 +34,15 @@ import {
 } from '@mantine/core';
 import { IconAlertTriangle, IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
+import type { IConfigGroupRef, IConfigValueRef } from '@/lib/config/configRefShared';
+import AddFromConfigPopover from '@/components/config/refs/AddFromConfigPopover';
+import BoundGroupsList from '@/components/config/refs/BoundGroupsList';
+import ConfigItemPicker, { CONFIG_FORBIDDEN_HINT } from '@/components/config/refs/ConfigItemPicker';
+import {
+    addGroupRefs, nameProblem, nameProblemText, nextRowId, rowsForPickedItems, rowsFromMaps, rowsToMaps, serializeMaps,
+    switchRowSource, usedNames, type EditorRow,
+} from '@/components/config/refs/refRows';
+import { useConfigCatalog, type ConfigCatalog, type ConfigCatalogGroup } from '@/components/config/refs/useConfigCatalog';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import { ConfigBlock } from './ConfigSection';
 import SandboxSeedFiles from './SandboxSeedFiles';
@@ -56,14 +65,6 @@ export interface AgentSandboxPanelProps {
     agentId?: string;
 }
 
-type Row = { id: number; key: string; value: string };
-let rowSeq = 0;
-const toRows = (map: Record<string, string> | undefined): Row[] =>
-    Object.entries(map ?? {}).map(([key, value]) => ({ id: ++rowSeq, key, value }));
-const toMap = (rows: Row[]): Record<string, string> | undefined => {
-    const entries = rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value] as const);
-    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-};
 /** A cleared NumberInput reports `''` — that means "unset", not 0. */
 const optionalNumber = (next: string | number) => (typeof next === 'number' ? next : undefined);
 
@@ -78,6 +79,7 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
     const tSecrets = useTranslations('agents.sandboxSecrets');
     const [capabilities, setCapabilities] = useState<SandboxCapabilities | null>(null);
     const enabled = value?.enabled ?? false;
+    const catalog = useConfigCatalog(enabled);
     const mode = resolveSandboxMode(value?.mode);
     const tools = { exec: true, code: true, files: true, ...(value?.tools ?? {}) };
     const patch = (next: Partial<IAgentSandboxConfig>) => onChange({ ...(value ?? {}), ...next });
@@ -301,9 +303,38 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                             </Text>
                             <KeyValueEditor
                                 value={value?.env}
-                                onChange={(env) => patch({ env })}
+                                refs={value?.envRefs}
+                                onChange={({ values, refs }) => patch({ env: values, envRefs: refs })}
                                 addLabel="Add variable"
+                                catalog={catalog}
+                                boundGroups={value?.groupRefs}
+                                onAddGroups={(groups) => patch({ groupRefs: addGroupRefs(value?.groupRefs, groups) })}
                             />
+                        </Stack>
+                    </ConfigBlock>
+
+                    <ConfigBlock title="Config groups">
+                        <Stack gap="xs">
+                            <Text size="xs" c="dimmed">
+                                Bind a whole Config group: every item in it, now and later, becomes a variable named
+                                after its key. Secret items are passed like Secrets (per command, masked), the others
+                                are set like Environment variables. A variable you set by name above or below wins.
+                            </Text>
+                            <BoundGroupsList
+                                catalog={catalog}
+                                value={value?.groupRefs}
+                                onChange={(next) => patch({ groupRefs: next.length > 0 ? next : undefined })}
+                            />
+                            <Group>
+                                <AddFromConfigPopover
+                                    catalog={catalog}
+                                    takenNames={new Set()}
+                                    boundGroups={value?.groupRefs}
+                                    onAddItems={() => undefined}
+                                    onAddGroups={(groups) => patch({ groupRefs: addGroupRefs(value?.groupRefs, groups) })}
+                                    groupsOnly
+                                />
+                            </Group>
                         </Stack>
                     </ConfigBlock>
 
@@ -334,9 +365,13 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
                             ) : null}
                             <KeyValueEditor
                                 value={value?.secrets}
-                                onChange={(secrets) => patch({ secrets: secrets ?? {} })}
+                                refs={value?.secretRefs}
+                                onChange={({ values, refs }) => patch({ secrets: values ?? {}, secretRefs: refs })}
                                 addLabel="Add secret"
                                 secret
+                                catalog={catalog}
+                                boundGroups={value?.groupRefs}
+                                onAddGroups={(groups) => patch({ groupRefs: addGroupRefs(value?.groupRefs, groups) })}
                             />
                         </Stack>
                     </ConfigBlock>
@@ -355,78 +390,124 @@ export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSan
 
 function KeyValueEditor({
     value,
+    refs,
     onChange,
     addLabel,
+    catalog,
     secret = false,
+    boundGroups,
+    onAddGroups,
 }: {
     value: Record<string, string> | undefined;
-    onChange: (next: Record<string, string> | undefined) => void;
+    refs: Record<string, IConfigValueRef> | undefined;
+    onChange: (next: { values: Record<string, string> | undefined; refs: Record<string, IConfigValueRef> | undefined }) => void;
     addLabel: string;
+    catalog: ConfigCatalog;
     secret?: boolean;
+    boundGroups?: IConfigGroupRef[];
+    onAddGroups?: (groups: ConfigCatalogGroup[]) => void;
 }) {
-    const [rows, setRows] = useState<Row[]>(() => toRows(value));
+    const [rows, setRows] = useState<EditorRow[]>(() => rowsFromMaps(value, refs));
+    const forbidden = catalog.status === 'forbidden';
 
     // Re-seed when the stored value changes from outside (agent reload/save).
-    const serialized = JSON.stringify(value ?? {});
+    const serialized = serializeMaps({ values: value, refs });
     useEffect(() => {
-        setRows((current) => (JSON.stringify(toMap(current) ?? {}) === serialized ? current : toRows(value)));
+        setRows((current) => (serializeMaps(rowsToMaps(current)) === serialized ? current : rowsFromMaps(value, refs)));
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serialized]);
 
-    const update = (next: Row[]) => {
+    const update = (next: EditorRow[]) => {
         setRows(next);
-        onChange(toMap(next));
+        onChange(rowsToMaps(next));
     };
-    const setRow = (id: number, next: Partial<Row>) => update(rows.map((r) => (r.id === id ? { ...r, ...next } : r)));
+    const setRow = (id: number, next: Partial<EditorRow>) => update(rows.map((r) => (r.id === id ? { ...r, ...next } : r)));
 
     return (
         <Stack gap={6}>
-            {rows.map((row) => (
-                <Group key={row.id} gap="xs" wrap="nowrap" align="flex-start">
-                    <TextInput
-                        placeholder="NAME"
-                        value={row.key}
-                        onChange={(event) => setRow(row.id, { key: event.currentTarget.value })}
-                        style={{ flex: 1 }}
-                        ff="monospace"
-                    />
-                    {secret ? (
-                        <PasswordInput
-                            placeholder={row.value === SANDBOX_SECRET_MASK ? 'Stored — type to replace' : 'value'}
-                            value={row.value === SANDBOX_SECRET_MASK ? '' : row.value}
-                            onChange={(event) => setRow(row.id, { value: event.currentTarget.value || SANDBOX_SECRET_MASK })}
-                            style={{ flex: 2 }}
-                        />
-                    ) : (
+            {rows.map((row) => {
+                const problem = row.source === 'config' && row.key.trim() ? nameProblem(row.key, usedNames(rows, row.id)) : null;
+                return (
+                    <Group key={row.id} gap="xs" wrap="nowrap" align="flex-start">
                         <TextInput
-                            placeholder="value"
-                            value={row.value}
-                            onChange={(event) => setRow(row.id, { value: event.currentTarget.value })}
-                            style={{ flex: 2 }}
+                            placeholder="NAME"
+                            aria-label="Variable name"
+                            value={row.key}
+                            onChange={(event) => setRow(row.id, { key: event.currentTarget.value })}
+                            style={{ flex: 1 }}
+                            ff="monospace"
+                            error={problem ? nameProblemText(problem) : undefined}
                         />
-                    )}
-                    <Tooltip label="Remove" withArrow>
-                        <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            mt={4}
-                            onClick={() => update(rows.filter((r) => r.id !== row.id))}
-                            aria-label="Remove"
-                        >
-                            <IconTrash size={14} />
-                        </ActionIcon>
-                    </Tooltip>
-                </Group>
-            ))}
-            <Group>
+                        <Tooltip label={CONFIG_FORBIDDEN_HINT} withArrow disabled={!forbidden}>
+                            <SegmentedControl
+                                size="xs"
+                                aria-label="Value source"
+                                value={row.source}
+                                onChange={(next) => update(rows.map((r) => (r.id === row.id ? switchRowSource(r, next as 'value' | 'config') : r)))}
+                                data={[
+                                    { value: 'value', label: 'Value' },
+                                    { value: 'config', label: 'Config', disabled: forbidden && row.source !== 'config' },
+                                ]}
+                            />
+                        </Tooltip>
+                        <div style={{ flex: 2, minWidth: 0 }}>
+                            {row.source === 'config' ? (
+                                <>
+                                    <ConfigItemPicker
+                                        catalog={catalog}
+                                        value={row.ref}
+                                        onChange={(ref) => setRow(row.id, { ref })}
+                                        disableSecret={!secret}
+                                    />
+                                    {!row.ref ? <Text size="xs" c="red.7" mt={2}>Pick a config item — until then the current value is kept.</Text> : null}
+                                </>
+                            ) : secret ? (
+                                <PasswordInput
+                                    placeholder={row.value === SANDBOX_SECRET_MASK ? 'Stored — type to replace' : 'value'}
+                                    aria-label="Secret value"
+                                    value={row.value === SANDBOX_SECRET_MASK ? '' : row.value}
+                                    onChange={(event) => setRow(row.id, { value: event.currentTarget.value || SANDBOX_SECRET_MASK })}
+                                />
+                            ) : (
+                                <TextInput
+                                    placeholder="value"
+                                    aria-label="Value"
+                                    value={row.value}
+                                    onChange={(event) => setRow(row.id, { value: event.currentTarget.value })}
+                                />
+                            )}
+                        </div>
+                        <Tooltip label="Remove" withArrow>
+                            <ActionIcon
+                                variant="subtle"
+                                color="red"
+                                mt={4}
+                                onClick={() => update(rows.filter((r) => r.id !== row.id))}
+                                aria-label="Remove"
+                            >
+                                <IconTrash size={14} />
+                            </ActionIcon>
+                        </Tooltip>
+                    </Group>
+                );
+            })}
+            <Group gap="xs">
                 <Button
                     size="compact-xs"
                     variant="light"
                     leftSection={<IconPlus size={12} />}
-                    onClick={() => update([...rows, { id: ++rowSeq, key: '', value: '' }])}
+                    onClick={() => update([...rows, { id: nextRowId(), key: '', source: 'value', value: '' }])}
                 >
                     {addLabel}
                 </Button>
+                <AddFromConfigPopover
+                    catalog={catalog}
+                    takenNames={usedNames(rows)}
+                    disableSecret={!secret}
+                    boundGroups={boundGroups}
+                    onAddItems={(picks) => update([...rows, ...rowsForPickedItems(picks, usedNames(rows))])}
+                    onAddGroups={onAddGroups}
+                />
             </Group>
         </Stack>
     );

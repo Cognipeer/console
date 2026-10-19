@@ -87,6 +87,8 @@ export interface ImportContext {
  */
 export interface ImportWriteContext extends ImportContext {
     canNameBucket: CanNameBucket;
+    /** Same for Config: pointing the sandbox at a config item or group takes read access to Config (see `applyAgentManifest`). */
+    canReferenceConfig?: () => Promise<boolean>;
 }
 
 // ── Preview ─────────────────────────────────────────────────────────────
@@ -630,6 +632,7 @@ export async function applyAgentDocumentImport(
         const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, manifest, {
             mode: 'create',
             canNameBucket: ctx.canNameBucket,
+            canReferenceConfig: ctx.canReferenceConfig,
         });
 
         // Provenance: where this agent came from, for whoever opens it next.
@@ -824,6 +827,7 @@ async function applyManifestDocument(
             key,
             name: input.name,
             canNameBucket: ctx.canNameBucket,
+            canReferenceConfig: ctx.canReferenceConfig,
         });
         return {
             agent: result.agent,
@@ -837,6 +841,7 @@ async function applyManifestDocument(
             warnings: [
                 ...warnings,
                 ...result.missing.map((dep) => ({ code: 'missing_dependency', message: `${dep.type} "${dep.key}" does not exist in this project.` })),
+                ...(result.warnings ?? []),
             ],
         };
     });

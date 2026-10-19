@@ -16,18 +16,35 @@ vi.mock('@/lib/license/tenantLicense', () => ({
 }));
 
 const conversations = vi.hoisted(() => new Map<string, Record<string, unknown>>());
+/** Config rows behind `sandbox.envRefs / secretRefs / groupRefs` (values are stored plain here, see the configService mock). */
+const configRows = vi.hoisted(() => ({
+    items: [] as Array<{ _id: string; key: string; value: string; isSecret: boolean; groupId: string; projectId: string; version: number }>,
+    groups: [] as Array<{ _id: string; key: string; projectId: string }>,
+    audit: [] as Array<Record<string, unknown>>,
+}));
+vi.mock('@/lib/services/config/configService', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/config/configService')>();
+    return { ...actual, openConfigItemValue: (item: { value: string }) => item.value };
+});
 vi.mock('@/lib/database', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/database')>();
-    return {
-        ...actual,
-        getDatabase: vi.fn(async () => ({
+    const getDatabase = vi.fn(async () => ({
             switchToTenant: vi.fn(),
+            findConfigItemById: vi.fn(async (id: string) => configRows.items.find((i) => i._id === id) ?? null),
+            findConfigGroupById: vi.fn(async (id: string) => configRows.groups.find((g) => g._id === id) ?? null),
+            listConfigItems: vi.fn(async (f: { groupId?: string }) => configRows.items.filter((i) => !f.groupId || i.groupId === f.groupId)),
+            createConfigAuditLog: vi.fn(async (entry: Record<string, unknown>) => { configRows.audit.push(entry); return entry; }),
             findAgentConversationById: vi.fn(async (id: string) => conversations.get(id) ?? null),
             updateAgentConversation: vi.fn(async (id: string, data: Record<string, unknown>) => {
                 conversations.set(id, { ...(conversations.get(id) ?? {}), ...data });
                 return conversations.get(id);
             }),
-        })),
+        }));
+    return {
+        ...actual,
+        getDatabase,
+        // The real one would open its own (unmocked) connection.
+        runWithTenantScope: async (_name: string, fn: (db: Awaited<ReturnType<typeof getDatabase>>) => unknown) => fn(await getDatabase()),
     };
 });
 
@@ -118,6 +135,9 @@ let fake: ReturnType<typeof fakeRunner>;
 beforeEach(() => {
     licensed.value = true;
     conversations.clear();
+    configRows.items = [];
+    configRows.groups = [];
+    configRows.audit = [];
     fake = fakeRunner();
     agentSandboxRunner.current = fake.runner;
 });
@@ -262,6 +282,81 @@ describe('secrets — seed files, outputs and an unreadable store', () => {
         expect(out.notice).toMatch(/secrets .* unavailable/);
         expect(out.notice).toMatch(/encryption key/);
         expect((fake.calls[1]!.args[2] as { env: Record<string, string> }).env).toEqual({});
+    });
+});
+
+describe('values taken from Config', () => {
+    const row = (id: string, key: string, value: string, isSecret: boolean, groupId = 'g1') =>
+        ({ _id: id, key, value, isSecret, groupId, projectId: 'p1', version: 2 });
+    beforeEach(() => {
+        configRows.groups = [{ _id: 'g1', key: 'shared', projectId: 'p1' }];
+        configRows.items = [row('i1', 'region', 'eu-west', false), row('i2', 'api-key', 'cfg-secret-value', true)];
+    });
+
+    it('sets plain values on the machine, passes secrets per command, masks them and names them to the model', async () => {
+        const { byName, tools } = await build({
+            enabled: true,
+            env: { MODE: 'ci' },
+            envRefs: { REGION: { configId: 'i1', key: 'region' } },
+            groupRefs: [{ groupId: 'g1', key: 'shared' }],
+        });
+        const out = await byName('sandbox_exec').invoke({ command: 'echo $API_KEY' }) as { stdout: string; notice?: string };
+
+        expect((fake.calls[0].args[1] as { env?: Record<string, string> }).env).toEqual({ REGION: 'eu-west', MODE: 'ci' });
+        const commandEnv = (fake.calls[1].args[2] as { env: Record<string, string> }).env;
+        expect(commandEnv).toEqual({ API_KEY: 'cfg-secret-value' });
+        expect(JSON.stringify(fake.calls[0].args[1])).not.toContain('cfg-secret-value');
+        expect(out.notice).toBeUndefined();
+        const description = (tools.find((t: { name: string }) => t.name === 'sandbox_exec') as { description: string }).description;
+        expect(description).toContain('API_KEY');
+        expect(description).not.toContain('cfg-secret-value');
+        expect(configRows.audit).toEqual([expect.objectContaining({ configKey: 'api-key', performedBy: 'agent:builder' })]);
+    });
+
+    it('never puts a secret on the machine, even when an envRefs item has become secret', async () => {
+        const { byName } = await build({ enabled: true, envRefs: { REGION: { configId: 'i2', key: 'api-key' } } });
+        await byName('sandbox_exec').invoke({ command: 'true' });
+        expect(fake.calls[0].args[1]).not.toHaveProperty('env');
+        expect((fake.calls[1].args[2] as { env: Record<string, string> }).env).toEqual({ REGION: 'cfg-secret-value' });
+    });
+
+    it('runs without a variable that is gone, warns once and tells the model with the results', async () => {
+        const { byName, warnings } = await build({
+            enabled: true,
+            envRefs: { REGION: { configId: 'i1', key: 'region' }, GONE: { configId: 'deleted', key: 'removed' } },
+        });
+        const first = await byName('sandbox_exec').invoke({ command: 'true' }) as { notice?: string };
+        const second = await byName('sandbox_exec').invoke({ command: 'true' }) as { notice?: string };
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/GONE/);
+        expect(first.notice).toMatch(/configured from Config are unavailable: [\s\S]*GONE[\s\S]*run without them/);
+        expect(second.notice).toBe(first.notice);
+        expect((fake.calls[0].args[1] as { env?: Record<string, string> }).env).toEqual({ REGION: 'eu-west' });
+    });
+
+    it('starts the sandbox without a Config value over the env limits, and says so (limit problem)', async () => {
+        configRows.items.push(row('i9', 'huge', 'x'.repeat(32 * 1024 + 1), false));
+        const { byName, warnings } = await build({
+            enabled: true,
+            envRefs: { REGION: { configId: 'i1', key: 'region' }, HUGE: { configId: 'i9', key: 'huge' } },
+        });
+        const out = await byName('sandbox_exec').invoke({ command: 'true' }) as { notice?: string };
+        expect((fake.calls[0].args[1] as { env?: Record<string, string> }).env).toEqual({ REGION: 'eu-west' });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/HUGE/);
+        expect(out.notice).toMatch(/configured from Config are unavailable: [\s\S]*HUGE[\s\S]*run without them/);
+    });
+
+    it('says nothing to the model about a name collision between bound groups (a warning only)', async () => {
+        configRows.groups.push({ _id: 'g2', key: 'second', projectId: 'p1' });
+        configRows.items.push(row('i3', 'region', 'other', false, 'g2'));
+        const { byName, warnings } = await build({
+            enabled: true,
+            groupRefs: [{ groupId: 'g1', key: 'shared' }, { groupId: 'g2', key: 'second' }],
+        });
+        const out = await byName('sandbox_exec').invoke({ command: 'true' }) as { notice?: string };
+        expect(warnings).toHaveLength(1);
+        expect(out.notice).toBeUndefined();
     });
 });
 

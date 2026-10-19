@@ -1,11 +1,12 @@
 /**
- * Operations resource types: alert-rule, config-group, quota-policy.
+ * Operations resource types: alert-rule, config-group, config-item, quota-policy.
  *
  * Backend semantics relied on:
  *   - listQuotaPolicies(tenantId): projectId filter only when given -> whole tenant
  *   - listAlertRules(tenantId): projectId filter only when !== undefined -> whole tenant
  *     (rules always carry a projectId; there are no tenant-wide rules)
  *   - listConfigGroups():       projectId filter only when truthy -> whole tenant
+ *   - listConfigItems():        same -> whole tenant
  */
 import { buildAttributes, statusFromEnabled, str } from '../mapping';
 import { createEdgeCollector } from '../references';
@@ -71,6 +72,23 @@ export function mapConfigGroup(g: Doc): ResourceRecord {
 }
 
 /**
+ * A config item, identified for "used by" and the delete warning. `value` is never read (it can be a secret,
+ * encrypted at rest); only what names the item and where it lives survives.
+ */
+export function mapConfigItem(i: Doc): ResourceRecord {
+  return baseRecord('config-item', i, {
+    name: str(i.name) ?? str(i.key) ?? String(i._id ?? i.id),
+    status: null,
+    attributes: buildAttributes({
+      groupId: i.groupId != null ? String(i.groupId) : undefined,
+      isSecret: i.isSecret === true,
+      valueType: str(i.valueType),
+      version: typeof i.version === 'number' ? i.version : undefined,
+    }),
+  });
+}
+
+/**
  * A configured limit (rate / per-request / resource caps / budget). The numbers
  * themselves are not surfaced, only which families the policy sets. `scopeId`
  * is the id of the user / token / resource / provider the policy targets.
@@ -115,6 +133,19 @@ export const operationsResourceTypes: ResourceTypeDefinition[] = [
     edition: 'community',
     list: async ({ db }) => (await db.listConfigGroups()).map((g) => mapConfigGroup(g as never)),
     detailUrl: (r) => `/dashboard/config/${encodeURIComponent(r.id)}`,
+  },
+  {
+    type: 'config-item',
+    service: 'config',
+    category: 'operations',
+    scope: 'project-or-tenant',
+    edition: 'community',
+    list: async ({ db }) => (await db.listConfigItems()).map((i) => mapConfigItem(i as never)),
+    // An item has no page of its own: it is shown in its group's page.
+    detailUrl: (r) => {
+      const groupId = r.attributes.find((a) => a.key === 'groupId')?.value;
+      return typeof groupId === 'string' ? `/dashboard/config/${encodeURIComponent(groupId)}` : null;
+    },
   },
   {
     type: 'quota-policy',

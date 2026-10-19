@@ -50,6 +50,7 @@ import {
   AgentManifestError,
   manifestErrorStatus,
   applyAgentManifest,
+  ConfigReferenceForbiddenError,
   buildAgentManifest,
   parseAgentManifest,
   previewAgentImport,
@@ -139,6 +140,7 @@ import {
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
+import { configReadRequiredBody, requestHasConfigRead } from './config-permission';
 import { sessionHasAgentsPermission } from './agents-permission';
 import {
   FeedbackError,
@@ -741,6 +743,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         user,
         canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+        canReferenceConfig: () => requestHasConfigRead(request, projectId),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -827,6 +830,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             projectId,
             user,
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+            canReferenceConfig: () => requestHasConfigRead(request, projectId),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('conflict' in checked) return reply.code(409).send(checked.conflict);
@@ -1028,6 +1032,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           allowMissingDependencies: body.allowMissingDependencies,
           // Importing is a config write like any other: naming a bucket takes the right to name it.
           canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+          canReferenceConfig: () => requestHasConfigRead(request, projectId),
         },
       );
 
@@ -1035,8 +1040,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         agent: redactAgent(result.agent),
         action: result.action,
         missing: result.missing,
+        warnings: result.warnings,
       });
     } catch (error) {
+      if (error instanceof ConfigReferenceForbiddenError) {
+        return reply.code(403).send(configReadRequiredBody(error.field));
+      }
       if (error instanceof BucketNamingForbiddenError) {
         return reply.code(403).send(bucketNamingForbiddenBody(error));
       }
@@ -1058,6 +1067,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   const sendImportError = (reply: FastifyReply, error: unknown) => {
     if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
     if (error instanceof BucketNamingForbiddenError) return reply.code(403).send(bucketNamingForbiddenBody(error));
+    if (error instanceof ConfigReferenceForbiddenError) return reply.code(403).send(configReadRequiredBody(error.field));
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
@@ -1098,6 +1108,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           projectId,
           userId: String(user._id),
           canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+          canReferenceConfig: () => requestHasConfigRead(request, projectId),
         },
         body,
       );

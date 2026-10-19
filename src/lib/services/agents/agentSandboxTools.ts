@@ -49,6 +49,8 @@ import {
 import { resolveAttachmentsConfig } from './sessionFilesConfig';
 import { resolveUploadMimeType, saveAgentOutputFile } from './sessionFiles';
 import { readAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
+import { resolveAgentSandboxConfigVars } from './agentSandboxConfigVars';
+import { blockingConfigRefProblems, describeConfigRefProblems } from '@/lib/services/config/configRefs';
 
 const logger = createLogger('agent-sandbox');
 
@@ -111,6 +113,11 @@ function tail(text: string, limit: number): string {
 
 /** Told to the model (and so the transcript) when the stored secrets cannot be decrypted. */
 const SECRETS_UNAVAILABLE_NOTICE = 'The sandbox secrets configured for this agent are unavailable (the encryption key has changed), so commands run without them. Tell the user to re-enter them in the agent settings.';
+
+/** Told to the model with the command results when variables configured from Config could not be read. */
+function configVarsUnavailableNotice(detail: string): string {
+    return `These sandbox variables configured from Config are unavailable: ${detail} Commands run without them.`;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
@@ -176,10 +183,28 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         ...(sessionConversationId ? { conversationId: sessionConversationId } : {}),
     };
     const timeoutSec = clampTimeout(config.commandTimeoutSec);
-    const { secrets, unreadable: secretsUnreadable } = readAgentSandboxSecrets(config);
+    const { secrets: typedSecrets, unreadable: secretsUnreadable } = readAgentSandboxSecrets(config);
+    // Config-sourced variables, read once per run: values from Config join the typed ones (secrets per command,
+    // the rest on the machine). A reference that cannot be read is left out; the run goes on and says so.
+    const configVars = await resolveAgentSandboxConfigVars({
+        sandbox: config,
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        secrets: typedSecrets,
+    });
+    const secrets = configVars.secrets;
+    const machineEnv = configVars.machineEnv;
+    const configProblems = configVars.problems;
+    if (configProblems.length > 0) input.onWarning(describeConfigRefProblems(configProblems));
+    const unavailableConfig = blockingConfigRefProblems(configProblems);
+    const configNotice = unavailableConfig.length > 0
+        ? configVarsUnavailableNotice(describeConfigRefProblems(unavailableConfig))
+        : undefined;
     const scrub = (text: string) => scrubSecretValues(text, secrets);
-    /** Said with every command result: stored secrets that cannot be opened mean commands run without them. */
-    const secretsNotice = secretsUnreadable ? SECRETS_UNAVAILABLE_NOTICE : undefined;
+    /** Said with every command result: variables that cannot be read mean commands run without them. */
+    const secretsNotice = [secretsUnreadable ? SECRETS_UNAVAILABLE_NOTICE : undefined, configNotice].filter(Boolean).join(' ') || undefined;
     const preview = config.preview?.enabled
         ? {
             public: config.preview.public === true,
@@ -257,7 +282,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             persist: false,
             ...(config.resources ? { resources: config.resources } : {}),
             ...(config.blockNetwork ? { blockNetwork: true } : {}),
-            ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
+            ...(Object.keys(machineEnv).length > 0 ? { env: machineEnv } : {}),
             ...(previous?.instanceId ? { instanceId: previous.instanceId } : {}),
             preview: { enabled: Boolean(preview), public: preview?.public ?? false },
             // A previewing machine is stopped by the sandbox module's reaper
@@ -334,11 +359,13 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const lifetime = session
         ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
         : 'The sandbox is discarded when this reply is finished.';
-    const secretNote = secretsUnreadable
-        ? ` ${SECRETS_UNAVAILABLE_NOTICE}`
-        : Object.keys(secrets).length > 0
-        ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
-        : '';
+    const secretNote = [
+        secretsUnreadable ? ` ${SECRETS_UNAVAILABLE_NOTICE}` : '',
+        configNotice ? ` ${configNotice}` : '',
+        Object.keys(secrets).length > 0
+            ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
+            : '',
+    ].join('');
 
     const z = input.zod;
     const toolsEnabled = { exec: true, code: true, files: true, ...(config.tools ?? {}) };

@@ -49,6 +49,7 @@ import {
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
+import { requestHasConfigRead } from './config-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { advertisedModelsForRequest } from './agent-model-authz';
 import { sendAuthorizationUnavailable } from './agent-session-access';
@@ -545,6 +546,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
+        canReferenceConfig: () => requestHasConfigRead(request, ctx.projectId),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -621,6 +623,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
             canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
+            canReferenceConfig: () => requestHasConfigRead(request, ctx.projectId),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('conflict' in checked) return reply.code(409).send(checked.conflict);

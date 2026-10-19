@@ -47,8 +47,8 @@ export default function CreateConfigItemModal({
       tags: '',
     },
     validate: {
-      name: (v) => (!v.trim() ? 'Name is required' : null),
-      value: (v) => (v === '' ? 'Value is required' : null),
+      name: (v) => (!v.trim() ? t('nameRequired') : null),
+      value: (v) => (v === '' ? t('valueRequired') : null),
     },
   });
 
@@ -122,7 +122,7 @@ export default function CreateConfigItemModal({
     if (values.isSecret) {
       return (
         <PasswordInput
-          placeholder="Configuration value"
+          placeholder={t('valuePlaceholder')}
           {...form.getInputProps('value')}
         />
       );
@@ -150,7 +150,7 @@ export default function CreateConfigItemModal({
     }
     return (
       <Textarea
-        placeholder={values.valueType === 'json' ? '{ "key": "value" }' : 'Configuration value'}
+        placeholder={values.valueType === 'json' ? '{ "key": "value" }' : t('valuePlaceholder')}
         autosize
         minRows={2}
         {...form.getInputProps('value')}
@@ -167,7 +167,7 @@ export default function CreateConfigItemModal({
         />
         <SummaryKV
           label={t('itemKey')}
-          value={values.key ? <span className="ds-mono">{values.key}</span> : <span className="ds-faint">auto</span>}
+          value={values.key ? <span className="ds-mono">{values.key}</span> : <span className="ds-faint">{t('auto')}</span>}
         />
         <SummaryKV
           label={t('valueType')}
@@ -177,12 +177,12 @@ export default function CreateConfigItemModal({
           label={t('isSecret')}
           value={
             <span className={`ds-badge ${values.isSecret ? 'ds-badge-warn' : 'ds-badge-ok'}`}>
-              {values.isSecret ? 'yes' : 'no'}
+              {values.isSecret ? t('yes') : t('no')}
             </span>
           }
         />
       </SummaryGroup>
-      <SummaryGroup title="Pre-flight">
+      <SummaryGroup title={t('preflight')}>
         <Checklist items={checklist} />
       </SummaryGroup>
     </>
@@ -196,9 +196,9 @@ export default function CreateConfigItemModal({
       onClose={onClose}
       icon={<IconPlus size={16} />}
       title={t('createItem')}
-      subtitle="Store a configuration value, secret, or API key in this group."
+      subtitle={t('createItemSubtitle')}
       summary={summary}
-      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      footerStatus={t('ready', { done: checklist.filter((c) => c.done).length, total: checklist.length })}
       primaryAction={{
         label: t('create'),
         icon: <IconCheck size={13} />,
@@ -215,14 +215,14 @@ export default function CreateConfigItemModal({
     >
       <FormSection
         number={1}
-        title="Identity"
-        description="Name and unique key for this config item."
+        title={t('identity')}
+        description={t('itemIdentityDescription')}
         done={validName}
       >
         <FormRow cols={1}>
           <FormField label={t('itemName')} required>
             <TextInput
-              placeholder="e.g. OpenAI API Key"
+              placeholder={t('itemNamePlaceholder')}
               {...form.getInputProps('name')}
             />
           </FormField>
@@ -231,7 +231,7 @@ export default function CreateConfigItemModal({
           <FormField
             label={t('itemKey')}
             optional
-            hint="Unique identifier used in API calls. Auto-generated from name if empty."
+            hint={t('itemKeyHint')}
           >
             <TextInput
               placeholder="auto"
@@ -242,7 +242,7 @@ export default function CreateConfigItemModal({
         <FormRow cols={1}>
           <FormField label={t('description')} optional>
             <Textarea
-              placeholder="What is this config for?"
+              placeholder={t('itemDescriptionPlaceholder')}
               autosize
               minRows={2}
               {...form.getInputProps('description')}
@@ -250,9 +250,9 @@ export default function CreateConfigItemModal({
           </FormField>
         </FormRow>
         <FormRow cols={1}>
-          <FormField label={t('tags')} optional hint="Comma separated.">
+          <FormField label={t('tags')} optional hint={t('tagsHint')}>
             <TextInput
-              placeholder="api, credentials, openai"
+              placeholder={t('tagsPlaceholder')}
               {...form.getInputProps('tags')}
             />
           </FormField>
@@ -262,7 +262,7 @@ export default function CreateConfigItemModal({
       <FormSection
         number={2}
         title={t('value')}
-        description="The actual configuration value and its type."
+        description={t('valueSectionDescription')}
         done={validValue}
       >
         <FormField label={t('valueType')}>
@@ -285,7 +285,7 @@ export default function CreateConfigItemModal({
         <ToggleList>
           <ToggleRow
             label={t('isSecret')}
-            description="Encrypt the value at rest. Secret values are masked in the UI."
+            description={t('secretHint')}
             checked={values.isSecret}
             onChange={(checked) => form.setFieldValue('isSecret', checked)}
           />

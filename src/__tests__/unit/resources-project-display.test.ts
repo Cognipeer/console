@@ -113,6 +113,7 @@ describe('scope of every community type (checked against how the runtime resolve
     browser: 'project-or-tenant',
     'browser-flow': 'project-or-tenant',
     'config-group': 'project-or-tenant',
+    'config-item': 'project-or-tenant',
     // the API stamps the active project when given one; without it the policy is tenant-wide
     'quota-policy': 'project-or-tenant',
     'inference-server': 'tenant',
