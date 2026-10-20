@@ -433,6 +433,19 @@ describe('sandbox capabilities', () => {
     });
 });
 
+describe('Console identity details', () => {
+    it('GET /agents/console-identity answers the issuer and key set of the caller\'s workspace', async () => {
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/console-identity' });
+        expect(res.statusCode).toBe(200);
+        const body = parseJsonBody<{ issuer: string; jwksUri: string; discoveryUri: string; algorithm: string; lifetimeSeconds: number }>(res.body);
+        expect(body.issuer).toMatch(/\/api\/public\/identity\/tenant-1$/);
+        expect(body.jwksUri).toBe(`${body.issuer}/.well-known/jwks.json`);
+        expect(body.discoveryUri).toBe(`${body.issuer}/.well-known/openid-configuration`);
+        expect(body).toMatchObject({ algorithm: 'RS256', lifetimeSeconds: 300 });
+    });
+});
+
 describe('sandbox secrets in API responses', () => {
     it('PATCH /agents/:agentId answers with secret keys masked and never the sealed payload', async () => {
         const { sealAgentSandboxConfig } = await import('@/lib/services/agents/agentSandboxSecrets');
