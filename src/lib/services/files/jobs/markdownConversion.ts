@@ -8,21 +8,28 @@
  *
  * A job that is lost (the memory queue forgets what was queued when the process restarts) leaves a record
  * `pending`; asking for the conversion again queues a new job, whatever the record's status is.
+ *
+ * The copy is written before the record says so, and anything may have happened since: the file may have been
+ * replaced or deleted, another run may have settled the record, the bucket may have been switched off or be deleting.
+ * The run reads the record and the bucket again before it settles anything, and a copy that nothing will carry is
+ * removed. Runs for one record in this process take turns, so the second finds the record settled and has nothing
+ * to do; across nodes that read is what decides, and only the time between it and the write of the record is open.
  */
 
 import { getDatabase, type DatabaseProvider, type FileRecordPatch, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { withResilience } from '@/lib/core/resilience';
 import {
   applyMarkdownConversion,
   composeProviderObjectKey,
   ensureFileBucketActive,
-  fileResilience,
   findFileRecord,
+  oneAtATime,
+  readStoredObject,
   requireBucketContext,
   requireBucketRecord,
   serializeFileRecord,
 } from '../fileService';
+import { bucketClosedError } from '../bucketRules';
 import { describeFailure, FileServiceError } from '../errors';
 import {
   assertMarkdownConvertible,
@@ -128,6 +135,32 @@ async function recordOfJob(
   return stillThere ? record : null;
 }
 
+/** Whether two reads of a file's record describe the same bytes (a replacement changes the size, the checksum or the etag). */
+function sameBytes(a: IFileRecord, b: IFileRecord): boolean {
+  return a.size === b.size && (a.checksum ?? null) === (b.checksum ?? null) && (a.etag ?? null) === (b.etag ?? null);
+}
+
+/**
+ * Why the bucket takes no more files now, or `null` when it does. A bucket that cannot be read is no reason to drop
+ * a conversion that is done: not knowing is taken as open, as an upload does.
+ */
+async function closedBucketError(
+  db: DatabaseProvider,
+  tenantId: string,
+  bucketKey: string,
+  projectId: string,
+): Promise<FileServiceError | null> {
+  try {
+    return bucketClosedError(await db.findFileBucketByKey(tenantId, bucketKey, projectId));
+  } catch (error) {
+    logger.warn('Could not check that a bucket still takes files after a Markdown conversion', {
+      bucketKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 /** The conversion itself, for a record that is waiting for it. Throws what stops it; the caller records that. */
 async function convertWaitingRecord(
   db: DatabaseProvider,
@@ -150,22 +183,55 @@ async function convertWaitingRecord(
 
   // A switched-off bucket takes nothing new, and the copy is new.
   const { runtime } = await requireBucketContext(tenantDbName, tenantId, projectId, bucketKey, 'write');
-  const original = await withResilience(
-    () => runtime.downloadFile(composeProviderObjectKey(bucket, record.key)),
-    fileResilience('download', tenantId, bucket.providerKey),
-  );
+  const original = await readStoredObject(runtime, composeProviderObjectKey(bucket, record.key), {
+    tenantId,
+    providerKey: bucket.providerKey,
+    size: record.size,
+  });
   if (markdownConversionTooLarge(original.data.length)) {
     await settle({ markdownStatus: 'skipped', markdownError: 'The file is larger than the limit for Markdown conversion.' });
     return;
   }
 
   const conversion = await applyMarkdownConversion(runtime, bucket, record, { fileName: record.name }, original.data, db);
+  // The copy this run wrote, unless it is the one the record carries: the copy of a file that is converted again
+  // takes the place of the first, and that object is the record's.
+  const discardCopy = async (carried?: string | null) => {
+    if (!conversion.markdownKey || conversion.markdownKey === carried) return;
+    await runtime.deleteFile(composeProviderObjectKey(bucket, conversion.markdownKey)).catch(() => undefined);
+  };
+
+  // An upload to the same key may have replaced the bytes while they were converted. This copy is of bytes that are
+  // gone, and that upload queued a conversion of its own, which finds the record still waiting: this run settles
+  // nothing, and the copy (its name was free when it was written, so nobody else holds it) is removed.
+  const current = await db.findFileRecordById(recordId);
+  if (current && !sameBytes(record, current)) {
+    await discardCopy(current.markdownKey);
+    logger.debug('Markdown conversion dropped: the file was replaced while it was converted', { bucketKey, key });
+    return;
+  }
+
+  // Another run of the same request settled the record while this one converted (the convert action queues a job
+  // whatever the status is, and a stalled job runs again), or asked for the conversion again: what that run decided
+  // stands, and the record is left as it is. This copy would be the second one for a record that has room for one.
+  if (current && (current.markdownStatus !== 'pending' || (current.markdownKey ?? null) !== (record.markdownKey ?? null))) {
+    await discardCopy(current.markdownKey);
+    logger.debug('Markdown conversion dropped: the record was settled while it was converted', { bucketKey, key });
+    return;
+  }
+
+  // The bucket was switched off or began to be deleted: the deletion lists its files once, and a copy written after
+  // that is a file nobody would see. The run stops with the reason, as one that found the bucket closed at its start.
+  const closed = await closedBucketError(db, tenantId, bucketKey, projectId);
+  if (closed) {
+    await discardCopy(current?.markdownKey);
+    throw closed;
+  }
+
   const updated = await settle(conversion);
 
   // The file was deleted while it was converted: its copy has no record to carry it.
-  if (!updated && conversion.markdownKey) {
-    await runtime.deleteFile(composeProviderObjectKey(bucket, conversion.markdownKey)).catch(() => undefined);
-  }
+  if (!updated) await discardCopy();
   logger.debug('Markdown conversion finished', { bucketKey, key, status: conversion.markdownStatus });
 }
 
@@ -203,22 +269,27 @@ async function recordFailedRun(payload: ConvertMarkdownJobPayload, error: unknow
  */
 export async function runMarkdownConversionJob(payload: ConvertMarkdownJobPayload): Promise<void> {
   const { tenantDbName, tenantId, projectId, bucketKey, key } = payload;
-  try {
-    const db = await tenantDb(tenantDbName);
-    const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
-    if (!bucket) return;
-    const record = await recordOfJob(db, bucket, payload);
-    const recordId = record?._id?.toString();
-    // Deleted since, or converted by an earlier run of the same request: nothing is waiting.
-    if (!record || !recordId || record.markdownStatus !== 'pending') return;
+  // Runs for one record take turns: the second reads what the first settled. A job queued by an older node has no
+  // record id, and takes its turn by the key.
+  const lane = `convert:${tenantId}:${projectId}:${bucketKey}:${payload.recordId ?? key}`;
+  await oneAtATime(lane, async () => {
+    try {
+      const db = await tenantDb(tenantDbName);
+      const bucket = await db.findFileBucketByKey(tenantId, bucketKey, projectId);
+      if (!bucket) return;
+      const record = await recordOfJob(db, bucket, payload);
+      const recordId = record?._id?.toString();
+      // Deleted since, or converted by an earlier run of the same request: nothing is waiting.
+      if (!record || !recordId || record.markdownStatus !== 'pending') return;
 
-    await convertWaitingRecord(db, bucket, record, recordId, payload);
-  } catch (error) {
-    logger.warn('Markdown conversion could not run', {
-      bucketKey,
-      key,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await recordFailedRun(payload, error);
-  }
+      await convertWaitingRecord(db, bucket, record, recordId, payload);
+    } catch (error) {
+      logger.warn('Markdown conversion could not run', {
+        bucketKey,
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await recordFailedRun(payload, error);
+    }
+  });
 }

@@ -69,10 +69,12 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const filter: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
       if (filters?.search) {
+        // The text as typed, not a pattern: a `\` or a `(` in a name is a character of the name.
+        const pattern = this.escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: pattern, $options: 'i' } },
+          { description: { $regex: pattern, $options: 'i' } },
+          { key: { $regex: pattern, $options: 'i' } },
         ];
       }
       const docs = await db.collection(COLLECTIONS.analysisDefinitions).find(filter).sort({ createdAt: -1 }).toArray();
@@ -132,10 +134,11 @@ export function AnalysisMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       if (filters?.source !== undefined) filter.source = filters.source;
       if (filters?.tag) filter.tags = filters.tag;
       if (filters?.search) {
+        const pattern = this.escapeRegex(filters.search);
         filter.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { description: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: pattern, $options: 'i' } },
+          { description: { $regex: pattern, $options: 'i' } },
+          { key: { $regex: pattern, $options: 'i' } },
         ];
       }
       const docs = await db

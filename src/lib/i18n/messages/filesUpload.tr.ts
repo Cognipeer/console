@@ -77,7 +77,7 @@ export const filesUploadTr: typeof filesUploadEn = {
   processing: {
     convert: 'Markdown’a dönüştür',
     convertHint:
-      'PDF, Word, PowerPoint, Excel, HTML, metin ve görsellerde çalışır. Her dosyanın yanına bir Markdown kopyası kaydedilir; orijinal dosya hiç değişmez.',
+      'PDF, Word, PowerPoint (.pptx), Excel, HTML ile CSV ve JSON gibi metin dosyalarında çalışır. Görseller gibi diğer dosyalar Markdown kopyası olmadan saklanır. Markdown kopyası, üretildiği dosyanın yanına kaydedilir; orijinal dosya hiç değişmez.',
     background:
       'Dönüştürme yüklemeden sonra arka planda çalışır. Durumu dosya listesinde ve dosya ayrıntılarında görünür; başarısız bir dönüştürme oradan yeniden denenebilir.',
     advanced: 'Gelişmiş',

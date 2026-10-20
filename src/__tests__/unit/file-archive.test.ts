@@ -7,13 +7,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
 
-const hoisted = vi.hoisted(() => ({ requireBucketContext: vi.fn(), assertWithinReadCeiling: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ requireBucketContext: vi.fn(), assertWithinReadCeiling: vi.fn(), readStoredObject: vi.fn() }));
 
 vi.mock('@/lib/services/files/fileService', () => ({
   requireBucketContext: hoisted.requireBucketContext,
   assertWithinReadCeiling: hoisted.assertWithinReadCeiling,
   composeProviderObjectKey: (bucket: { key: string }, key: string) => `${bucket.key}/${key}`,
-  fileResilience: (operation: string, tenantId: string, providerKey: string) => ({ key: `file-${operation}:${tenantId}:${providerKey}` }),
+  readStoredObject: hoisted.readStoredObject,
 }));
 
 import {
@@ -108,6 +108,12 @@ describe('createFilesArchive', () => {
     contents = {};
     hoisted.requireBucketContext.mockResolvedValue({ bucket: { key: 'docs', tenantId: 't1', providerKey: 'disk' }, provider: {}, runtime });
     hoisted.assertWithinReadCeiling.mockReset();
+    // The service's read keeps the retries of a file call; the memory budget has a test of its own.
+    hoisted.readStoredObject.mockReset();
+    hoisted.readStoredObject.mockImplementation(async (from: typeof runtime, objectKey: string, source: { tenantId: string; providerKey: string }) => {
+      const { withResilience } = await import('@/lib/core/resilience');
+      return withResilience(() => from.downloadFile(objectKey), { key: `file-download:${source.tenantId}:${source.providerKey}` });
+    });
   });
 
   it('holds the files under their names, with their bytes, and is named after the bucket', async () => {
@@ -140,6 +146,18 @@ describe('createFilesArchive', () => {
     await collect(archive.stream);
     expect(downloads).toEqual(['docs/a.txt', 'docs/b.txt', 'docs/c.txt', 'docs/d.txt']);
     expect(peak).toBe(1);
+  });
+
+  it('reads each object as one of the reads of the process, by the size its record gives', async () => {
+    contents = { 'docs/a.txt': Buffer.from('alpha'), 'docs/b.txt': Buffer.from('beta') };
+
+    const archive = await createFilesArchive('tenant_x', 't1', 'p1', 'docs', [record('a.txt', { size: 5 }), record('b.txt', { size: 4 })]);
+    await collect(archive.stream);
+
+    expect(hoisted.readStoredObject.mock.calls.map(([, objectKey, source]) => [objectKey, source])).toEqual([
+      ['docs/a.txt', { tenantId: 't1', providerKey: 'disk', size: 5 }],
+      ['docs/b.txt', { tenantId: 't1', providerKey: 'disk', size: 4 }],
+    ]);
   });
 
   it('refuses files that add up to more than the limit before it reads any of them', async () => {

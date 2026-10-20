@@ -17,7 +17,6 @@ import { AzureBlobError, isAzureBlobError } from '@/lib/providers/contracts/azur
 import type { AzureBlobCredentials, AzureBlobSettings } from '@/lib/providers/contracts/azure/blobConfig';
 import type { FileConnectionCheck, FileProviderRuntime } from '@/lib/providers/domains/file';
 import { ProviderSettingsError } from '@/lib/providers/errors';
-import { OutboundDnsError, OutboundNetworkError } from '@/lib/security/outboundFetch';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import { fakeSdkModule, resetFake, restError, state } from '../helpers/fakeAzureBlobSdk';
 
@@ -373,6 +372,85 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(error.message).toMatch(/download failed/);
     });
 
+    describe('a bound the caller states', () => {
+      // A caller that reads objects of its own, which the upload limit never applied to (a sandbox volume), says how
+      // much it can hold. The server-wide ceiling is 100 MB here.
+      it('replaces the ceiling: an object over it is let through when the caller allows it', async () => {
+        const rt = await create();
+        await rt.uploadFile({ key: 'big', name: 'big', data: Buffer.from('b') });
+        state.download = { contentLength: 150 * MIB, chunks: () => [Buffer.from('abc')] };
+
+        expect(await rt.downloadFile('big').catch((e) => e)).toMatchObject({ code: 'ObjectTooLarge' });
+        // 150 MiB is under the bound: the object is read (and then found shorter than announced)
+        const error = await rt.downloadFile('big', { maxBytes: 200 * MIB }).catch((e) => e);
+        expect(error.code).not.toBe('ObjectTooLarge');
+        expect(error.message).toMatch(/download failed/);
+      });
+
+      it('refuses an object over the bound, although the ceiling would let it through, without reading it', async () => {
+        const rt = await create();
+        await rt.uploadFile({ key: 'mid', name: 'mid', data: Buffer.from('m') });
+        let produced = 0;
+        state.download = { contentLength: 5 * MIB, chunks: function* () { produced += 1; yield Buffer.alloc(MIB); } };
+
+        const error = await rt.downloadFile('mid', { maxBytes: 4 * MIB }).catch((e) => e);
+
+        expect(error).toBeInstanceOf(AzureBlobError);
+        expect(error).toMatchObject({ code: 'ObjectTooLarge', retryable: false });
+        expect(error.message).toBe('This file is larger than the 4 MB this server loads into memory at once.');
+        expect(produced).toBe(0);
+      });
+
+      // The sizes are small on purpose: were the bound ignored, the call would hand back what it read, and a failed
+      // assertion prints it.
+      it('stops a body that announced nothing once it passes the bound', async () => {
+        const rt = await create();
+        await rt.uploadFile({ key: 'stream', name: 'stream', data: Buffer.from('s') });
+        const chunk = Buffer.alloc(1024, 1);
+        let produced = 0;
+        state.download = {
+          contentLength: null,
+          chunks: function* () {
+            for (let i = 0; i < 50; i += 1) {
+              produced += 1;
+              yield chunk;
+            }
+          },
+        };
+
+        const error = await rt.downloadFile('stream', { maxBytes: 3 * 1024 }).then(() => undefined, (e) => e);
+
+        expect(error).toMatchObject({ code: 'ObjectTooLarge' });
+        expect(produced).toBeLessThan(10);
+      });
+
+      it('reads an object that is exactly the bound, and refuses one byte more', async () => {
+        const rt = await create();
+        await rt.uploadFile({ key: 'exact', name: 'exact', data: Buffer.from('e') });
+        state.download = { contentLength: null, chunks: () => [Buffer.alloc(1024, 2), Buffer.alloc(1024, 3)] };
+
+        expect((await rt.downloadFile('exact', { maxBytes: 2048 })).data.length).toBe(2048);
+        const error = await rt.downloadFile('exact', { maxBytes: 2047 }).then(() => undefined, (e) => e);
+        expect(error).toMatchObject({ code: 'ObjectTooLarge' });
+      });
+
+      it.each([
+        ['zero', 0],
+        ['a negative number', -5],
+        ['NaN', Number.NaN],
+        ['text', '4194304'],
+      ])('ignores a bound that is %s: the ceiling applies', async (_label, maxBytes) => {
+        const rt = await create();
+        await rt.uploadFile({ key: 'big', name: 'big', data: Buffer.from('b') });
+        state.download = { contentLength: 150 * MIB };
+
+        const error = await rt.downloadFile('big', { maxBytes } as never).catch((e) => e);
+
+        expect(error).toMatchObject({ code: 'ObjectTooLarge' });
+        expect(error.message).toContain('100 MB');
+      });
+    });
+
     it('does not hand back a body that is shorter than announced', async () => {
       const rt = await create();
       await rt.uploadFile({ key: 'short', name: 'short', data: Buffer.from('s') });
@@ -381,6 +459,136 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(error).toBeInstanceOf(AzureBlobError);
       expect(error.message).toContain('Incomplete download: got 5 of 10 bytes');
       expect(error.retryable).toBe(true);
+    });
+  });
+
+  describe('a download whose connection drops', () => {
+    const payload = Buffer.from('0123456789'.repeat(100)); // 1000 bytes
+
+    async function seeded(): Promise<Runtime> {
+      const rt = await create();
+      await rt.uploadFile({ key: 'big.bin', name: 'big.bin', data: payload });
+      state.downloads.length = 0;
+      return rt;
+    }
+
+    it('asks for the rest of the object under the version it started with, and hands back the whole of it', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 400, times: 1 };
+      const result = await rt.downloadFile('big.bin');
+      expect(result.data.equals(payload)).toBe(true);
+      expect(result.size).toBe(1000);
+      const etag = [...state.containers.get(CONTAINER_URL)!.values()][0].etag;
+      // the SDK's own continuation is off (it does not run for a dropped connection), so the driver does it
+      expect(state.downloads).toEqual([
+        { offset: 0, count: undefined, ifMatch: undefined, maxRetryRequests: 0 },
+        { offset: 400, count: 600, ifMatch: etag, maxRetryRequests: 0 },
+      ]);
+    });
+
+    it('continues again when the rest is cut off too, up to two times', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 400, times: 2 };
+      expect((await rt.downloadFile('big.bin')).data.equals(payload)).toBe(true);
+      expect(state.downloads.map((d) => [d.offset, d.count])).toEqual([[0, undefined], [400, 600], [800, 200]]);
+    });
+
+    it('recognises a reset reported with a Node code and the SDK\'s own "received less data" error', async () => {
+      for (const error of [
+        Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+        Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET' } }),
+        new Error('Data corruption failure: received less data than required. Received data offset: 99, data needed offset: 999, retries: 0, max retries: 0'),
+      ]) {
+        const rt = await seeded();
+        state.cutDownload = { afterBytes: 250, times: 1, error };
+        expect((await rt.downloadFile('big.bin')).data.equals(payload)).toBe(true);
+        expect(state.downloads).toHaveLength(2);
+      }
+    });
+
+    it('gives up after two continuations, and says the connection was interrupted rather than that nothing answered', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 100, times: 9 };
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error.message).toBe('The connection to Azure Blob Storage was interrupted (download).');
+      expect(error.retryable).toBe(true);
+      expect(state.downloads).toHaveLength(3);
+    });
+
+    it('does not continue a download the caller gave up on, and says what it always said for a time limit', async () => {
+      const rt = await seeded();
+      const controller = new AbortController();
+      state.cutDownload = { afterBytes: 100, times: 1, onCut: () => controller.abort() };
+      const result = await rt.checkConnection({ signal: controller.signal });
+      expect(result.steps?.find((step) => step.step === 'read')?.message).toBe('Azure Blob Storage did not answer in time (download).');
+      expect(state.downloads).toHaveLength(1);
+    });
+
+    it('does not continue a failure that is not a lost connection', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 100, times: 1, error: new Error('Something else went wrong') };
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error.message).toBe('Azure Blob Storage download failed with an unknown error: Something else went wrong.');
+      expect(state.downloads).toHaveLength(1);
+    });
+
+    it('takes a download whose connection was reported lost after the last byte as complete', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 1000, times: 1 };
+      const result = await rt.downloadFile('big.bin');
+      expect(result.data.equals(payload)).toBe(true);
+      expect(state.downloads).toHaveLength(1);
+    });
+
+    it('does not ask for the rest of an object it has no version of', async () => {
+      const rt = await seeded();
+      ([...state.containers.get(CONTAINER_URL)!.values()][0] as { etag?: string }).etag = undefined;
+      state.cutDownload = { afterBytes: 400, times: 1 };
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error.message).toBe('The connection to Azure Blob Storage was interrupted (download).');
+      expect(state.downloads).toHaveLength(1);
+    });
+
+    it('does not guess at a body that ended short without an error: that is reported as incomplete', async () => {
+      const rt = await seeded();
+      state.download = { contentLength: 1000, chunks: () => [payload.subarray(0, 300)] };
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error.message).toContain('Incomplete download: got 300 of 1000 bytes');
+      expect(state.downloads).toHaveLength(1);
+    });
+
+    it('reports a file that was replaced while it was being continued, and lets the caller try again', async () => {
+      const rt = await seeded();
+      state.cutDownload = {
+        afterBytes: 100,
+        times: 1,
+        onCut: () => { for (const blob of state.containers.get(CONTAINER_URL)!.values()) blob.etag = '"0x8DREPLACED"'; },
+      };
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error).toMatchObject({ code: 'BlobChangedDuringDownload', retryable: true });
+      expect(error.message).toBe('The file changed while it was being downloaded; try again.');
+      expect(error.message).not.toMatch(/not found|does not exist/i);
+    });
+
+    it('lets a failure of the continuation request speak for itself', async () => {
+      const rt = await seeded();
+      state.cutDownload = { afterBytes: 100, times: 1 };
+      state.onCall.set('download', () => {
+        if (state.downloads.length === 1) state.failNext.set('download', restError(503, 'ServerBusy', 'busy'));
+      });
+      const error = await rt.downloadFile('big.bin').catch((e) => e);
+      expect(error.message).toBe('Azure Blob Storage is busy or timing out (ServerBusy); try again.');
+      expect(error.statusCode).toBe(503);
+    });
+
+    it('is the same for the read step of Test connection, which then finds the object intact', async () => {
+      const rt = await create();
+      state.cutDownload = { afterBytes: 10, times: 1 };
+      const result = await rt.checkConnection();
+      expect(result).toMatchObject({ ok: true });
+      expect(state.downloads).toHaveLength(2);
     });
   });
 
@@ -660,21 +868,23 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
   });
 
   describe('endpoint policy', () => {
-    it('SaaS: https only, no private, loopback or metadata addresses', async () => {
-      for (const endpoint of ['https://127.0.0.1/acctname1', 'https://169.254.169.254/acctname1', 'https://[::1]/acctname1', 'https://localhost/acctname1', 'https://x.internal/acctname1', 'https://storage.internal.example/acctname1']) {
+    it('SaaS: no private, loopback or metadata addresses, over https or plain http', async () => {
+      for (const endpoint of ['https://127.0.0.1/acctname1', 'https://169.254.169.254/acctname1', 'https://[::1]/acctname1', 'https://localhost/acctname1', 'https://x.internal/acctname1', 'https://storage.internal.example/acctname1', 'http://127.0.0.1:10000/acctname1', 'http://169.254.169.254/acctname1']) {
         const error = await create({ endpoint }).catch((e) => e);
-        expect(error, endpoint).toBeInstanceOf(OutboundNetworkError);
-        expect(error.message).toContain('Refusing outbound request to private/loopback host');
-        expect(error.retryable).toBe(false);
+        // The setting it is about, in the words every provider endpoint check uses: no host, URL or range in them.
+        expect(error, endpoint).toBeInstanceOf(ProviderEndpointError);
+        expect(error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: false });
+        expect(error.message).toBe('Provider endpoint "endpoint" is not allowed: private network addresses are reachable only through networks the operator has opened for this organization');
       }
-      settingsError(await create({ endpoint: 'http://93.184.216.34/acctname1' }).catch((e) => e), 'endpoint');
+      await expect(create({ endpoint: 'http://93.184.216.34/acctname1' })).resolves.toBeDefined();
       await expect(create({ endpoint: 'https://93.184.216.34/acctname1' })).resolves.toBeDefined();
     });
 
-    it('SaaS: a host that does not resolve is refused as an outage, not as a private target', async () => {
+    it('SaaS: a host that does not resolve is answered as the setting it is about, and stays retryable: it is no policy refusal', async () => {
       const error = await create({ endpoint: 'https://acctname1.blob.example.invalid' }).catch((e) => e);
-      expect(error).toBeInstanceOf(OutboundDnsError);
-      expect(error.retryable).toBe(true);
+      expect(error).toBeInstanceOf(ProviderEndpointError);
+      expect(error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: true });
+      expect(error.message).toBe('Provider endpoint "endpoint" is not allowed: Could not resolve host: acctname1.blob.example.invalid');
     });
 
     it('SaaS: the loopback refusal comes from createRuntime, before the SDK or any socket', async () => {
@@ -688,7 +898,7 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       await expect(create({ endpoint: 'http://127.0.0.1:10000/acctname1' })).resolves.toBeDefined();
       await expect(create({ endpoint: 'https://storage.internal.example/acctname1' })).resolves.toBeDefined();
       mode({ DEPLOYMENT_MODE: 'onprem', OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
-      await expect(create({ endpoint: 'http://127.0.0.1:10000/acctname1' })).rejects.toBeInstanceOf(OutboundNetworkError);
+      await expect(create({ endpoint: 'http://127.0.0.1:10000/acctname1' })).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'endpoint', retryable: false });
       mode({ DEPLOYMENT_MODE: 'onprem', OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: '127.0.0.1' });
       await expect(create({ endpoint: 'http://127.0.0.1:10000/acctname1' })).resolves.toBeDefined();
     });
@@ -753,14 +963,18 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(options.lookup).toBeUndefined();
     });
 
-    it('skipping verification is on-prem only, and only for the boolean true', async () => {
+    it('skipping verification works on any deployment, and only for the boolean true', async () => {
       mode({ DEPLOYMENT_MODE: 'onprem' });
       await create({ allowInsecureTls: true });
       expect(((await requestAfterPolicies(0)).agent!.options as { rejectUnauthorized?: boolean }).rejectUnauthorized).toBe(false);
       await create({ allowInsecureTls: 'false' });
       expect(state.clients[1].pipeline.factories).toHaveLength(0);
       mode({ DEPLOYMENT_MODE: 'saas' });
-      settingsError(await create({ allowInsecureTls: true }).catch((e) => e), 'allowInsecureTls');
+      await create({ allowInsecureTls: true });
+      const saas = (await requestAfterPolicies(2)).agent!;
+      expect((saas.options as { rejectUnauthorized?: boolean }).rejectUnauthorized).toBe(false);
+      // the network policy stays on: the same agent still checks every address it connects to
+      expect(typeof saas.options.lookup).toBe('function');
     });
 
     it('a CA certificate that does not parse is refused when the runtime is built', async () => {
@@ -834,7 +1048,12 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
 
     it('connection string: a BlobEndpoint on a private address is refused on SaaS', async () => {
       const connectionString = `AccountName=acctname1;AccountKey=${KEY};BlobEndpoint=https://storage.internal.example/acctname1`;
-      await expect(create({ authMethod: 'connectionString', accountName: undefined }, { connectionString })).rejects.toBeInstanceOf(OutboundNetworkError);
+      const error = await create({ authMethod: 'connectionString', accountName: undefined }, { connectionString }).catch((e) => e);
+      // The endpoint came out of the connection string, so that is the setting the person is sent to.
+      expect(error).toBeInstanceOf(ProviderEndpointError);
+      expect(error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'connectionString', retryable: false });
+      expect(error.message).not.toContain(KEY);
+      expect(error.message).not.toContain('storage.internal.example');
     });
 
     it('Entra: token credential, https only, the sovereign suffix picks the sovereign authority', async () => {
@@ -920,13 +1139,21 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       }
     });
 
-    it('allows plain http and skipping verification on a self-hosted deployment only', async () => {
-      const emulator = { endpoint: 'http://127.0.0.1:10000/acctname1' };
-      settingsError(await check({ settings: emulator }).catch((e) => e), 'endpoint');
-      settingsError(await check({ settings: { allowInsecureTls: true } }).catch((e) => e), 'allowInsecureTls');
+    it('allows plain http and skipping verification on any deployment; Microsoft Entra sign-in still needs https', async () => {
+      mode({ DEPLOYMENT_MODE: 'saas' });
+      await expect(check({ settings: { endpoint: 'http://93.184.216.34:10000/acctname1' } })).resolves.toBeUndefined();
+      await expect(check({ settings: { allowInsecureTls: true } })).resolves.toBeUndefined();
+      // plain http does not open a loopback address on SaaS
+      const loopback = await check({ settings: { endpoint: 'http://127.0.0.1:10000/acctname1' } }).catch((e) => e);
+      expect(loopback).toBeInstanceOf(ProviderEndpointError);
+      const entra = { credentials: { accountKey: undefined, clientSecret: 'super-secret-value' }, settings: { authMethod: 'entra', entraTenantId: CLIENT, clientId: CLIENT, endpoint: 'http://93.184.216.34/acctname1' } };
+      const entraHttp = await check(entra).catch((e) => e);
+      settingsError(entraHttp, 'endpoint');
+      expect(entraHttp.message).toBe('Microsoft Entra authentication needs an https endpoint.');
       mode({ DEPLOYMENT_MODE: 'onprem' });
-      await expect(check({ settings: emulator, isOnPrem: true })).resolves.toBeUndefined();
+      await expect(check({ settings: { endpoint: 'http://127.0.0.1:10000/acctname1' }, isOnPrem: true })).resolves.toBeUndefined();
       await expect(check({ settings: { allowInsecureTls: true }, isOnPrem: true })).resolves.toBeUndefined();
+      settingsError(await check({ ...entra, isOnPrem: true }).catch((e) => e), 'endpoint');
     });
 
     it('SaaS refuses a private or loopback endpoint, wherever the endpoint was typed', async () => {
@@ -1144,13 +1371,37 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(steps(result)?.at(-1)).toEqual(['delete', true]);
     });
 
-    it('reports a delete that failed, and says so', async () => {
+    it('passes when only the delete failed, and says what is missing and which test file stays behind', async () => {
       const rt = await create();
       state.failNext.set('delete', restError(403, 'AuthorizationPermissionMismatch', 'no delete'));
       const result = await rt.checkConnection();
-      expect(result.ok).toBe(false);
+      // writing and reading work, so the connection does; the failed step and the message carry the rest
+      expect(result.ok).toBe(true);
       expect(steps(result)).toEqual([['list', true], ['write', true], ['read', true], ['delete', false]]);
+      expect(result.message).toMatch(/^Connected to container "files"\. Removing the test file failed\. /);
       expect(result.message).toContain('d (delete)');
+      const left = blobNames();
+      expect(left).toHaveLength(1);
+      const relative = left[0].slice('t1/prov/'.length);
+      expect(relative).toMatch(/^\.cognipeer-connection-test\/[0-9a-f-]{36}\.txt$/);
+      expect(result.steps?.[3].message).toMatch(/\.$/);
+      expect(result.steps?.[3].message).toContain(`The test file "${relative}" stays in the container.`);
+      expect(result.message).toContain(`The test file "${relative}" stays in the container.`);
+      expect(result.message).not.toMatch(/\.\./);
+    });
+
+    it('still fails when something besides the delete failed', async () => {
+      state.containers.set(CONTAINER_URL, new Map());
+      const rt = await create({ authMethod: 'sas', createContainer: false }, { sasToken: SAS });
+      // a SAS with neither list nor delete: the list is a gap and the test goes on, but the check is not a pass
+      state.failNext.set('list', restError(403, 'AuthorizationPermissionMismatch', 'no list'));
+      state.failNext.set('delete', restError(403, 'AuthorizationPermissionMismatch', 'no delete'));
+      const result = await rt.checkConnection();
+      expect(result.ok).toBe(false);
+      expect(steps(result)).toEqual([['list', false], ['write', true], ['read', true], ['delete', false]]);
+      expect(result.message).toContain('l (list)');
+      expect(result.message).not.toContain('Writing, reading and deleting still work.');
+      expect(result.message).not.toContain(SAS_SIG);
     });
 
     it('never throws, whatever it is thrown at', async () => {
@@ -1191,6 +1442,19 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(result.ok).toBe(false);
       expect(steps(result)).toEqual([['list', true], ['write', true], ['read', false], ['delete', false]]);
       expect(result.steps?.[2].message).toBe('Azure Blob Storage did not answer in time (download).');
+      // the delete that the time limit cut short is cleaned up afterwards: nothing is claimed to stay behind
+      expect(result.steps?.[3].message).not.toContain('stays in the container');
+      expect(blobNames()).toEqual([]);
+    });
+
+    it('is not a pass when the caller\'s time limit cut the delete short, and the test file is still removed', async () => {
+      const rt = await create();
+      const controller = new AbortController();
+      state.onCall.set('delete', () => controller.abort());
+      const result = await rt.checkConnection({ signal: controller.signal });
+      expect(result.ok).toBe(false);
+      expect(steps(result)).toEqual([['list', true], ['write', true], ['read', true], ['delete', false]]);
+      expect(result.steps?.[3].message).not.toContain('stays in the container');
       expect(blobNames()).toEqual([]);
     });
 
@@ -1205,6 +1469,108 @@ describe('AzureBlobFileProviderContract (SDK faked)', () => {
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(result.ok).toBe(false);
       expect(steps(result)).toEqual([['list', false]]);
+    });
+  });
+
+  describe('credentials that stop working, and text that carries them', () => {
+    const entraSettings = { authMethod: 'entra', endpoint: 'https://acctname1.blob.core.windows.net', entraTenantId: 'contoso.onmicrosoft.com', clientId: CLIENT, createContainer: false };
+
+    it('names the expiry of a SAS that ran out while the runtime was cached, where an emulator only says "refused"', async () => {
+      const rt = await create({ authMethod: 'sas', createContainer: false }, { sasToken: SAS });
+      state.containers.set(CONTAINER_URL, new Map());
+      expect((await rt.listFiles()).items).toEqual([]);
+      vi.setSystemTime(new Date('2100-01-01T00:00:00Z'));
+      try {
+        state.failNext.set('list', restError(403, 'AuthorizationFailure', 'This request is not authorized to perform this operation.'));
+        const error = await rt.listFiles().catch((e) => e);
+        expect(error).toBeInstanceOf(AzureBlobError);
+        expect(error.message).toBe('Azure rejected the SAS token: it expired on 2099-01-01T00:00:00.000Z. Create a new one and replace it in the provider settings.');
+        expect(error).toMatchObject({ statusCode: 403, retryable: false });
+        expect(error.message).not.toContain(SAS_SIG);
+        // the same through the service's own code
+        state.failNext.set('list', restError(403, 'AuthenticationFailed', 'Server failed to authenticate the request.'));
+        expect((await rt.listFiles().catch((e) => e)).message).toContain('it expired on 2099-01-01T00:00:00.000Z');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does the same for a SAS inside a connection string, and says when one has not started yet', async () => {
+      const token = 'sv=2022-11-02&sr=c&sp=racwdl&st=2098-01-01T00:00:00Z&se=2099-01-01T00:00:00Z&sig=ab%2Bcdefgh%3D';
+      const rt = await create({ authMethod: 'sas', createContainer: false }, { sasToken: token });
+      state.containers.set(CONTAINER_URL, new Map());
+      state.failNext.set('list', restError(403, 'AuthorizationFailure', 'not authorized'));
+      const early = await rt.listFiles().catch((e) => e);
+      expect(early.message).toBe('Azure rejected the SAS token: it is not valid before 2098-01-01T00:00:00.000Z. Check the start time of the SAS and the clock of this server.');
+
+      const viaString = await create(
+        { authMethod: 'connectionString', createContainer: false },
+        { connectionString: `BlobEndpoint=https://acctname1.blob.core.windows.net;SharedAccessSignature=${token}` },
+      );
+      state.failNext.set('list', restError(403, 'AuthorizationFailure', 'not authorized'));
+      expect((await viaString.listFiles().catch((e) => e)).message).toContain('it is not valid before 2098-01-01T00:00:00.000Z');
+    });
+
+    it('keeps the firewall sentence for a SAS that is inside its window, and for every other kind of credential', async () => {
+      const rt = await create({ authMethod: 'sas', createContainer: false }, { sasToken: SAS });
+      state.containers.set(CONTAINER_URL, new Map());
+      state.failNext.set('list', restError(403, 'AuthorizationFailure', 'not authorized'));
+      expect((await rt.listFiles().catch((e) => e)).message).toMatch(/firewall/);
+      const keyed = await create({ createContainer: false });
+      state.containers.set(CONTAINER_URL, new Map());
+      state.failNext.set('list', restError(403, 'AuthorizationFailure', 'not authorized'));
+      expect((await keyed.listFiles().catch((e) => e)).message).toMatch(/firewall/);
+    });
+
+    it('tells what to check for the kind of credential that was sent when the service gives no detail', async () => {
+      const cases: Array<[Record<string, unknown>, Record<string, unknown>, RegExp]> = [
+        [{ createContainer: false }, { accountKey: KEY }, /^Azure rejected the credentials \(AuthenticationFailed\): check the account name and key\.$/],
+        [{ authMethod: 'sas', createContainer: false }, { sasToken: SAS }, /^Azure rejected the credentials \(AuthenticationFailed\): check the SAS signature and validity window\.$/],
+        [entraSettings, { clientSecret: 'a-client-secret-value' }, /^Azure rejected the credentials \(AuthenticationFailed\): the Microsoft Entra token was not accepted; check the authority host, the tenant ID and the clock of this server\.$/],
+      ];
+      for (const [settings, credentials, expected] of cases) {
+        const rt = await create(settings, credentials);
+        state.containers.set(CONTAINER_URL, new Map());
+        state.failNext.set('list', restError(403, 'AuthenticationFailed', 'Server failed to authenticate the request.'));
+        expect((await rt.listFiles().catch((e) => e)).message).toMatch(expected);
+      }
+    });
+
+    it('points at the configured API version when the service rejects a header', async () => {
+      const rt = await create({ apiVersion: '2099-01-01' });
+      state.failNext.set('upload', restError(400, 'InvalidHeaderValue', 'The value for one of the HTTP headers is not in the correct format.'));
+      const error = await rt.uploadFile({ key: 'a', name: 'a', data: Buffer.from('a') }).catch((e) => e);
+      expect(error.message).toBe('The service rejected a request header (The value for one of the HTTP headers is not in the correct format). If it names the API version, this service may not support 2099-01-01: change or clear "API version" in the provider settings.');
+      const plain = await create();
+      state.failNext.set('upload', restError(400, 'InvalidHeaderValue', 'The value for one of the HTTP headers is not in the correct format.'));
+      expect((await plain.uploadFile({ key: 'a', name: 'a', data: Buffer.from('a') }).catch((e) => e)).message).toContain('set "API version" in the provider settings');
+    });
+
+    it('takes the client secret out of an error that already is one of ours, whoever echoed it', async () => {
+      const secret = 'Cl13nt~Secret-value-1234';
+      const rt = await create(entraSettings, { clientSecret: secret });
+      state.containers.set(CONTAINER_URL, new Map());
+      const echoed = () => new AzureBlobError(`Microsoft Entra rejected the service principal (invalid_client): Bad credentials ${secret} for ${CLIENT} (${encodeURIComponent(secret)})`, { statusCode: 401, code: 'EntraTokenRequestFailed' });
+      state.failNext.set('list', echoed());
+      const error = await rt.listFiles().catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error).toMatchObject({ statusCode: 401, code: 'EntraTokenRequestFailed', retryable: false });
+      expect(error.message).toBe(`Microsoft Entra rejected the service principal (invalid_client): Bad credentials [redacted] for ${CLIENT} ([redacted])`);
+
+      state.failNext.set('list', echoed());
+      const check = await rt.checkConnection();
+      expect(JSON.stringify(check)).not.toContain('Cl13nt');
+      expect(JSON.stringify(check)).not.toContain(encodeURIComponent(secret));
+      expect(check.steps?.[0].message).toContain('[redacted]');
+      expect(JSON.stringify(logs)).not.toContain('Cl13nt');
+    });
+
+    it('leaves an error of ours without a credential in it as it is (same object)', async () => {
+      const rt = await create();
+      const failure = new AzureBlobError('The container is unavailable.', { statusCode: 503, code: 'ServerBusy' });
+      state.containers.set(CONTAINER_URL, new Map());
+      state.failNext.set('list', failure);
+      expect(await rt.listFiles().catch((e) => e)).toBe(failure);
     });
   });
 });

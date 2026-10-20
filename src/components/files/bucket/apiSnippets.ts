@@ -8,7 +8,9 @@
  * - an upload sends the file as a base64 data URL in a JSON body; `keyHint` ending in `/` names a folder and the
  *   file keeps a generated unique name inside it, any other `keyHint` is the whole key;
  * - a Markdown copy is only made when `convertToMarkdown` is true (off by default on this API);
- * - the SDK's `files.list` takes `search`, `limit` and `cursor` only, so a folder listing calls the endpoint itself.
+ * - the SDK's `files.list` takes `search`, `limit` and `cursor` only, so a folder listing calls the endpoint itself;
+ * - the bucket's key is data, never code: whatever characters it has, it stays inside its string in every language
+ *   (URL-encoded in the addresses, escaped in the TypeScript literals).
  */
 
 import { clientApiRoutes } from '../filesApi';
@@ -41,9 +43,26 @@ function trimOrigin(origin: string): string {
   return (origin.trim() || PLACEHOLDER_ORIGIN).replace(/\/+$/, '');
 }
 
-/** A single-quoted string literal for TypeScript. */
+const TS_ESCAPES: Readonly<Record<string, string>> = { '\\': '\\\\', "'": "\\'", '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/**
+ * A single-quoted string literal for TypeScript. Besides the quote and the backslash, a line break (the ones a string
+ * literal cannot hold, and the two Unicode separators older tools still break a line at) and the other control
+ * characters are written as escapes, so a value stays on its line whatever it holds.
+ */
 function ts(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  const escaped = value.replace(/[\\'\u0000-\u001f\u007f\u2028\u2029]/g, (char) => TS_ESCAPES[char] ?? `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return `'${escaped}'`;
+}
+
+/**
+ * A bucket key as ONE path segment of a URL. The Python samples put it inside an f-string, where a quote, a brace, a
+ * backslash or a line break means something; `encodeURIComponent` leaves none of them in the text, so a key is data in
+ * every sample, whatever characters it has (the cURL samples take the same form from `clientApiRoutes`). A plain key
+ * (letters, digits, `-`, `_`, `.`) comes out as it went in.
+ */
+function segmentOf(key: string): string {
+  return encodeURIComponent(key);
 }
 
 /** A double-quoted string literal for Python and the shell's JSON. */
@@ -165,7 +184,8 @@ function typescriptSnippet(operation: ApiOperation, context: SnippetContext): st
 }
 
 function pythonSnippet(operation: ApiOperation, context: SnippetContext): string {
-  const bucket = context.bucketKey;
+  // Spliced into f-strings below: only ever in its URL-encoded form.
+  const bucket = segmentOf(context.bucketKey);
   const base = apiBaseUrl(context.origin);
   const objects = `f"{BASE}/files/buckets/${bucket}/objects"`;
   const setup = ['import httpx', '', `BASE = ${dq(base)}`, `HEADERS = {"Authorization": "Bearer ${TOKEN_PLACEHOLDER}"}`];

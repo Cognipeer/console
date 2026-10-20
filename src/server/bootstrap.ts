@@ -56,6 +56,7 @@ import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/r
 import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrganization';
 import { markBootstrapStarted } from './bootstrapMarker';
 import { ensureServerEnvLoaded } from './env';
+import { resumeDeletingFileBuckets } from './resumeDeletingFileBuckets';
 
 const logger = createLogger('startup');
 
@@ -401,6 +402,10 @@ async function runBootstrap(): Promise<void> {
   // Documents left `pending` by a restart: the memory queue driver drops
   // in-flight jobs, so without this sweep a deferred ingest would never run.
   await bestEffort(resumePendingRagIngests, 'Knowledge Engine ingest resume failed during startup');
+
+  // Buckets a restart left "being deleted": the memory queue driver drops the deletion job with the process, and
+  // without this sweep the bucket would stay switched off and marked for good. After the files consumer above.
+  await bestEffort(resumeDeletingFileBuckets, 'File bucket deletion resume failed during startup');
 
   applicationReady = true;
 

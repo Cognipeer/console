@@ -10,18 +10,13 @@ import {
   type ListObjectsV2CommandOutput,
   type _Object,
 } from '@aws-sdk/client-s3';
-import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { ProviderSettingsError } from '@/lib/providers/errors';
-import {
-  assertPublicUrl,
-  OutboundDnsError,
-  type OutboundGuardOptions,
-} from '@/lib/security/outboundFetch';
 import { createStorageAgents, type StorageAgents } from '@/lib/security/storageTransport';
-import { endpointGuardOptions, toProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+import { assertProviderUrlAllowed, endpointGuardOptions } from '@/lib/services/providers/providerEndpointGuard';
 import type { ProviderContext } from '../../types';
 import type {
+  DownloadFileOptions,
   FileConnectionCheck,
   FileDownloadResult,
   FileObjectHandle,
@@ -30,11 +25,13 @@ import type {
   UploadFileInput,
   UploadFileResult,
 } from '../../domains/file';
-import { maxStorageDownloadBytes } from '../storageLimits';
+import { resolveDownloadCeiling } from '../downloadCeiling';
 import {
   buildS3Metadata,
+  decodeListedKey,
   decodeS3Metadata,
   generateKey,
+  hasLoneSurrogate,
   normalizeS3Endpoint,
   resolveS3Bucket,
   resolveS3Region,
@@ -42,10 +39,11 @@ import {
   s3BasePrefix,
   sanitizeKey,
   settingText,
+  toHeaderContentType,
   type S3CompatibleSettings,
   type S3Credentials,
 } from './s3Helpers';
-import { describeS3Error, isS3OperationError, S3OperationError, type S3ErrorContext, type S3Operation } from './s3Errors';
+import { describeS3Error, invalidKeyError, isS3OperationError, S3OperationError, type S3ErrorContext, type S3Operation } from './s3Errors';
 
 /**
  * The runtime both S3 drivers share: `aws-s3-files` (Amazon S3, or any endpoint set the old way) and
@@ -92,22 +90,12 @@ function requiredCredential(value: unknown, label: string, field: string): strin
   return text;
 }
 
-/** The policy refuses this endpoint (a private target on SaaS); a resolver outage stays the retryable error it is. */
-async function assertEndpointAllowed(endpoint: string, guard: OutboundGuardOptions | undefined): Promise<void> {
-  try {
-    await assertPublicUrl(endpoint, guard);
-  } catch (error) {
-    if (error instanceof OutboundDnsError) throw error;
-    throw toProviderEndpointError('endpoint', error);
-  }
-}
-
 /**
  * Builds the S3 client of a provider's settings. Reads them leniently (a stored row keeps working: values trimmed,
  * defaults filled in); the strict checks that refuse a setting belong to the save path (`validateS3Settings`).
  *
- * Throws `ProviderSettingsError` for a setting that cannot work (no bucket, no keys, a CA bundle that does not parse,
- * skipped TLS verification outside a self-hosted deployment) and `ProviderEndpointError` for an endpoint the
+ * Throws `ProviderSettingsError` for a setting that cannot work (no bucket, no keys, a CA bundle that does not parse)
+ * and `ProviderEndpointError` for an endpoint the
  * deployment's network policy refuses, before any socket is opened. A private endpoint passes only inside a network
  * the operator has opened for `options.tenantId` (none is opened without it).
  */
@@ -137,13 +125,14 @@ export async function createS3Client(
   }
 
   const guard = endpointGuardOptions(options.tenantId);
-  await assertEndpointAllowed(endpoint, guard);
+  // The same check, and the same errors, as when the provider was saved: a refused address is a `ProviderEndpointError`
+  // for this setting, a name that does not resolve is one that is `retryable`.
+  await assertProviderUrlAllowed('endpoint', endpoint, { tenantId: options.tenantId });
   const agents = createStorageAgents({
     guard,
     guardHost: new URL(endpoint).hostname,
     caCertificate: settings.caCertificate,
     allowInsecureTls: settings.allowInsecureTls,
-    isOnPrem: getConfig().deployment.isOnPrem,
   });
   try {
     const client = new S3Client({
@@ -263,9 +252,21 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
     secrets,
   });
 
+  /** A key or prefix as the store gets it. One the driver cannot send is a typed, non-retryable error, raised before any request. */
+  function sanitized(raw: string | undefined): string {
+    let clean: string;
+    try {
+      clean = sanitizeKey(raw ?? generateKey());
+    } catch {
+      throw invalidKeyError();
+    }
+    if (hasLoneSurrogate(clean)) throw invalidKeyError('it holds a character that has no UTF-8 form (a lone surrogate).');
+    return clean;
+  }
+
   function toStorageKey(relativeKey?: string) {
-    const sanitized = sanitizeKey(relativeKey ?? generateKey());
-    return { relativeKey: sanitized, storageKey: `${basePrefix}${sanitized}` };
+    const clean = sanitized(relativeKey);
+    return { relativeKey: clean, storageKey: `${basePrefix}${clean}` };
   }
 
   /** Every SDK call goes through here: what comes out says what to change and carries `statusCode` / `retryable`. */
@@ -306,8 +307,19 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
       log.warn('S3 object metadata that does not fit was left out', { key: storageKey, dropped });
     }
 
+    const contentType = toHeaderContentType(input.contentType);
+    if (contentType.invalid) {
+      throw new S3OperationError({
+        code: 'invalid_header',
+        message: 'The content type contains characters that are not allowed in an HTTP header.',
+        statusCode: 400,
+        retryable: false,
+      });
+    }
+    if (contentType.reduced) log.warn('S3 content type outside printable ASCII was reduced to its media type', { key: storageKey });
+
     const send = () => client.send(
-      new PutObjectCommand({ Bucket: bucket, Key: storageKey, Body: body, ContentType: input.contentType, Metadata: metadata }),
+      new PutObjectCommand({ Bucket: bucket, Key: storageKey, Body: body, ContentType: contentType.value, Metadata: metadata }),
       { abortSignal: signal },
     );
     const response = await call('put', async () => {
@@ -328,7 +340,7 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
         key: relativeKey,
         name: input.name ?? relativeKey.split('/').pop() ?? relativeKey,
         size: body.length,
-        contentType: input.contentType,
+        contentType: contentType.value,
         checksum,
         etag: response.ETag ?? undefined,
         // what the caller gave, not the header-safe form that was sent
@@ -337,9 +349,9 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
     };
   }
 
-  async function getObject(key: string, signal?: AbortSignal): Promise<FileDownloadResult> {
+  async function getObject(key: string, signal?: AbortSignal, options?: DownloadFileOptions): Promise<FileDownloadResult> {
     const { storageKey } = toStorageKey(key);
-    const limit = maxStorageDownloadBytes();
+    const limit = resolveDownloadCeiling(options);
     const tooLarge = () => new S3OperationError({
       code: 'object_too_large',
       message: `The object is larger than the ${Math.round(limit / (1024 * 1024))} MB this server reads into memory at once.`,
@@ -371,7 +383,7 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
   /** The first page of the provider's own prefix: one request that proves the bucket, the keys and the endpoint. */
   function listOnePage(signal?: AbortSignal) {
     return call('list', () => client.send(
-      new ListObjectsV2Command({ Bucket: bucket, Prefix: basePrefix, MaxKeys: 1 }),
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: basePrefix, MaxKeys: 1, EncodingType: 'url' }),
       { abortSignal: signal },
     ), signal);
   }
@@ -504,23 +516,28 @@ export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3Fi
 
   const runtime: S3FileRuntime = {
     uploadFile: (input) => putObject(input),
-    downloadFile: (key) => getObject(key),
+    downloadFile: (key, options) => getObject(key, undefined, options),
     deleteFile: (key) => removeObject(key),
 
     async listFiles(options?: ListFilesOptions) {
-      const sanitizedPrefix = options?.prefix && options.prefix.trim().length > 0 ? sanitizeKey(options.prefix) : undefined;
-      const listPrefix = sanitizedPrefix ? `${basePrefix}${sanitizedPrefix}` : basePrefix;
+      const listPrefix = options?.prefix && options.prefix.trim().length > 0 ? `${basePrefix}${sanitized(options.prefix)}` : basePrefix;
 
       const response = await call('list', () => client.send(new ListObjectsV2Command({
         Bucket: bucket,
         Prefix: listPrefix,
-        ContinuationToken: options?.cursor,
+        // An empty cursor is the first page (the other file drivers read it so); sent as it is, some stores answer 400.
+        ContinuationToken: options?.cursor || undefined,
         MaxKeys: options?.limit ?? 50,
+        // A key may hold a character XML cannot carry (a control character, U+FFFF): a store then fails the page or hands
+        // the key back with a replacement character. Encoded, every key arrives exactly; the answer says whether the store
+        // did it (`EncodingType`), and only then are the keys decoded, so a store that ignores the parameter is read as before.
+        EncodingType: 'url',
       })));
 
+      const decode = response.EncodingType === 'url' ? decodeListedKey : (key: string) => key;
       const contents: _Object[] = response.Contents ?? [];
       return {
-        items: contents.map((object) => toHandle((object.Key ?? '').slice(basePrefix.length), object)),
+        items: contents.map((object) => toHandle(decode(object.Key ?? '').slice(basePrefix.length), object)),
         nextCursor: response.NextContinuationToken ?? undefined,
       };
     },

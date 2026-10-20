@@ -80,6 +80,7 @@ export const filesCreateEn = {
     generic: 'The bucket could not be created. Try again.',
     nameRequired: 'Give the bucket a name.',
     nameTooLong: 'The name can have at most {max} characters.',
+    descriptionTooLong: 'The description can have at most {max} characters.',
     keyRequired: 'The bucket needs a key.',
     keyInvalid: 'Use lowercase letters, numbers, hyphens and underscores only.',
     keyTooLong: 'The key can have at most {max} characters.',

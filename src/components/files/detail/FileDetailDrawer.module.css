@@ -1,6 +1,12 @@
 /* The file drawer. Colours come from the --ds tokens, so both colour schemes follow. Nothing is wider than the
    drawer: long names, keys and checksums wrap, and the drawer itself is never wider than the screen. */
 
+/* The drawer's header ends in a rule, and the body that follows it has no top padding of its own (the library takes it
+   off a body that comes after a header). Without this the facts under the name sit directly on that rule. */
+.body:not(:only-child) {
+  padding-top: 16px;
+}
+
 .title {
   display: flex;
   align-items: center;

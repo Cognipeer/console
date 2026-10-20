@@ -10,12 +10,18 @@ import { createHash } from 'node:crypto';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
+import { getCircuitState, isRetryable, resetAllCircuits, withResilience } from '@/lib/core/resilience';
 import { S3CompatibleFileProviderContract } from '@/lib/providers/contracts/s3Compatible.contract';
 import { decodeS3MetadataValue } from '@/lib/providers/contracts/s3/s3Helpers';
 import { isS3OperationError, type S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
 import { S3_PROBE_CLEANUP_MS, type S3FileRuntime } from '@/lib/providers/contracts/s3/s3FileRuntime';
 import type { S3CompatibleSettings } from '@/lib/providers/contracts/s3/s3Helpers';
 import { s3Error, startFakeS3, type FakeS3, type FakeS3Options, type RecordedRequest } from '../helpers/fakeS3Server';
+
+// the resilience layer logs every retry and refusal; this file checks outcomes, and the runtime's own logger is injected
+vi.mock('@/lib/core/logger', () => ({
+  createLogger: () => ({ debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined }),
+}));
 
 const SECRET = 'secret-secret-secret';
 const credentials = { accessKeyId: 'AKIATEST', secretAccessKey: SECRET };
@@ -33,6 +39,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  resetAllCircuits();
   setConfigSource(original);
   for (const runtime of runtimes.splice(0)) runtime.close();
   for (const server of servers.splice(0)) await server.close();
@@ -220,6 +227,35 @@ describe('a round trip', () => {
     }
   });
 
+  it('sends a content type a header can carry: trimmed, reduced to its media type when it is not ASCII, refused when it cannot be a header', async () => {
+    const server = await fakeStore();
+    const logger = makeLogger();
+    const runtime = await runtimeFor(server, {}, logger);
+    const contentTypeOf = (key: string) => server.objects.get(`bkt3/tenant1/minio-main/${key}`)?.contentType;
+
+    const plain = await runtime.uploadFile({ key: 'a.json', name: 'a.json', contentType: ' application/json; charset=utf-8 ', data: Buffer.from('{}') });
+    expect(contentTypeOf('a.json')).toBe('application/json; charset=utf-8');
+    expect(plain.handle.contentType).toBe('application/json; charset=utf-8');
+
+    // the SDK signs such a value as UTF-8 and Node writes it as Latin-1: a Go-based store would answer with a signature error
+    const accented = await runtime.uploadFile({ key: 'b.txt', name: 'b.txt', contentType: 'text/plain; name=\u00E7ay.txt', data: Buffer.from('b') });
+    expect(contentTypeOf('b.txt')).toBe('text/plain');
+    expect(contentTypeOf('b.txt')).toMatch(PRINTABLE_ASCII);
+    expect(accented.handle.contentType).toBe('text/plain');
+    const warning = logger.warn.mock.calls.find(([message]) => String(message).includes('content type outside printable ASCII'));
+    expect(warning?.[1]).toEqual({ key: 'tenant1/minio-main/b.txt' });
+
+    const before = server.requests.length;
+    for (const contentType of ['text/plain\r\nX-Injected: 1', 'text/\u011F', 'text/plain\u0000']) {
+      const error = await failureOf(() => runtime.uploadFile({ key: 'c.txt', name: 'c.txt', contentType, data: Buffer.from('c') }));
+      expect(error).toMatchObject({ code: 'invalid_header', retryable: false, statusCode: 400 });
+      expect(error.message).toBe('The content type contains characters that are not allowed in an HTTP header.');
+    }
+    // refused before anything was sent
+    expect(server.requests.length).toBe(before);
+    expect(server.objects.has('bkt3/tenant1/minio-main/c.txt')).toBe(false);
+  });
+
   it('writes nothing a store without flexible checksums rejects, and sends no Expect header', async () => {
     const server = await fakeStore({ rejectChecksumHeaders: true });
     const runtime = await runtimeFor(server);
@@ -371,6 +407,64 @@ describe('listing', () => {
     expect((await runtime.listFiles({ prefix: '  ' })).items).toHaveLength(3);
   });
 
+  it('reads the prefix as text: a folder name also lists the names that merely start with it, with or without the slash', async () => {
+    const server = await fakeStore();
+    for (const key of ['dir/a.txt', 'dir-other/c.txt', 'dirx.txt', 'other/z.txt']) server.seed('bkt3', `tenant1/minio-main/${key}`, key);
+    const runtime = await runtimeFor(server);
+    const keys = async (prefix: string) => (await runtime.listFiles({ prefix })).items.map((item) => item.key);
+
+    expect(await keys('dir/')).toEqual(['dir-other/c.txt', 'dir/a.txt', 'dirx.txt']);
+    expect(await keys('dir')).toEqual(['dir-other/c.txt', 'dir/a.txt', 'dirx.txt']);
+  });
+
+  it('asks for url-encoded keys, so a key XML cannot carry comes back exactly', async () => {
+    const server = await fakeStore();
+    const runtime = await runtimeFor(server);
+    const keys = ['plain.txt', 'a b+c%d#e.txt', 'çay şül/\u{1F600}.txt', 'ctl\u0001\u001b.txt', 'bom\uffff.txt', '100%41.txt'];
+    for (const key of keys) server.seed('bkt3', `tenant1/minio-main/${key}`, key);
+
+    const page = await runtime.listFiles({ limit: 100 });
+    expect(page.items.map((item) => item.key).sort()).toEqual([...keys].sort());
+    expect(page.items.find((item) => item.key === 'a b+c%d#e.txt')).toMatchObject({ name: 'a b+c%d#e.txt', size: 'a b+c%d#e.txt'.length });
+    const listing = server.requests.find((request) => request.method === 'GET');
+    expect(listing?.query.get('encoding-type')).toBe('url');
+    // the cursor stays what the store gave: it is not a key
+    const first = await runtime.listFiles({ limit: 2 });
+    expect(first.nextCursor).toBeTruthy();
+    const second = await runtime.listFiles({ limit: 2, cursor: first.nextCursor });
+    expect(second.items.map((item) => item.key)).not.toEqual(first.items.map((item) => item.key));
+  });
+
+  it('reads the keys as they are from a store that ignores the encoding request', async () => {
+    const server = await fakeStore({ ignoreEncodingType: true });
+    const runtime = await runtimeFor(server);
+    // text that would change if it were decoded
+    const keys = ['100%41.txt', 'a+b.txt', 'sp ace.txt'];
+    for (const key of keys) server.seed('bkt3', `tenant1/minio-main/${key}`, key);
+    expect((await runtime.listFiles()).items.map((item) => item.key).sort()).toEqual([...keys].sort());
+  });
+
+  it('decodes "+" as a space, and leaves a key alone when the store says "url" and sends something else', async () => {
+    const listing = (keys: string[]) => `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bkt3</Name><Prefix>tenant1/minio-main/</Prefix><KeyCount>${keys.length}</KeyCount><MaxKeys>50</MaxKeys><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>${keys.map((key) => `<Contents><Key>${key}</Key><LastModified>2026-01-01T00:00:00.000Z</LastModified><ETag>"e"</ETag><Size>1</Size></Contents>`).join('')}</ListBucketResult>`;
+    const server = await fakeStore({
+      intercept: (request) => (request.method === 'GET' && !request.key
+        ? { status: 200, headers: { 'content-type': 'application/xml' }, body: listing(['tenant1/minio-main/a+b%2Bc%20d.txt', 'tenant1/minio-main/100%.txt', 'tenant1/minio-main/%C3%A7ay.txt']) }
+        : undefined),
+    });
+    const runtime = await runtimeFor(server);
+    expect((await runtime.listFiles()).items.map((item) => item.key)).toEqual(['a b+c d.txt', '100%.txt', 'çay.txt']);
+  });
+
+  it('reads an empty cursor as the first page, like the other file drivers do', async () => {
+    const server = await fakeStore();
+    server.seed('bkt3', 'tenant1/minio-main/one.txt', '1');
+    const runtime = await runtimeFor(server);
+    expect((await runtime.listFiles({ cursor: '' })).items.map((item) => item.key)).toEqual(['one.txt']);
+    const listing = server.requests.find((request) => request.method === 'GET');
+    // an empty continuation token is not one: some stores answer it with a 400
+    expect(listing?.query.has('continuation-token')).toBe(false);
+  });
+
   it('answers an empty page for a bucket with nothing in it', async () => {
     const server = await fakeStore();
     const runtime = await runtimeFor(server);
@@ -385,6 +479,65 @@ describe('listing', () => {
     expect(handle.key).toBe('dir/.file.txt');
     expect(server.objects.has('bkt3/tenant1/minio-main/dir/.file.txt')).toBe(true);
     await expect(runtime.downloadFile('///')).rejects.toThrow('Invalid file key provided.');
+  });
+});
+
+describe('a key the driver cannot send', () => {
+  const BAD = ['///', '', '\\', 'bad/\uD800.txt', 'lone/\uDC00low.txt', 'half\uD83D'];
+
+  it('is refused before any request, as a typed error that says so and is not retried', async () => {
+    const server = await fakeStore();
+    const runtime = await runtimeFor(server);
+    for (const key of BAD) {
+      const calls: Array<[string, () => Promise<unknown>]> = [
+        ['upload', () => runtime.uploadFile({ key, name: 'x', data: Buffer.from('x') })],
+        ['download', () => runtime.downloadFile(key)],
+        ['head', () => runtime.getFileMetadata(key)],
+        ['delete', () => runtime.deleteFile(key)],
+        // a blank prefix means "the whole provider"
+        ...(key.trim() === '' ? [] : [['list', () => runtime.listFiles({ prefix: key })] as [string, () => Promise<unknown>]]),
+      ];
+      for (const [label, run] of calls) {
+        const error = await failureOf(run);
+        expect(error, `${label} ${JSON.stringify(key)}`).toMatchObject({ code: 'invalid_key', statusCode: 400, retryable: false });
+        expect(error.message).toMatch(/^Invalid file key provided/);
+        expect(isRetryable(error)).toBe(false);
+        expect(error.message).not.toContain(SECRET);
+      }
+    }
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it('does not count against the circuit breaker, so one caller cannot shut the provider for the others', async () => {
+    const server = await fakeStore();
+    const runtime = await runtimeFor(server);
+    const options = {
+      key: 'file-upload:tenant1:minio-main',
+      retry: { enabled: true, maxAttempts: 3, initialDelayMs: 1, maxDelayMs: 2, jitterFactor: 0 },
+      circuitBreaker: { enabled: true, threshold: 3, resetMs: 60_000 },
+      countFailure: isRetryable,
+    };
+
+    let attempts = 0;
+    for (let call = 0; call < 6; call += 1) {
+      await expect(withResilience(async () => {
+        attempts += 1;
+        return runtime.uploadFile({ key: 'bad/\uD800.txt', name: 'x', data: Buffer.from('x') });
+      }, options)).rejects.toMatchObject({ code: 'invalid_key' });
+    }
+    expect(attempts).toBe(6);
+    expect(getCircuitState(options.key)?.state ?? 'closed').toBe('closed');
+    await expect(withResilience(() => runtime.uploadFile({ key: 'good.txt', name: 'good.txt', data: Buffer.from('ok') }), options))
+      .resolves.toMatchObject({ handle: { key: 'good.txt' } });
+
+    // the same options do open the circuit for a store that is down, so the check above proves something
+    const down = await fakeStore({ intercept: () => s3Error(503, 'SlowDown', 'Please reduce your request rate.') });
+    const failing = await runtimeFor(down);
+    const downOptions = { ...options, key: 'file-upload:tenant1:down' };
+    for (let call = 0; call < 3; call += 1) {
+      await expect(withResilience(() => failing.uploadFile({ key: 'a.txt', name: 'a.txt', data: Buffer.from('a') }), downOptions)).rejects.toMatchObject({ code: 'store_unavailable' });
+    }
+    expect(getCircuitState(downOptions.key)?.state).toBe('open');
   });
 });
 

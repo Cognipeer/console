@@ -22,3 +22,21 @@ export class ProviderSettingsError extends Error {
     this.field = field;
   }
 }
+
+export const PROVIDER_KEY_EXISTS = 'duplicate_key';
+
+/**
+ * Thrown when a provider is created under a key the tenant already has (a provider key is unique inside its tenant).
+ * Maps to HTTP 409 `{ error, code }` at every provider create entry point (`sendProviderConfigError`), with the code
+ * the Files API gives a bucket key that is taken. Asking again with the same key is refused again, so it is not
+ * retryable.
+ */
+export class ProviderKeyExistsError extends Error {
+  readonly code = PROVIDER_KEY_EXISTS;
+  readonly retryable = false;
+
+  constructor(key: string) {
+    super(`Provider with key "${key}" already exists.`);
+    this.name = 'ProviderKeyExistsError';
+  }
+}

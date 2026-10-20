@@ -67,20 +67,19 @@ function checkFlag(field: 'usePathStyleEndpoint' | 'createBucketIfMissing', labe
 export interface S3SettingsCheck {
   credentials: Partial<S3Credentials>;
   settings: Partial<S3CompatibleSettings>;
-  /** `getConfig().deployment.isOnPrem`. */
-  isOnPrem: boolean;
   /** S3-compatible storage has no regional endpoint to fall back on, so it needs one; Amazon S3 does not. */
   requireEndpoint: boolean;
 }
 
 /** Throws `ProviderSettingsError(field, message)` for the first problem found. */
-export function validateS3Settings({ credentials, settings, isOnPrem, requireEndpoint }: S3SettingsCheck): void {
+export function validateS3Settings({ credentials, settings, requireEndpoint }: S3SettingsCheck): void {
   requireCredential('accessKeyId', 'Access key ID', credentials.accessKeyId);
   requireCredential('secretAccessKey', 'Secret access key', credentials.secretAccessKey);
   checkSessionToken(credentials.sessionToken);
 
   const endpoint = settingText(settings.endpoint);
   if (endpoint) {
+    // Plain http is the provider's own choice on every deployment; the network policy applies to it either way.
     normalizeS3Endpoint(endpoint, { strict: true });
   } else if (requireEndpoint) {
     throw new ProviderSettingsError('endpoint', 'Endpoint URL is required (for example https://minio.internal:9000).');
@@ -97,6 +96,5 @@ export function validateS3Settings({ credentials, settings, isOnPrem, requireEnd
   validateStorageTlsSettings({
     caCertificate: settings.caCertificate,
     allowInsecureTls: settings.allowInsecureTls,
-    isOnPrem,
   });
 }

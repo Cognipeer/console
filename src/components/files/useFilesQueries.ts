@@ -52,13 +52,14 @@ import {
   type BucketDetail,
   type BucketListItem,
   type CreateBucketInput,
+  type DeleteBucketOptions,
   type DeleteBucketResult,
   type FileProviderListItem,
-  type FileProviderTestResult,
+  type ProviderTestResult,
   type FilesApiError,
-  type FilesLimits,
+  type FileLimits,
   type ImportInput,
-  type ImportResult,
+  type ImportFromStorageResult,
   type ObjectsPage,
   type ObjectsQuery,
   type ObjectVariant,
@@ -189,16 +190,28 @@ export function isBucketDeleting(bucket: { deleting?: boolean } | null | undefin
   return bucket?.deleting === true;
 }
 
+/**
+ * Names one run of a background job: the item, and (when the server says) when the run was last asked for, so asking
+ * again ("Convert again", "Delete again") restarts the poll clock instead of finding it already out of time.
+ */
+function runName(item: { key: string; updatedAt?: unknown }): string {
+  return item.updatedAt ? `${item.key}@${String(item.updatedAt)}` : item.key;
+}
+
 /** Names the files that are converting (`null` = none): the poll clock restarts when this changes. */
-export function pendingMarkdownSignature(records: ReadonlyArray<{ key: string; markdownStatus?: string | null }> | null | undefined): string | null {
-  const keys = (records ?? []).filter((record) => record.markdownStatus === 'pending').map((record) => record.key);
-  return keys.length > 0 ? keys.sort().join('\n') : null;
+export function pendingMarkdownSignature(
+  records: ReadonlyArray<{ key: string; markdownStatus?: string | null; updatedAt?: unknown }> | null | undefined,
+): string | null {
+  const runs = (records ?? []).filter((record) => record.markdownStatus === 'pending').map(runName);
+  return runs.length > 0 ? runs.sort().join('\n') : null;
 }
 
 /** Names the buckets that are being deleted (`null` = none). */
-export function deletingBucketsSignature(buckets: ReadonlyArray<{ key: string; deleting?: boolean }> | null | undefined): string | null {
-  const keys = (buckets ?? []).filter(isBucketDeleting).map((bucket) => bucket.key);
-  return keys.length > 0 ? keys.sort().join('\n') : null;
+export function deletingBucketsSignature(
+  buckets: ReadonlyArray<{ key: string; deleting?: boolean; updatedAt?: unknown }> | null | undefined,
+): string | null {
+  const runs = (buckets ?? []).filter(isBucketDeleting).map(runName);
+  return runs.length > 0 ? runs.sort().join('\n') : null;
 }
 
 /** A refusal (403, 404, 409...) will not change by asking again. */
@@ -367,7 +380,7 @@ export function useBucket(bucketKey: string | null | undefined): UseQueryResult<
     queryFn: ({ signal }) => getBucket(bucketKey as string, { signal }),
     refetchOnMount: 'always',
     retry: retryUnlessClientError,
-    refetchInterval: (query) => poll(query.state, (bucket) => (bucket && isBucketDeleting(bucket) ? bucket.key : null)),
+    refetchInterval: (query) => poll(query.state, (bucket) => deletingBucketsSignature(bucket ? [bucket] : [])),
   });
 }
 
@@ -441,7 +454,7 @@ export function useObject(
     placeholderData: options.placeholder,
     refetchOnMount: 'always',
     retry: retryUnlessClientError,
-    refetchInterval: (query) => poll(query.state, (record) => (record?.markdownStatus === 'pending' ? record.key : null)),
+    refetchInterval: (query) => poll(query.state, (record) => pendingMarkdownSignature(record ? [record] : [])),
   });
 }
 
@@ -477,9 +490,9 @@ export function useFileProviders(options: { enabled?: boolean } = {}): UseQueryR
 }
 
 /** What one upload may weigh and be, and the project's storage quota. Pass `bucketKey` for an upload into that bucket. */
-export function useFilesLimits(options: { bucketKey?: string; enabled?: boolean } = {}): UseQueryResult<FilesLimits, FilesApiError> {
+export function useFilesLimits(options: { bucketKey?: string; enabled?: boolean } = {}): UseQueryResult<FileLimits, FilesApiError> {
   const project = useFilesProject();
-  return useQuery<FilesLimits, FilesApiError>({
+  return useQuery<FileLimits, FilesApiError>({
     queryKey: filesKeys.limits(project, options.bucketKey),
     enabled: options.enabled !== false,
     queryFn: ({ signal }) => getFilesLimits({ signal, bucketKey: options.bucketKey }),
@@ -514,17 +527,19 @@ export function useUpdateBucket(): UseMutationResult<
 
 /**
  * `deleted`: the bucket is gone (its cache is forgotten). `deleting`: a job is removing the files first; the list
- * and the bucket report it and are polled until it is gone.
+ * and the bucket report it and are polled until it is gone. `force` deletes only the bucket, leaving its files in the
+ * storage provider - also when the bucket is `deleting`, the way out of a run that was lost and cannot be asked for
+ * again; `deleteFiles` asked for a bucket that is already `deleting` queues the job anew.
  */
 export function useDeleteBucket(): UseMutationResult<
   DeleteBucketResult,
   FilesApiError,
-  { bucketKey: string; deleteFiles?: boolean }
+  { bucketKey: string } & DeleteBucketOptions
 > {
   const queryClient = useQueryClient();
   const project = useFilesProject();
-  return useMutation<DeleteBucketResult, FilesApiError, { bucketKey: string; deleteFiles?: boolean }>({
-    mutationFn: ({ bucketKey, deleteFiles }) => deleteBucket(bucketKey, { deleteFiles }),
+  return useMutation<DeleteBucketResult, FilesApiError, { bucketKey: string } & DeleteBucketOptions>({
+    mutationFn: ({ bucketKey, deleteFiles, force }) => deleteBucket(bucketKey, { deleteFiles, force }),
     onSuccess: async (result, { bucketKey }) => {
       if (result.status === 'deleted') {
         forgetBucket(queryClient, project, bucketKey);
@@ -533,6 +548,9 @@ export function useDeleteBucket(): UseMutationResult<
       }
       await invalidateBucketMeta(queryClient, project, bucketKey);
     },
+    // A refusal can leave the bucket changed: a queue that was not there leaves a note on it (`deleteError`), a run
+    // that began meanwhile marks it deleting, an agent that chose it since blocks the delete. Read it again.
+    onError: (_error, { bucketKey }) => invalidateBucketMeta(queryClient, project, bucketKey),
   });
 }
 
@@ -594,13 +612,13 @@ export function useConvertObject(): UseMutationResult<FileRecordView, FilesApiEr
 
 /** "Import from storage": one scan step; call again with `nextCursor` until it is absent. */
 export function useImportFromStorage(): UseMutationResult<
-  ImportResult,
+  ImportFromStorageResult,
   FilesApiError,
   { bucketKey: string; input?: ImportInput }
 > {
   const queryClient = useQueryClient();
   const project = useFilesProject();
-  return useMutation<ImportResult, FilesApiError, { bucketKey: string; input?: ImportInput }>({
+  return useMutation<ImportFromStorageResult, FilesApiError, { bucketKey: string; input?: ImportInput }>({
     mutationFn: ({ bucketKey, input }) => importFromStorage(bucketKey, input),
     onSuccess: (result, { bucketKey }) => (result.imported > 0 ? invalidateBucketContent(queryClient, project, bucketKey) : undefined),
   });
@@ -633,10 +651,10 @@ export function useArchiveObjects(): UseMutationResult<void, FilesApiError, { bu
  * Tests a saved provider by its RECORD id (`provider._id`) and refreshes everything that shows its health.
  * A caller without provider access gets a 403 (`filesErrorMessage(error, t, 'providerTest')` words it).
  */
-export function useTestFileProvider(): UseMutationResult<FileProviderTestResult, FilesApiError, string> {
+export function useTestFileProvider(): UseMutationResult<ProviderTestResult, FilesApiError, string> {
   const queryClient = useQueryClient();
   const project = useFilesProject();
-  return useMutation<FileProviderTestResult, FilesApiError, string>({
+  return useMutation<ProviderTestResult, FilesApiError, string>({
     mutationFn: (providerRecordId) => testFileProvider(providerRecordId),
     onSuccess: () => invalidateProviderHealth(queryClient, project),
   });

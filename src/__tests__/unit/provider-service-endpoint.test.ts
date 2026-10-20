@@ -63,10 +63,19 @@ describe('provider service endpoint validation for file stores', () => {
 
   it('create rejects a private or loopback endpoint on SaaS before touching the database', async () => {
     saas();
-    for (const endpoint of ['http://10.0.0.5:9000', 'http://127.0.0.1:9000', 'http://169.254.169.254', 'https://localhost:9000']) {
+    for (const endpoint of ['https://10.0.0.5:9000', 'https://127.0.0.1:9000', 'https://169.254.169.254', 'https://localhost:9000']) {
       await expect(create(endpoint), endpoint).rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint' });
     }
     expect(db.createProvider).not.toHaveBeenCalled();
+  });
+
+  it('create on SaaS judges a plain-http endpoint by where it points, like an https one', async () => {
+    saas();
+    await expect(create('http://10.0.0.5:9000')).rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint' });
+    expect(db.createProvider).not.toHaveBeenCalled();
+    db.createProvider.mockResolvedValue({ _id: 'p1', key: 'files', type: 'file', driver: 'aws-s3-files', credentialsEnc: 'x' });
+    await expect(create('http://93.184.216.34:9000')).resolves.toMatchObject({ _id: 'p1' });
+    expect(db.createProvider).toHaveBeenCalledTimes(1);
   });
 
   it('create saves a file store with a public endpoint, or none (Amazon S3), on SaaS', async () => {
@@ -95,7 +104,7 @@ describe('provider service endpoint validation for file stores', () => {
       settings: { region: 'us-east-1', bucket: 'cp-files-test' },
     });
     await expect(updateProviderConfig('t', 'p1', {
-      settings: { region: 'us-east-1', bucket: 'cp-files-test', endpoint: 'http://169.254.169.254' },
+      settings: { region: 'us-east-1', bucket: 'cp-files-test', endpoint: 'https://169.254.169.254' },
     } as never)).rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint' });
     expect(db.updateProvider).not.toHaveBeenCalled();
   });

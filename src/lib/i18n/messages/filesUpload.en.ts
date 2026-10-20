@@ -79,7 +79,7 @@ export const filesUploadEn = {
   processing: {
     convert: 'Convert to Markdown',
     convertHint:
-      'Works for PDF, Word, PowerPoint, Excel, HTML, text and images. A Markdown copy is stored next to each file; the original is never changed.',
+      'Works for PDF, Word, PowerPoint (.pptx), Excel, HTML and text files such as CSV and JSON. Other files, such as images, are stored without a Markdown copy. A Markdown copy is stored next to the file it is made from; the original is never changed.',
     background:
       'Conversion runs in the background after the upload. Its status shows in the file list and in the file details, where a failed conversion can be retried.',
     advanced: 'Advanced',

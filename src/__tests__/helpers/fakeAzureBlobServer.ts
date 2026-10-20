@@ -36,6 +36,11 @@ export interface BlobServerOptions {
   authorize?: (request: SeenRequest) => { status: number; code: string; headers?: Record<string, string> } | undefined;
   /** Takes over the answer to a request when it returns true. */
   override?: (request: SeenRequest, response: http.ServerResponse) => boolean;
+  /**
+   * Cuts the connection in the middle of the body of the first `times` blob downloads, after `afterBytes` bytes of it
+   * (what a dropped connection looks like to the client). `onDrop` runs just before each cut.
+   */
+  dropDownloads?: { afterBytes: number; times: number; onDrop?: () => void };
 }
 
 export interface BlobServer {
@@ -83,6 +88,7 @@ export async function startBlobServer(options: BlobServerOptions): Promise<BlobS
   const containers = new Map<string, Map<string, StoredBlob>>();
   const sockets = new Set<Socket>();
   let sequence = 0;
+  let dropsLeft = options.dropDownloads?.times ?? 0;
 
   function route(request: SeenRequest, response: http.ServerResponse): void {
     const url = new URL(request.url, 'http://x');
@@ -151,11 +157,30 @@ export async function startBlobServer(options: BlobServerOptions): Promise<BlobS
       case 'GET':
       case 'HEAD': {
         if (!blob) return sendError(request, response, 404, 'BlobNotFound', 'The specified blob does not exist.');
-        const ranged = Boolean(request.headers['x-ms-range'] ?? request.headers.range);
-        const headers = { ...blobHeaders(blob), 'content-length': String(blob.data.length) };
-        if (ranged && blob.data.length > 0) Object.assign(headers, { 'content-range': `bytes 0-${blob.data.length - 1}/${blob.data.length}` });
-        response.writeHead(ranged && blob.data.length > 0 ? 206 : 200, headers);
-        return void response.end(request.method === 'HEAD' ? undefined : blob.data);
+        const ifMatch = request.headers['if-match'];
+        if (ifMatch && ifMatch !== '*' && ifMatch !== blob.etag) {
+          return sendError(request, response, 412, 'ConditionNotMet', 'The condition specified using HTTP conditional header(s) is not met.');
+        }
+        // `bytes=<start>-[<end>]`; an empty blob has no range to give and answers 200
+        const range = /^bytes=(\d+)-(\d*)$/.exec(String(request.headers['x-ms-range'] ?? request.headers.range ?? ''));
+        const total = blob.data.length;
+        const start = range ? Number(range[1]) : 0;
+        if (range && total > 0 && start >= total) return sendError(request, response, 416, 'InvalidRange', 'The range specified is invalid for the current size of the resource.');
+        const end = range && total > 0 ? Math.min(range[2] === '' ? total - 1 : Number(range[2]), total - 1) : total - 1;
+        const ranged = Boolean(range) && total > 0;
+        const slice = ranged ? blob.data.subarray(start, end + 1) : blob.data;
+        const headers = { ...blobHeaders(blob), 'content-length': String(slice.length) };
+        if (ranged) Object.assign(headers, { 'content-range': `bytes ${start}-${end}/${total}` });
+        response.writeHead(ranged ? 206 : 200, headers);
+        const drop = options.dropDownloads;
+        if (request.method === 'GET' && drop && dropsLeft > 0 && slice.length > drop.afterBytes) {
+          dropsLeft -= 1;
+          drop.onDrop?.();
+          // the socket goes once the part has been handed to the kernel, so the client reads exactly that part and then loses the connection
+          response.write(slice.subarray(0, drop.afterBytes), () => response.socket?.destroy());
+          return;
+        }
+        return void response.end(request.method === 'HEAD' ? undefined : slice);
       }
       case 'DELETE':
         if (!blob) return sendError(request, response, 404, 'BlobNotFound', 'The specified blob does not exist.');
@@ -197,6 +222,57 @@ export async function startBlobServer(options: BlobServerOptions): Promise<BlobS
     endpoint: `${options.tls ? 'https' : 'http'}://127.0.0.1:${port}/${options.account}`,
     seen,
     containers,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+export interface TokenServerOptions {
+  /** The key pair the server presents. */
+  tls: { key: string | Buffer; cert: string | Buffer };
+  /** The access token it hands out (default `token-from-the-fake-authority`). */
+  token?: string;
+}
+
+export interface TokenServer {
+  port: number;
+  /** `https://127.0.0.1:<port>`: what the provider's "Authority host" setting holds. */
+  authority: string;
+  /** Every request that got through the TLS handshake, in order. */
+  seen: SeenRequest[];
+  close(): Promise<void>;
+}
+
+/** A stand-in for a Microsoft Entra token endpoint: `POST /<tenant>/oauth2/v2.0/token` is answered with an access token, anything else with a 404. */
+export async function startTokenServer(options: TokenServerOptions): Promise<TokenServer> {
+  const seen: SeenRequest[] = [];
+  const sockets = new Set<Socket>();
+  const server = https.createServer({ key: options.tls.key, cert: options.tls.cert }, (req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      seen.push({ method: req.method ?? '', url: req.url ?? '', headers: req.headers, body: Buffer.concat(chunks) });
+      if (req.method === 'POST' && /^\/[^/]+\/oauth2\/v2\.0\/token$/.test(req.url ?? '')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ token_type: 'Bearer', expires_in: 3600, access_token: options.token ?? 'token-from-the-fake-authority' }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+    });
+  });
+  server.on('secureConnection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    authority: `https://127.0.0.1:${port}`,
+    seen,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));

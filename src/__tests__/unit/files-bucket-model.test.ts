@@ -8,8 +8,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import ts from 'typescript';
 import type { FileRecordView } from '@/lib/services/files';
-import { FilesApiError, clientApiRoutes, filesRoutes, type FilesLimits } from '@/components/files/filesApi';
+import { FilesApiError, clientApiRoutes, filesRoutes, type FileLimits } from '@/components/files/filesApi';
 import {
   DEFAULT_FILES_TAB_STATE,
   MAX_SEARCH_LENGTH,
@@ -45,14 +46,17 @@ import {
   IMPORT_PAGE_SIZE,
   MAX_IMPORT_PAGES,
   addImportPage,
+  canRetryImport,
   runImportScan,
 } from '@/components/files/bucket/importScan';
 import {
+  DESCRIPTION_MAX_LENGTH,
   NAME_MAX_LENGTH,
   PREFIX_MAX_LENGTH,
   agentFilesHref,
   deleteErrorOf,
   deleteRules,
+  descriptionProblem,
   driverNameOf,
   effectivePrefix,
   gaugeOf,
@@ -66,6 +70,21 @@ import {
   settingsPatch,
   valuesOf,
 } from '@/components/files/bucket/settingsModel';
+import {
+  BUCKET_DESCRIPTION_MAX,
+  BUCKET_NAME_MAX,
+  BUCKET_PREFIX_MAX,
+  normalizeBucketPrefix,
+} from '@/components/files/shared/bucketRules';
+import { DELETE_STALLED_AFTER_MS } from '@/components/files/shared/jobClock';
+import {
+  BUCKET_DESCRIPTION_MAX_LENGTH as SERVER_BUCKET_DESCRIPTION_MAX_LENGTH,
+  BUCKET_NAME_MAX_LENGTH as SERVER_BUCKET_NAME_MAX_LENGTH,
+  BUCKET_PREFIX_MAX_LENGTH as SERVER_BUCKET_PREFIX_MAX_LENGTH,
+  parseBucketDescription,
+  parseBucketName,
+  parseBucketPrefix,
+} from '@/lib/services/files/bucketRules';
 import {
   API_LANGUAGES,
   API_OPERATIONS,
@@ -267,11 +286,16 @@ describe('the rows of the grid', () => {
     expect(showsSessionColumns(state({ show: 'session' }), [])).toBe(true);
   });
 
-  it('offers the Markdown download only for a copy that exists', () => {
+  it('offers the Markdown download for a copy that exists, whatever the last conversion did', () => {
+    // A re-conversion that fails, is skipped or is still running leaves the earlier copy where it was.
     expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'succeeded' }))).toBe(true);
-    expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'failed' }))).toBe(false);
-    expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'pending' }))).toBe(false);
+    expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'failed' }))).toBe(true);
+    expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'pending' }))).toBe(true);
+    expect(hasMarkdownCopy(rec('a', { markdownKey: 'a.md', markdownStatus: 'skipped' }))).toBe(true);
+    // A record without a copy has nothing to download, even when its status says the conversion went well.
     expect(hasMarkdownCopy(rec('a', { markdownStatus: 'succeeded' }))).toBe(false);
+    expect(hasMarkdownCopy(rec('a', { markdownKey: '', markdownStatus: 'succeeded' }))).toBe(false);
+    expect(hasMarkdownCopy(rec('a', { markdownStatus: 'pending' }))).toBe(false);
   });
 
   it('says a file changed when it last changed, else when it was created', () => {
@@ -439,6 +463,15 @@ describe('the import scan', () => {
     expect(step).toHaveBeenCalledTimes(2);
   });
 
+  it('offers a second try for every failure but a storage location another bucket uses', () => {
+    expect(canRetryImport(FilesApiError.fromBody(409, { error: 'x', code: 'storage_location_shared' }))).toBe(false);
+    expect(canRetryImport(FilesApiError.fromBody(409, { error: 'x', code: 'import_in_progress' }))).toBe(true);
+    expect(canRetryImport(FilesApiError.fromBody(409, { error: 'x', code: 'bucket_inactive' }))).toBe(true);
+    expect(canRetryImport(FilesApiError.fromBody(503, { error: 'x', code: 'storage_unavailable' }))).toBe(true);
+    expect(canRetryImport(FilesApiError.network(new Error('offline')))).toBe(true);
+    expect(canRetryImport(new Error('odd'))).toBe(true);
+  });
+
   it('gives up on a scan that never ends', async () => {
     const step = vi.fn();
     const run = await runImportScan({ step, from: { ...EMPTY_IMPORT_PROGRESS, pages: MAX_IMPORT_PAGES, cursor: 'c' } });
@@ -498,8 +531,9 @@ describe('the Storage card’s rules', () => {
     expect(effectivePrefix({ key: 'docs', prefix: '/team/files/' })).toBe('team/files');
   });
 
-  it('reads a typed prefix without its surrounding blanks and slashes', () => {
-    expect(normalizePrefixInput('  /team//files/ ')).toBe('team//files');
+  it('reads a typed prefix without its surrounding blanks and slashes, and a doubled slash as one', () => {
+    expect(normalizePrefixInput('  /team//files/ ')).toBe('team/files');
+    expect(normalizePrefixInput('team///files')).toBe('team/files');
     expect(normalizePrefixInput('///')).toBe('');
     expect(normalizePrefixInput('')).toBe('');
   });
@@ -513,6 +547,73 @@ describe('the Storage card’s rules', () => {
     expect(prefixProblem('bad\u0007name')).toBe('controlChars');
     expect(prefixProblem('x'.repeat(PREFIX_MAX_LENGTH))).toBeNull();
     expect(prefixProblem('x'.repeat(PREFIX_MAX_LENGTH + 1))).toBe('tooLong');
+  });
+
+  it('refuses what the server refuses in a prefix: two dots anywhere, a backslash, the delete character', () => {
+    expect(PREFIX_MAX_LENGTH).toBe(200);
+    // Two dots are refused inside a name too, not only as a folder of their own.
+    expect(prefixProblem('a..b')).toBe('dotSegments');
+    expect(prefixProblem('team/..hidden')).toBe('dotSegments');
+    expect(prefixProblem('v1.2/notes')).toBeNull();
+    expect(prefixProblem('team\\files')).toBe('controlChars');
+    expect(prefixProblem('bad\u007fname')).toBe('controlChars');
+    // The limit counts what is kept: the slashes and blanks around the prefix do not.
+    expect(prefixProblem(`/${'x'.repeat(PREFIX_MAX_LENGTH)}/ `)).toBeNull();
+    expect(prefixProblem(' '.repeat(5) + 'x'.repeat(PREFIX_MAX_LENGTH + 1))).toBe('tooLong');
+  });
+
+  it('keeps the limits and the checks of the forms the same as the server’s', () => {
+    expect(BUCKET_NAME_MAX).toBe(SERVER_BUCKET_NAME_MAX_LENGTH);
+    expect(BUCKET_DESCRIPTION_MAX).toBe(SERVER_BUCKET_DESCRIPTION_MAX_LENGTH);
+    expect(BUCKET_PREFIX_MAX).toBe(SERVER_BUCKET_PREFIX_MAX_LENGTH);
+    expect(NAME_MAX_LENGTH).toBe(SERVER_BUCKET_NAME_MAX_LENGTH);
+    expect(PREFIX_MAX_LENGTH).toBe(SERVER_BUCKET_PREFIX_MAX_LENGTH);
+
+    const serverRefusesPrefix = (text: string) => {
+      try {
+        parseBucketPrefix(normalizeBucketPrefix(text));
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    const prefixes = [
+      '', 'team', 'team/files', 'a/b.c/d', 'v1.2/notes', '  /team//files/ ', '///', 'a//b', 'a/./b', './a', 'a/b/.', '.',
+      'a..b', '../x', 'x/..', 'x/..y', 'team\\files', 'bad\u0007name', 'bad\u007fname', 'tab\tname', 'new\nline',
+      'x'.repeat(PREFIX_MAX_LENGTH), 'x'.repeat(PREFIX_MAX_LENGTH + 1), `/${'x'.repeat(PREFIX_MAX_LENGTH)}/`, ' é/ü ',
+    ];
+    for (const text of prefixes) expect(prefixProblem(text) !== null, JSON.stringify(text)).toBe(serverRefusesPrefix(text));
+
+    const serverRefusesName = (text: string) => {
+      try {
+        parseBucketName(text);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    for (const text of ['', '  ', 'Docs', ' Docs ', 'x'.repeat(BUCKET_NAME_MAX), 'x'.repeat(BUCKET_NAME_MAX + 1), ` ${'x'.repeat(BUCKET_NAME_MAX)} `]) {
+      expect(nameProblem(text) !== null, JSON.stringify(text)).toBe(serverRefusesName(text));
+    }
+
+    const serverRefusesDescription = (text: string) => {
+      try {
+        parseBucketDescription(text);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    for (const text of ['', 'Notes', 'two\nlines', 'x'.repeat(BUCKET_DESCRIPTION_MAX), 'x'.repeat(BUCKET_DESCRIPTION_MAX + 1), ` ${'x'.repeat(BUCKET_DESCRIPTION_MAX)} `]) {
+      expect(descriptionProblem(text) !== null, JSON.stringify(text)).toBe(serverRefusesDescription(text));
+    }
+  });
+
+  it('asks for a description of at most 1000 characters', () => {
+    expect(descriptionProblem('')).toBeNull();
+    expect(descriptionProblem('x'.repeat(DESCRIPTION_MAX_LENGTH))).toBeNull();
+    expect(descriptionProblem(` ${'x'.repeat(DESCRIPTION_MAX_LENGTH)} `)).toBeNull();
+    expect(descriptionProblem('x'.repeat(DESCRIPTION_MAX_LENGTH + 1))).toBe('tooLong');
   });
 
   it('fixes the prefix once the bucket holds a file', () => {
@@ -543,9 +644,9 @@ describe('the Usage card’s gauges', () => {
 
   it('reads the project’s quota from the limits', () => {
     expect(quotaOf(null)).toBeNull();
-    const noQuota = { maxFileBytes: 1, maxRequestBytes: 1, allowedMimeTypes: null } as unknown as FilesLimits;
+    const noQuota = { maxFileBytes: 1, maxRequestBytes: 1, allowedMimeTypes: null } as unknown as FileLimits;
     expect(quotaOf(noQuota)).toBeNull();
-    const limits: FilesLimits = {
+    const limits: FileLimits = {
       maxFileBytes: 10,
       maxRequestBytes: 10,
       allowedMimeTypes: null,
@@ -563,18 +664,53 @@ describe('deleting the bucket', () => {
 
   it('is blocked while an agent keeps its session files in the bucket', () => {
     const rules = deleteRules({ usedBy: [agent], stats: { fileCount: 2, totalBytes: 1 }, deleting: false });
-    expect(rules).toMatchObject({ blocked: true, agents: [agent], fileCount: 2, needsFilesConsent: true, deleting: false });
+    expect(rules).toMatchObject({ blocked: true, agents: [agent], fileCount: 2, holdsFiles: true, deleting: false, stalled: false });
   });
 
-  it('needs the explicit choice about the files only when there are some', () => {
-    expect(deleteRules({ usedBy: [], stats: { fileCount: 0, totalBytes: 0 } })).toMatchObject({ blocked: false, needsFilesConsent: false, fileCount: 0 });
-    expect(deleteRules({ usedBy: [], stats: { fileCount: 3, totalBytes: 0 } })).toMatchObject({ needsFilesConsent: true });
+  it('asks what becomes of the files only when there are some', () => {
+    expect(deleteRules({ usedBy: [], stats: { fileCount: 0, totalBytes: 0 } })).toMatchObject({ blocked: false, holdsFiles: false, fileCount: 0 });
+    expect(deleteRules({ usedBy: [], stats: { fileCount: 3, totalBytes: 0 } })).toMatchObject({ holdsFiles: true });
     // Missing numbers count as an empty bucket.
-    expect(deleteRules({} as never)).toMatchObject({ blocked: false, fileCount: 0, agents: [], deleting: false });
+    expect(deleteRules({} as never)).toMatchObject({ blocked: false, fileCount: 0, agents: [], deleting: false, stalled: false, lastError: null });
   });
 
   it('knows a delete job is already running', () => {
     expect(deleteRules({ usedBy: [], deleting: true })).toMatchObject({ deleting: true });
+  });
+
+  describe('a delete job that was most likely lost', () => {
+    const askedAt = Date.parse('2026-10-20T10:00:00.000Z');
+    const deleting = { usedBy: [], deleting: true, updatedAt: '2026-10-20T10:00:00.000Z' as unknown as Date };
+
+    it('is told from a running one by how long the bucket has been deleting', () => {
+      expect(deleteRules(deleting, askedAt)).toMatchObject({ deleting: true, stalled: false });
+      expect(deleteRules(deleting, askedAt + DELETE_STALLED_AFTER_MS - 1)).toMatchObject({ stalled: false });
+      expect(deleteRules(deleting, askedAt + DELETE_STALLED_AFTER_MS)).toMatchObject({ stalled: true });
+      expect(deleteRules(deleting, askedAt + 24 * 3_600_000)).toMatchObject({ stalled: true });
+    });
+
+    it('is never taken for lost without a time to judge by, or with one in the future', () => {
+      expect(deleteRules({ usedBy: [], deleting: true }, askedAt + 24 * 3_600_000)).toMatchObject({ deleting: true, stalled: false });
+      expect(deleteRules({ usedBy: [], deleting: true, updatedAt: 'not a date' as unknown as Date }, askedAt)).toMatchObject({ stalled: false });
+      expect(deleteRules(deleting, askedAt - 60_000)).toMatchObject({ stalled: false });
+    });
+
+    it('is not a thing for a bucket that is not deleting', () => {
+      expect(deleteRules({ usedBy: [], deleting: false, updatedAt: deleting.updatedAt }, askedAt + 24 * 3_600_000)).toMatchObject({ deleting: false, stalled: false });
+      expect(deleteRules({ usedBy: [], updatedAt: deleting.updatedAt }, askedAt + 24 * 3_600_000)).toMatchObject({ deleting: false, stalled: false });
+    });
+  });
+
+  describe('a delete that stopped with an error', () => {
+    it('carries the reason, so the person can read it and ask again', () => {
+      expect(deleteRules({ usedBy: [], deleting: false, deleteError: 'Access denied' })).toMatchObject({ deleting: false, lastError: 'Access denied' });
+      expect(deleteRules({ usedBy: [], metadata: { deleteError: 'Access denied' } })).toMatchObject({ lastError: 'Access denied' });
+      expect(deleteRules({ usedBy: [] })).toMatchObject({ lastError: null });
+    });
+
+    it('is not shown while a run is going: the reason belongs to the run before it', () => {
+      expect(deleteRules({ usedBy: [], deleting: true, deleteError: 'Access denied' })).toMatchObject({ deleting: true, lastError: null });
+    });
   });
 
   it('links the blocking agent to its Files settings', () => {
@@ -587,6 +723,13 @@ describe('deleting the bucket', () => {
     expect(deleteErrorOf({ metadata: { deleteError: { message: 'Timeout' } } })).toBe('Timeout');
     expect(deleteErrorOf({ metadata: { deleteError: '   ' } })).toBeNull();
     expect(deleteErrorOf({ metadata: { deleteError: 42 } })).toBeNull();
+  });
+
+  it('prefers the reason the list and the bucket state outright, over the one in the metadata', () => {
+    expect(deleteErrorOf({ deleteError: ' Access denied ' })).toBe('Access denied');
+    expect(deleteErrorOf({ deleteError: 'Newer', metadata: { deleteError: 'Older' } })).toBe('Newer');
+    expect(deleteErrorOf({ deleteError: '   ', metadata: { deleteError: 'Older' } })).toBe('Older');
+    expect(deleteErrorOf({ deleteError: '' })).toBeNull();
   });
 });
 
@@ -603,6 +746,40 @@ describe('the words of a failed bucket call', () => {
     expect(bucketErrorMessage(FilesApiError.fromBody(409, { error: 'x', code: 'prefix_locked' }), t)).toBe('[errors.prefixLocked]');
     expect(bucketErrorMessage(FilesApiError.fromBody(403, {}), t)).toBe('[errors.forbidden]');
     expect(bucketErrorMessage(new Error('odd'), t)).toBe('[errors.generic]');
+  });
+
+  describe('a bucket delete that failed', () => {
+    const sentence = 'This bucket holds files of sessions started by someone else, and you are not allowed to change them, so it cannot be deleted with its files.';
+    const refused = FilesApiError.fromBody(403, { error: sentence, code: 'forbidden', message: sentence, service: 'agents', required: 'write' });
+    const failure = (error: unknown) => bucketErrorMessage(error, t, 'deleteBucket');
+
+    it('says why, in the server’s sentence, when the files could not go because of other people’s sessions', () => {
+      expect(failure(refused)).toBe(sentence);
+      // The answer that has no code and only an `error` (the fallback of the same route) says it too.
+      expect(failure(FilesApiError.fromBody(403, { error: sentence }))).toBe(sentence);
+    });
+
+    it('words the gates’ own refusal, which gives no reason of its own, as a missing permission', () => {
+      const gate = 'Forbidden: files requires write permission';
+      expect(failure(FilesApiError.fromBody(403, {}))).toBe('[errors.forbidden]');
+      expect(failure(FilesApiError.fromBody(403, { error: 'Forbidden' }))).toBe('[errors.forbidden]');
+      expect(failure(FilesApiError.fromBody(403, { error: gate, code: 'forbidden', message: gate, service: 'files', required: 'write' }))).toBe('[errors.forbidden]');
+    });
+
+    it('uses the delete dialog’s words for a storage location another bucket uses', () => {
+      const shared = FilesApiError.fromBody(409, { error: 'x', code: 'storage_location_shared' });
+      expect(failure(shared)).toBe('[errors.storageLocationSharedDelete]');
+    });
+
+    it('keeps the agents of a bucket in use, and the wording of everything else', () => {
+      const reason = 'The bucket "docs" is where this agent keeps session files: Support.';
+      const inUse = FilesApiError.fromBody(409, { error: reason, code: 'bucket_in_use', agents: [{ key: 'support', name: 'Support' }] });
+      expect(failure(inUse)).toBe(reason);
+      expect(failure(FilesApiError.fromBody(409, { error: 'x', code: 'bucket_deleting' }))).toBe('[errors.bucketDeleting]');
+      expect(failure(FilesApiError.fromBody(503, { error: 'x', code: 'queue_unavailable' }))).toBe('[errors.queueUnavailable]');
+      expect(failure(FilesApiError.fromBody(409, { error: 'x', code: 'bucket_not_empty' }))).toBe('[errors.bucketNotEmpty]');
+      expect(failure(new Error('odd'))).toBe('[errors.generic]');
+    });
   });
 
   it('knows a bucket that is gone', () => {
@@ -728,6 +905,101 @@ describe('the API tab’s code samples', () => {
     expect(list.files[0].key).toBe(SAMPLE_FILE_KEY);
     expect(list.folders[0].startsWith(SAMPLE_FOLDER)).toBe(true);
   });
+
+  /**
+   * The key of a bucket made before keys were checked can be any text, and every sample is code that a person
+   * copies and runs. Each sample is rendered with such keys and compared with the render for a plain key: the key may
+   * change the text it stands for, never the shape of the program around it.
+   */
+  describe('a bucket key that holds quotes, braces, a backslash or a line break', () => {
+    const MARK = 'KEYMARK';
+    const AWKWARD_KEYS = [
+      'say "hello"',
+      'a"+b+"',
+      'x{1 + 1}',
+      'x{name}',
+      'back\\slash',
+      "it's",
+      'two\nlines',
+      'return\rcarriage',
+      'line\u2028separator',
+      'tab\tstop',
+      'a b',
+      '../up',
+      'A/B',
+      '100%',
+      'back`tick${name}',
+      'first\nsecond();//',
+    ];
+    const at = (bucketKey: string) => ({ origin: 'https://console.example.com', bucketKey });
+    const count = (text: string, pattern: RegExp) => (text.match(pattern) ?? []).length;
+
+    it('puts the key in the cURL and Python samples in its URL-encoded form only, where a plain key stands', () => {
+      for (const language of ['curl', 'python'] as const) {
+        for (const operation of API_OPERATIONS) {
+          const plain = buildSnippet(operation, language, at(MARK));
+          for (const key of AWKWARD_KEYS) {
+            const label = `${language}/${operation} ${JSON.stringify(key)}`;
+            expect(buildSnippet(operation, language, at(key)), label).toBe(plain.split(MARK).join(encodeURIComponent(key)));
+          }
+        }
+      }
+    });
+
+    it('adds no line, quote, brace or backslash to the Python samples, which put the key inside an f-string', () => {
+      for (const operation of API_OPERATIONS) {
+        const plain = buildSnippet(operation, 'python', at(MARK)).split('\n');
+        for (const key of AWKWARD_KEYS) {
+          const label = `python/${operation} ${JSON.stringify(key)}`;
+          const lines = buildSnippet(operation, 'python', at(key)).split('\n');
+          expect(lines, label).toHaveLength(plain.length);
+          lines.forEach((line, index) => {
+            for (const pattern of [/"/g, /[{}]/g, /\\/g, /[\r\u2028\u2029]/g]) {
+              expect(count(line, pattern), `${label}, line ${index + 1}, ${pattern}`).toBe(count(plain[index]!, pattern));
+            }
+          });
+        }
+      }
+    });
+
+    /** What the TypeScript compiler makes of a sample: its syntax errors, its node kinds and the text of its strings. */
+    function shapeOf(code: string) {
+      const options = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext };
+      const errors = (ts.transpileModule(code, { reportDiagnostics: true, compilerOptions: options }).diagnostics ?? []).map((diagnostic) =>
+        ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'),
+      );
+      const kinds: number[] = [];
+      const strings: string[] = [];
+      const visit = (node: ts.Node) => {
+        kinds.push(node.kind);
+        if (ts.isStringLiteral(node)) strings.push(node.text);
+        ts.forEachChild(node, visit);
+      };
+      visit(ts.createSourceFile('sample.ts', code, ts.ScriptTarget.ES2022, true));
+      return { errors, kinds, strings };
+    }
+
+    it('keeps the key inside its string in the TypeScript samples: the same program, with the key as its text', () => {
+      for (const operation of API_OPERATIONS) {
+        const plain = shapeOf(buildSnippet(operation, 'typescript', at(MARK)));
+        expect(plain.errors, `typescript/${operation}`).toEqual([]);
+        for (const key of AWKWARD_KEYS) {
+          const label = `typescript/${operation} ${JSON.stringify(key)}`;
+          const shape = shapeOf(buildSnippet(operation, 'typescript', at(key)));
+          expect(shape.errors, label).toEqual([]);
+          expect(shape.kinds, label).toEqual(plain.kinds);
+          // A string that is the key alone is the key; one that holds it in an address holds its URL-encoded form.
+          expect(shape.strings, label).toEqual(plain.strings.map((text) => (text === MARK ? key : text.split(MARK).join(encodeURIComponent(key)))));
+        }
+      }
+    });
+
+    it('writes a line break of the key as an escape in the TypeScript literal, not as a break of the line', () => {
+      const code = buildSnippet('list', 'typescript', at('two\nlines\u2028here'));
+      expect(code).toContain("client.files.list('two\\nlines\\u2028here'");
+      expect(code.split('\n').some((line) => line.startsWith('lines'))).toBe(false);
+    });
+  });
 });
 
 /* ── The wording ─────────────────────────────────────────────────────────── */
@@ -782,7 +1054,8 @@ describe('the stylesheet’s guards for a narrow screen', () => {
   };
 
   it('stacks the label / value rows of the Settings cards under 640px', () => {
-    const media = css.match(/@media \(max-width: 640px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    // The stylesheet keeps more than one block for this width (the header has its own): look at all of them.
+    const media = [...css.matchAll(/@media \(max-width: 640px\)\s*\{[\s\S]*?\n\}/g)].map((block) => block[0]).join('\n');
     expect(media).toMatch(/\.rows\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   });
 

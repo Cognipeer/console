@@ -113,6 +113,65 @@ describe('the download ceiling', () => {
   });
 });
 
+describe('a bound the caller states', () => {
+  // A caller that reads objects of its own, which the upload limit never applied to (a sandbox volume), says how much
+  // it can hold. The ceiling above is made 1 MiB in this file.
+  it('replaces the ceiling: an object over it is read when the caller allows it', async () => {
+    const data = Buffer.alloc(2 * MIB, 'a');
+    const { runtime } = await storeWith(data);
+
+    expect(await failureOf(() => runtime.downloadFile('big.bin'))).toMatchObject({ code: 'object_too_large' });
+    const result = await runtime.downloadFile('big.bin', { maxBytes: 4 * MIB });
+
+    expect(result.data.equals(data)).toBe(true);
+    expect(result.size).toBe(2 * MIB);
+  });
+
+  it('refuses an object over the bound, although the ceiling would let it through, without reading it', async () => {
+    const { runtime } = await storeWith(Buffer.from('x'));
+    const destroy = vi.fn();
+    const unread = () => { throw new Error('the body of an object over the bound must not be read'); };
+    const body = { destroy, [Symbol.asyncIterator]: unread, transformToByteArray: unread, arrayBuffer: unread };
+    vi.spyOn(S3Client.prototype, 'send').mockResolvedValueOnce({ ContentLength: 3 * MIB, Body: body } as never);
+
+    const error = await failureOf(() => runtime.downloadFile('big.bin', { maxBytes: 2 * MIB }));
+
+    expect(error).toMatchObject({ code: 'object_too_large', retryable: false });
+    expect(error.message).toBe('The object is larger than the 2 MB this server reads into memory at once.');
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads an object that is exactly the bound, and refuses one byte more', async () => {
+    const data = Buffer.alloc(MIB / 2, 'e');
+    const { server, runtime } = await storeWith(data);
+    server.seed('bkt3', 'tenant1/minio-main/over.bin', Buffer.alloc(MIB / 2 + 1, 'o'));
+
+    expect((await runtime.downloadFile('big.bin', { maxBytes: MIB / 2 })).data.equals(data)).toBe(true);
+    expect(await failureOf(() => runtime.downloadFile('over.bin', { maxBytes: MIB / 2 }))).toMatchObject({ code: 'object_too_large' });
+  });
+
+  it('stops a stream that does not announce its size at the bound, whichever side of the ceiling it is on', async () => {
+    const { runtime } = await storeWith(Buffer.alloc(3 * MIB, 'a'), { noContentLength: true });
+
+    expect(await failureOf(() => runtime.downloadFile('big.bin', { maxBytes: 2 * MIB }))).toMatchObject({ code: 'object_too_large' });
+    expect((await runtime.downloadFile('big.bin', { maxBytes: 4 * MIB })).data.length).toBe(3 * MIB);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['a negative number', -5],
+    ['NaN', Number.NaN],
+    ['text', '4194304'],
+  ])('ignores a bound that is %s: the ceiling applies', async (_label, maxBytes) => {
+    const { runtime } = await storeWith(Buffer.alloc(2 * MIB, 'a'));
+
+    const error = await failureOf(() => runtime.downloadFile('big.bin', { maxBytes } as never));
+
+    expect(error).toMatchObject({ code: 'object_too_large' });
+    expect(error.message).toBe('The object is larger than the 1 MB this server reads into memory at once.');
+  });
+});
+
 describe('a body that is not a stream', () => {
   // Bodies a client library may hand over already read, or only readable whole; the ceiling holds for each.
   const bodies: Array<[string, (size: number) => unknown]> = [

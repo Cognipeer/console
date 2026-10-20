@@ -11,7 +11,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
 import { formatRelativeTime } from '@/components/providers/providerAccessModel';
 import { isFilesApiError } from '../filesApi';
-import { FileKindChip, FileKindIcon, filesErrorMessage, formatBytes, ReadOnlyHint } from '../shared';
+import { FileKindChip, FileKindIcon, filesErrorMessage, formatBytes, hasMarkdownCopy, ReadOnlyHint } from '../shared';
 import { useFilesAccess } from '../useFilesAccess';
 import { useDeleteObject, useDownloadObject, useObject } from '../useFilesQueries';
 import BucketLockHint from './BucketLockHint';
@@ -172,7 +172,7 @@ function DrawerBody({ bucket, fileKey, onChanged, onDeleted, onAsking }: BodyPro
           >
             {t('actions.download')}
           </Button>
-          {record.markdownStatus === 'succeeded' ? (
+          {hasMarkdownCopy(record) ? (
             <Button
               type="button"
               size="xs"
@@ -262,7 +262,7 @@ function DrawerBody({ bucket, fileKey, onChanged, onDeleted, onAsking }: BodyPro
         </Drawer.Title>
         <Drawer.CloseButton aria-label={t('actions.close')} />
       </Drawer.Header>
-      <Drawer.Body>{content}</Drawer.Body>
+      <Drawer.Body className={styles.body}>{content}</Drawer.Body>
     </>
   );
 }

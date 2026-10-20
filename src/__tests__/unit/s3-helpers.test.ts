@@ -6,11 +6,13 @@ import { describe, expect, it } from 'vitest';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import {
   buildS3Metadata,
+  decodeListedKey,
   decodeS3Metadata,
   decodeS3MetadataValue,
   describeS3Location,
   encodeS3MetadataValue,
   generateKey,
+  hasLoneSurrogate,
   normalizeS3Endpoint,
   resolveS3Bucket,
   resolveS3Region,
@@ -21,6 +23,7 @@ import {
   s3EndpointHost,
   sanitizeKey,
   settingText,
+  toHeaderContentType,
   toS3MetadataKey,
 } from '@/lib/providers/contracts/s3/s3Helpers';
 
@@ -161,10 +164,35 @@ describe('keys and base prefix', () => {
     expect(() => sanitizeKey('')).toThrow('Invalid file key provided.');
   });
 
+  it('hasLoneSurrogate finds text that has no UTF-8 form and leaves real pairs alone', () => {
+    expect(hasLoneSurrogate('plain.txt')).toBe(false);
+    expect(hasLoneSurrogate('çay şül/ğüşıöç İ.txt')).toBe(false);
+    expect(hasLoneSurrogate('emoji \u{1F600} \u{1F468}\u200D\u{1F469}.txt')).toBe(false);
+    expect(hasLoneSurrogate('bad\uD800.txt')).toBe(true);
+    expect(hasLoneSurrogate('\uDC00low')).toBe(true);
+    expect(hasLoneSurrogate('high then plain \uD83D x')).toBe(true);
+    expect(hasLoneSurrogate('\uD83D\uD83D\uDE00')).toBe(true);
+  });
+
+  it('decodeListedKey reads a url-encoded listing key: "+" is a space, %XX a byte, anything else as it came', () => {
+    expect(decodeListedKey('a+b%2Bc%25d%23e.txt')).toBe('a b+c%d#e.txt');
+    expect(decodeListedKey('a%20b.txt')).toBe('a b.txt');
+    expect(decodeListedKey('%C3%A7ay+%C5%9F%C3%BCl/%F0%9F%98%80.txt')).toBe('çay şül/\u{1F600}.txt');
+    expect(decodeListedKey('ctl%01%1B.txt')).toBe('ctl\u0001\u001b.txt');
+    expect(decodeListedKey('dir/plain.txt')).toBe('dir/plain.txt');
+    // not valid percent-encoding: the store said "url" and did not mean it
+    expect(decodeListedKey('100%.txt')).toBe('100%.txt');
+    expect(decodeListedKey('%E0%A4%A.txt')).toBe('%E0%A4%A.txt');
+  });
+
   it('generateKey keeps the extension and a readable lower-case stem', () => {
     expect(generateKey('report.pdf')).toMatch(/^report-\d+-[0-9a-f]{8}\.pdf$/);
     expect(generateKey('Rapor Şubat.PDF')).toMatch(/^rapor-ubat-\d+-[0-9a-f]{8}\.PDF$/);
-    expect(generateKey('My File (1).TXT')).toMatch(/^my-file-1--\d+-[0-9a-f]{8}\.TXT$/);
+    expect(generateKey('My File (1).TXT')).toMatch(/^my-file-1-\d+-[0-9a-f]{8}\.TXT$/);
+    // No dash is left at either end of the stem, and a name with nothing usable is `file` (as on the other drivers).
+    expect(generateKey('(final).pdf')).toMatch(/^final-\d+-[0-9a-f]{8}\.pdf$/);
+    expect(generateKey('日本語.txt')).toMatch(/^file-\d+-[0-9a-f]{8}\.txt$/);
+    expect(generateKey('-lead.txt')).toMatch(/^lead-\d+-[0-9a-f]{8}\.txt$/);
     expect(generateKey()).toMatch(/^\d+-[0-9a-f-]{36}$/);
   });
 
@@ -477,5 +505,32 @@ describe('buildS3Metadata', () => {
     const entries: Array<[string, unknown]> = [['user_id', 'u1'], ['customer.id', 'c1'], ['Source Key', 's']];
     expect(buildS3Metadata(entries).metadata).toEqual({ 'user-id': 'u1', 'customer-id': 'c1', 'source-key': 's' });
     expect(buildS3Metadata(entries, { keepPunctuation: true }).metadata).toEqual({ user_id: 'u1', 'customer.id': 'c1', 'source-key': 's' });
+  });
+});
+
+describe('toHeaderContentType', () => {
+  it('keeps a header-safe value, trimmed, and treats blank as none', () => {
+    expect(toHeaderContentType('application/pdf')).toEqual({ value: 'application/pdf' });
+    expect(toHeaderContentType('  text/plain; charset=utf-8 ')).toEqual({ value: 'text/plain; charset=utf-8' });
+    expect(toHeaderContentType(undefined)).toEqual({});
+    expect(toHeaderContentType(null)).toEqual({});
+    expect(toHeaderContentType('')).toEqual({});
+    expect(toHeaderContentType('   ')).toEqual({});
+  });
+
+  it('reduces a value outside printable ASCII to its media type', () => {
+    // the SDK signs such a value as UTF-8 while Node writes Latin-1: a Go-based store then reports a wrong signature
+    expect(toHeaderContentType('text/plain; name=\u00E7ay.txt')).toEqual({ value: 'text/plain', reduced: true });
+    expect(toHeaderContentType('application/pdf;filename=\u015Fubat.pdf')).toEqual({ value: 'application/pdf', reduced: true });
+    expect(toHeaderContentType('text/plain; x=\u{1F600}')).toEqual({ value: 'text/plain', reduced: true });
+  });
+
+  it('refuses what cannot be a header value, or has no media type to keep', () => {
+    expect(toHeaderContentType('text/plain\r\nX-Injected: 1')).toEqual({ invalid: true });
+    expect(toHeaderContentType('text/plain\u0000')).toEqual({ invalid: true });
+    expect(toHeaderContentType('text/\u011F')).toEqual({ invalid: true });
+    expect(toHeaderContentType('; charset=\u00E7')).toEqual({ invalid: true });
+    expect(toHeaderContentType(42)).toEqual({ invalid: true });
+    expect(toHeaderContentType({})).toEqual({ invalid: true });
   });
 });

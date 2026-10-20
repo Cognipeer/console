@@ -74,12 +74,16 @@ export function assertBlobNameLimits(blobName: string): string {
   return blobName;
 }
 
-/** Same shape as the other drivers: `<slug>-<timestamp>-<8 hex>.<ext>`. */
+/**
+ * Same shape as the other drivers: `<slug>-<timestamp>-<8 hex>.<ext>`. Runs of characters outside a-z, 0-9, `-` and
+ * `_` become one dash; a dash left at either end of the slug (a name that starts with a letter outside that range)
+ * is dropped, and a name with nothing left is `file`, as in the keys the Files service generates itself.
+ */
 export function generateKey(fileName?: string): string {
   if (!fileName) return `${Date.now()}-${randomUUID()}`;
   const extension = path.extname(fileName);
   const baseName = fileName.slice(0, fileName.length - extension.length);
-  const slug = (baseName.length > 0 ? baseName : 'file').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
+  const slug = baseName.replace(/[^a-z0-9-_]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '') || 'file';
   return `${slug}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
 }
 

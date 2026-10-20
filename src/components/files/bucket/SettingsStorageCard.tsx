@@ -10,7 +10,8 @@ import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { formatLatency } from '@/components/providers/providerAccessModel';
 import ProviderTestSteps from '@/components/providers/ProviderTestSteps';
 import { useTranslations } from '@/lib/i18n';
-import type { BucketDetail, FileProviderTestResult } from '../filesApi';
+import type { BucketDetail, ProviderTestResult } from '../filesApi';
+import { isLocalDiskProvider } from '../list/providerModel';
 import { CopyButton, filesErrorMessage, ProviderHealthChip, providerHref, StorageLocation } from '../shared';
 import { useTestFileProvider, useUpdateBucket } from '../useFilesQueries';
 import { bucketErrorMessage } from './bucketErrors';
@@ -41,7 +42,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /** What a connection test said: whether it worked, how long it took, and each step it ran. */
-function TestOutcome({ result }: { result: FileProviderTestResult }) {
+function TestOutcome({ result }: { result: ProviderTestResult }) {
   const t = useTranslations('files.bucket');
   return (
     <div className={styles.testResult} role="status" aria-live="polite">
@@ -161,9 +162,12 @@ export default function SettingsStorageCard({ bucket, editable }: SettingsStorag
 
   const provider = bucket.provider;
   const providerId = provider?._id !== undefined && provider._id !== null && provider._id !== '' ? String(provider._id) : null;
-  const link = mayOpenProviders(user?.role) ? providerHref(provider) : null;
+  // The Providers area, and the test of a saved provider in it, are for owners and admins: the server answers 403 to
+  // anybody else, so the button is not drawn for them (Files access alone does not give it).
+  const providerAccess = mayOpenProviders(user?.role);
+  const link = providerAccess ? providerHref(provider) : null;
   // The server's own disk needs no test.
-  const canTest = providerId !== null && bucket.providerHealth?.state !== 'builtin';
+  const canTest = providerAccess && providerId !== null && bucket.providerHealth?.state !== 'builtin';
 
   return (
     <DetailCard title={t('storage.title')} description={t('storage.description')}>
@@ -209,7 +213,7 @@ export default function SettingsStorageCard({ bucket, editable }: SettingsStorag
           <PrefixRow bucket={bucket} editable={editable} />
         </Row>
         <Row label={t('storage.location')}>
-          <StorageLocation location={bucket.storageLocation} />
+          <StorageLocation location={bucket.storageLocation} localDisk={provider ? isLocalDiskProvider(provider) : false} />
         </Row>
         <Row label={t('storage.key')}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>

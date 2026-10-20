@@ -8,7 +8,7 @@ import type { FileRecordView } from '@/lib/services/files';
 import { formatRelativeTime } from '@/components/providers/providerAccessModel';
 import { createdByWho } from '../bucket/FileBrowseParts';
 import { expiryLabel, isSessionFile, sessionHref } from '../bucket/fileBrowse';
-import { CopyButton, formatBytes } from '../shared';
+import { CopyButton, formatBytes, hasMarkdownCopy } from '../shared';
 import { apiSnippets, checksumKind, originOf } from './detailModel';
 import styles from './FileDetailDrawer.module.css';
 
@@ -104,7 +104,7 @@ function ApiSection({ bucketKey, record }: DetailsPanelProps) {
   const titleId = useId();
   // The page runs in the browser: the address in the snippets is the one the person is using right now.
   const origin = typeof window === 'undefined' ? '' : window.location.origin;
-  const snippets = apiSnippets(origin, bucketKey, record.key, { markdown: record.markdownStatus === 'succeeded' });
+  const snippets = apiSnippets(origin, bucketKey, record.key, { markdown: hasMarkdownCopy(record) });
 
   return (
     <section className={styles.api} aria-labelledby={titleId}>

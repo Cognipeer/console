@@ -3,7 +3,8 @@
  * (`ProviderEndpointError`), a setting the driver cannot work with (`ProviderSettingsError`) - is the caller's to
  * fix: EVERY route that creates, updates or tests a provider answers it with 400 `{ error, code, field }`
  * (`sendProviderConfigError`), the dashboard and the client API alike: the generic provider routes and the
- * model, vector and file ones.
+ * model, vector and file ones. A key the tenant already has is a 409 `{ error, code: 'duplicate_key' }` on the same
+ * routes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -110,7 +111,7 @@ vi.mock('@/lib/services/vector', () => ({
 
 import type { FastifyReply } from 'fastify';
 import type { FastifyPluginAsync } from 'fastify';
-import { ProviderSettingsError } from '@/lib/providers/errors';
+import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import { sendProviderConfigError } from '@/server/api/providerConfigErrors';
 import { clientFilesApiPlugin } from '@/server/api/plugins/client-files';
@@ -138,6 +139,10 @@ const REFUSALS: Refusal[] = [
     expected: { code: 'provider_endpoint_not_allowed', field: 'endpoint' },
   },
 ];
+
+/** The conflict every create route has to map: the tenant already has a provider under this key. */
+const TAKEN = { status: 409, body: { error: 'Provider with key "minio-main" already exists.', code: 'duplicate_key' } } as const;
+const keyTaken = () => new ProviderKeyExistsError('minio-main');
 
 const FILE_BODY = {
   key: 'minio-main',
@@ -199,6 +204,13 @@ describe('sendProviderConfigError', () => {
     expect(reply.send).toHaveBeenCalledWith({ error: error.message, ...refusal.expected });
   });
 
+  it('answers 409 { error, code } for a key the tenant already has', () => {
+    const reply = replyStub();
+    expect(sendProviderConfigError(reply as unknown as FastifyReply, keyTaken())).toBe(true);
+    expect(reply.code).toHaveBeenCalledWith(TAKEN.status);
+    expect(reply.send).toHaveBeenCalledWith(TAKEN.body);
+  });
+
   it('leaves every other error to the route (nothing is sent)', () => {
     for (const other of [new Error('boom'), new TypeError('bad'), 'text', null, undefined, { code: 'provider_settings_invalid' }]) {
       const reply = replyStub();
@@ -247,6 +259,45 @@ describe('dashboard providers API (plugins/providers.ts)', () => {
     });
   });
 
+  describe('what the caller may name on the server\'s disk (the base directory of a local disk provider)', () => {
+    const lastCall = (fn: { mock: { calls: unknown[][] } }) => fn.mock.calls.at(-1)![2];
+
+    it.each(['owner', 'admin'])('POST and PATCH hand the provider service the capability of %s', async (role) => {
+      hoisted.session.userRole = role;
+      hoisted.createProviderConfig.mockResolvedValue({ key: 'k' });
+      hoisted.updateProviderConfig.mockResolvedValue({ key: 'k' });
+      for (const url of ['/api/providers?scope=tenant', '/api/providers']) {
+        await inject(app, 'POST', url);
+        expect(lastCall(hoisted.createProviderConfig), url).toMatchObject({ allowHostPaths: true });
+      }
+      for (const url of ['/api/providers/prov-1?scope=tenant', '/api/providers/prov-1']) {
+        await inject(app, 'PATCH', url, { settings: { basePath: '/srv/files' } });
+        expect(hoisted.updateProviderConfig.mock.calls.at(-1)![2], url).toMatchObject({ allowHostPaths: true });
+      }
+    });
+
+    it('an edit by anyone else in a project (the route does not gate it by role) does not carry it, and the body cannot add it', async () => {
+      hoisted.session.userRole = 'user';
+      hoisted.updateProviderConfig.mockResolvedValue({ key: 'k' });
+
+      await inject(app, 'PATCH', '/api/providers/prov-1', { allowHostPaths: true, settings: { basePath: '/srv/files', allowHostPaths: true } });
+
+      const payload = hoisted.updateProviderConfig.mock.calls.at(-1)![2] as Record<string, unknown>;
+      expect(payload.allowHostPaths).toBe(false);
+      expect(payload.settings).toEqual({ basePath: '/srv/files', allowHostPaths: true });
+    });
+
+    it('a create body cannot add it either', async () => {
+      hoisted.session.userRole = 'user';
+
+      const res = await inject(app, 'POST', '/api/providers?scope=tenant', { ...FILE_BODY, allowHostPaths: true });
+
+      // owners and admins only: the route answers before the service is asked anything
+      expect(res.statusCode).toBe(403);
+      expect(hoisted.createProviderConfig).not.toHaveBeenCalled();
+    });
+  });
+
   it('a message that happens to say "required" is not turned into a bare 400 (code and field stay)', async () => {
     const error = new ProviderSettingsError('accessKeyId', 'Access key ID is required.');
     hoisted.createProviderConfig.mockRejectedValueOnce(error);
@@ -256,6 +307,7 @@ describe('dashboard providers API (plugins/providers.ts)', () => {
 
   it('logs a refusal by name, code and field, not by its words (they can quote what was typed into a field)', async () => {
     hoisted.providersLog.error.mockClear();
+    hoisted.providersLog.warn.mockClear();
     for (const error of [
       new ProviderEndpointError('endpoint', 'Invalid URL: https://AKIAEXAMPLE:SUPERSECRETKEY@host'),
       new ProviderSettingsError('accessKeyId', 'Bad value SUPERSECRETKEY'),
@@ -264,12 +316,14 @@ describe('dashboard providers API (plugins/providers.ts)', () => {
       expect((await inject(app, 'PATCH', '/api/providers/prov-1?scope=tenant', { settings: { endpoint: 'x' } })).statusCode).toBe(400);
     }
 
-    expect(hoisted.providersLog.error).toHaveBeenCalledTimes(2);
-    expect(hoisted.providersLog.error.mock.calls.map(([, fields]) => fields)).toEqual([
-      { name: 'ProviderEndpointError', code: 'provider_endpoint_not_allowed', field: 'endpoint' },
-      { name: 'ProviderSettingsError', code: 'provider_settings_invalid', field: 'accessKeyId' },
+    // What a person typed wrong is a warning: an error in the log means the server failed.
+    expect(hoisted.providersLog.error).not.toHaveBeenCalled();
+    expect(hoisted.providersLog.warn).toHaveBeenCalledTimes(2);
+    expect(hoisted.providersLog.warn.mock.calls.map(([message, fields]) => [message, fields])).toEqual([
+      ['Provider request refused', { name: 'ProviderEndpointError', code: 'provider_endpoint_not_allowed', field: 'endpoint' }],
+      ['Provider request refused', { name: 'ProviderSettingsError', code: 'provider_settings_invalid', field: 'accessKeyId' }],
     ]);
-    expect(JSON.stringify(hoisted.providersLog.error.mock.calls)).not.toContain('SUPERSECRETKEY');
+    expect(JSON.stringify(hoisted.providersLog.warn.mock.calls)).not.toContain('SUPERSECRETKEY');
   });
 
   it('still logs the message of any other failure', async () => {
@@ -277,6 +331,15 @@ describe('dashboard providers API (plugins/providers.ts)', () => {
     hoisted.updateProviderConfig.mockRejectedValueOnce(new Error('database is down'));
     expect((await inject(app, 'PATCH', '/api/providers/prov-1?scope=tenant', { label: 'x' })).statusCode).toBe(500);
     expect(hoisted.providersLog.error).toHaveBeenCalledWith('Provider request failed', { error: 'database is down', name: 'Error' });
+  });
+
+  it('POST /providers: a key the tenant already has is a 409 with its code (tenant scope and project scope)', async () => {
+    for (const url of ['/api/providers?scope=tenant', '/api/providers']) {
+      hoisted.createProviderConfig.mockRejectedValueOnce(keyTaken());
+      const res = await inject(app, 'POST', url);
+      expect(res.statusCode, url).toBe(TAKEN.status);
+      expect(parseJsonBody(res.body), url).toEqual(TAKEN.body);
+    }
   });
 
   it('other failures keep their own answers (duplicate key 409, anything else on update 500)', async () => {
@@ -309,10 +372,39 @@ describe('client providers API (plugins/client-providers.ts)', () => {
     });
   });
 
+  describe('what the caller may name on the server\'s disk (the base directory of a local disk provider)', () => {
+    afterEach(() => { hoisted.auth.user = { _id: 'user-1', role: 'owner' }; });
+
+    it.each([
+      ['owner', true],
+      ['admin', true],
+      ['user', false],
+      ['member', false],
+    ])('POST and PATCH carry it for the role %s: %s', async (role, expected) => {
+      hoisted.auth.user = { _id: 'user-1', role };
+      hoisted.createProviderConfig.mockResolvedValue({ key: 'k' });
+      hoisted.updateProviderConfig.mockResolvedValue({ key: 'k' });
+
+      for (const url of ['/api/client/v1/providers', '/api/client/v1/providers?scope=tenant']) {
+        await inject(app, 'POST', url, { ...FILE_BODY, allowHostPaths: true });
+        expect(hoisted.createProviderConfig.mock.calls.at(-1)![2], url).toMatchObject({ allowHostPaths: expected });
+      }
+      await inject(app, 'PATCH', '/api/client/v1/providers/prov-1', { allowHostPaths: true, settings: { basePath: '/srv/files' } });
+      expect(hoisted.updateProviderConfig.mock.calls.at(-1)![2]).toMatchObject({ allowHostPaths: expected });
+    });
+  });
+
   it('a message that happens to say "required" keeps its code and field', async () => {
     hoisted.createProviderConfig.mockRejectedValueOnce(new ProviderSettingsError('bucket', 'Bucket name is required.'));
     const res = await inject(app, 'POST', '/api/client/v1/providers');
     expect(parseJsonBody(res.body)).toMatchObject({ code: 'provider_settings_invalid', field: 'bucket' });
+  });
+
+  it('POST /client/v1/providers: a key the tenant already has is a 409 with its code', async () => {
+    hoisted.createProviderConfig.mockRejectedValueOnce(keyTaken());
+    const res = await inject(app, 'POST', '/api/client/v1/providers');
+    expect(res.statusCode).toBe(TAKEN.status);
+    expect(parseJsonBody(res.body)).toEqual(TAKEN.body);
   });
 
   it('other failures keep their own answers (duplicate key 409, anything else 500)', async () => {
@@ -346,6 +438,23 @@ describe('Files providers (dashboard and client API)', () => {
         await app.close();
       }
     });
+  });
+
+  it('a key the tenant already has is a 409 { error, code: duplicate_key } (it used to be a 500)', async () => {
+    for (const [plugin, url] of [
+      [filesApiPlugin, '/api/files/providers'],
+      [clientFilesApiPlugin, '/api/client/v1/files/providers'],
+    ] as const) {
+      const app = await appOf(plugin);
+      try {
+        hoisted.createFileProvider.mockRejectedValueOnce(keyTaken());
+        const res = await inject(app, 'POST', url);
+        expect(res.statusCode, url).toBe(TAKEN.status);
+        expect(parseJsonBody(res.body), url).toEqual(TAKEN.body);
+      } finally {
+        await app.close();
+      }
+    }
   });
 
   it('a provider that is saved answers 201, and other failures stay a 500', async () => {
@@ -384,6 +493,13 @@ describe('model providers (plugins/models.ts)', () => {
   it('a duplicate key stays a 409', async () => {
     hoisted.createModelProvider.mockRejectedValueOnce(new Error('Provider with key "openai-eu" already exists.'));
     expect((await inject(app, 'POST', '/api/models/providers', MODEL_BODY)).statusCode).toBe(409);
+  });
+
+  it('a key the tenant already has is a 409 with its code', async () => {
+    hoisted.createModelProvider.mockRejectedValueOnce(new ProviderKeyExistsError('openai-eu'));
+    const res = await inject(app, 'POST', '/api/models/providers', MODEL_BODY);
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody(res.body)).toEqual({ error: 'Provider with key "openai-eu" already exists.', code: 'duplicate_key' });
   });
 });
 
@@ -427,6 +543,18 @@ describe('vector providers (dashboard plugins/vector.ts and client plugins/clien
         await app.close();
       }
     });
+  });
+
+  it.each(routes)('%s: a key the tenant already has is a 409 with its code', async (_name, plugin, url) => {
+    const app = await appOf(plugin);
+    try {
+      hoisted.createVectorProvider.mockRejectedValueOnce(new ProviderKeyExistsError('es-main'));
+      const res = await inject(app, 'POST', url, VECTOR_BODY);
+      expect(res.statusCode).toBe(409);
+      expect(parseJsonBody(res.body)).toEqual({ error: 'Provider with key "es-main" already exists.', code: 'duplicate_key' });
+    } finally {
+      await app.close();
+    }
   });
 
   it.each(routes)('%s: a provider that is saved answers 201, and other failures stay a 500', async (_name, plugin, url) => {

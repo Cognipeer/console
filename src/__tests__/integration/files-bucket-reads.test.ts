@@ -264,6 +264,7 @@ describe('getFileBucketDetail: one bucket for its page', () => {
       providerHealth: { state: 'ok', testedAt: '2026-10-19T08:30:00.000Z' },
       provider: { key: 's3-main' },
       usedBy: [],
+      usedByCount: 0,
       storageLocation: `s3://files/console/${tenantId}/s3-main/invoices/`,
     });
     expect(JSON.stringify(detail)).not.toContain(SECRET);
@@ -290,7 +291,7 @@ describe('getFileBucketDetail: one bucket for its page', () => {
     expect(createRuntime).not.toHaveBeenCalled();
     expect(detail).toMatchObject({
       key: 'old', status: 'disabled', stats: { fileCount: 1, totalBytes: 10 },
-      providerHealth: { state: 'inactive' }, usedBy: [], storageLocation: null,
+      providerHealth: { state: 'inactive' }, usedBy: [], usedByCount: 0, storageLocation: null,
     });
     expect(detail).not.toHaveProperty('provider');
   });
@@ -325,6 +326,17 @@ describe('getFileBucketDetail: one bucket for its page', () => {
     it('is empty for a bucket nobody keeps session files in', async () => {
       await agent('a', attachmentsOn('elsewhere'));
       expect(await usedBy()).toEqual([]);
+    });
+
+    it('counts the agents it names', async () => {
+      await agent('a', attachmentsOn('docs'));
+      await agent('b', attachmentsOn('docs', false));
+      await agent('c', attachmentsOn('elsewhere'));
+
+      const detail = await getFileBucketDetail(DB_NAME, tenantId, PROJECT, 'docs');
+
+      expect(detail.usedByCount).toBe(2);
+      expect(detail.usedByCount).toBe(detail.usedBy.length);
     });
 
     it('addresses an agent by the id its page is under, not by its key', async () => {

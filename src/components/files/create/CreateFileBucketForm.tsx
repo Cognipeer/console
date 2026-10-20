@@ -21,9 +21,11 @@ import { StorageLocation } from '../shared';
 import { useFilesAccess } from '../useFilesAccess';
 import { useCreateBucket, useFileProviders } from '../useFilesQueries';
 import {
+  BUCKET_DESCRIPTION_MAX,
   BUCKET_KEY_MAX,
   BUCKET_NAME_MAX,
   BUCKET_PREFIX_MAX,
+  bucketDescriptionIssue,
   bucketKeyIssue,
   bucketNameIssue,
   bucketPrefixIssue,
@@ -125,12 +127,13 @@ function CreateBucketScreen({ onClose, onCreated }: Omit<CreateFileBucketFormPro
   }, []);
 
   const nameIssue = bucketNameIssue(name);
+  const descriptionIssue = bucketDescriptionIssue(description);
   const keyIssue = bucketKeyIssue(key);
   const prefixIssue = bucketPrefixIssue(prefix);
   const folder = effectiveBucketPrefix(prefix, key);
 
   const providerReady = Boolean(provider);
-  const identityReady = !nameIssue && !keyIssue;
+  const identityReady = !nameIssue && !keyIssue && !descriptionIssue;
   const prefixReady = !prefixIssue;
   const readyCount = [providerReady, identityReady, prefixReady].filter(Boolean).length;
   const canSubmit = readyCount === 3;
@@ -361,6 +364,7 @@ function CreateBucketScreen({ onClose, onCreated }: Omit<CreateFileBucketFormPro
                 minRows={2}
                 autosize
                 value={description}
+                error={descriptionIssue ? t('errors.descriptionTooLong', { max: BUCKET_DESCRIPTION_MAX }) : undefined}
                 onChange={(event) => setDescription(event.currentTarget.value)}
               />
             </FormField>

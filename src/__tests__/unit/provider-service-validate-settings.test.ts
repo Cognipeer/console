@@ -162,6 +162,65 @@ describe('createProviderConfig', () => {
     expect(validateSettings).not.toHaveBeenCalled();
     expect(hoisted.db.createProvider).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ['one level up', '..'],
+    ['the folder itself', '.'],
+    ['nothing', ''],
+    ['a path', 'team/a'],
+    ['a path that goes up', '../tenant-2/disk'],
+    ['a path with a backslash', 'a\\b'],
+    ['a NUL', 'a\u0000b'],
+    ['a newline', 'a\nb'],
+  ])('refuses a key that is %s: the key is a folder name on the disk drivers', async (_label, key) => {
+    const error = await createProviderConfig('tenant_acme', 'tenant-1', createInput({ key })).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ProviderSettingsError);
+    expect(error).toMatchObject({ field: 'key', code: 'provider_settings_invalid' });
+    expect(error.message).toBe('The provider key is used as a folder name: it cannot be empty, "." or "..", and it cannot hold "/", "\\" or a control character.');
+    // refused before the driver, the endpoint guard or the database is asked anything
+    expect(validateSettings).not.toHaveBeenCalled();
+    expect(hoisted.endpointGuard).not.toHaveBeenCalled();
+    expect(hoisted.db.findProviderByKey).not.toHaveBeenCalled();
+    expect(hoisted.db.createProvider).not.toHaveBeenCalled();
+  });
+
+  it('refuses a key that is not text', async () => {
+    for (const key of [undefined, null, 7, {}, ['a']]) {
+      await expect(createProviderConfig('tenant_acme', 'tenant-1', createInput({ key: key as never })), String(key)).rejects.toMatchObject({ field: 'key' });
+    }
+    expect(hoisted.db.createProvider).not.toHaveBeenCalled();
+  });
+
+  it.each(['minio-main', 'My Provider', 'a.b', '..hidden', '...', 'ünï', 'k:1', 'a_b-c', 'UPPER'])('takes %j as a key', async (key) => {
+    await createProviderConfig('tenant_acme', 'tenant-1', createInput({ key }));
+
+    expect(hoisted.db.createProvider).toHaveBeenCalledWith(expect.objectContaining({ key }));
+  });
+
+  it('tells the driver whether the caller may name directories of this server - only when the route says so', async () => {
+    await createProviderConfig('tenant_acme', 'tenant-1', createInput({ key: 'a' }));
+    expect(validateSettings).toHaveBeenLastCalledWith(expect.not.objectContaining({ allowHostPaths: expect.anything() }));
+
+    await createProviderConfig('tenant_acme', 'tenant-1', createInput({ key: 'b', allowHostPaths: false }));
+    expect(validateSettings).toHaveBeenLastCalledWith(expect.not.objectContaining({ allowHostPaths: expect.anything() }));
+
+    await createProviderConfig('tenant_acme', 'tenant-1', createInput({ key: 'c', allowHostPaths: true }));
+    expect(validateSettings).toHaveBeenLastCalledWith({
+      credentials: expect.anything(),
+      settings: expect.anything(),
+      isOnPrem: false,
+      tenantId: 'tenant-1',
+      allowHostPaths: true,
+    });
+  });
+
+  it('does not store what the caller was allowed to do', async () => {
+    await createProviderConfig('tenant_acme', 'tenant-1', createInput({ allowHostPaths: true }));
+
+    expect(hoisted.db.createProvider.mock.calls[0]![0]).not.toHaveProperty('allowHostPaths');
+    expect(JSON.stringify(hoisted.db.createProvider.mock.calls[0]![0])).not.toContain('allowHostPaths');
+  });
 });
 
 describe('updateProviderConfig', () => {
@@ -215,6 +274,18 @@ describe('updateProviderConfig', () => {
     deployment('onprem');
     await updateProviderConfig('tenant_acme', 'prov-1', { settings: { endpoint: 'http://minio:9000' } });
     expect(validateSettings).toHaveBeenCalledWith(expect.objectContaining({ isOnPrem: true }));
+  });
+
+  it('tells the driver whether the caller may name directories of this server - only when the route says so - and does not store it', async () => {
+    await updateProviderConfig('tenant_acme', 'prov-1', { settings: { bucket: 'one' } });
+    expect(validateSettings).toHaveBeenLastCalledWith(expect.not.objectContaining({ allowHostPaths: expect.anything() }));
+
+    await updateProviderConfig('tenant_acme', 'prov-1', { settings: { bucket: 'two' }, allowHostPaths: false });
+    expect(validateSettings).toHaveBeenLastCalledWith(expect.not.objectContaining({ allowHostPaths: expect.anything() }));
+
+    await updateProviderConfig('tenant_acme', 'prov-1', { settings: { bucket: 'three' }, allowHostPaths: true });
+    expect(validateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ allowHostPaths: true, settings: { bucket: 'three' } }));
+    expect(JSON.stringify(hoisted.db.updateProvider.mock.calls.at(-1))).not.toContain('allowHostPaths');
   });
 
   it('takes the organization from the stored provider, for the driver and for the endpoint guard', async () => {

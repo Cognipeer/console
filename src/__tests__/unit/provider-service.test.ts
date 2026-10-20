@@ -21,6 +21,7 @@ vi.mock('@/lib/utils/crypto', () => ({
 }));
 
 import { getDatabase } from '@/lib/database';
+import { ProviderKeyExistsError } from '@/lib/providers/errors';
 import { encryptObject, decryptObject } from '@/lib/utils/crypto';
 import { createMockDb } from '../helpers/db.mock';
 import {
@@ -119,6 +120,18 @@ describe('createProviderConfig', () => {
     ).rejects.toThrow('Provider with key "openai-main" already exists.');
   });
 
+  it('refuses a key that is taken with a typed error that the routes answer as a 409', async () => {
+    db.findProviderByKey.mockResolvedValue(makeProviderRecord());
+
+    const error = await createProviderConfig(TENANT_DB, TENANT_ID, {
+      key: 'openai-main', type: 'model', driver: 'openai', label: 'OpenAI', credentials: {}, createdBy: USER_ID,
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(ProviderKeyExistsError);
+    expect(error).toMatchObject({ code: 'duplicate_key', retryable: false, message: 'Provider with key "openai-main" already exists.' });
+    expect(db.createProvider).not.toHaveBeenCalled();
+  });
+
   it('maps a concurrent duplicate-key insert (race) to an "already exists" error', async () => {
     // Pre-check passes (no existing), but the insert loses the race and the DB
     // rejects with a unique-constraint violation.
@@ -137,6 +150,15 @@ describe('createProviderConfig', () => {
         createdBy: USER_ID,
       }),
     ).rejects.toThrow('Provider with key "openai-main" already exists.');
+  });
+
+  it('answers the lost race with the same typed error as the pre-check', async () => {
+    db.findProviderByKey.mockResolvedValue(null);
+    db.createProvider.mockRejectedValue(Object.assign(new Error('E11000 duplicate key error'), { code: 11000 }));
+
+    await expect(createProviderConfig(TENANT_DB, TENANT_ID, {
+      key: 'openai-main', type: 'model', driver: 'openai', label: 'OpenAI', credentials: {}, createdBy: USER_ID,
+    })).rejects.toBeInstanceOf(ProviderKeyExistsError);
   });
 
   it('defaults status to active when not provided', async () => {

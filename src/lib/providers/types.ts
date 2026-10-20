@@ -102,6 +102,12 @@ export interface ProviderContract<TRuntime = unknown, TCredentials = Record<stri
      * networks opened for this organization; without it none are opened.
      */
     tenantId?: string;
+    /**
+     * Set when the person saving the provider administers providers (an owner or an admin), who may name directories
+     * of this server: the base directory of the local disk driver. The route sets it from the caller's role, never from
+     * a request body. A driver that takes no such setting ignores it.
+     */
+    allowHostPaths?: boolean;
   }): void | Promise<void>;
   /**
    * File providers only: where this provider's objects live, for display (for example

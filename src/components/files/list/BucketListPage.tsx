@@ -34,6 +34,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import { CreateFileBucketForm } from '../create/CreateFileBucketForm';
 import { isFilesApiError, type BucketListItem } from '../filesApi';
 import { bucketRefusalMessage } from '../bucket/fileBrowse';
+import { deleteErrorOf } from '../bucket/settingsModel';
 import {
   BucketStatusBadge,
   ReadOnlyHint,
@@ -41,6 +42,7 @@ import {
   filesErrorMessage,
   formatBytes,
   formatCount,
+  useNow,
 } from '../shared';
 import { useBuckets, useUpdateBucket } from '../useFilesQueries';
 import { useFilesAccess } from '../useFilesAccess';
@@ -80,6 +82,8 @@ export default function BucketListPage() {
   const providerOptions = useMemo(() => bucketProviderOptions(buckets), [buckets]);
 
   const busyKey = updateBucket.isPending ? updateBucket.variables?.bucketKey : undefined;
+  // A bucket that has been `deleting` for long enough is offered "Delete again": the list keeps its own clock.
+  const now = useNow(30_000, buckets.some((bucket) => bucket.deleting === true));
 
   const toggleStatus = (bucket: BucketListItem) => {
     const next = bucket.status === 'disabled' ? 'active' : 'disabled';
@@ -122,7 +126,8 @@ export default function BucketListPage() {
       key: 'name',
       label: t('columns.bucket'),
       render: (bucket) => (
-        <div className="ds-col" style={{ gap: 2, minWidth: 0 }}>
+        // A name keeps a readable width however long the provider's message beside it is: the cell wraps, it never squeezes.
+        <div className="ds-col" style={{ gap: 2, minWidth: 200 }}>
           {/* A real link: Cmd/Ctrl-click and middle-click open the bucket in a new tab. */}
           <Link
             href={bucketHref(bucket.key)}
@@ -146,24 +151,26 @@ export default function BucketListPage() {
       key: 'files',
       label: t('columns.files'),
       align: 'right',
-      render: (bucket) => <span className="ds-mono">{formatCount(bucket.stats?.fileCount, locale)}</span>,
+      render: (bucket) => <span className="ds-mono" style={{ whiteSpace: 'nowrap' }}>{formatCount(bucket.stats?.fileCount, locale)}</span>,
     },
     {
       key: 'size',
       label: t('columns.size'),
       align: 'right',
-      render: (bucket) => <span className="ds-mono">{formatBytes(bucket.stats?.totalBytes)}</span>,
+      render: (bucket) => <span className="ds-mono" style={{ whiteSpace: 'nowrap' }}>{formatBytes(bucket.stats?.totalBytes)}</span>,
     },
     {
       key: 'status',
       label: t('columns.status'),
-      render: (bucket) => <BucketStatusBadge status={bucket.status} deleting={bucket.deleting} />,
+      render: (bucket) => (
+        <BucketStatusBadge status={bucket.status} deleting={bucket.deleting} deleteError={deleteErrorOf(bucket)} />
+      ),
     },
     {
       key: 'updated',
       label: t('columns.updated'),
       render: (bucket) => (
-        <span className="ds-faint" style={{ fontSize: 12.5 }}>
+        <span className="ds-faint" style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>
           <RelativeTime value={bucket.updatedAt ?? bucket.createdAt} />
         </span>
       ),
@@ -180,6 +187,7 @@ export default function BucketListPage() {
           busy={busyKey === bucket.key}
           onNavigate={navigate}
           onToggleStatus={toggleStatus}
+          now={now}
         />
       ),
     },

@@ -8,45 +8,99 @@
  * screen branches on `status` / `code` and shows `filesErrorMessage(...)` (see
  * `shared/filesErrors.ts`).
  *
- * The view types extend the ones the server already exports (`FileBucketView`,
- * `FileRecordView`, `FileProviderView`) with the fields the overhauled routes add.
+ * The view types are the server's own (`FileBucketView`, `BucketListItem`, `BucketDetail`, `FileRecordView`,
+ * `FileProviderView`, `FileLimits`, ...): they are imported from the service as types and re-exported here, so a
+ * field the server adds or drops changes this file's types with it. Only the request bodies, which the server does
+ * not export as types, are declared here.
  * Nothing here talks to React: `useFilesQueries.ts` wraps these for components.
  */
 
 import { ApiError } from '@/lib/api/client';
-import type { FileBucketView, FileProviderView, FileRecordView } from '@/lib/services/files';
+import type { FileTypeFilter } from '@/lib/database';
+import type {
+  BatchDeleteResult,
+  BucketDetail,
+  BucketListItem,
+  BucketStats,
+  BucketUser,
+  FileBucketView,
+  FileLimits,
+  FileProviderView,
+  FileRecordView,
+  ImportFromStorageResult,
+  ListFilesRequest,
+  ListFilesResponse,
+  ProviderHealth,
+  ProviderHealthState,
+} from '@/lib/services/files';
+import type { ProviderTestResult } from '@/lib/services/providers/providerConnectionTest';
 
 /* ── Errors ──────────────────────────────────────────────────────────────── */
 
 /**
- * The `code` values the Files routes answer with next to `error`. A call can
- * carry other codes (a code is additive); `FilesApiError.code` is a plain string.
+ * Every `code` the Files routes (and the provider routes they share) answer with next to `error`. The list is tied
+ * to the server in `files-ui-client-real-stack.test.ts`: a code the file service has and this list lacks fails the
+ * type check there, and a code named here that no server file defines fails the run. A call can still carry a code
+ * that is not listed (a code is additive); `FilesApiError.code` is a plain string.
  */
 export const FILES_ERROR_CODES = [
+  // The file service's refusals (`FileServiceErrorCode`).
   'bucket_not_found',
+  'file_not_found',
   'bucket_inactive',
-  'provider_inactive',
-  'bucket_in_use',
+  'bucket_deleting',
+  'bucket_not_empty',
   'prefix_locked',
-  'file_too_large',
-  'archive_too_large',
-  'preview_unsupported',
+  'duplicate_key',
+  'provider_missing',
+  'provider_unassigned',
+  'provider_inactive',
+  'provider_invalid',
+  'provider_mismatch',
+  'markdown_unavailable',
   'conversion_unsupported',
+  'conversion_too_large',
+  'archive_too_large',
+  'import_in_progress',
   'storage_location_shared',
   'object_too_large',
+  'quota_exceeded',
+  'queue_unavailable',
+  'file_too_large',
+  'content_type_not_allowed',
+  'invalid_content_type',
+  'invalid_request',
+  'preview_unsupported',
+  // The agents' check on a bucket they keep session files in (names the agents).
+  'bucket_in_use',
+  // A storage failure or outage, as the HTTP layer words it (`server/api/fileHttp.ts`).
+  'storage_failure',
+  'storage_unavailable',
+  'storage_timeout',
+  'internal_error',
+  // A provider setting or endpoint the console refuses (provider create / update / test; names the form `field`).
+  'provider_settings_invalid',
+  'provider_endpoint_not_allowed',
 ] as const;
 
 export type FilesErrorCode = (typeof FILES_ERROR_CODES)[number];
 
 /** Thrown by every fetcher of this module. Extends `ApiError`, so `payload` holds the parsed body. */
 export class FilesApiError extends ApiError {
-  /** The machine-readable `code` of the answer, when it had one. */
+  /**
+   * The machine-readable `code` of the answer, when it had one. Some answers have none: a missing body field (400),
+   * a quota or rate limit on an upload or a new bucket (429), a refusal for want of a permission (403), a missing
+   * login (401) and Fastify's own errors. A screen switches on `status` for those.
+   */
   readonly code?: string;
+  /** The `reason` a few refusals add next to the code (`preview_unsupported`: `unsupported_type` or `too_large`). */
+  readonly reason?: string;
 
-  constructor(init: { message: string; status: number; code?: string; payload?: unknown }) {
+  constructor(init: { message: string; status: number; code?: string; reason?: string; payload?: unknown }) {
     super(init.message, init.status, init.payload);
     this.name = 'FilesApiError';
     this.code = init.code;
+    this.reason = init.reason;
   }
 
   /**
@@ -58,6 +112,7 @@ export class FilesApiError extends ApiError {
     const fallback = statusText && statusText.trim() ? statusText.trim() : `HTTP ${status}`;
     let message: string | undefined;
     let code: string | undefined;
+    let reason: string | undefined;
 
     if (record) {
       // Fastify's own errors read { statusCode, error: 'Bad Request', message: '<the reason>' }: the reason is `message`.
@@ -65,6 +120,7 @@ export class FilesApiError extends ApiError {
       const candidates = fastifyShape ? [record.message, record.error] : [record.error, record.message, record.detail];
       message = candidates.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
       if (typeof record.code === 'string' && record.code.trim()) code = record.code.trim();
+      if (typeof record.reason === 'string' && record.reason.trim()) reason = record.reason.trim();
       // An envelope { error: { message, code } } (the client API's shape) is read too.
       if (!message && record.error && typeof record.error === 'object') {
         const inner = record.error as Record<string, unknown>;
@@ -73,7 +129,7 @@ export class FilesApiError extends ApiError {
       }
     }
 
-    return new FilesApiError({ message: message ?? fallback, status, code, payload: body });
+    return new FilesApiError({ message: message ?? fallback, status, code, reason, payload: body });
   }
 
   /** Reads the body of a failed response (JSON or not) into an error. */
@@ -101,102 +157,39 @@ export function isFilesApiError(error: unknown): error is FilesApiError {
 
 /* ── Types ───────────────────────────────────────────────────────────────── */
 
-/** The classes of the objects listing's `type` filter. */
-export type FileTypeFilter = 'pdf' | 'image' | 'text' | 'office' | 'other';
+// The view types the routes answer with are the server's own, re-exported under the names the screens use.
+export type {
+  BatchDeleteResult,
+  BucketDetail,
+  BucketListItem,
+  BucketStats,
+  BucketUser,
+  FileLimits,
+  FileProviderView,
+  FileTypeFilter,
+  ImportFromStorageResult,
+  ProviderHealth,
+  ProviderHealthState,
+  ProviderTestResult,
+};
 
-export type ProviderHealthState = 'ok' | 'failed' | 'untested' | 'builtin' | 'inactive';
+/**
+ * `GET /files/providers`: a file provider with its health and where it keeps files. The other provider answers
+ * (create, update) leave `providerHealth` and `storageLocationBase` out; the listing always sets them.
+ * `storageLocationBase` is the physical location up to and including `<providerKey>/`, so the create form can
+ * preview `${base}${prefix}`; `null` when the driver does not say (this server's disk, or settings that name no
+ * bucket yet): tell the two apart by `driver`, not by the base.
+ */
+export type FileProviderListItem = FileProviderView & Required<Pick<FileProviderView, 'providerHealth' | 'storageLocationBase'>>;
 
-/** A provider's standing, from its status and the outcome of its last connection test. */
-export interface ProviderHealth {
-  state: ProviderHealthState;
-  /** ISO time of the last test; absent when it was never tested. */
-  testedAt?: string;
-  /** Why the provider is in this state (the test's message, or the reason it is disabled). */
-  message?: string;
-}
+/** The parameters of the objects listing: the server's `ListFilesRequest` minus the two that the path names. */
+export type ObjectsQuery = Omit<ListFilesRequest, 'bucketKey' | 'providerKey'>;
 
-/** Count and size of everything a bucket holds, session files included. */
-export interface BucketStats {
-  fileCount: number;
-  /** Original sizes plus the Markdown copies. */
-  totalBytes: number;
-}
-
-/** `GET /files/providers`: a file provider with its health and where it keeps files. */
-export interface FileProviderListItem extends FileProviderView {
-  providerHealth: ProviderHealth;
-  /** Physical location up to and including `<providerKey>/`, so the create form can preview `${base}${prefix}`; null = this server's disk. */
-  storageLocationBase: string | null;
-}
-
-/** `GET /files/buckets`: a bucket with its stats and its provider's health. */
-export interface BucketListItem extends FileBucketView {
-  stats: BucketStats;
-  providerHealth: ProviderHealth;
-  /** A delete-with-files job is running; the bucket is disabled meanwhile. */
-  deleting?: boolean;
-}
-
-/** An agent whose Files settings name the bucket. */
-export interface BucketUsedByAgent {
-  agentId: string;
-  agentKey: string;
-  name: string;
-}
-
-/** `GET /files/buckets/:bucketKey`. */
-export interface BucketDetail extends BucketListItem {
-  usedBy: BucketUsedByAgent[];
-  /** Human-readable physical location (no credentials, no server paths); null = this server's disk. */
-  storageLocation: string | null;
-}
-
-export type ObjectPurposeFilter = 'conversation' | 'other';
-
-/** The parameters of the objects listing. */
-export interface ObjectsQuery {
-  /**
-   * The folder to list: `''` is the bucket root, otherwise no leading slash and one trailing slash.
-   * Defined (even empty), the listing is that one folder: its files and its sub-folders (`folders`).
-   */
-  prefix?: string;
-  /** A name search under `prefix`. A search is a FLAT listing: matches anywhere below, no `folders`. */
-  search?: string;
-  /** A class of file. Behaves like `search`: a flat listing of the matches anywhere below `prefix`. */
-  type?: FileTypeFilter;
-  /** Only session files (`conversation`) or only the others (`other`). */
-  purpose?: ObjectPurposeFilter;
-  cursor?: string;
-  /** 1..200, default 50. */
-  limit?: number;
-}
-
-/** One page of the objects listing. There is no total: session-file visibility would make it wrong. */
-export interface ObjectsPage {
-  items: FileRecordView[];
-  /** Sub-folders of `prefix` (full paths ending in `/`); empty for a search or type listing. */
-  folders: string[];
-  /** The folder listed, normalised; only in the folder listing. */
-  prefix?: string;
-  nextCursor?: string;
-}
-
-/** `GET /files/limits`. */
-export interface FilesLimits {
-  /** The largest file one upload can carry: the configured limit, the per-request quota and what fits in the request body. */
-  maxFileBytes: number;
-  maxRequestBytes: number;
-  /** null = any type. */
-  allowedMimeTypes: string[] | null;
-  quota: {
-    usedBytes: number;
-    /** null = unlimited. */
-    limitBytes: number | null;
-    filesUsed: number;
-    /** null = unlimited. */
-    filesLimit: number | null;
-  };
-}
+/**
+ * One page of the objects listing, as the screens read it: `folders` is always an array (the server leaves it out of
+ * a search or type listing). There is no total: session-file visibility would make it wrong.
+ */
+export type ObjectsPage = Omit<ListFilesResponse, 'folders'> & { folders: string[] };
 
 export interface CreateBucketInput {
   key: string;
@@ -212,15 +205,32 @@ export interface CreateBucketInput {
 export interface UpdateBucketInput {
   /** 1..120 characters. */
   name?: string;
-  description?: string;
+  /** Up to 1000 characters; `''` or `null` clears it. */
+  description?: string | null;
+  /**
+   * `active` also clears the note a failed "delete with files" left on the bucket (`deleteError`): switching the bucket
+   * back on is how a person keeps it after all.
+   */
   status?: 'active' | 'disabled';
   /** Refused with `prefix_locked` (409) when the bucket has any file. */
   prefix?: string;
 }
 
+/** Which kind of delete `DELETE /files/buckets/:bucketKey` is asked for. Left empty, it is the plain one. */
 export interface DeleteBucketOptions {
-  /** Also delete the bucket's files from the storage provider (a background job; the answer is 202). */
+  /**
+   * Also delete the bucket's files from the storage provider (a background job; the answer is 202 `deleting`). Asked
+   * again for a bucket that is already being deleted, it queues the job anew: the way back when a run was lost.
+   */
   deleteFiles?: boolean;
+  /**
+   * Delete only the bucket (`?force=true`): its files stay in the storage provider and their records stay behind, so
+   * they still count toward the project's storage. Without it a bucket that holds files answers 409 `bucket_not_empty`.
+   * Ignored together with `deleteFiles`. It is also accepted for a bucket that is being deleted, which a plain delete
+   * is not: the way out when the run was lost and another bucket now uses the storage location, where the run cannot
+   * be asked for again (`storage_location_shared`).
+   */
+  force?: boolean;
 }
 
 /** `deleted`: gone now. `deleting`: a job is removing the files first; the bucket reports `deleting` until it is gone. */
@@ -262,24 +272,11 @@ export interface UploadObjectResult {
   record: FileRecordView;
 }
 
-export interface BatchDeleteResult {
-  deleted: string[];
-  failed: Array<{ key: string; error: string }>;
-}
-
 export interface ImportInput {
   /** Pass back `nextCursor` to continue a scan. */
   cursor?: string;
   /** 1..500, default 200. */
   limit?: number;
-}
-
-/** "Import from storage": objects found under the bucket's prefix that got a file record. */
-export interface ImportResult {
-  scanned: number;
-  imported: number;
-  skipped: number;
-  nextCursor?: string;
 }
 
 export type ObjectVariant = 'original' | 'markdown';
@@ -289,23 +286,6 @@ export interface DownloadedFile {
   blob: Blob;
   fileName: string | null;
   contentType: string | null;
-}
-
-export type FileProviderTestStepName = 'list' | 'write' | 'read' | 'delete';
-
-export interface FileProviderTestStep {
-  step: FileProviderTestStepName;
-  ok: boolean;
-  message?: string;
-}
-
-/** `POST /api/providers/:id/test` of a file provider. */
-export interface FileProviderTestResult {
-  /** null: the driver has no test. */
-  ok: boolean | null;
-  latencyMs: number;
-  message: string;
-  details?: { steps?: FileProviderTestStep[] };
 }
 
 interface CallOptions {
@@ -342,9 +322,15 @@ export const filesRoutes = {
   providers: (): string => `${FILES_BASE}/providers`,
   buckets: (): string => `${FILES_BASE}/buckets`,
   bucket: (bucketKey: string): string => `${FILES_BASE}/buckets/${encodeURIComponent(bucketKey)}`,
-  /** `?deleteFiles=true` is the only parameter of the bucket delete. */
-  bucketDelete: (bucketKey: string, options: DeleteBucketOptions = {}): string =>
-    `${FILES_BASE}/buckets/${encodeURIComponent(bucketKey)}${options.deleteFiles ? '?deleteFiles=true' : ''}`,
+  /**
+   * The bucket delete: plain (only an empty bucket goes), `?deleteFiles=true` (a job removes the files first) or
+   * `?force=true` (only the bucket goes; its files stay). With both options the files are deleted.
+   */
+  bucketDelete: (bucketKey: string, options: DeleteBucketOptions = {}): string => {
+    const base = `${FILES_BASE}/buckets/${encodeURIComponent(bucketKey)}`;
+    if (options.deleteFiles) return `${base}?deleteFiles=true`;
+    return options.force ? `${base}?force=true` : base;
+  },
   objects: (bucketKey: string, query?: ObjectsQuery): string =>
     `${FILES_BASE}/buckets/${encodeURIComponent(bucketKey)}/objects${objectsQueryString(query)}`,
   object: (bucketKey: string, key: string): string =>
@@ -516,8 +502,8 @@ function postJsonWithProgress<T>(url: string, body: unknown, options: UploadObje
 /* ── Fetchers ────────────────────────────────────────────────────────────── */
 
 /** What an upload may weigh and be, and the project's storage quota. Pass the bucket you are about to upload into. */
-export async function getFilesLimits(options: CallOptions & { bucketKey?: string } = {}): Promise<FilesLimits> {
-  return requestJson<FilesLimits>(filesRoutes.limits(options.bucketKey), 'GET', undefined, options.signal);
+export async function getFilesLimits(options: CallOptions & { bucketKey?: string } = {}): Promise<FileLimits> {
+  return requestJson<FileLimits>(filesRoutes.limits(options.bucketKey), 'GET', undefined, options.signal);
 }
 
 export async function listFileProviders(options: CallOptions = {}): Promise<FileProviderListItem[]> {
@@ -552,7 +538,14 @@ export async function updateBucket(
   return body.bucket;
 }
 
-/** 200 -> `deleted`; 202 (a delete-with-files job started) -> `deleting`. A bucket an agent uses answers 409 `bucket_in_use`. */
+/**
+ * 200 -> `deleted`; 202 (a delete-with-files job started) -> `deleting`. The refusals: 409 `bucket_in_use` (an agent
+ * keeps session files in it; in every form), 409 `bucket_not_empty` (a plain delete of a bucket with files), 409
+ * `bucket_deleting` (a plain delete while the job runs; `force` is accepted then and removes the bucket alone), 409
+ * `storage_location_shared` (`deleteFiles` while another bucket keeps files in the same location), 403 (`deleteFiles`
+ * with sessions of somebody else) and 503 `queue_unavailable` (`deleteFiles`; the bucket keeps a note of it in
+ * `deleteError`).
+ */
 export async function deleteBucket(
   bucketKey: string,
   deleteOptions: DeleteBucketOptions = {},
@@ -663,16 +656,29 @@ export async function archiveObjects(bucketKey: string, keys: string[], options:
   return archive.blob;
 }
 
-/** (Re)starts the Markdown conversion: 202, the record comes back `pending`. 415 `conversion_unsupported` for types the converter cannot read. */
+/**
+ * (Re)starts the Markdown conversion, whatever the record's status is (the way back for a job that was lost): 202, the
+ * record comes back `pending`. The refusals: 415 `conversion_unsupported` (a type the converter cannot read), 413
+ * `conversion_too_large`, 409 `bucket_inactive` / `bucket_deleting`, 503 `queue_unavailable` (the record is left
+ * `failed` with why).
+ */
 export async function convertObject(bucketKey: string, key: string, options: CallOptions = {}): Promise<FileRecordView> {
   const body = await requestJson<{ record?: FileRecordView }>(filesRoutes.convert(bucketKey), 'POST', { key }, options.signal);
   if (!body?.record) throw unreadableAnswer(202);
   return body.record;
 }
 
-/** Registers the objects already in the provider under the bucket's prefix as file records (never changes an object). 409 for a disabled bucket. */
-export async function importFromStorage(bucketKey: string, input: ImportInput = {}, options: CallOptions = {}): Promise<ImportResult> {
-  const body = await requestJson<Partial<ImportResult>>(filesRoutes.import(bucketKey), 'POST', input, options.signal);
+/**
+ * Registers the objects already in the provider under the bucket's prefix as file records (never changes an object).
+ * The refusals: 409 `bucket_inactive` (disabled bucket), 409 `storage_location_shared` (another bucket keeps files
+ * in the same location), 409 `import_in_progress` (a scan of this bucket is running), 429 `quota_exceeded`.
+ */
+export async function importFromStorage(
+  bucketKey: string,
+  input: ImportInput = {},
+  options: CallOptions = {},
+): Promise<ImportFromStorageResult> {
+  const body = await requestJson<Partial<ImportFromStorageResult>>(filesRoutes.import(bucketKey), 'POST', input, options.signal);
   return {
     scanned: body?.scanned ?? 0,
     imported: body?.imported ?? 0,
@@ -701,9 +707,11 @@ export async function fetchObjectText(
 }
 
 /**
- * Tests a saved file provider (list, write, read, delete) and keeps the outcome on its record. Needs provider
- * access: anybody else gets 403. `providerRecordId` is `provider._id`.
+ * Tests a saved file provider (list, write, read, delete) and keeps the outcome on its record. Owners and admins
+ * only: anybody else gets 403. `providerRecordId` is `provider._id`, not its key. An empty body is the plain re-test;
+ * `{ credentials?, settings? }` would test unsaved values and keep nothing. A broken setting answers 400 with its
+ * `code` (`provider_settings_invalid`, `provider_endpoint_not_allowed`) and the form `field`.
  */
-export async function testFileProvider(providerRecordId: string, options: CallOptions = {}): Promise<FileProviderTestResult> {
-  return requestJson<FileProviderTestResult>(filesRoutes.providerTest(providerRecordId), 'POST', {}, options.signal);
+export async function testFileProvider(providerRecordId: string, options: CallOptions = {}): Promise<ProviderTestResult> {
+  return requestJson<ProviderTestResult>(filesRoutes.providerTest(providerRecordId), 'POST', {}, options.signal);
 }

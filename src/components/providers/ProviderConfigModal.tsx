@@ -74,6 +74,19 @@ export type ProviderConfigModalSubmitPayload = {
   projectIds: string[];
 };
 
+/** The domains the service filter of the create form offers, in its order (beside "All domains"). */
+export const CREATE_DOMAINS = [
+  'model',
+  'embedding',
+  'vector',
+  'file',
+  'datasource',
+  'stt',
+  'tts',
+  'ocr',
+  'websearch',
+] as const satisfies readonly ProviderDomain[];
+
 /** What a create `onSubmit` may hand back so the modal can offer the assign step. */
 export type CreatedProviderSummary = { id: string; name: string; domain: string; key?: string };
 
@@ -625,20 +638,7 @@ export default function ProviderConfigModal({
               aria-label="Filter by domain"
               style={{ minWidth: 160 }}
             >
-              {(
-                [
-                  'all',
-                  'model',
-                  'embedding',
-                  'vector',
-                  'file',
-                  'datasource',
-                  'stt',
-                  'tts',
-                  'ocr',
-                  'websearch',
-                ] as const
-              ).map((d) => (
+              {(['all', ...CREATE_DOMAINS] as const).map((d) => (
                 <option key={d} value={d}>
                   {d === 'all' ? 'All domains' : DOMAIN_LABELS[d]}
                 </option>

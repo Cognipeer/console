@@ -44,6 +44,14 @@ export interface FakeState {
   emptyListPages: number;
   /** Makes downloads announce this Content-Length (`null` = none) and send these chunks instead of the blob. */
   download?: { contentLength?: number | null; chunks?: () => Iterable<Buffer> };
+  /** Every download call: the range and the condition it asked for, and the SDK retry count it was given. */
+  downloads: Array<{ offset: number; count?: number; ifMatch?: string; maxRetryRequests?: number }>;
+  /**
+   * Makes the next `times` downloads send only `afterBytes` bytes and then fail with `error` (an AbortError unless
+   * given: that is what the real SDK's body stream ends with when the connection drops). `onCut` runs just before
+   * the failure, for a test that changes the world at that moment (abort a signal, replace the blob).
+   */
+  cutDownload?: { afterBytes: number; times: number; error?: unknown; onCut?: () => void };
   etagSeq: number;
 }
 
@@ -58,6 +66,7 @@ export const state: FakeState = {
   onCall: new Map(),
   delayMs: 0,
   emptyListPages: 0,
+  downloads: [],
   etagSeq: 0,
 };
 
@@ -73,6 +82,8 @@ export function resetFake(): void {
   state.delayMs = 0;
   state.emptyListPages = 0;
   state.download = undefined;
+  state.downloads.length = 0;
+  state.cutDownload = undefined;
 }
 
 /** The error shape of a failed service call: `statusCode`, `details.errorCode`, and the body's message when there is one. */
@@ -99,6 +110,13 @@ function assertServiceAcceptsMetadata(metadata: Record<string, string> | undefin
 
 function abortError(): Error {
   return Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+}
+
+/** The first `afterBytes` of `data`, then the failure: a body that breaks off. */
+async function* cutOff(data: Buffer, afterBytes: number, error: unknown, onCut?: () => void): AsyncGenerator<Buffer> {
+  yield data.subarray(0, afterBytes);
+  onCut?.();
+  throw error;
 }
 
 async function gate(kind: string, abortSignal?: AbortSignal): Promise<void> {
@@ -178,14 +196,29 @@ class FakeContainerClient {
   getBlobClient(name: string) {
     const blobs = (): Map<string, FakeBlob> => this.blobs();
     return {
-      async download(_offset: number, _count: number | undefined, options: { abortSignal?: AbortSignal } = {}) {
+      async download(
+        offset: number,
+        count: number | undefined,
+        options: { abortSignal?: AbortSignal; maxRetryRequests?: number; conditions?: { ifMatch?: string } } = {},
+      ) {
         await gate('download', options.abortSignal);
+        state.downloads.push({ offset, count, ifMatch: options.conditions?.ifMatch, maxRetryRequests: options.maxRetryRequests });
         const blob = blobs().get(name);
         if (!blob) throw restError(404, 'BlobNotFound', 'The specified blob does not exist.');
+        if (options.conditions?.ifMatch && options.conditions.ifMatch !== blob.etag) {
+          throw restError(412, 'ConditionNotMet', 'The condition specified using HTTP conditional header(s) is not met.');
+        }
         const override = state.download;
+        const data = blob.data.subarray(offset, count === undefined ? undefined : offset + count);
+        const cut = state.cutDownload;
+        let body: Iterable<Buffer> | AsyncIterable<Buffer> = override?.chunks ? override.chunks() : [data];
+        if (cut && cut.times > 0) {
+          cut.times -= 1;
+          body = cutOff(data, cut.afterBytes, cut.error ?? abortError(), cut.onCut);
+        }
         return {
-          readableStreamBody: Readable.from(override?.chunks ? override.chunks() : [blob.data]),
-          contentLength: override && 'contentLength' in override ? override.contentLength ?? undefined : blob.data.length,
+          readableStreamBody: Readable.from(body),
+          contentLength: override && 'contentLength' in override ? override.contentLength ?? undefined : data.length,
           contentType: blob.contentType,
           etag: blob.etag,
           metadata: { ...blob.metadata },

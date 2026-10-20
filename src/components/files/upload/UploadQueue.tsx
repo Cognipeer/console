@@ -3,7 +3,7 @@
 import { ActionIcon, Button, Progress, Text, TextInput } from '@mantine/core';
 import { IconCircleCheck, IconX } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { FilesLimits } from '../filesApi';
+import type { FileLimits } from '../filesApi';
 import { FileKindIcon, formatBytes } from '../shared';
 import {
   effectiveContentType,
@@ -16,7 +16,7 @@ import styles from './UploadFilesForm.module.css';
 
 export interface UploadQueueProps {
   items: readonly QueueItem[];
-  limits: FilesLimits | undefined;
+  limits: FileLimits | undefined;
   /** The folder the next run sends to (normalised), for the key previews. */
   folder: string;
   /** A failed row may be retried now (the destination is valid and the screen may write). */

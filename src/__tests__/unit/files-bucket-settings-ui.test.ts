@@ -29,7 +29,10 @@ import {
   LIMITS,
   LOCAL_DISK,
   MIB,
+  MINUTE,
   bucketDetail,
+  deletingBucket,
+  failedDeleteBucket,
   fileRecord,
   installBucketServer,
   refusal,
@@ -73,6 +76,7 @@ vi.mock('@/components/files/detail/FileDetailDrawer', () => ({ FileDetailDrawer:
 vi.mock('@/components/files/upload/UploadFilesForm', () => ({ UploadFilesForm: (props: unknown) => stubs.upload(props) }));
 
 import BucketPage from '@/components/files/bucket/BucketPage';
+import { DELETE_STALLED_AFTER_MS } from '@/components/files/shared/jobClock';
 import { SAMPLE_FILE_KEY, buildSnippet } from '@/components/files/bucket/apiSnippets';
 import { formatBytes } from '@/components/files/shared';
 
@@ -171,8 +175,10 @@ async function submit(form: HTMLFormElement | null) {
 
 /** The code samples of the API tab (its answer examples are regions too, but have no language). */
 const samples = () => qa('pre[role="region"]').filter((pre) => /, (cURL|TypeScript|Python) sample$/.test(pre.getAttribute('aria-label') ?? ''));
-const modalOpen = (testId: string) => Boolean(q(`[data-testid="${testId}"] [role="dialog"]`));
-const modal = (testId: string) => q(`[data-testid="${testId}"]`)!;
+// The page and its danger zone each host a delete dialog: the one that is open is the one that has its content.
+const modalsOf = (testId: string) => qa(`[data-testid="${testId}"]`);
+const modalOpen = (testId: string) => modalsOf(testId).some((node) => q('[role="dialog"]', node));
+const modal = (testId: string) => modalsOf(testId).find((node) => q('[role="dialog"]', node)) ?? modalsOf(testId)[0]!;
 const toasts = () => notify.show.mock.calls.map((call) => call[0] as { color?: string; title?: string; message?: string });
 const patches = () => server.api.to('PATCH', '/api/files/buckets/docs');
 const deletes = () => server.api.to('DELETE', '/api/files/buckets/docs');
@@ -258,6 +264,24 @@ describe('Settings → General', () => {
     expect(saveButton()!.disabled).toBe(false);
   });
 
+  it('asks for a description of at most 1000 characters, and sends nothing until it fits', async () => {
+    server = installBucketServer({ records: [] });
+    await openPage();
+
+    await setInput(descriptionInput(), 'x'.repeat(1001));
+    expect(text()).toContain('The description can have at most 1000 characters.');
+    expect(saveButton()!.disabled).toBe(true);
+    await submit(descriptionInput().closest('form'));
+    expect(patches()).toHaveLength(0);
+
+    await setInput(descriptionInput(), 'x'.repeat(1000));
+    expect(text()).not.toContain('The description can have at most 1000 characters.');
+    expect(saveButton()!.disabled).toBe(false);
+    await click(saveButton());
+    await waitFor(() => patches().length === 1, 'the PATCH');
+    expect(patches()[0]!.body).toEqual({ description: 'x'.repeat(1000) });
+  });
+
   it('shows the server’s refusal under the form — with the agents it names — and keeps what was typed', async () => {
     server = installBucketServer({ records: [] });
     const reason = 'The bucket "docs" is where this agent keeps session files: Support. Choose another bucket in its Files settings.';
@@ -330,6 +354,25 @@ describe('Settings → Storage', () => {
     expect(qa('a').find((anchor) => anchor.textContent === 'Open provider')).toBeUndefined();
     expect(qa('a[href^="/dashboard/providers/"]')).toHaveLength(0);
   });
+
+  it.each(['owner', 'admin'] as const)('offers Test now to the %s', async (role) => {
+    server = installBucketServer({ records: [] });
+    await openPage({ role });
+    expect(buttonByText('Test now')).toBeTruthy();
+  });
+
+  it.each(['project_admin', 'user'] as const)(
+    'does not offer Test now to a %s: the server refuses the test unless the person is an owner or an admin',
+    async (role) => {
+      server = installBucketServer({ records: [] });
+      await openPage({ role });
+      expect(buttonByText('Test now')).toBeUndefined();
+      // The provider and its health are still there to read; only the button that asks the server to test is not.
+      expect(text()).toContain('MinIO (on-prem)');
+      expect(text()).toContain('Connected');
+      expect(server.api.to('POST', '/api/providers/prov-minio/test')).toHaveLength(0);
+    },
+  );
 
   it('tests the saved provider on demand and shows the outcome step by step', async () => {
     server = installBucketServer({ records: [] });
@@ -443,13 +486,32 @@ describe('Settings → the prefix', () => {
     await openPage();
 
     await setInput(prefixInput()!, 'team/../x');
-    expect(text()).toContain('A prefix cannot contain “.” or “..” segments.');
+    expect(text()).toContain('A prefix cannot contain “..” or use “.” as a folder name.');
     expect((buttonByText('Save prefix') as HTMLButtonElement).disabled).toBe(true);
-    await setInput(prefixInput()!, 'x'.repeat(257));
-    expect(text()).toContain('The prefix can have at most 256 characters.');
+    // Two dots are refused inside a name too, not only as a folder of their own.
+    await setInput(prefixInput()!, 'team/a..b');
+    expect(text()).toContain('A prefix cannot contain “..” or use “.” as a folder name.');
+    await setInput(prefixInput()!, 'x'.repeat(201));
+    expect(text()).toContain('The prefix can have at most 200 characters.');
+    expect((buttonByText('Save prefix') as HTMLButtonElement).disabled).toBe(true);
     await setInput(prefixInput()!, 'a\u0007b');
-    expect(text()).toContain('A prefix cannot contain control characters.');
+    expect(text()).toContain('A prefix cannot contain backslashes or control characters.');
+    await setInput(prefixInput()!, 'team\\files');
+    expect(text()).toContain('A prefix cannot contain backslashes or control characters.');
     expect(patches()).toHaveLength(0);
+  });
+
+  it('accepts a prefix of exactly the longest length the server takes, and reads a doubled slash as one', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 0, totalBytes: 0 } }) });
+    await openPage();
+
+    await setInput(prefixInput()!, `/${'x'.repeat(200)}/`);
+    expect(text()).not.toContain('The prefix can have at most 200 characters.');
+    expect((buttonByText('Save prefix') as HTMLButtonElement).disabled).toBe(false);
+    await setInput(prefixInput()!, 'team//files');
+    await click(buttonByText('Save prefix'));
+    await waitFor(() => patches().length === 1, 'the PATCH');
+    expect(patches()[0]!.body).toEqual({ prefix: 'team/files' });
   });
 
   it('shows the server’s refusal when files turned up in the meantime (prefix_locked)', async () => {
@@ -555,6 +617,13 @@ describe('Settings → Usage', () => {
 
 /* ── The danger zone and the delete dialog ───────────────────────────────── */
 
+const DELETE_DIALOG = 'delete-bucket-modal';
+const choiceInputs = () => qa<HTMLInputElement>('input[type="radio"]', modal(DELETE_DIALOG));
+const choice = (value: 'files' | 'bucketOnly') => q<HTMLInputElement>(`input[type="radio"][value="${value}"]`, modal(DELETE_DIALOG))!;
+const confirmButton = () => q<HTMLButtonElement>('[data-testid="delete-bucket-confirm"]')!;
+const dangerButton = (label = 'Delete bucket…') => buttonByText(label) as HTMLButtonElement | undefined;
+const SHARED_SENTENCE = 'Another bucket uses this storage location. Delete the bucket without its files, or remove the other bucket first.';
+
 describe('Settings → Danger zone', () => {
   it('describes what deleting this bucket takes with it', async () => {
     server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 0, totalBytes: 0 } }) });
@@ -564,12 +633,16 @@ describe('Settings → Danger zone', () => {
 
     server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 1, totalBytes: 10 } }) });
     await openPage();
-    expect(text()).toContain('Deleting this bucket also deletes its file from MinIO (on-prem). This cannot be undone.');
+    expect(text()).toContain(
+      'This bucket holds 1 file in MinIO (on-prem). When you delete the bucket you choose whether the file is deleted too. This cannot be undone.',
+    );
     await mounted!.unmount();
 
     server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 1284, totalBytes: 10 } }) });
     await openPage();
-    expect(text()).toContain('Deleting this bucket also deletes its 1,284 files from MinIO (on-prem). This cannot be undone.');
+    expect(text()).toContain(
+      'This bucket holds 1,284 files in MinIO (on-prem). When you delete the bucket you choose whether the files are deleted too. This cannot be undone.',
+    );
   });
 
   it('deletes an empty bucket after a plain question, and goes back to the list', async () => {
@@ -577,56 +650,107 @@ describe('Settings → Danger zone', () => {
     await openPage();
 
     await click(buttonByText('Delete bucket…'));
-    expect(modalOpen('delete-bucket-modal')).toBe(true);
-    expect(modal('delete-bucket-modal').textContent).toContain('Delete the bucket “Docs”?');
-    expect(modal('delete-bucket-modal').textContent).toContain('The bucket is empty, so only the bucket itself is removed.');
+    expect(modalOpen(DELETE_DIALOG)).toBe(true);
+    expect(modal(DELETE_DIALOG).textContent).toContain('Delete the bucket “Docs”?');
+    expect(modal(DELETE_DIALOG).textContent).toContain('The bucket is empty, so only the bucket itself is removed.');
     // No question about files when there are none.
-    expect(q('input[type="checkbox"]', modal('delete-bucket-modal'))).toBeNull();
+    expect(choiceInputs()).toHaveLength(0);
     expect(deletes()).toHaveLength(0);
 
-    await click(q('[data-testid="delete-bucket-confirm"]'));
+    await click(confirmButton());
     await waitFor(() => deletes().length === 1, 'the DELETE');
     expect(deletes()[0]!.query).toEqual({});
     await waitFor(() => nav.store.pushes.includes('/dashboard/files'), 'the way back to the list');
     expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Bucket “Docs” deleted' });
-    await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
   });
 
-  it('will not delete a bucket with files until the person says the files go too', async () => {
+  it('will not delete a bucket with files until the person says what happens to them', async () => {
     server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
     server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
     await openPage();
 
     await click(buttonByText('Delete bucket…'));
-    const dialog = modal('delete-bucket-modal');
-    expect(dialog.textContent).toContain('This bucket holds 3 files, stored in MinIO (on-prem). Deleting the bucket removes them from there too.');
-    const confirm = q<HTMLButtonElement>('[data-testid="delete-bucket-confirm"]')!;
-    const box = q<HTMLInputElement>('input[type="checkbox"]', dialog)!;
-    expect(box.checked).toBe(false);
-    expect(dialog.textContent).toContain('Also delete the 3 files from MinIO (on-prem)');
-    expect(confirm.disabled).toBe(true);
-    await click(confirm);
+    const dialog = modal(DELETE_DIALOG);
+    expect(dialog.textContent).toContain('This bucket holds 3 files, stored in MinIO (on-prem). Choose what happens to them.');
+    // Two answers, and neither is picked for the person.
+    expect(choiceInputs().map((input) => input.value)).toEqual(['files', 'bucketOnly']);
+    expect(choiceInputs().map((input) => input.checked)).toEqual([false, false]);
+    expect(dialog.textContent).toContain('Delete the bucket and its 3 files');
+    expect(dialog.textContent).toContain('The files are removed from MinIO (on-prem) in the background. This cannot be undone.');
+    expect(dialog.textContent).toContain('Delete the bucket only');
+    expect(dialog.textContent).toContain('The files stay in MinIO (on-prem) and keep counting toward the project’s storage.');
+    expect(confirmButton().disabled).toBe(true);
+    await click(confirmButton());
     expect(deletes()).toHaveLength(0);
 
-    await click(box);
-    expect(confirm.disabled).toBe(false);
-    await click(confirm);
+    await click(choice('files'));
+    expect(choice('files').checked).toBe(true);
+    expect(confirmButton().disabled).toBe(false);
+    await click(confirmButton());
     await waitFor(() => deletes().length === 1, 'the DELETE');
-    // The explicit choice goes to the server as the only parameter.
+    // Asking for the files to go is the one parameter that is sent.
     expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
     // Removing the files is a background job: the dialog closes, the page stays and says it started.
-    await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
     expect(toasts().at(-1)).toMatchObject({ color: 'blue', message: 'Deleting “Docs”. Its files are being removed in the background.' });
     expect(nav.store.pushes).toEqual([]);
+  });
+
+  it('deletes only the bucket when that is what the person picks, and says where the files stay', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+    await openPage();
+
+    await click(buttonByText('Delete bucket…'));
+    await click(choice('bucketOnly'));
+    expect(choice('bucketOnly').checked).toBe(true);
+    expect(choice('files').checked).toBe(false);
+    await click(confirmButton());
+
+    await waitFor(() => deletes().length === 1, 'the DELETE');
+    expect(deletes()[0]!.query).toEqual({ force: 'true' });
+    await waitFor(() => nav.store.pushes.includes('/dashboard/files'), 'the way back to the list');
+    expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Bucket “Docs” deleted. Its files stay in MinIO (on-prem).' });
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+  });
+
+  it('changes its mind with the choice: the last pick is what is sent', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+    server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+    await openPage();
+
+    await click(buttonByText('Delete bucket…'));
+    await click(choice('bucketOnly'));
+    await click(choice('files'));
+    await click(confirmButton());
+    await waitFor(() => deletes().length === 1, 'the DELETE');
+    expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
+  });
+
+  it('starts every opening without a choice made', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+    await openPage();
+
+    await click(buttonByText('Delete bucket…'));
+    await click(choice('files'));
+    await click(buttonByText('Cancel'));
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+    await click(buttonByText('Delete bucket…'));
+    await waitFor(() => modalOpen(DELETE_DIALOG), 'the dialog to open');
+    expect(choiceInputs().map((input) => input.checked)).toEqual([false, false]);
+    expect(confirmButton().disabled).toBe(true);
+    expect(deletes()).toHaveLength(0);
   });
 
   it('words the question for a single file in the singular', async () => {
     server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 1, totalBytes: 10 } }) });
     await openPage();
     await click(buttonByText('Delete bucket…'));
-    const dialog = modal('delete-bucket-modal');
-    expect(dialog.textContent).toContain('This bucket holds 1 file, stored in MinIO (on-prem).');
-    expect(dialog.textContent).toContain('Also delete the file from MinIO (on-prem)');
+    const dialog = modal(DELETE_DIALOG);
+    expect(dialog.textContent).toContain('This bucket holds 1 file, stored in MinIO (on-prem). Choose what happens to it.');
+    expect(dialog.textContent).toContain('Delete the bucket and its file');
+    expect(dialog.textContent).toContain('The file is removed from MinIO (on-prem) in the background.');
+    expect(dialog.textContent).toContain('The file stays in MinIO (on-prem) and keeps counting toward the project’s storage.');
   });
 
   it('asks again, with the choice, when the server finds files the numbers did not show', async () => {
@@ -636,16 +760,34 @@ describe('Settings → Danger zone', () => {
     await openPage();
 
     await click(buttonByText('Delete bucket…'));
-    await click(q('[data-testid="delete-bucket-confirm"]'));
-    await waitFor(() => modal('delete-bucket-modal').textContent!.includes('The bucket now contains files.'), 'the second question');
-    const box = q<HTMLInputElement>('input[type="checkbox"]', modal('delete-bucket-modal'))!;
-    expect((q('[data-testid="delete-bucket-confirm"]') as HTMLButtonElement).disabled).toBe(true);
+    await click(confirmButton());
+    await waitFor(() => modal(DELETE_DIALOG).textContent!.includes('The bucket now contains files.'), 'the second question');
+    expect(modal(DELETE_DIALOG).textContent).toContain('This bucket holds files, stored in MinIO (on-prem). Choose what happens to them.');
+    expect(modal(DELETE_DIALOG).textContent).toContain('Delete the bucket and its files');
+    expect(choiceInputs().map((input) => input.checked)).toEqual([false, false]);
+    expect(confirmButton().disabled).toBe(true);
 
-    await click(box);
-    await click(q('[data-testid="delete-bucket-confirm"]'));
+    await click(choice('files'));
+    await click(confirmButton());
     await waitFor(() => deletes().length === 2, 'the second DELETE');
     expect(deletes()[0]!.query).toEqual({});
     expect(deletes()[1]!.query).toEqual({ deleteFiles: 'true' });
+  });
+
+  it('can delete only the bucket when the server found files the numbers did not show', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 0, totalBytes: 0 } }) });
+    let answers = 0;
+    server.deleteAnswer = () => (answers++ === 0 ? refusal(409, 'The bucket is not empty.', 'bucket_not_empty') : jsonResponse({ success: true }));
+    await openPage();
+
+    await click(buttonByText('Delete bucket…'));
+    await click(confirmButton());
+    await waitFor(() => choiceInputs().length === 2, 'the choice');
+    await click(choice('bucketOnly'));
+    await click(confirmButton());
+    await waitFor(() => deletes().length === 2, 'the second DELETE');
+    expect(deletes()[1]!.query).toEqual({ force: 'true' });
+    await waitFor(() => nav.store.pushes.includes('/dashboard/files'), 'the way back to the list');
   });
 
   it('shows the failure and keeps the dialog when the server refuses', async () => {
@@ -653,56 +795,88 @@ describe('Settings → Danger zone', () => {
     server.deleteAnswer = () => refusal(500, 'The storage provider is unreachable');
     await openPage();
     await click(buttonByText('Delete bucket…'));
-    await click(q('[data-testid="delete-bucket-confirm"]'));
-    await waitFor(() => modal('delete-bucket-modal').textContent!.includes('The storage provider is unreachable'), 'the failure');
-    expect(modalOpen('delete-bucket-modal')).toBe(true);
+    await click(confirmButton());
+    await waitFor(() => modal(DELETE_DIALOG).textContent!.includes('The storage provider is unreachable'), 'the failure');
+    expect(modalOpen(DELETE_DIALOG)).toBe(true);
     expect(nav.store.pushes).toEqual([]);
     // Cancel closes it and nothing was deleted.
     await click(buttonByText('Cancel'));
-    await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+  });
+
+  it('says why a delete with the files was refused when the bucket holds files of other people’s sessions', async () => {
+    const sentence = 'This bucket holds files of sessions started by someone else, and you are not allowed to change them, so it cannot be deleted with its files.';
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+    server.deleteAnswer = () => refusal(403, sentence, 'forbidden');
+    await openPage();
+    await click(buttonByText('Delete bucket…'));
+    await click(choice('files'));
+    await click(confirmButton());
+
+    await waitFor(() => modal(DELETE_DIALOG).textContent!.includes(sentence), 'the refusal');
+    expect(modalOpen(DELETE_DIALOG)).toBe(true);
+    // The bucket can still be deleted without its files: the choice stays open.
+    expect(choice('files').checked).toBe(true);
+    await click(choice('bucketOnly'));
+    expect(confirmButton().disabled).toBe(false);
   });
 
   describe('when another bucket uses the same storage location', () => {
-    const SERVER_SENTENCE = 'Another bucket uses this storage location. Delete the bucket without its files, or remove the other bucket first.';
-
-    it('explains, in the person’s words, why the bucket cannot go with its files, and keeps the dialog', async () => {
+    it('explains, in the person’s words, why the bucket cannot go with its files, and moves the choice to the bucket only', async () => {
       server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
-      server.deleteAnswer = () => refusal(409, SERVER_SENTENCE, 'storage_location_shared');
+      server.deleteAnswer = (call) => (call.query.deleteFiles ? refusal(409, SHARED_SENTENCE, 'storage_location_shared') : jsonResponse({ success: true }));
       await openPage();
       await click(buttonByText('Delete bucket…'));
-      const dialog = modal('delete-bucket-modal');
-      await click(q('input[type="checkbox"]', dialog));
-      await click(q('[data-testid="delete-bucket-confirm"]'));
+      const dialog = modal(DELETE_DIALOG);
+      await click(choice('files'));
+      await click(confirmButton());
 
       await waitFor(() => dialog.textContent!.includes('Another bucket uses this storage location'), 'the refusal');
-      expect(dialog.textContent).toContain('so this bucket cannot be deleted together with its files. Delete the other bucket first.');
-      // The server's sentence advises an API option the dialog does not offer: it is not shown as it is.
-      expect(dialog.textContent).not.toContain('Delete the bucket without its files');
-      expect(q('[role="alert"]', dialog)).toBeTruthy();
-      expect(modalOpen('delete-bucket-modal')).toBe(true);
+      // The server's sentence, in the viewer's language, and it advises exactly what the dialog now offers.
+      expect(q('[role="alert"]', dialog)!.textContent).toBe(SHARED_SENTENCE);
+      expect(choice('bucketOnly').checked).toBe(true);
+      expect(choice('files').checked).toBe(false);
+      expect(modalOpen(DELETE_DIALOG)).toBe(true);
       expect(deletes()).toHaveLength(1);
       expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
       expect(nav.store.pushes).toEqual([]);
       expect(toasts().filter((toast) => toast.color === 'green')).toEqual([]);
     });
 
-    it('lets the person cancel, and ask again once the other bucket is gone', async () => {
+    it('lets the person delete the bucket without its files after that', async () => {
       server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
-      let answers = 0;
-      server.deleteAnswer = () => (answers++ === 0 ? refusal(409, SERVER_SENTENCE, 'storage_location_shared') : jsonResponse({ status: 'deleting' }, 202));
+      server.deleteAnswer = (call) => (call.query.deleteFiles ? refusal(409, SHARED_SENTENCE, 'storage_location_shared') : jsonResponse({ success: true }));
       await openPage();
       await click(buttonByText('Delete bucket…'));
-      await click(q('input[type="checkbox"]', modal('delete-bucket-modal')));
-      await click(q('[data-testid="delete-bucket-confirm"]'));
-      await waitFor(() => modal('delete-bucket-modal').textContent!.includes('Delete the other bucket first.'), 'the refusal');
+      await click(choice('files'));
+      await click(confirmButton());
+      await waitFor(() => modal(DELETE_DIALOG).textContent!.includes('remove the other bucket first.'), 'the refusal');
 
-      // The choice is still there, and so is the way out.
-      expect(q<HTMLInputElement>('input[type="checkbox"]', modal('delete-bucket-modal'))!.checked).toBe(true);
+      expect(confirmButton().disabled).toBe(false);
+      await click(confirmButton());
+      await waitFor(() => deletes().length === 2, 'the second DELETE');
+      expect(deletes().map((call) => call.query)).toEqual([{ deleteFiles: 'true' }, { force: 'true' }]);
+      await waitFor(() => nav.store.pushes.includes('/dashboard/files'), 'the way back to the list');
+      expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Bucket “Docs” deleted. Its files stay in MinIO (on-prem).' });
+    });
+
+    it('lets the person cancel, and ask again with the files once the other bucket is gone', async () => {
+      server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+      let answers = 0;
+      server.deleteAnswer = () => (answers++ === 0 ? refusal(409, SHARED_SENTENCE, 'storage_location_shared') : jsonResponse({ status: 'deleting' }, 202));
+      await openPage();
+      await click(buttonByText('Delete bucket…'));
+      await click(choice('files'));
+      await click(confirmButton());
+      await waitFor(() => modal(DELETE_DIALOG).textContent!.includes('remove the other bucket first.'), 'the refusal');
+
+      // The way out is there, and so is the other choice.
       expect(buttonByText('Cancel')).toBeTruthy();
-      await click(q('[data-testid="delete-bucket-confirm"]'));
+      await click(choice('files'));
+      await click(confirmButton());
       await waitFor(() => deletes().length === 2, 'the second DELETE');
       expect(deletes().map((call) => call.query)).toEqual([{ deleteFiles: 'true' }, { deleteFiles: 'true' }]);
-      await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+      await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
       expect(toasts().at(-1)).toMatchObject({ color: 'blue', message: 'Deleting “Docs”. Its files are being removed in the background.' });
     });
 
@@ -712,9 +886,9 @@ describe('Settings → Danger zone', () => {
       server.deleteAnswer = () => jsonResponse({ success: true });
       await openPage();
       await click(buttonByText('Delete bucket…'));
-      expect(q('input[type="checkbox"]', modal('delete-bucket-modal'))).toBeNull();
+      expect(choiceInputs()).toHaveLength(0);
 
-      await click(q('[data-testid="delete-bucket-confirm"]'));
+      await click(confirmButton());
 
       await waitFor(() => deletes().length === 1, 'the DELETE');
       expect(deletes()[0]!.query).toEqual({});
@@ -724,16 +898,19 @@ describe('Settings → Danger zone', () => {
 
     it('speaks Turkish', async () => {
       server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
-      server.deleteAnswer = () => refusal(409, SERVER_SENTENCE, 'storage_location_shared');
+      server.deleteAnswer = () => refusal(409, SHARED_SENTENCE, 'storage_location_shared');
       await openPage({ locale: 'tr' });
       await click(buttonByText('Bucket’ı sil…'));
-      const dialog = modal('delete-bucket-modal');
-      await click(q('input[type="checkbox"]', dialog));
+      const dialog = modal(DELETE_DIALOG);
+      await click(q('input[type="radio"][value="files"]', dialog));
       await click(q('[data-testid="delete-bucket-confirm"]'));
 
       await waitFor(() => dialog.textContent!.includes('Başka bir bucket bu depolama konumunu kullanıyor'), 'the refusal');
-      expect(dialog.textContent).toContain('dosyalarıyla birlikte silinemez. Önce diğer bucket’ı silin.');
+      expect(q('[role="alert"]', dialog)!.textContent).toBe(
+        'Başka bir bucket bu depolama konumunu kullanıyor. Bucket’ı dosyaları olmadan silin ya da önce diğer bucket’ı kaldırın.',
+      );
       expect(dialog.textContent).not.toContain('Another bucket');
+      expect(q<HTMLInputElement>('input[type="radio"][value="bucketOnly"]', dialog)!.checked).toBe(true);
     });
   });
 
@@ -759,27 +936,406 @@ describe('Settings → Danger zone', () => {
 
     await click(q('button[aria-label="More actions"]'));
     await click(qa('[role="menuitem"]').find((item) => item.textContent === 'Delete bucket…'));
-    const dialog = modal('delete-bucket-modal');
+    const dialog = modal(DELETE_DIALOG);
     expect(dialog.textContent).toContain('An agent keeps its session files in this bucket, so it cannot be deleted yet.');
     expect(q('ul[aria-label="Agents using this bucket"]', dialog)!.textContent).toContain('Support');
     expect(q('[data-testid="delete-bucket-confirm"]')).toBeNull();
+    expect(choiceInputs()).toHaveLength(0);
     expect(deletes()).toHaveLength(0);
     await click(buttonByText('Close'));
-    await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+    await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+  });
+
+  it('is open from the header menu of a bucket with files too, with the same choice', async () => {
+    server = installBucketServer({ records: [], bucket: bucketDetail({ stats: { fileCount: 3, totalBytes: 10 } }) });
+    await openPage({ tab: 'files' });
+
+    await click(q('button[aria-label="More actions"]'));
+    await click(qa('[role="menuitem"]').find((item) => item.textContent === 'Delete bucket…'));
+    expect(choiceInputs().map((input) => input.value)).toEqual(['files', 'bucketOnly']);
+    expect(confirmButton().disabled).toBe(true);
   });
 
   it('says that a delete job is running, and offers nothing while it does', async () => {
-    server = installBucketServer({ records: [], bucket: bucketDetail({ deleting: true, status: 'disabled' }) });
+    server = installBucketServer({ records: [], bucket: deletingBucket(MINUTE) });
     await openPage();
     expect(text()).toContain('This bucket is being deleted. Its files are being removed from the storage provider.');
     expect((buttonByText('Delete bucket…') as HTMLButtonElement).disabled).toBe(true);
+    // A job that has only just started is not offered again.
+    expect(buttonByText('Delete again')).toBeUndefined();
+    expect(buttonByText('Delete again…')).toBeUndefined();
+    expect(q('.detail-header')!.textContent).toContain('Deleting…');
   });
 
-  it('shows why the last attempt to delete the bucket failed', async () => {
-    server = installBucketServer({ records: [], bucket: bucketDetail({ metadata: { deleteError: 'Access denied by the provider' } }) });
-    await openPage();
-    expect(text()).toContain('The last attempt to delete this bucket failed: Access denied by the provider');
-    expect((buttonByText('Delete bucket…') as HTMLButtonElement).disabled).toBe(false);
+  describe('a delete job that was most likely lost', () => {
+    it('is told from a running one on the page: a notice with “Delete again”, and a danger zone that offers it', async () => {
+      server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+      await openPage();
+
+      expect(text()).toContain('The deletion has not finished for a while. If the server was restarted since, the background run may have been lost.');
+      expect(text()).not.toContain('Its files are being removed from the storage provider, so nothing can be changed until that finishes.');
+      expect(buttonByText('Delete again')).toBeTruthy();
+      expect(text()).toContain('The deletion has not finished for a while; the background run may have been lost. Delete again to continue where it stopped.');
+      const again = dangerButton('Delete again…')!;
+      expect(again.disabled).toBe(false);
+      expect(dangerButton()).toBeUndefined();
+      // The badge still says what the server says, and nothing else about the bucket becomes changeable.
+      expect(q('.detail-header')!.textContent).toContain('Deleting…');
+      expect(nameInput().disabled).toBe(true);
+    });
+
+    it('asks again for the files to go, from the notice, and stays on the page while the job runs', async () => {
+      server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE, { stats: { fileCount: 2, totalBytes: 10 } }) });
+      server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+      await openPage();
+
+      await click(buttonByText('Delete again'));
+      const dialog = modal(DELETE_DIALOG);
+      expect(dialog.textContent).toContain('The deletion has not finished for a while.');
+      expect(dialog.textContent).toContain('Deleting again continues where it stopped; files already removed stay removed.');
+      // The files are the question already answered: there is no choice to make.
+      expect(choiceInputs()).toHaveLength(0);
+      expect(confirmButton().textContent).toBe('Delete again');
+      expect(confirmButton().disabled).toBe(false);
+      await click(confirmButton());
+
+      await waitFor(() => deletes().length === 1, 'the DELETE');
+      expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
+      await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+      expect(toasts().at(-1)).toMatchObject({ color: 'blue', message: 'Deleting “Docs”. Its files are being removed in the background.' });
+      expect(nav.store.pushes).toEqual([]);
+    });
+
+    it('asks again from the danger zone as well', async () => {
+      server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+      server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+      await openPage();
+
+      await click(dangerButton('Delete again…'));
+      expect(modalOpen(DELETE_DIALOG)).toBe(true);
+      await click(confirmButton());
+      await waitFor(() => deletes().length === 1, 'the DELETE');
+      expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
+    });
+
+    it('is not offered again before the time has come', async () => {
+      server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS - MINUTE) });
+      await openPage();
+      expect(buttonByText('Delete again')).toBeUndefined();
+      expect(buttonByText('Delete again…')).toBeUndefined();
+      expect(qa('[role="status"]').some((notice) => notice.textContent!.includes('Its files are being removed from the storage provider'))).toBe(true);
+      expect(text()).not.toContain('The deletion has not finished for a while');
+    });
+
+    it('is offered the moment the bucket page notices that the time has come', async () => {
+      // A job asked for just under the limit ago crosses it while the page stays open.
+      vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+      try {
+        server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS - 20_000) });
+        await openPage();
+        expect(buttonByText('Delete again')).toBeUndefined();
+        await act(async () => {
+          vi.advanceTimersByTime(60_000);
+        });
+        expect(buttonByText('Delete again')).toBeTruthy();
+        expect(text()).toContain('The deletion has not finished for a while.');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not offer anyone who cannot write a deletion to run again', async () => {
+      server = installBucketServer({ level: 'read', records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+      await openPage();
+      await waitFor(() => nameInput().disabled, 'the fields to lock');
+      expect(text()).toContain('The deletion has not finished for a while.');
+      expect(buttonByText('Delete again')).toBeUndefined();
+      expect(buttonByText('Delete again…')).toBeUndefined();
+    });
+
+    describe('when another bucket uses the storage location', () => {
+      type DeleteCall = Parameters<BucketServer['deleteAnswer']>[0];
+      // As the server answers a bucket that is being deleted: the files cannot be asked for again, a plain delete is
+      // refused while the run is on, and `force` removes the bucket record (the files stay where they are).
+      const answerAsTheServerDoes = (call: DeleteCall) =>
+        call.query.force
+          ? jsonResponse({ success: true })
+          : call.query.deleteFiles
+            ? refusal(409, SHARED_SENTENCE, 'storage_location_shared')
+            : refusal(409, 'The bucket is being deleted.', 'bucket_deleting');
+
+      /** Opens the dialog of a bucket whose run looks lost and asks again, until the server refuses. */
+      const askAgainUntilRefused = async (bucket = deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE), locale = 'en') => {
+        server = installBucketServer({ records: [], bucket });
+        server.deleteAnswer = answerAsTheServerDoes;
+        await openPage({ locale });
+        await click(buttonByText(locale === 'tr' ? 'Yeniden sil' : 'Delete again'));
+        await click(confirmButton());
+        await waitFor(() => q('[role="alert"]', modal(DELETE_DIALOG)) !== null, 'the refusal');
+      };
+
+      it('says why asking again fails, and offers the way the sentence recommends: delete only the bucket', async () => {
+        server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+        server.deleteAnswer = answerAsTheServerDoes;
+        await openPage();
+        await click(buttonByText('Delete again'));
+        // Nothing to choose while the run can still be asked for: asking again is the one thing on offer.
+        expect(choiceInputs()).toHaveLength(0);
+        await click(confirmButton());
+
+        await waitFor(() => q('[role="alert"]', modal(DELETE_DIALOG)) !== null, 'the refusal');
+        expect(q('[role="alert"]', modal(DELETE_DIALOG))!.textContent).toBe(SHARED_SENTENCE);
+        expect(modalOpen(DELETE_DIALOG)).toBe(true);
+        // The sentence advises deleting the bucket without its files: that is offered now, and picked.
+        expect(choiceInputs().map((input) => input.value)).toEqual(['files', 'bucketOnly']);
+        expect(choice('bucketOnly').checked).toBe(true);
+        expect(choice('files').checked).toBe(false);
+        const dialog = modal(DELETE_DIALOG);
+        expect(dialog.textContent).toContain('Delete the bucket only');
+        expect(dialog.textContent).toContain('The files stay in MinIO (on-prem) and keep counting toward the project’s storage.');
+        expect(confirmButton().textContent).toBe('Delete bucket');
+        expect(confirmButton().disabled).toBe(false);
+        expect(deletes()).toHaveLength(1);
+        expect(nav.store.pushes).toEqual([]);
+      });
+
+      it('deletes only the bucket then: the files stay, and the person is told where', async () => {
+        await askAgainUntilRefused();
+
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        // The request the server lets past a bucket that is being deleted.
+        expect(deletes().map((call) => call.query)).toEqual([{ deleteFiles: 'true' }, { force: 'true' }]);
+        await waitFor(() => nav.store.pushes.includes('/dashboard/files'), 'the way back to the list');
+        expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Bucket “Docs” deleted. Its files stay in MinIO (on-prem).' });
+        await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+      });
+
+      it('can still ask again with the files once the other bucket is gone', async () => {
+        await askAgainUntilRefused();
+        let answers = 0;
+        server.deleteAnswer = (call) => (answers++ === 0 ? jsonResponse({ status: 'deleting' }, 202) : answerAsTheServerDoes(call));
+
+        await click(choice('files'));
+        expect(confirmButton().textContent).toBe('Delete again');
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        expect(deletes().map((call) => call.query)).toEqual([{ deleteFiles: 'true' }, { deleteFiles: 'true' }]);
+        await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+        expect(toasts().at(-1)).toMatchObject({ color: 'blue', message: 'Deleting “Docs”. Its files are being removed in the background.' });
+        expect(nav.store.pushes).toEqual([]);
+      });
+
+      it('moves the choice back to the bucket only when asking again with the files is refused once more', async () => {
+        await askAgainUntilRefused();
+
+        await click(choice('files'));
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        await waitFor(() => choice('bucketOnly').checked, 'the choice to move');
+        expect(choice('files').checked).toBe(false);
+        expect(modalOpen(DELETE_DIALOG)).toBe(true);
+      });
+
+      it('keeps the dialog and the choice when deleting only the bucket fails', async () => {
+        await askAgainUntilRefused();
+        server.deleteAnswer = () => refusal(500, 'The bucket could not be deleted');
+
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        await waitFor(() => modal(DELETE_DIALOG).textContent!.includes('The bucket could not be deleted'), 'the failure');
+        expect(deletes()[1]!.query).toEqual({ force: 'true' });
+        expect(choice('bucketOnly').checked).toBe(true);
+        expect(modalOpen(DELETE_DIALOG)).toBe(true);
+        expect(nav.store.pushes).toEqual([]);
+      });
+
+      it('offers nothing of the kind for a refusal that has another reason', async () => {
+        server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+        server.deleteAnswer = () => refusal(503, 'The queue is not available.', 'queue_unavailable');
+        await openPage();
+        await click(buttonByText('Delete again'));
+        await click(confirmButton());
+
+        await waitFor(() => q('[role="alert"]', modal(DELETE_DIALOG)) !== null, 'the refusal');
+        expect(choiceInputs()).toHaveLength(0);
+        expect(confirmButton().textContent).toBe('Delete again');
+        expect(confirmButton().disabled).toBe(false);
+      });
+
+      it('starts every opening without it: the bucket only goes once the server has refused again', async () => {
+        await askAgainUntilRefused();
+        expect(choiceInputs()).toHaveLength(2);
+
+        await click(buttonByText('Close', modal(DELETE_DIALOG)));
+        await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+        await click(buttonByText('Delete again'));
+        await waitFor(() => modalOpen(DELETE_DIALOG), 'the dialog to open');
+        expect(choiceInputs()).toHaveLength(0);
+        expect(q('[role="alert"]', modal(DELETE_DIALOG))).toBeNull();
+        expect(confirmButton().textContent).toBe('Delete again');
+        expect(deletes()).toHaveLength(1);
+      });
+
+      it('asks the same when the numbers show no files left, since the run cannot be asked for either', async () => {
+        await askAgainUntilRefused(deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE, { stats: { fileCount: 0, totalBytes: 0 } }));
+
+        expect(choiceInputs().map((input) => input.value)).toEqual(['files', 'bucketOnly']);
+        expect(choice('bucketOnly').checked).toBe(true);
+        expect(modal(DELETE_DIALOG).textContent).toContain('Delete the bucket and its files');
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        expect(deletes()[1]!.query).toEqual({ force: 'true' });
+      });
+
+      it('is offered from the danger zone as well', async () => {
+        server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+        server.deleteAnswer = answerAsTheServerDoes;
+        await openPage();
+        await click(dangerButton('Delete again…'));
+        await click(confirmButton());
+        await waitFor(() => q('[role="alert"]', modal(DELETE_DIALOG)) !== null, 'the refusal');
+
+        expect(choiceInputs().map((input) => input.value)).toEqual(['files', 'bucketOnly']);
+        await click(confirmButton());
+        await waitFor(() => deletes().length === 2, 'the second DELETE');
+        expect(deletes()[1]!.query).toEqual({ force: 'true' });
+      });
+
+      it('speaks Turkish', async () => {
+        await askAgainUntilRefused(deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE), 'tr');
+
+        const dialog = modal(DELETE_DIALOG);
+        expect(q('[role="alert"]', dialog)!.textContent).toBe(
+          'Başka bir bucket bu depolama konumunu kullanıyor. Bucket’ı dosyaları olmadan silin ya da önce diğer bucket’ı kaldırın.',
+        );
+        expect(dialog.textContent).toContain('Yalnızca bucket’ı sil');
+        expect(dialog.textContent).toContain('Dosyalar MinIO (on-prem) üzerinde kalır ve projenin depolama kullanımına saymaya devam eder.');
+        expect(q<HTMLInputElement>('input[type="radio"][value="bucketOnly"]', dialog)!.checked).toBe(true);
+        expect(confirmButton().textContent).toBe('Bucket’ı sil');
+        expect(dialog.textContent).not.toContain('Delete the bucket only');
+      });
+    });
+
+    it('speaks Turkish', async () => {
+      server = installBucketServer({ records: [], bucket: deletingBucket(DELETE_STALLED_AFTER_MS + MINUTE) });
+      await openPage({ locale: 'tr' });
+      expect(text()).toContain('Silme bir süredir tamamlanmadı.');
+      expect(buttonByText('Yeniden sil')).toBeTruthy();
+      expect(buttonByText('Yeniden sil…')).toBeTruthy();
+    });
+  });
+
+  describe('a delete that stopped with an error', () => {
+    const REASON = 'Access denied by the provider';
+
+    it('shows why on the page, with a way to try again or to keep the bucket', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON) });
+      await openPage();
+
+      expect(text()).toContain('Deleting this bucket did not finish');
+      expect(q('[role="alert"]')!.textContent).toContain(REASON);
+      expect(text()).toContain('Files that were already removed stay removed. Try again once the cause is fixed, or keep the bucket.');
+      expect(q('.detail-header')!.textContent).toContain('Deletion failed');
+      expect(q(`button[aria-label="Deletion failed: ${REASON}"]`)).toBeTruthy();
+      expect(buttonByText('Try again')).toBeTruthy();
+      expect(buttonByText('Keep the bucket')).toBeTruthy();
+      // The danger zone says it too, and offers the deletion again.
+      expect(text()).toContain(`The last attempt to delete this bucket failed: ${REASON}`);
+      expect(dangerButton('Delete again…')!.disabled).toBe(false);
+      expect(dangerButton()).toBeUndefined();
+    });
+
+    it('reads the reason the bucket carries in its metadata, as an answer to an update does', async () => {
+      server = installBucketServer({ records: [], bucket: bucketDetail({ metadata: { deleteError: REASON } }) });
+      await openPage();
+      expect(text()).toContain(`The last attempt to delete this bucket failed: ${REASON}`);
+      expect(text()).toContain('Deleting this bucket did not finish');
+      expect(dangerButton('Delete again…')!.disabled).toBe(false);
+    });
+
+    it('asks the question again, with the reason, when “Try again” is pressed', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON, { stats: { fileCount: 3, totalBytes: 10 } }) });
+      server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+      await openPage();
+
+      await click(buttonByText('Try again'));
+      const dialog = modal(DELETE_DIALOG);
+      expect(dialog.textContent).toContain(`The last attempt to delete this bucket with its files stopped: ${REASON}`);
+      expect(dialog.textContent).toContain('Files that were already removed stay removed.');
+      // The files are still there to be decided about: nothing is picked for the person, as the first time.
+      expect(choiceInputs().map((input) => input.checked)).toEqual([false, false]);
+      expect(confirmButton().disabled).toBe(true);
+      await click(choice('files'));
+      await click(confirmButton());
+      await waitFor(() => deletes().length === 1, 'the DELETE');
+      expect(deletes()[0]!.query).toEqual({ deleteFiles: 'true' });
+      await waitFor(() => !modalOpen(DELETE_DIALOG), 'the dialog to close');
+    });
+
+    it('can still delete only the bucket after a failure', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON, { stats: { fileCount: 3, totalBytes: 10 } }) });
+      await openPage();
+      await click(dangerButton('Delete again…'));
+      await click(choice('bucketOnly'));
+      await click(confirmButton());
+      await waitFor(() => deletes().length === 1, 'the DELETE');
+      expect(deletes()[0]!.query).toEqual({ force: 'true' });
+    });
+
+    it('keeps the bucket when asked to: it is switched on, and the failure is forgotten', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON) });
+      await openPage();
+
+      await click(buttonByText('Keep the bucket'));
+      await waitFor(() => patches().length === 1, 'the PATCH');
+      expect(patches()[0]!.body).toEqual({ status: 'active' });
+      await waitFor(() => toasts().length > 0, 'a notification');
+      expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Docs is kept and switched on again.' });
+      await waitFor(() => !text().includes('Deleting this bucket did not finish'), 'the notice to go');
+      expect(q('.detail-header')!.textContent).toContain('Active');
+      expect(q('.detail-header')!.textContent).not.toContain('Deletion failed');
+      expect(text()).not.toContain('The last attempt to delete this bucket failed');
+      expect(dangerButton()!.disabled).toBe(false);
+    });
+
+    it('says why keeping it failed, and leaves the notice where it is', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON) });
+      server.fail.patch = refusal(409, 'This bucket is being deleted.', 'bucket_deleting');
+      await openPage();
+
+      await click(buttonByText('Keep the bucket'));
+      await waitFor(() => toasts().some((toast) => toast.color === 'red'), 'the failure');
+      expect(toasts().find((toast) => toast.color === 'red')!.message).toBe('This bucket is being deleted, so it cannot be changed.');
+      expect(text()).toContain('Deleting this bucket did not finish');
+    });
+
+    it('shows a person who can only read the reason, and no way to act on it', async () => {
+      server = installBucketServer({ level: 'read', records: [], bucket: failedDeleteBucket(REASON) });
+      await openPage();
+      await waitFor(() => nameInput().disabled, 'the fields to lock');
+      expect(q('[role="alert"]')!.textContent).toContain(REASON);
+      expect(buttonByText('Try again')).toBeUndefined();
+      expect(buttonByText('Keep the bucket')).toBeUndefined();
+    });
+
+    it('does not show the failure of a run that has been asked for again', async () => {
+      // The server clears `deleteError` when it marks the bucket again; a stale copy never hides the running notice.
+      server = installBucketServer({ records: [], bucket: deletingBucket(MINUTE, { deleteError: REASON, metadata: { deleteError: REASON } }) });
+      await openPage();
+      expect(text()).not.toContain('Deleting this bucket did not finish');
+      expect(text()).not.toContain('The last attempt to delete this bucket failed');
+      expect(q('.detail-header')!.textContent).toContain('Deleting…');
+    });
+
+    it('speaks Turkish', async () => {
+      server = installBucketServer({ records: [], bucket: failedDeleteBucket(REASON) });
+      await openPage({ locale: 'tr' });
+      expect(text()).toContain('Bu bucket’ın silinmesi tamamlanmadı');
+      expect(q('.detail-header')!.textContent).toContain('Silme başarısız');
+      expect(buttonByText('Yeniden dene')).toBeTruthy();
+      expect(buttonByText('Bucket’ı tut')).toBeTruthy();
+    });
   });
 });
 
@@ -1009,14 +1565,36 @@ describe('Import from storage', () => {
       await click(q('[data-testid="import-start"]'));
 
       await waitFor(() => modal('import-modal').textContent!.includes('The import stopped with an error'), 'the failure');
-      expect(modal('import-modal').textContent).toContain('Another bucket uses this storage location, so the objects in it cannot be imported.');
+      expect(q('[role="alert"]', modal('import-modal'))!.textContent).toContain(
+        'Another bucket uses this storage location, so objects in it cannot be imported.',
+      );
       expect(modal('import-modal').textContent).not.toContain('Something went wrong');
       expect(counts()).toEqual({ Scanned: '0', Imported: '0', Skipped: '0' });
       expect(importCalls()).toHaveLength(1);
-      expect(q('[role="alert"]', modal('import-modal'))).toBeTruthy();
+      // Asking again would answer the same until the other bucket is gone: the dialog offers to close, not to retry.
+      expect(q('[data-testid="import-resume"]')).toBeNull();
       // The person can leave, and nothing else was touched.
       await click(q('[data-testid="import-close"]'));
       await waitFor(() => !modalOpen('import-modal'), 'the dialog to close');
+    });
+
+    it('stops short of the objects it had already read, and says how far it got', async () => {
+      server = installBucketServer({ records: [] });
+      let calls = 0;
+      server.api.on('POST', /\/import$/, () => {
+        calls += 1;
+        return calls === 1
+          ? { scanned: 200, imported: 120, skipped: 80, nextCursor: 'c1' }
+          : refusal(409, 'Another bucket uses this storage location, so objects in it cannot be imported.', 'storage_location_shared');
+      });
+      await openPage({ tab: 'files' });
+      await openImport();
+      await click(q('[data-testid="import-start"]'));
+
+      await waitFor(() => modal('import-modal').textContent!.includes('The import stopped with an error'), 'the failure');
+      expect(counts()).toEqual({ Scanned: '200', Imported: '120', Skipped: '80' });
+      expect(q('[data-testid="import-resume"]')).toBeNull();
+      expect(q('[role="alert"]', modal('import-modal'))!.textContent).toContain('Another bucket uses this storage location');
     });
 
     it('speaks Turkish', async () => {

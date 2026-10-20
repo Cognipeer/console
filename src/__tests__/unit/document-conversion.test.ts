@@ -179,18 +179,29 @@ describe('the PowerPoint reader\'s working file', () => {
   });
 
   it('leaves another file alone: one with other bytes, or another name', async () => {
-    // A name inside the window of the read (it lasts a few milliseconds), but not the one the read writes.
-    const other = path.join(directory, `temp_pptx_${Date.now() + 3}.zip`);
-    writeFileSync(other, 'a different document, being read by someone else');
+    const neighbour = 'a different document, being read by someone else';
+    let other = '';
+    // The other file is written from inside the read, one millisecond after the read's own file: a name inside the
+    // window of the read (it lasts a dozen milliseconds), and never the one the read writes, whatever the clock does.
+    hoisted.convert.mockImplementation(async (document: Buffer) => {
+      const stamp = Date.now();
+      writeFileSync(path.join(directory, `temp_pptx_${stamp}.zip`), document);
+      other = path.join(directory, `temp_pptx_${stamp + 1}.zip`);
+      writeFileSync(other, neighbour);
+      await new Promise((resolve) => setTimeout(resolve, 12));
+      throw new Error('Failed to convert PPTX: Unclosed root tag');
+    });
     writeFileSync(path.join(directory, 'temp_pptx_notanumber.zip'), 'x');
     writeFileSync(path.join(directory, 'keep.zip'), 'x');
     mkdirSync(path.join(directory, `temp_pptx_${Date.now()}.zip.d`));
-    hoisted.convert.mockImplementation(libraryThatWritesItsWorkingFile('fails'));
 
     await expect(convertDocumentToMarkdown(documentOf(500), 'bad.pptx', { workingDirectory: directory })).rejects.toThrow();
 
-    expect(readFileSync(other, 'utf8')).toBe('a different document, being read by someone else');
+    expect(other).not.toBe('');
+    expect(readFileSync(other, 'utf8')).toBe(neighbour);
     expect(readdirSync(directory)).toEqual(expect.arrayContaining(['keep.zip', 'temp_pptx_notanumber.zip', path.basename(other)]));
+    // The read's own file is the one that went.
+    expect(workingFiles()).toEqual([path.basename(other)]);
   });
 
   it('is not shared: two presentations are read one after the other', async () => {

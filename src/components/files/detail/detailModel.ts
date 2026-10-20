@@ -41,13 +41,12 @@ export function baseNameOfKey(key: string): string {
 export type FileOrigin = 'upload' | 'agent_output' | 'import';
 
 /**
- * Where the file came from. A record that names no origin was uploaded. The record type lists `agent_output`
- * only; `import` (a file registered from the provider) arrives as a plain string, so the value is read loosely.
+ * Where the file came from: `agent_output` (an agent wrote it to its sandbox), `import` (an object that was already
+ * in the provider and was registered as a file afterwards). A record that names no origin, or one this screen does
+ * not know yet, counts as an upload.
  */
 export function originOf(record: { origin?: string | null }): FileOrigin {
-  if (record.origin === 'agent_output') return 'agent_output';
-  if (record.origin === 'import') return 'import';
-  return 'upload';
+  return record.origin === 'agent_output' || record.origin === 'import' ? record.origin : 'upload';
 }
 
 export type ChecksumKind = 'sha256' | 'other';

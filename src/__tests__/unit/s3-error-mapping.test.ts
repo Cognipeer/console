@@ -10,7 +10,7 @@ import net from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { ProviderSettingsError } from '@/lib/providers/errors';
-import { describeS3Error, isS3OperationError, S3_ERROR_MESSAGE_MAX_CHARS, S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
+import { describeS3Error, invalidKeyError, isS3OperationError, S3_ERROR_MESSAGE_MAX_CHARS, S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
 import { createS3FileRuntime, type S3FileRuntime } from '@/lib/providers/contracts/s3/s3FileRuntime';
 import type { S3CompatibleSettings } from '@/lib/providers/contracts/s3/s3Helpers';
 import { OutboundDnsError, OutboundNetworkError } from '@/lib/security/outboundFetch';
@@ -106,6 +106,8 @@ const STORE_CASES: StoreCase[] = [
   { name: 'AuthorizationHeaderMalformed worded the Garage way', response: s3Error(400, 'AuthorizationHeaderMalformed', 'Authorization header malformed, unexpected scope: 20240101/us-east-1/s3/aws4_request'), run: list, code: 'wrong_region', retryable: false, status: 400, message: /Check the Region field/ },
   { name: 'InvalidBucketName', response: s3Error(400, 'InvalidBucketName', 'The specified bucket is not valid.'), run: upload, code: 'invalid_bucket_name', retryable: false, status: 400, message: /"bkt3" is not a valid bucket name/ },
   { name: 'RequestTimeTooSkewed', response: s3Error(403, 'RequestTimeTooSkewed', 'The difference between the request time and the current time is too large.'), run: list, code: 'clock_skew', retryable: false, status: 403, message: /15 minutes/ },
+  { name: 'KeyTooLongError', response: s3Error(400, 'KeyTooLongError', 'Your key is too long'), run: upload, code: 'invalid_key', retryable: false, status: 400, message: /^Invalid file key provided: it is longer than the store allows/, requests: 1 },
+  { name: 'XMinioInvalidObjectName', response: s3Error(400, 'XMinioInvalidObjectName', 'Object name contains unsupported characters.'), run: upload, code: 'invalid_key', retryable: false, status: 400, message: /^Invalid file key provided: Object name contains unsupported characters\.$/, requests: 1 },
   { name: 'MetadataTooLarge', response: s3Error(400, 'MetadataTooLarge', 'Your metadata headers exceed the maximum allowed metadata size.'), run: upload, code: 'metadata_too_large', retryable: false, status: 400 },
   { name: 'EntityTooLarge', response: s3Error(400, 'EntityTooLarge', 'Your proposed upload exceeds the maximum allowed size'), run: upload, code: 'object_too_large', retryable: false, status: 400 },
   { name: 'NotImplemented', response: s3Error(501, 'NotImplemented', 'A header you provided implies functionality that is not implemented'), run: upload, code: 'not_implemented', retryable: false, status: 501, message: /does not implement a feature/, requests: 1 },
@@ -224,6 +226,9 @@ describe('S3 errors from a store', () => {
     const error = await failureOf(() => denied.getFileMetadata('absent.txt'));
     expect(error.code).toBe('access_denied');
     expect(error.statusCode).toBe(403);
+    // a HEAD answer has no body to say why, so the message names both causes instead of blaming the permission alone
+    expect(error.message).toMatch(/gave no reason: the secret access key may be wrong, or the credentials may lack permission/);
+    expectSafeMessage(error);
   });
 });
 
@@ -293,6 +298,13 @@ describe('describeS3Error on Node-level and synthetic errors', () => {
     expect(mapped.retryable).toBe(retryable);
     expectSafeMessage(mapped);
     expect(mapped.message).toMatch(/\S/);
+  });
+
+  it('a URIError (a value the SDK cannot put into a URL) is a refused request, not a store failure to retry', () => {
+    const mapped = describeS3Error(new URIError('URI malformed'), ctx);
+    expect(mapped).toMatchObject({ code: 'invalid_request', retryable: false });
+    expect(mapped.message).toMatch(/cannot be sent in a URL/);
+    expectSafeMessage(mapped);
   });
 
   it('tells a TLS port from a plain one, and a TLS handshake that failed for another reason', () => {
@@ -391,6 +403,13 @@ describe('S3OperationError', () => {
   it('rewrites the wording the file routes read as "no such file" unless it is the missing-object message', () => {
     expect(new S3OperationError({ code: 'object_missing', message: 'The object does not exist.', retryable: false }).message).toBe('The object does not exist.');
     expect(new S3OperationError({ code: 'unknown', message: 'Resource not found and it does not exist', retryable: false }).message).toBe('Resource missing and it is missing');
+  });
+
+  it('invalidKeyError uses the text of the other drivers and a verdict that stops retries and breaker counts', () => {
+    const plain = invalidKeyError();
+    expect(plain).toMatchObject({ name: 'S3OperationError', code: 'invalid_key', statusCode: 400, retryable: false, message: 'Invalid file key provided.' });
+    expect(invalidKeyError('too long').message).toBe('Invalid file key provided: too long');
+    expect(isS3OperationError(plain)).toBe(true);
   });
 
   it('cuts a message that is too long', () => {

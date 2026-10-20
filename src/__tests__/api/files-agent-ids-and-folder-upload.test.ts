@@ -41,6 +41,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 vi.mock('@/lib/services/files', async () => {
   const actual = await vi.importActual<typeof import('@/lib/services/files/fileService')>('@/lib/services/files/fileService');
   return {
+    chooseRelativeFileKey: actual.chooseRelativeFileKey,
     composeUploadKeyHint: actual.composeUploadKeyHint,
     createFileBucket: vi.fn(),
     createFileProvider: vi.fn(),
@@ -81,7 +82,7 @@ beforeEach(async () => {
   mockFn(requireProjectContextForRequest).mockResolvedValue(CTX);
   mockFn(getFileBucket).mockResolvedValue({ id: 'b1', key: 'docs', status: 'active', providerKey: 'disk' });
   findAgentByKey = vi.fn(async (key: string) => (key === 'support' ? { _id: 'agent-77', key } : null));
-  mockFn(getDatabase).mockResolvedValue(createMockDb({ switchToTenant: vi.fn(), findAgentByKey, countFileRecords: vi.fn(async () => 0), sumFileRecordBytes: vi.fn(async () => 0) } as never));
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ switchToTenant: vi.fn(), findAgentByKey, countFileRecords: vi.fn(async () => 0), sumFileRecordBytes: vi.fn(async () => 0), listFileRecordsByKeys: vi.fn(async () => []) } as never));
   app = await createFastifyApiTestApp(filesApiPlugin);
 });
 

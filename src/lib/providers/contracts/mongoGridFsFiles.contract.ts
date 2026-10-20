@@ -20,7 +20,8 @@ import {
 } from '@/lib/services/providers/providerEndpointGuard';
 import { ProviderSettingsError } from '../errors';
 import type { ProviderContract } from '../types';
-import { maxStorageDownloadBytes, StorageObjectTooLargeError } from './storageLimits';
+import { resolveDownloadCeiling } from './downloadCeiling';
+import { hasLoneSurrogate, StorageInvalidKeyError, StorageObjectTooLargeError } from './storageLimits';
 import type {
   FileObjectHandle,
   FileProviderRuntime,
@@ -66,6 +67,9 @@ function refusesLiteralMember(address: string, guard: OutboundGuardOptions | und
   return isIP(host) !== 0 && privateNetworkBlockApplies(host, guard) && guardRefusesAddress(host, guard);
 }
 
+/** The fields of a server's answer to the driver's heartbeat that name the other members of its replica set. */
+const ANNOUNCED_MEMBER_FIELDS = ['hosts', 'passives', 'arbiters'] as const;
+
 /**
  * `guarded`: the URI was typed into the provider form, so the client's connections follow the deployment's
  * network policy (see `assertUriAllowed`), with the private networks opened for `tenantId`. The app's own
@@ -84,16 +88,41 @@ function getClient(uri: string, tenantId: string | undefined, guarded: boolean):
     const forget = () => {
       if (clients.get(key) === pending) clients.delete(key);
     };
+    // A client that met a member it may not dial cannot be trusted: it is not kept, and closing it ends the attempt.
+    const refuse = (address: string) => {
+      if (refused) return;
+      refused = address;
+      forget();
+      logger.warn('MongoDB server announced a host this deployment does not allow; connection closed', { address });
+      process.nextTick(() => { client.close().catch(() => undefined); });
+    };
     if (guarded) {
-      // A literal address skips that lookup, and the servers announce members the URI never named. The event comes
-      // before the driver starts connecting to the member; closing the client cancels that connection before the
-      // handshake is sent, and a client that cannot be trusted is not kept.
+      // A literal address skips that lookup, and the servers announce members the URI never named. A member is
+      // announced in a server's answer to the heartbeat, and the driver reads that answer into its list of servers
+      // right after this event has been delivered: the members this deployment does not allow are taken out of the
+      // answer here, in place, so the driver never opens a socket to one.
+      client.on('serverHeartbeatSucceeded', ({ reply }) => {
+        try {
+          for (const field of ANNOUNCED_MEMBER_FIELDS) {
+            const members: unknown = reply?.[field];
+            if (!Array.isArray(members)) continue;
+            for (let index = members.length - 1; index >= 0; index -= 1) {
+              const address: unknown = members[index];
+              if (typeof address !== 'string' || !refusesLiteralMember(address, guard)) continue;
+              members.splice(index, 1);
+              refuse(address);
+            }
+          }
+        } catch {
+          // The check above is the first line; the one below still holds if this one could not run.
+          logger.warn('The members a MongoDB server announced could not be checked');
+        }
+      });
+      // The second line, for a member that reaches the driver another way than a heartbeat answer. The event comes
+      // after the driver has begun connecting to the member, so a TCP connection may be opened and dropped here, but
+      // closing the client cancels the handshake: nothing is sent to the member.
       client.on('serverOpening', ({ address }) => {
-        if (refused || !refusesLiteralMember(address, guard)) return;
-        refused = address;
-        forget();
-        logger.warn('MongoDB server announced a host this deployment does not allow; connection closed', { address });
-        process.nextTick(() => { client.close().catch(() => undefined); });
+        if (refusesLiteralMember(address, guard)) refuse(address);
       });
     }
     const notAllowed = () => new ProviderEndpointError('uri', 'the database announced a host that is not allowed on this deployment');
@@ -122,6 +151,51 @@ async function assertHostAllowed(host: string, scope: ProviderEndpointScope): Pr
 }
 
 /**
+ * Sign-in methods whose credentials are the ones written in the URI. Every other method makes the driver sign in as
+ * the machine the console runs on (a cloud role or workload identity, a Kerberos ticket, the client certificate the
+ * server holds): an identity of the deployment, not of whoever typed the URI.
+ */
+const URI_CREDENTIAL_MECHANISMS: ReadonlySet<string> = new Set(['DEFAULT', 'SCRAM-SHA-1', 'SCRAM-SHA-256', 'PLAIN']);
+
+/** What a person is told when a sign-in method is refused: the method (a fixed name of the driver, never part of the URI) and what to use instead. */
+const SERVER_IDENTITY_REASON = 'uses the server\'s own identity and is available on self-hosted deployments only. Use a user name and password in the connection URI.';
+
+/** The user name and password the URI itself holds, split the way the driver's connection string parser splits them. */
+const URI_USERINFO = /^[^/]+:\/\/(?:([^:@]*)(?::([^@]*))?@)?/;
+
+/**
+ * The sign-in method of a URI must take its credentials from the URI: DEFAULT, SCRAM-SHA-1, SCRAM-SHA-256 and PLAIN
+ * do, and MONGODB-AWS does when the URI holds both the access key and the secret. MONGODB-OIDC, GSSAPI, MONGODB-X509,
+ * and the `ENVIRONMENT` and `TOKEN_RESOURCE` properties make the driver use the identity of the server instead.
+ *
+ * MONGODB-AWS is judged on the text of the URI, not on the credentials the driver built from it: the driver fills a
+ * missing access key or secret in from the AWS variables of its own process.
+ */
+function assertCredentialsFromUri(uri: string, options: MongoClient['options']): void {
+  const credentials = options.credentials;
+  if (!credentials) return;
+  const refuse = (subject: string) => new ProviderSettingsError('uri', `${subject} ${SERVER_IDENTITY_REASON}`);
+
+  const mechanism: string = credentials.mechanism;
+  if (mechanism === 'MONGODB-AWS') {
+    const [, accessKey, secret] = URI_USERINFO.exec(uri) ?? [];
+    if (!accessKey || !secret) {
+      throw new ProviderSettingsError(
+        'uri',
+        'Authentication method MONGODB-AWS needs the access key and the secret in the connection URI: without them it uses the server\'s own identity, which is available on self-hosted deployments only.',
+      );
+    }
+  } else if (!URI_CREDENTIAL_MECHANISMS.has(mechanism)) {
+    throw refuse(`Authentication method ${mechanism}`);
+  }
+
+  // These name where the server's own identity is read from, whatever the method
+  const { ENVIRONMENT, TOKEN_RESOURCE } = credentials.mechanismProperties;
+  if (ENVIRONMENT !== undefined) throw refuse('The authentication property ENVIRONMENT');
+  if (TOKEN_RESOURCE !== undefined) throw refuse('The authentication property TOKEN_RESOURCE');
+}
+
+/**
  * A connection URI someone typed in is held to the same network policy as a storage endpoint: every host the
  * driver would dial (the seed list, a proxy) is vetted, and a form the policy cannot check - a local socket - is
  * refused while private targets are blocked. A `mongodb+srv` URI is vetted through its SRV record: the record the
@@ -129,7 +203,12 @@ async function assertHostAllowed(host: string, scope: ProviderEndpointScope): Pr
  * driver's own parser reads the URI, so the hosts vetted are the hosts dialled; creating a client connects to
  * nothing. A private host passes only inside a network opened for `tenantId`.
  *
- * Certificate files named in the URI are read from the server's disk, which only a self-hosted install offers.
+ * Certificate files named in the URI (the CA bundle, the client certificate and key, the revocation list) are read from
+ * the server's disk, which only a self-hosted install offers. Where the deployment blocks private targets (SaaS, or a
+ * self-hosted install that turns the block on) the sign-in method must take its credentials from the URI (see
+ * `assertCredentialsFromUri`). Turning certificate verification off with the URI options (`tlsInsecure`,
+ * `tlsAllowInvalidCertificates`, `tlsAllowInvalidHostnames`) is the provider's own choice on every deployment, as it is
+ * for the storage endpoints; the hosts it dials are held to the network policy either way.
  * An error from the driver's parser is not passed on: it can quote part of the URI, and the URI holds a password.
  */
 async function assertUriAllowed(uri: string, isOnPrem: boolean, tenantId: string | undefined): Promise<void> {
@@ -140,11 +219,12 @@ async function assertUriAllowed(uri: string, isOnPrem: boolean, tenantId: string
     throw new ProviderSettingsError('uri', 'Connection URI is not a valid MongoDB connection string.');
   }
 
-  if (!isOnPrem && (options.tlsCAFile || options.tlsCertificateKeyFile)) {
-    throw new ProviderSettingsError('uri', 'Certificate files in the connection URI are only available on self-hosted deployments.');
+  if (!isOnPrem && (options.tlsCAFile || options.tlsCertificateKeyFile || options.tlsCRLFile)) {
+    throw new ProviderSettingsError('uri', 'Certificate files (tlsCAFile, tlsCertificateKeyFile, tlsCRLFile) in the connection URI are only available on self-hosted deployments.');
   }
   const scope = { tenantId };
   const refuseUnvettable = refusesUnvettableEndpoints(scope);
+  if (!isOnPrem || refuseUnvettable) assertCredentialsFromUri(uri, options);
   if (options.srvHost) await assertSrvTargetsAllowed('uri', options.srvHost, scope, options.srvServiceName);
   for (const address of options.hosts) {
     if (address.socketPath) {
@@ -174,7 +254,11 @@ function sanitizeKey(rawKey: string): string {
   const normalized = rawKey.replace(/\\/g, '/').replace(/\.{2,}/g, '.');
   const trimmed = normalized.replace(/^\/+/, '').replace(/\/+$/, '');
   if (!trimmed || trimmed.includes('..')) {
-    throw new Error('Invalid file key provided.');
+    throw new StorageInvalidKeyError();
+  }
+  // Written to a path (or a file name), a lone surrogate turns into U+FFFD: two different keys would be one file.
+  if (hasLoneSurrogate(trimmed)) {
+    throw new StorageInvalidKeyError('it holds a character that has no UTF-8 form (a lone surrogate).');
   }
   return trimmed;
 }
@@ -183,7 +267,8 @@ function generateKey(fileName?: string): string {
   if (!fileName) return `${Date.now()}-${randomUUID()}`;
   const extension = path.extname(fileName);
   const baseName = fileName.slice(0, fileName.length - extension.length);
-  const slug = (baseName || 'file').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
+  // A dash left at either end of the stem is dropped, as the other drivers do.
+  const slug = (baseName || 'file').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '') || 'file';
   return `${slug}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
 }
 
@@ -378,14 +463,14 @@ export const MongoGridFsFileProviderContract: ProviderContract<
         };
       },
 
-      async downloadFile(key) {
+      async downloadFile(key, options) {
         const { relativeKey, filename } = toStorage(key);
         const file = await findLatest(filename);
         if (!file) {
           // a missing key is the caller's to hear about, not a storage failure (the file circuit breaker reads the status)
           throw Object.assign(new Error(`File not found: ${relativeKey}`), { statusCode: 404 });
         }
-        const ceiling = maxStorageDownloadBytes();
+        const ceiling = resolveDownloadCeiling(options);
         if (file.length > ceiling) throw new StorageObjectTooLargeError(ceiling);
         const chunks: Buffer[] = [];
         let received = 0;

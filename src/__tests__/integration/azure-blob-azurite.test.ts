@@ -18,6 +18,7 @@ import { AzureBlobFileProviderContract } from '@/lib/providers/contracts/azureBl
 import { AzureBlobError, isAzureBlobError } from '@/lib/providers/contracts/azure/blobErrors';
 import type { FileConnectionCheck, FileProviderRuntime } from '@/lib/providers/domains/file';
 import { ProviderSettingsError } from '@/lib/providers/errors';
+import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
 const ENDPOINT = process.env.AZURITE_BLOB_ENDPOINT ?? '';
 const ACCOUNT = 'devstoreaccount1';
@@ -319,8 +320,22 @@ describe.runIf(Boolean(ENDPOINT))('Azure Blob file provider against Azurite', ()
       const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
       expect(error).toBeInstanceOf(AzureBlobError);
       expect(error.statusCode).toBe(403);
+      // the token's own start time is what the sentence names (the emulator only says it is not authorized)
+      expect(error.message).toMatch(/^Azure rejected the SAS token: it is not valid before \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\. /);
       expect(error.message).not.toContain(new URLSearchParams(token).get('sig')!);
     });
+
+    it('a SAS that runs out while the provider is in use says when it expired, without the signature', async () => {
+      const token = sasFor('racwdl', 2_000);
+      const rt = await sasRuntime(token);
+      expect((await rt.listFiles({ limit: 1 })).items).toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
+      const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error.statusCode).toBe(403);
+      expect(error.message).toMatch(/^Azure rejected the SAS token: it expired on \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\. Create a new one and replace it in the provider settings\.$/);
+      expect(error.message).not.toContain(new URLSearchParams(token).get('sig')!);
+    }, 15_000);
 
     it('an account SAS works too', async () => {
       const token = sdk.generateAccountSASQueryParameters({
@@ -456,6 +471,29 @@ describe.runIf(Boolean(ENDPOINT))('Azure Blob file provider against Azurite', ()
       expect(await blobNamesIn(container)).toEqual([]);
     });
 
+    it('a container SAS without the delete permission passes, and names what is missing and the test file that stays', async () => {
+      const container = freshContainer();
+      await service().getContainerClient(container).createIfNotExists();
+      const token = sdk.generateBlobSASQueryParameters({
+        containerName: container,
+        permissions: sdk.ContainerSASPermissions.parse('racwl'),
+        startsOn: new Date(Date.now() - 60_000),
+        expiresOn: new Date(Date.now() + 3_600_000),
+      }, keyed).toString();
+      const rt = await runtimeFor({ container, credentials: { accountKey: undefined, sasToken: token }, settings: { authMethod: 'sas', createContainer: false } });
+      const result = await rt.checkConnection();
+      expect(result.ok).toBe(true);
+      expect(steps(result)).toEqual([['list', true], ['write', true], ['read', true], ['delete', false]]);
+      expect(result.message).toMatch(/^Connected to container "[^"]+"\. Removing the test file failed\. The credentials do not allow "delete" /);
+      expect(result.message).toContain('d (delete)');
+      const left = await blobNamesIn(container);
+      expect(left).toHaveLength(1);
+      const relative = /The test file "([^"]+)" stays in the container\.$/.exec(result.message)?.[1];
+      expect(relative).toMatch(/^\.cognipeer-connection-test\/[0-9a-f-]{36}\.txt$/);
+      expect(left[0].endsWith(`/${relative}`)).toBe(true);
+      expect(result.message).not.toContain(new URLSearchParams(token).get('sig')!);
+    });
+
     it('a wrong key fails at the first step and carries no secret', async () => {
       const other = Buffer.from('w'.repeat(48)).toString('base64');
       const rt = await runtimeFor({ credentials: { accountKey: other } });
@@ -485,12 +523,14 @@ describe.runIf(Boolean(ENDPOINT))('Azure Blob file provider against Azurite', ()
   describe('settings', () => {
     const settingsFor = (overrides: Record<string, unknown> = {}) => ({ accountName: ACCOUNT, endpoint: ENDPOINT, container: 'files', authMethod: 'accountKey', ...overrides });
 
-    it('validateSettings accepts the emulator on a self-hosted deployment and refuses it on the hosted one', async () => {
+    it('validateSettings accepts the emulator on a self-hosted deployment and refuses its loopback address on the hosted one', async () => {
       await expect(Promise.resolve(AzureBlobFileProviderContract.validateSettings!({ credentials: { accountKey: KEY }, settings: settingsFor(), isOnPrem: true }))).resolves.toBeUndefined();
       mode({ DEPLOYMENT_MODE: 'saas' });
       const error = await Promise.resolve(AzureBlobFileProviderContract.validateSettings!({ credentials: { accountKey: KEY }, settings: settingsFor(), isOnPrem: false })).catch((e) => e);
-      expect(error).toBeInstanceOf(ProviderSettingsError);
+      // Plain http is the provider's own choice on every deployment; what refuses a loopback address on the hosted one is the network policy.
+      expect(error).toBeInstanceOf(ProviderEndpointError);
       expect(error.field).toBe('endpoint');
+      expect(error.code).toBe('provider_endpoint_not_allowed');
     });
 
     it('describeStorageLocation names the folder the provider writes into', () => {

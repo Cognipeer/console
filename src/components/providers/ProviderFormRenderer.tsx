@@ -67,10 +67,14 @@ function renderField(
   }
 
   const storedCue = storedSecretPlaceholder !== undefined && showsStoredSecretCue(field, storedCredentialFields);
+  const inputProps = form.getInputProps(field.name);
   const commonProps = {
     disabled,
     placeholder: storedCue ? storedSecretPlaceholder : field.placeholder,
-    ...form.getInputProps(field.name),
+    ...inputProps,
+    // A field the form holds no value for yet is empty, not undefined: an input that starts uncontrolled and is
+    // filled in later makes React warn each time a provider form is opened (a select takes null for "nothing chosen").
+    value: inputProps.value ?? (field.type === 'select' ? null : ''),
   } as const;
 
   const input = (() => {

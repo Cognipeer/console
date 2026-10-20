@@ -140,11 +140,18 @@ describe('http probes of the inference drivers', () => {
     expect(result.message).toContain('***');
   });
 
-  it('stops waiting after the limit', async () => {
+  it('stops waiting after the limit, and says what to look at', async () => {
     const never = vi.fn(() => new Promise<Response>(() => undefined));
     const result = await testProviderConnection(base({}), { fetchImpl: never as never, timeoutMs: 25 });
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/Timed out/);
+    expect(result.message).toMatch(/check its address and port, and any firewall or proxy in between/);
+  });
+
+  it('names the limit in seconds', async () => {
+    const never = vi.fn(() => new Promise<Response>(() => undefined));
+    const result = await testProviderConnection(base({}), { fetchImpl: never as never, timeoutMs: 1_200, graceMs: 0 });
+    expect(result.message).toMatch(/^Timed out after 1 s\. /);
   });
 });
 
@@ -321,6 +328,22 @@ describe('the outbound guard', () => {
         base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
         { createRuntime: createRuntime as never },
       ), uri).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+    }
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('a MongoDB GridFS connection URI must sign in with the credentials it holds: a method that uses the identity of the server is refused on SaaS', async () => {
+    dns.hosts.set('mongo.example.net', ['93.184.216.34']);
+    const createRuntime = vi.fn();
+    for (const uri of [
+      'mongodb://mongo.example.net/?authMechanism=MONGODB-OIDC&authMechanismProperties=ENVIRONMENT:k8s',
+      'mongodb://mongo.example.net/?tls=true&authMechanism=MONGODB-X509',
+      'mongodb://mongo.example.net/?authMechanism=MONGODB-AWS',
+    ]) {
+      await expect(testProviderConnection(
+        base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      ), uri).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri' });
     }
     expect(createRuntime).not.toHaveBeenCalled();
   });

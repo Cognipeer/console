@@ -7,22 +7,24 @@ import { IconAlertTriangle, IconInfoCircle, IconTrash } from '@tabler/icons-reac
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { BucketDetail } from '../filesApi';
-import { formatCount } from '../shared';
+import { formatCount, useNow } from '../shared';
 import DeleteBucketDialog from './DeleteBucketDialog';
-import { agentFilesHref, deleteErrorOf, deleteRules } from './settingsModel';
+import { agentFilesHref, deleteRules } from './settingsModel';
 import styles from './bucket.module.css';
 
 /**
  * Danger zone: delete the bucket, and with it (the person's explicit choice, asked in the dialog) the files it holds
  * in the storage provider. When an agent keeps its session files here the deletion is blocked and the agents are
- * listed with a link to where they choose another bucket.
+ * listed with a link to where they choose another bucket. When the last deletion stopped with an error the reason is
+ * shown and the button reads "Delete again…"; so does a deletion that has been running so long that it was probably
+ * lost.
  */
 export default function SettingsDangerCard({ bucket }: { bucket: BucketDetail }) {
   const t = useTranslations('files.bucket');
   const locale = useLocale();
   const [open, setOpen] = useState(false);
-  const rules = deleteRules(bucket);
-  const lastError = deleteErrorOf(bucket);
+  const now = useNow(30_000, bucket.deleting === true);
+  const rules = deleteRules(bucket, now);
   const providerName = bucket.provider?.label?.trim() || bucket.providerKey;
 
   const description =
@@ -34,14 +36,14 @@ export default function SettingsDangerCard({ bucket }: { bucket: BucketDetail })
 
   return (
     <DetailCard title={t('danger.title')} description={description} danger>
-      {lastError && !rules.deleting ? (
+      {rules.lastError ? (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} role="alert" mb="sm">
-          {t('danger.lastFailed', { reason: lastError })}
+          {t('danger.lastFailed', { reason: rules.lastError })}
         </Alert>
       ) : null}
       {rules.deleting ? (
-        <Alert color="blue" icon={<IconInfoCircle size={16} />} role="status" mb="sm">
-          {t('danger.inProgress')}
+        <Alert color={rules.stalled ? 'yellow' : 'blue'} icon={<IconInfoCircle size={16} />} role="status" mb="sm">
+          {rules.stalled ? t('danger.stalled') : t('danger.inProgress')}
         </Alert>
       ) : null}
       {rules.blocked ? (
@@ -64,13 +66,13 @@ export default function SettingsDangerCard({ bucket }: { bucket: BucketDetail })
         color="red"
         variant="light"
         size="xs"
-        disabled={rules.blocked || rules.deleting}
+        disabled={rules.blocked || (rules.deleting && !rules.stalled)}
         // The page theme paints every light button in the accent colour; a destructive one keeps red.
         style={{ background: 'var(--mantine-color-red-light)', color: 'var(--ds-err-text)' }}
         leftSection={<IconTrash size={13} stroke={1.7} />}
         onClick={() => setOpen(true)}
       >
-        {t('danger.button')}
+        {rules.stalled || rules.lastError !== null ? t('danger.buttonAgain') : t('danger.button')}
       </Button>
       <DeleteBucketDialog bucket={bucket} opened={open} onClose={() => setOpen(false)} />
     </DetailCard>

@@ -4,8 +4,8 @@
  * server's decisions with mocks; this is the one place where the client the screens call and the server that
  * answers it meet: the paths `filesRoutes` builds, the bodies the fetchers send, and the answers they read.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import JSZip from 'jszip';
 
@@ -45,9 +45,18 @@ import {
   updateBucket,
   uploadFile,
   type FilesApiError,
+  type FilesErrorCode,
 } from '@/components/files/filesApi';
+import { deleteRules } from '@/components/files/bucket/settingsModel';
+import { PREVIEW_MAX_BYTES } from '@/components/files/shared/fileKind';
+import { filesErrorMessage, type FilesTranslator } from '@/components/files/shared/filesErrors';
 import { parseFolder } from '@/components/files/upload/uploadModel';
+import { getQueue } from '@/lib/core/queue';
+import { en } from '@/lib/i18n/messages/en';
+import { PROVIDER_SETTINGS_INVALID } from '@/lib/providers/errors';
 import type { FileServiceErrorCode } from '@/lib/services/files/errors';
+import { startFilesQueueConsumer } from '@/lib/services/files/jobs/filesConsumer';
+import { PROVIDER_ENDPOINT_NOT_ALLOWED } from '@/lib/services/providers/providerEndpointGuard';
 import { createFilesStack, type FilesStack } from '../helpers/filesRealStack';
 
 let stack: FilesStack;
@@ -98,6 +107,13 @@ afterEach(async () => {
 });
 
 const textFile = (name: string, content: string, type = 'text/plain') => new File([content], name, { type });
+
+/** A translator over the real `files.common` messages of English. */
+const english: FilesTranslator = (key, values) => {
+  const found = key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], en.files.common);
+  if (typeof found !== 'string') throw new Error(`missing files.common.${key}`);
+  return found.replace(/\{(\w+)\}/g, (_match, name: string) => String(values?.[name] ?? `{${name}}`));
+};
 
 /** What a call rejected with: the screens branch on `status` and `code`. */
 async function refusalOf(call: Promise<unknown>): Promise<FilesApiError> {
@@ -252,13 +268,23 @@ describe('the files of a bucket', () => {
     const { record } = await uploadFile('reports', new File([new Uint8Array([0, 1, 2, 3])], 'blob.bin', { type: 'application/octet-stream' }), { convertToMarkdown: false });
 
     const noPreview = await refusalOf(fetchObjectText('reports', record.key));
-    expect(noPreview).toMatchObject({ status: 415, code: 'preview_unsupported' });
+    expect(noPreview).toMatchObject({ status: 415, code: 'preview_unsupported', reason: 'unsupported_type' });
+    expect(filesErrorMessage(noPreview, english)).toBe(en.files.common.errors.previewUnsupported);
 
     const noConversion = await refusalOf(convertObject('reports', record.key));
     expect(noConversion).toMatchObject({ status: 415, code: 'conversion_unsupported' });
 
     const gone = await refusalOf(getObject('reports', 'nowhere/at-all.txt'));
     expect(gone.status).toBe(404);
+  });
+
+  it('tells a file too large to preview from a type that cannot be previewed', async () => {
+    const big = await stack.putFile('reports', 'big.txt', 'x', { size: PREVIEW_MAX_BYTES + 1 });
+
+    const refused = await refusalOf(fetchObjectText('reports', big.key));
+
+    expect(refused).toMatchObject({ status: 415, code: 'preview_unsupported', reason: 'too_large' });
+    expect(filesErrorMessage(refused, english)).toBe(en.files.common.errors.previewTooLarge);
   });
 
   it('deletes one file, and then the file is gone for the drawer that still has it open', async () => {
@@ -305,6 +331,22 @@ describe('the files of a bucket', () => {
 
     expect(pending).toMatchObject({ key: record.key, markdownStatus: 'pending' });
     expect((await getObject('reports', record.key)).markdownStatus).toBe('pending');
+  });
+
+  it('moves the time of a record whenever a conversion is asked for, so a screen can tell a lost run from a running one', async () => {
+    const { record } = await uploadFile('reports', textFile('notes.txt', 'some notes'), { convertToMarkdown: false });
+    const before = await getObject('reports', record.key);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    const pending = await convertObject('reports', record.key);
+    expect(pending.markdownStatus).toBe('pending');
+    expect(Date.parse(String(pending.updatedAt))).toBeGreaterThan(Date.parse(String(before.updatedAt)));
+
+    // Asking again for a conversion that never ended (its job was lost) starts it anew and restarts the clock.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const again = await convertObject('reports', record.key);
+    expect(again.markdownStatus).toBe('pending');
+    expect(Date.parse(String(again.updatedAt))).toBeGreaterThan(Date.parse(String(pending.updatedAt)));
   });
 
   it('registers the objects that are already in the storage, a page at a time', async () => {
@@ -381,16 +423,183 @@ describe('changing and deleting a bucket', () => {
     expect(detail.status).toBe('disabled');
     expect((await listBuckets()).find((bucket) => bucket.key === 'reports')!.deleting).toBe(true);
   });
+
+  it('refuses to delete a bucket that holds files without being told what happens to them, then removes only the bucket when asked', async () => {
+    await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+
+    expect(await refusalOf(deleteBucket('reports'))).toMatchObject({ status: 409, code: 'bucket_not_empty' });
+    expect((await getBucket('reports')).stats.fileCount).toBe(1);
+
+    await expect(deleteBucket('reports', { force: true })).resolves.toEqual({ status: 'deleted' });
+    expect((await refusalOf(getBucket('reports'))).status).toBe(404);
+    expect((await listBuckets()).map((bucket) => bucket.key)).not.toContain('reports');
+  });
+
+  it('refuses to take the files of a storage location another bucket uses, in the sentences the dialogs translate', async () => {
+    await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+    // The same folder of the same provider: what is in it is not all this bucket's.
+    await createBucket({ key: 'twin', name: 'Twin', providerKey: 'local', prefix: 'reports' });
+
+    const noDelete = await refusalOf(deleteBucket('reports', { deleteFiles: true }));
+    expect(noDelete).toMatchObject({ status: 409, code: 'storage_location_shared' });
+    expect(noDelete.message).toBe(en.files.common.errors.storageLocationSharedDelete);
+    expect(filesErrorMessage(noDelete, english, 'deleteBucket')).toBe(noDelete.message);
+    // Nothing was marked: the bucket is as it was.
+    expect((await getBucket('reports')).deleting ?? false).toBe(false);
+
+    const noImport = await refusalOf(importFromStorage('reports'));
+    expect(noImport).toMatchObject({ status: 409, code: 'storage_location_shared' });
+    expect(noImport.message).toBe(en.files.common.errors.storageLocationSharedImport);
+    expect(filesErrorMessage(noImport, english, 'importFromStorage')).toBe(noImport.message);
+
+    // The sentence advises what the dialog then offers: the bucket alone can go.
+    await expect(deleteBucket('reports', { force: true })).resolves.toEqual({ status: 'deleted' });
+    expect((await listBuckets()).map((bucket) => bucket.key)).toEqual(['twin']);
+  });
+
+  it('keeps a bucket whose files are being deleted closed to everything but the same request again', async () => {
+    await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+    await expect(deleteBucket('reports', { deleteFiles: true })).resolves.toEqual({ status: 'deleting' });
+
+    expect(await refusalOf(updateBucket('reports', { name: 'Renamed' }))).toMatchObject({ status: 409, code: 'bucket_deleting' });
+    expect(await refusalOf(updateBucket('reports', { status: 'active' }))).toMatchObject({ status: 409, code: 'bucket_deleting' });
+    expect(await refusalOf(deleteBucket('reports'))).toMatchObject({ status: 409, code: 'bucket_deleting' });
+    expect(filesErrorMessage(await refusalOf(deleteBucket('reports')), english)).toBe(en.files.common.errors.bucketDeleting);
+
+    await expect(deleteBucket('reports', { deleteFiles: true })).resolves.toEqual({ status: 'deleting' });
+  });
+
+  it('lets the bucket alone be removed while its files are being deleted: the way out of a run the queue lost', async () => {
+    await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+    await expect(deleteBucket('reports', { deleteFiles: true })).resolves.toEqual({ status: 'deleting' });
+    // Another bucket has come to keep its files in the same folder since, so the deletion cannot be asked for again.
+    await createBucket({ key: 'twin', name: 'Twin', providerKey: 'local', prefix: 'reports' });
+    expect(await refusalOf(deleteBucket('reports', { deleteFiles: true }))).toMatchObject({ status: 409, code: 'storage_location_shared' });
+    expect(await refusalOf(deleteBucket('reports'))).toMatchObject({ status: 409, code: 'bucket_deleting' });
+
+    await expect(deleteBucket('reports', { force: true })).resolves.toEqual({ status: 'deleted' });
+    expect((await listBuckets()).map((bucket) => bucket.key)).toEqual(['twin']);
+  });
+
+  it('moves the time of a bucket whenever its files are asked to go, which is what a screen judges a lost run by', async () => {
+    await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+    const before = await getBucket('reports');
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    await deleteBucket('reports', { deleteFiles: true });
+    const asked = await getBucket('reports');
+    expect(Date.parse(String(asked.updatedAt))).toBeGreaterThan(Date.parse(String(before.updatedAt)));
+    // Just asked: not a run to offer again.
+    expect(deleteRules(asked)).toMatchObject({ deleting: true, stalled: false });
+
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await deleteBucket('reports', { deleteFiles: true });
+    const again = await getBucket('reports');
+    expect(Date.parse(String(again.updatedAt))).toBeGreaterThan(Date.parse(String(asked.updatedAt)));
+    // Long after, the same bucket is the one a screen offers to delete again.
+    expect(deleteRules(again, Date.parse(String(again.updatedAt)) + 10 * 60_000)).toMatchObject({ deleting: true, stalled: true });
+  });
+
+  describe('when the removal of the files stops', () => {
+    it('says why on the list and on the bucket, and forgets it when the bucket is kept', async () => {
+      const { record } = await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+      // The object cannot be removed: the job stops with a reason.
+      stack.blockObject('reports', record.key);
+      await startFilesQueueConsumer();
+
+      await deleteBucket('reports', { deleteFiles: true });
+      await vi.waitFor(async () => expect((await getBucket('reports')).deleteError).toBeTruthy(), { timeout: 15_000 });
+
+      const detail = await getBucket('reports');
+      expect(detail.deleting ?? false).toBe(false);
+      expect(detail.status).toBe('disabled');
+      expect(detail.deleteError).toMatch(/^1 file could not be deleted from the storage provider: /);
+      const listed = (await listBuckets()).find((bucket) => bucket.key === 'reports')!;
+      expect(listed.deleteError).toBe(detail.deleteError);
+      // The screens read the same reason from both, and offer to delete again.
+      expect(deleteRules(detail)).toMatchObject({ deleting: false, stalled: false, lastError: detail.deleteError });
+      expect(deleteRules(listed)).toMatchObject({ lastError: detail.deleteError });
+
+      // "Keep the bucket": switched on again, the reason is forgotten - on the answer and on what is read after it.
+      const kept = await updateBucket('reports', { status: 'active' });
+      expect(kept.status).toBe('active');
+      expect(deleteRules(kept).lastError).toBeNull();
+      const after = await getBucket('reports');
+      expect(after.deleteError).toBeUndefined();
+      expect(deleteRules(after).lastError).toBeNull();
+      expect((await listBuckets()).find((bucket) => bucket.key === 'reports')!.deleteError).toBeUndefined();
+    });
+
+    it('can be asked again once the cause is gone, and the bucket then disappears', async () => {
+      const { record } = await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+      const stuck = stack.blockObject('reports', record.key);
+      await startFilesQueueConsumer();
+      await deleteBucket('reports', { deleteFiles: true });
+      await vi.waitFor(async () => expect((await getBucket('reports')).deleteError).toBeTruthy(), { timeout: 15_000 });
+
+      rmSync(stuck, { recursive: true, force: true });
+      writeFileSync(stuck, 'now a plain file');
+      await expect(deleteBucket('reports', { deleteFiles: true })).resolves.toEqual({ status: 'deleting' });
+      // Asking again clears the old reason at once.
+      expect((await getBucket('reports')).deleteError).toBeUndefined();
+
+      await vi.waitFor(async () => expect((await refusalOf(getBucket('reports'))).status).toBe(404), { timeout: 15_000 });
+      expect(existsSync(stuck)).toBe(false);
+    });
+
+    it('leaves a bucket that could not be queued as it was, with why, and the client treats it as a failed deletion', async () => {
+      await uploadFile('reports', textFile('a.txt', 'a'), { convertToMarkdown: false });
+      vi.spyOn(await getQueue(), 'publish').mockRejectedValueOnce(new Error('redis is down'));
+
+      const refused = await refusalOf(deleteBucket('reports', { deleteFiles: true }));
+      expect(refused).toMatchObject({ status: 503, code: 'queue_unavailable' });
+      expect(filesErrorMessage(refused, english)).toBe(en.files.common.errors.queueUnavailable);
+
+      // Still switched on, and carrying the reason: the page offers to try again or to keep it as it is.
+      const detail = await getBucket('reports');
+      expect(detail).toMatchObject({ status: 'active' });
+      expect(detail.deleting ?? false).toBe(false);
+      expect(detail.deleteError).toMatch(/queue/i);
+      expect(deleteRules(detail).lastError).toBe(detail.deleteError);
+
+      // Keeping it forgets the reason even though it is switched on already.
+      await updateBucket('reports', { status: 'active' });
+      expect((await getBucket('reports')).deleteError).toBeUndefined();
+    });
+  });
 });
 
 describe('the error codes', () => {
-  it('are every one a code the server can answer with', () => {
-    // At compile time (tsc): the client names no code the service does not have (`bucket_in_use` is the agents' own).
-    const serverCodes: ReadonlyArray<FileServiceErrorCode | 'bucket_in_use'> = FILES_ERROR_CODES;
+  it('are every one a code the server can answer with, and the client names every code of the file service', () => {
+    // The codes the file service raises are `FileServiceErrorCode`; the others are written where the answer is made.
+    type ServerCode =
+      | FileServiceErrorCode
+      // The agents' check on a bucket they keep session files in (`sessionFilesBucket.ts`).
+      | 'bucket_in_use'
+      // A failure or an outage of the storage, as the HTTP layer words it (`server/api/fileHttp.ts`).
+      | 'storage_failure'
+      | 'storage_unavailable'
+      | 'storage_timeout'
+      | 'internal_error'
+      // A provider setting or endpoint the console refuses (`providers/errors.ts`, `providerEndpointGuard.ts`).
+      | typeof PROVIDER_SETTINGS_INVALID
+      | typeof PROVIDER_ENDPOINT_NOT_ALLOWED;
+
+    // At compile time (tsc): the client names no code the server does not have...
+    const serverCodes: ReadonlyArray<ServerCode> = FILES_ERROR_CODES;
     expect(serverCodes.length).toBeGreaterThan(0);
+    // ...and the file service has no code the client does not name.
+    expectTypeOf<Exclude<FileServiceErrorCode, FilesErrorCode>>().toEqualTypeOf<never>();
+    expectTypeOf<Exclude<ServerCode, FilesErrorCode>>().toEqualTypeOf<never>();
 
     // At run time: each is written in the files where the server defines them.
-    const sources = ['src/lib/services/files/errors.ts', 'src/lib/services/agents/sessionFilesBucket.ts']
+    const sources = [
+      'src/lib/services/files/errors.ts',
+      'src/lib/services/agents/sessionFilesBucket.ts',
+      'src/server/api/fileHttp.ts',
+      'src/lib/providers/errors.ts',
+      'src/lib/services/providers/providerEndpointGuard.ts',
+    ]
       .map((file) => readFileSync(path.join(process.cwd(), file), 'utf8'))
       .join('\n');
     expect(FILES_ERROR_CODES.filter((code) => !sources.includes(`'${code}'`))).toEqual([]);

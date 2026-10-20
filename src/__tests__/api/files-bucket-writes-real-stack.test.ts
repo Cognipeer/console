@@ -209,6 +209,35 @@ describe('POST /files/buckets (the same rules)', () => {
     expect(stack.json(ok).bucket).toMatchObject({ key: 'fresh', name: 'Fresh ones', prefix: 'team/fresh', description: 'New', status: 'active' });
   });
 
+  it('refuses a key no route could address, and creates nothing for it', async () => {
+    const create = (key: unknown) => stack.request('POST', '/files/buckets', { key, providerKey: 'local', name: 'Odd key' });
+    const countBuckets = async () => stack.json(await stack.request('GET', '/files/buckets')).buckets.length as number;
+    const before = await countBuckets();
+
+    // `./docs` and its kin read as another bucket's folder to the drivers, and a number is no key at all.
+    for (const key of ['a/b', '../up', 'Upper', 'with space', 'k'.repeat(65), 'p%2Fq', 5, './docs', './docs/', 'docs//', 'back\\slash', '.']) {
+      const res = await create(key);
+      expect(res.statusCode, String(key)).toBe(400);
+      expect(stack.json(res), String(key)).toMatchObject({ code: 'invalid_request' });
+      expect(stack.json(res).error).toMatch(/\bkey\b/);
+    }
+    expect(await countBuckets()).toBe(before);
+  });
+
+  it('takes the longest key a bucket may have, and the bucket can then be reached and deleted by it', async () => {
+    const key = `l${'-k_9'.repeat(15)}0`;
+    expect(key).toHaveLength(62);
+    const longest = `${key}ab`;
+    expect(longest).toHaveLength(64);
+
+    const created = await stack.request('POST', '/files/buckets', { key: longest, providerKey: 'local', name: 'Longest' });
+    expect(created.statusCode).toBe(201);
+    expect(stack.json(created).bucket).toMatchObject({ key: longest, prefix: longest });
+
+    expect((await stack.request('GET', `/files/buckets/${longest}`)).statusCode).toBe(200);
+    expect((await stack.request('DELETE', `/files/buckets/${longest}`)).statusCode).toBe(200);
+  });
+
   it('uses the key as the prefix when none is given, and may be left without one on purpose', async () => {
     const plain = await stack.request('POST', '/files/buckets', { key: 'plain', providerKey: 'local', name: 'Plain' });
     expect(stack.json(plain).bucket.prefix).toBe('plain');
@@ -281,9 +310,83 @@ describe('DELETE /files/buckets/:bucketKey?deleteFiles=true', () => {
     expect(upload.statusCode).toBe(409);
     expect(stack.json(upload).code).toBe('bucket_inactive');
 
-    const plain = await stack.request('DELETE', '/files/buckets/work?force=true');
+    const plain = await stack.request('DELETE', '/files/buckets/work');
     expect(plain.statusCode).toBe(409);
     expect(stack.json(plain).code).toBe('bucket_deleting');
+  });
+
+  describe('a bucket that stays "deleting" because its job is gone', () => {
+    it('can be removed with force: the bucket goes and the files stay where they are', async () => {
+      await fill();
+      // The deletion was asked for and its job never ran (a restart lost the queue): nothing will end the marker.
+      await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+      expect(await stack.bucket('work')).toMatchObject({ metadata: { deleting: true } });
+
+      const res = await stack.request('DELETE', '/files/buckets/work?force=true');
+
+      expect(res.statusCode).toBe(200);
+      expect(stack.json(res)).toEqual({ success: true });
+      expect(await stack.bucket('work')).toBeNull();
+      for (const key of ['a.txt', 'docs/b.pdf', 'docs/b.md', 'docs/deep/c.txt']) {
+        expect(existsSync(stack.objectPath('work', key)), key).toBe(true);
+      }
+      // The other bucket is left alone.
+      expect(await stack.bucket('empty')).not.toBeNull();
+    });
+
+    it('is the way out when another bucket now shares its storage location, which stops the deletion from being asked for again', async () => {
+      await fill();
+      await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+      // a bucket added afterwards that keeps its files in the same folder
+      await stack.createBucket('twin', { prefix: 'work' });
+
+      const again = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+      expect(again.statusCode).toBe(409);
+      expect(stack.json(again)).toMatchObject({ code: 'storage_location_shared' });
+      const patch = await stack.request('PATCH', '/files/buckets/work', { status: 'active' });
+      expect(patch.statusCode).toBe(409);
+      expect(stack.json(patch)).toMatchObject({ code: 'bucket_deleting' });
+
+      const forced = await stack.request('DELETE', '/files/buckets/work?force=true');
+
+      expect(forced.statusCode).toBe(200);
+      expect(await stack.bucket('work')).toBeNull();
+      expect(await stack.bucket('twin')).not.toBeNull();
+      expect(existsSync(stack.objectPath('work', 'a.txt'))).toBe(true);
+    });
+
+    it('is still refused without force, and force does not remove a bucket an agent keeps its session files in', async () => {
+      await fill();
+      await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      const plain = await stack.request('DELETE', '/files/buckets/work');
+      expect(plain.statusCode).toBe(409);
+      expect(stack.json(plain).code).toBe('bucket_deleting');
+      expect(await stack.bucket('work')).toMatchObject({ metadata: { deleting: true } });
+
+      // an agent that keeps its session files in the bucket is a reason to keep it, force or not
+      await stack.db.createAgent({
+        tenantId: stack.tenantId, projectId: stack.projectId, key: 'support', name: 'Support',
+        config: { modelKey: 'm', attachments: { enabled: true, bucketKey: 'work' } }, status: 'active', createdBy: 'x',
+      } as never);
+      const inUse = await stack.request('DELETE', '/files/buckets/work?force=true');
+      expect(inUse.statusCode).toBe(409);
+      expect(stack.json(inUse)).toMatchObject({ code: 'bucket_in_use' });
+      expect(await stack.bucket('work')).not.toBeNull();
+    });
+
+    it('does not make the job that was queued for it remove anything once the bucket is gone', async () => {
+      await fill();
+      await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+      expect((await stack.request('DELETE', '/files/buckets/work?force=true')).statusCode).toBe(200);
+
+      // the queue delivers the job after all
+      await stack.db.runWithTenant(FILES_DB_NAME, () => runBucketDeletionJob({ tenantDbName: FILES_DB_NAME, tenantId: stack.tenantId, projectId: stack.projectId, bucketKey: 'work', actor: stack.userId }));
+
+      for (const key of ['a.txt', 'docs/b.pdf', 'docs/deep/c.txt']) {
+        expect(existsSync(stack.objectPath('work', key)), key).toBe(true);
+      }
+    });
   });
 
   it('removes every object and its Markdown copy, then the records, then the bucket', async () => {
@@ -545,6 +648,168 @@ describe('DELETE /files/buckets/:bucketKey?deleteFiles=true', () => {
       expect(await gone('work')).toBe(true);
       expect(await stack.records('work')).toEqual([]);
     });
+
+    it('removes only the records of its own project: another project\'s bucket of the same key, in a folder of its own, keeps its records', async () => {
+      await fill();
+      const second = String((await stack.db.createProject({ tenantId: stack.tenantId, key: 'second', name: 'Second', createdBy: 'x' }))._id);
+      await stack.db.createFileBucket({
+        tenantId: stack.tenantId, projectId: second, key: 'work', name: 'Their work', providerKey: 'local', prefix: 'second-work', status: 'active', createdBy: 'x',
+      } as never);
+      stack.putObject('second-work', 'theirs.txt', 'theirs');
+      await stack.db.createFileRecord({
+        tenantId: stack.tenantId, projectId: second, providerKey: 'local', bucketKey: 'work', key: 'theirs.txt', name: 'theirs.txt', size: 6,
+        contentType: 'text/plain', markdownStatus: 'skipped', createdBy: 'x',
+      });
+      await startFilesQueueConsumer();
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(202);
+      await vi.waitFor(async () => expect(await gone('work')).toBe(true), { timeout: 10_000 });
+      for (const key of ['a.txt', 'docs/b.pdf', 'docs/b.md', 'docs/deep/c.txt']) expect(existsSync(stack.objectPath('work', key)), key).toBe(false);
+      expect(await stack.db.findFileBucketByKey(stack.tenantId, 'work', second)).not.toBeNull();
+      expect(await stack.db.findFileRecordByKey('local', 'work', 'theirs.txt', second)).not.toBeNull();
+      expect(existsSync(stack.objectPath('second-work', 'theirs.txt'))).toBe(true);
+    });
+
+    it('removes the Markdown copy a conversion put on a record after the page of records was read', async () => {
+      await stack.putFile('work', 'notes.txt', 'Notes of the quarter', { markdownStatus: 'pending' });
+      const bucket = await stack.bucket('work');
+      await stack.db.updateFileBucket(String(bucket!._id), { status: 'disabled', metadata: { deleting: true } });
+      const real = stack.db.listFileRecords.bind(stack.db);
+      let settled = false;
+      vi.spyOn(stack.db, 'listFileRecords').mockImplementation(async (filters) => {
+        const page = await real(filters);
+        const listed = page.items.find((record) => record.key === 'notes.txt');
+        if (listed && !settled) {
+          settled = true;
+          // A conversion that was running finishes now: the page in hand still says "pending, no copy".
+          stack.putObject('work', 'notes.md', '# Notes of the quarter');
+          await stack.db.updateFileRecord(String(listed._id), { markdownStatus: 'succeeded', markdownKey: 'notes.md', markdownSize: 22 });
+        }
+        return page;
+      });
+
+      await stack.db.runWithTenant(FILES_DB_NAME, () => runBucketDeletionJob(payload()));
+
+      expect(await gone('work')).toBe(true);
+      expect(await stack.records('work')).toEqual([]);
+      expect(existsSync(stack.objectPath('work', 'notes.txt'))).toBe(false);
+      // Nothing is left in the provider that no record names.
+      expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+    });
+
+    it('skips a record that is already gone when its turn comes, and still ends the deletion', async () => {
+      await fill();
+      const bucket = await stack.bucket('work');
+      await stack.db.updateFileBucket(String(bucket!._id), { status: 'disabled', metadata: { deleting: true } });
+      const real = stack.db.listFileRecords.bind(stack.db);
+      let removed = false;
+      vi.spyOn(stack.db, 'listFileRecords').mockImplementation(async (filters) => {
+        const page = await real(filters);
+        const listed = page.items.find((record) => record.key === 'a.txt');
+        if (listed && !removed) {
+          removed = true;
+          // Another run (or a person) has deleted the file since the page was read.
+          rmSync(stack.objectPath('work', 'a.txt'));
+          await stack.db.deleteFileRecord(String(listed._id));
+        }
+        return page;
+      });
+
+      await stack.db.runWithTenant(FILES_DB_NAME, () => runBucketDeletionJob(payload()));
+
+      expect(await gone('work')).toBe(true);
+      expect(await stack.records('work')).toEqual([]);
+    });
+
+    describe('when the bucket is changed while the job is under way', () => {
+      const FILE_KEYS = ['a.txt', 'b.txt', 'c.txt'];
+
+      /**
+       * Runs the job over three files, read one to a page, and does `during` right after the second file has been
+       * deleted: what a person (or another run of the same deletion) does to a bucket while a long deletion goes on.
+       * `bucketDeletes` is how many times a bucket row was deleted, by the job at its end or by `during`.
+       */
+      async function runInterruptedBy(during: () => Promise<void>) {
+        for (const key of FILE_KEYS) await stack.putFile('work', key, key);
+        const bucket = await stack.bucket('work');
+        await stack.db.updateFileBucket(String(bucket!._id), { status: 'disabled', metadata: { deleting: true } });
+        const list = stack.db.listFileRecords.bind(stack.db);
+        const paging = vi.spyOn(stack.db, 'listFileRecords').mockImplementation((filters) => list({ ...filters, limit: 1 }));
+        const bucketDeletes = vi.spyOn(stack.db, 'deleteFileBucket');
+        const remove = stack.db.deleteFileRecord.bind(stack.db);
+        let removed = 0;
+        vi.spyOn(stack.db, 'deleteFileRecord').mockImplementation(async (id) => {
+          const result = await remove(id);
+          removed += 1;
+          if (removed === 2) await during();
+          return result;
+        });
+
+        await stack.db.runWithTenant(FILES_DB_NAME, () => runBucketDeletionJob(payload()));
+
+        paging.mockRestore();
+        return { bucketDeletes: bucketDeletes.mock.calls.length };
+      }
+
+      const keysLeft = async () => (await stack.records('work')).map((record) => record.key).sort();
+
+      it('ends at once when the bucket is removed with force: the files that are left stay, and no bucket is deleted a second time', async () => {
+        let forced = 0;
+
+        const { bucketDeletes } = await runInterruptedBy(async () => {
+          forced = (await stack.request('DELETE', '/files/buckets/work?force=true')).statusCode;
+        });
+
+        expect(forced).toBe(200);
+        expect(await gone('work')).toBe(true);
+        // The two files deleted before the bucket went are gone; the third keeps its record and its object.
+        const left = await keysLeft();
+        expect(left).toHaveLength(1);
+        for (const key of FILE_KEYS) expect(existsSync(stack.objectPath('work', key)), key).toBe(left.includes(key));
+        // The only bucket deletion there was is the forced one.
+        expect(bucketDeletes).toBe(1);
+      });
+
+      it('ends when the bucket was removed and made again under the same key: the new bucket and its files are not the job\'s', async () => {
+        let again: { _id?: unknown } | undefined;
+
+        const { bucketDeletes } = await runInterruptedBy(async () => {
+          await stack.request('DELETE', '/files/buckets/work?force=true');
+          // The same key, and a deletion of its own asked for: that one has a job of its own.
+          again = await stack.createBucket('work', { status: 'disabled', metadata: { deleting: true } });
+          await stack.putFile('work', 'new.txt', 'new');
+        });
+
+        const current = await stack.bucket('work');
+        expect(String(current?._id)).toBe(String(again?._id));
+        expect(current).toMatchObject({ status: 'disabled', metadata: { deleting: true } });
+        const left = await keysLeft();
+        expect(left).toHaveLength(2);
+        expect(left).toContain('new.txt');
+        for (const key of [...FILE_KEYS, 'new.txt']) expect(existsSync(stack.objectPath('work', key)), key).toBe(left.includes(key));
+        expect(bucketDeletes).toBe(1);
+      });
+
+      it('ends when another run of the same deletion has given up on the bucket: what that run wrote down stays', async () => {
+        const reason = 'The other run could not delete a file.';
+
+        const { bucketDeletes } = await runInterruptedBy(async () => {
+          const bucket = await stack.bucket('work');
+          // What a run that stops leaves on the bucket: the reason, and no `deleting` any more.
+          await stack.db.updateFileBucket(String(bucket!._id), { metadata: { deleteError: reason } });
+        });
+
+        const current = await stack.bucket('work');
+        expect(current).toMatchObject({ status: 'disabled', metadata: { deleteError: reason } });
+        expect(current?.metadata).not.toHaveProperty('deleting');
+        const left = await keysLeft();
+        expect(left).toHaveLength(1);
+        for (const key of FILE_KEYS) expect(existsSync(stack.objectPath('work', key)), key).toBe(left.includes(key));
+        expect(bucketDeletes).toBe(0);
+      });
+    });
   });
 
   describe('an upload that is still being written when the bucket is deleted', () => {
@@ -637,6 +902,96 @@ describe('DELETE /files/buckets/:bucketKey?deleteFiles=true', () => {
     });
   });
 
+  describe('a Knowledge Engine module that keeps its sources in the bucket', () => {
+    const OBJECTS = ['a.txt', 'docs/b.pdf', 'docs/b.md', 'docs/deep/c.txt'];
+    const moduleOf = (over: Record<string, unknown> = {}) => stack.db.createRagModule({
+      tenantId: stack.tenantId, projectId: stack.projectId, key: 'handbook', name: 'Handbook', embeddingModelKey: 'embed', vectorProviderKey: 'vectors',
+      vectorIndexKey: 'index', fileBucketKey: 'work', chunkConfig: { strategy: 'recursive_character', chunkSize: 800, chunkOverlap: 100 },
+      status: 'active', createdBy: 'x', ...over,
+    } as never);
+    const untouched = async () => {
+      expect(await stack.records('work')).toHaveLength(3);
+      for (const key of OBJECTS) expect(existsSync(stack.objectPath('work', key)), key).toBe(true);
+    };
+
+    it('is a 409 naming the modules, with nothing marked, queued or deleted: re-indexing reads those files back', async () => {
+      await fill();
+      await moduleOf({ key: 'handbook', name: 'Handbook' });
+      await moduleOf({ key: 'faq', name: 'FAQ' });
+      const publish = vi.spyOn(await getQueue(), 'publish');
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(409);
+      const body = stack.json(res);
+      expect(body).toMatchObject({ code: 'bucket_in_use', type: 'bucket_in_use', modules: [{ key: 'faq', name: 'FAQ' }, { key: 'handbook', name: 'Handbook' }] });
+      expect(body.error).toContain('these Knowledge Engine modules: FAQ, Handbook');
+      const bucket = await stack.bucket('work');
+      expect(bucket).toMatchObject({ status: 'active' });
+      expect(bucket?.metadata ?? {}).not.toHaveProperty('deleting');
+      expect(publish).not.toHaveBeenCalled();
+      await untouched();
+    });
+
+    it('speaks of one module in the singular', async () => {
+      await fill();
+      await moduleOf();
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(409);
+      expect(stack.json(res).error).toContain('this Knowledge Engine module: Handbook');
+      expect(stack.json(res).error).toContain('Delete the module first');
+    });
+
+    it('does not stop the delete that leaves the files where they are: the bucket goes, every object stays', async () => {
+      await fill();
+      await moduleOf();
+
+      const res = await stack.request('DELETE', '/files/buckets/work?force=true');
+
+      expect(res.statusCode).toBe(200);
+      expect(await stack.bucket('work')).toBeNull();
+      for (const key of OBJECTS) expect(existsSync(stack.objectPath('work', key)), key).toBe(true);
+    });
+
+    it('is not stopped by a module of another project that names a bucket of the same key, nor by one that keeps its sources in another bucket', async () => {
+      await fill();
+      const second = String((await stack.db.createProject({ tenantId: stack.tenantId, key: 'second', name: 'Second', createdBy: 'x' }))._id);
+      await moduleOf({ key: 'theirs', name: 'Theirs', projectId: second });
+      await moduleOf({ key: 'elsewhere', name: 'Elsewhere', fileBucketKey: 'empty' });
+      await moduleOf({ key: 'no-bucket', name: 'No bucket', fileBucketKey: undefined });
+      await startFilesQueueConsumer();
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(202);
+      await vi.waitFor(async () => expect(await gone('work')).toBe(true), { timeout: 10_000 });
+      for (const key of OBJECTS) expect(existsSync(stack.objectPath('work', key)), key).toBe(false);
+    });
+
+    it('answers a bucket that does not exist with a 404, whatever a module says', async () => {
+      await moduleOf({ key: 'dangling', name: 'Dangling', fileBucketKey: 'nobody' });
+
+      const res = await stack.request('DELETE', '/files/buckets/nobody?deleteFiles=true');
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('lets the files go once the module is gone', async () => {
+      await fill();
+      const ragModule = await moduleOf();
+      expect((await stack.request('DELETE', '/files/buckets/work?deleteFiles=true')).statusCode).toBe(409);
+      await stack.db.deleteRagModule(String(ragModule._id));
+      await startFilesQueueConsumer();
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(202);
+      await vi.waitFor(async () => expect(await gone('work')).toBe(true), { timeout: 10_000 });
+    });
+  });
+
   describe('a storage location another bucket uses', () => {
     const SHARED = 'Another bucket uses this storage location. Delete the bucket without its files, or remove the other bucket first.';
     const OBJECTS = ['a.txt', 'docs/b.pdf', 'docs/b.md', 'docs/deep/c.txt'];
@@ -681,6 +1036,28 @@ describe('DELETE /files/buckets/:bucketKey?deleteFiles=true', () => {
 
       expect(res.statusCode).toBe(409);
       expect(stack.json(res).code).toBe('storage_location_shared');
+      await untouched();
+    });
+
+    // Buckets stored before keys and folders were validated can spell a folder in a way the drivers read as another
+    // one (the disk driver drops `.` segments and doubled slashes, and reads a backslash as a slash).
+    it.each([
+      ['a key with a leading dot segment', './work', {}],
+      ['a key with a leading dot segment and a closing slash', './work/', {}],
+      ['a key with a backslash after a dot', '.\\work', {}],
+      ['a folder with a leading dot segment', 'legacy', { prefix: './work' }],
+      ['a folder of a run of dots', 'legacy', { prefix: '../work' }],
+      ['a folder inside it, spelled with a backslash', 'legacy', { prefix: 'work\\archive' }],
+      ['a folder inside it, with a dot segment in the middle', 'legacy', { prefix: 'work/./archive' }],
+    ])('is a 409 for a bucket of another project saved with %s: the drivers read it as this folder', async (_label, key, over) => {
+      await fill();
+      await bucketOf(await secondProject(), key, over);
+
+      const res = await stack.request('DELETE', '/files/buckets/work?deleteFiles=true');
+
+      expect(res.statusCode).toBe(409);
+      expect(stack.json(res)).toEqual({ error: SHARED, code: 'storage_location_shared' });
+      expect((await stack.bucket('work'))?.metadata ?? {}).not.toHaveProperty('deleting');
       await untouched();
     });
 

@@ -10,7 +10,7 @@
  * caller's own sessions off it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -705,5 +705,87 @@ describe('the Document Store, for the files a session holds', () => {
     expect((await viaToken('DELETE', `/client/v1/files/buckets/docs/objects/${encodeURIComponent('agent-sessions/support/s1/c.txt')}`)).statusCode).toBe(200); // deleting is acting: a separate action this rule does not touch
     const list = await viaToken('GET', '/client/v1/files/buckets/docs/objects');
     expect(list.statusCode).toBe(200);
+  });
+
+  describe('an upload through the client Files API under the key of a session file', () => {
+    const KEY = 'agent-sessions/support/s1/c.txt';
+    const SESSION_BYTES = 'what the session wrote';
+    const objectOf = (key: string) => path.join(tmpDir, tenantId, 'local', 'docs', ...key.split('/'));
+    const upload = (keyHint: string, content = 'bytes of the caller') => viaToken('POST', '/client/v1/files/buckets/docs/objects', {
+      fileName: 'upload.txt', contentType: 'text/plain', data: Buffer.from(content).toString('base64'), keyHint,
+    });
+    const recordsUnder = async (key: string) => {
+      await db.switchToTenant(dbName);
+      return db.listFileRecordsByKeys({ providerKey: 'local', bucketKey: 'docs', projectId: p1, keys: [key] });
+    };
+
+    beforeEach(async () => {
+      // The file of the session of `starter`, with the object it holds.
+      await sessionFile('starters', KEY, { size: SESSION_BYTES.length, contentType: 'text/plain' });
+      mkdirSync(path.dirname(objectOf(KEY)), { recursive: true });
+      writeFileSync(objectOf(KEY), SESSION_BYTES);
+    });
+
+    it('is refused to a token whose owner a rule stops from changing that session: the object and its record stay as the session left them', async () => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const refused = await upload(KEY);
+      expect(refused.statusCode).toBe(403);
+      expect(json(refused).error).toMatchObject({ code: 'session_forbidden' });
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+      const records = await recordsUnder(KEY);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ purpose: 'conversation', conversationId: idOf('starters'), size: SESSION_BYTES.length });
+    });
+
+    it.each([
+      ['a doubled slash', 'agent-sessions//support/s1/c.txt'],
+      ['backslashes', 'agent-sessions\\support\\s1\\c.txt'],
+      ['a leading slash', '/agent-sessions/support/s1/c.txt'],
+      ['spaces around it', `  ${KEY}  `],
+    ])('is refused when the key is spelled with %s: the key looked up is the key the object lands on', async (_label, spelled) => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const refused = await upload(spelled);
+      expect(refused.statusCode).toBe(403);
+      expect(json(refused).error).toMatchObject({ code: 'session_forbidden' });
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+      expect(await recordsUnder(KEY)).toHaveLength(1);
+    });
+
+    it('is allowed to the owner of the session, whatever a rule says about other people\'s sessions, and replaces the file', async () => {
+      await deny('agent.session_manage_others', 'starter');
+      await tokenOf('starter');
+
+      const written = await upload(KEY, 'the owner writes again');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe('the owner writes again');
+      expect(await recordsUnder(KEY)).toHaveLength(1);
+    });
+
+    it('is allowed to a token whose owner may change every session, while somebody a rule stops is refused', async () => {
+      await deny('agent.session_manage_others', 'other');
+
+      await tokenOf('other');
+      expect((await upload(KEY, 'refused')).statusCode).toBe(403);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+
+      await tokenOf('padmin');
+      const written = await upload(KEY, 'a teammate\'s edit');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe('a teammate\'s edit');
+    });
+
+    it('is not the session\'s business under a key that holds no session file', async () => {
+      await deny('agent.session_manage_others', 'other');
+      await tokenOf('other');
+
+      const written = await upload('plain.txt');
+      expect(written.statusCode).toBe(201);
+      expect(readFileSync(objectOf('plain.txt'), 'utf8')).toBe('bytes of the caller');
+      expect(readFileSync(objectOf(KEY), 'utf8')).toBe(SESSION_BYTES);
+    });
   });
 });

@@ -30,7 +30,9 @@ import { getFileLimits } from '@/lib/services/files/fileLimits';
 import { getFileBucketDetail, listFileBucketItems, listFileProviderItems } from '@/lib/services/files/fileReads';
 import { IMPORT_DEFAULT_LIMIT, IMPORT_MAX_LIMIT, importFromStorage } from '@/lib/services/files/importFromStorage';
 import { startBucketDeletion } from '@/lib/services/files/jobs/bucketDeletion';
+import { bucketHoldsSourcesBody, findModulesKeepingSourcesIn } from '@/lib/services/files/knowledgeSources';
 import { queueMarkdownConversion } from '@/lib/services/files/jobs/markdownConversion';
+import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { assertPreviewSize, planPreview } from '@/lib/services/files/preview';
 import type { FileRecordView } from '@/lib/services/files/types';
 import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
@@ -53,10 +55,11 @@ import {
   readJsonObjectBody,
   requireProjectContextForRequest,
   sendProjectContextError,
+  serviceLevelForRequest,
   withApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
-import { sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
+import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
 import {
   SESSION_FORBIDDEN_MESSAGE,
   refuseSessionLinked,
@@ -65,7 +68,7 @@ import {
   type SessionAction,
   type SessionRefusal,
 } from './agent-session-access';
-import { listVisibleFiles, sessionOfFile } from './session-linked-files';
+import { listVisibleFiles, sessionOfFile, sessionRefusedForUpload } from './session-linked-files';
 
 const logger = createLogger('api:files');
 
@@ -125,18 +128,6 @@ function parseLimit(value?: string): number | undefined {
     return undefined;
   }
   return Math.min(parsed, 200);
-}
-
-function estimateBase64Bytes(input: unknown): number | undefined {
-  if (typeof input !== 'string') return undefined;
-  const base64 = input.includes('base64,') ? input.split('base64,').pop() ?? '' : input;
-  if (!base64) return 0;
-
-  const normalized = base64.replace(/\s/g, '');
-  const paddingMatch = normalized.match(/=+$/);
-  const padding = paddingMatch ? paddingMatch[0].length : 0;
-  const bytes = Math.floor((normalized.length * 3) / 4) - padding;
-  return bytes > 0 ? bytes : 0;
 }
 
 /** A missing bucket is the handlers' 404; the in-use guard only speaks for one that exists. */
@@ -526,12 +517,19 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { bucketKey } = request.params as { bucketKey: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
-      const bucket = await getFileBucketDetail(
+      const detail = await getFileBucketDetail(
         session.tenantDbName,
         session.tenantId,
         projectId,
         bucketKey,
       );
+
+      // Which agents keep their session files here is the agents service's to say: a caller who may not read agents
+      // is told how many there are (`usedByCount`), not which. Asked only when some do, and quietly: the answer
+      // shapes the body, it refuses nothing.
+      const namesHidden = detail.usedBy.length > 0
+        && (await serviceLevelForRequest(request, 'agents', { projectId })) === 'none';
+      const bucket = namesHidden ? { ...detail, usedBy: [] } : detail;
 
       return reply.code(200).send({ bucket });
     } catch (error) {
@@ -577,7 +575,8 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
 
       // Not even with `force`: the agent would keep pointing at a bucket that is gone.
-      if (await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey)) {
+      const exists = await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey);
+      if (exists) {
         const inUse = await findAgentsUsingBucket(session.tenantDbName, projectId, bucketKey);
         if (inUse.length > 0) return reply.code(409).send(bucketInUseBody(bucketKey, inUse, 'delete'));
       }
@@ -585,6 +584,12 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       // The files go from the storage provider too: a job does that, and the bucket is gone when it is done. Until
       // then it is switched off and says it is being deleted; if the job fails it says why and can be deleted again.
       if (query.deleteFiles === 'true') {
+        // A Knowledge Engine module keeps the originals and the extracted text of its documents in its bucket, and
+        // re-indexing reads them back: emptying the bucket would leave a module that cannot rebuild its documents.
+        if (exists) {
+          const modules = await findModulesKeepingSourcesIn(session.tenantDbName, projectId, bucketKey);
+          if (modules.length > 0) return reply.code(409).send(bucketHoldsSourcesBody(bucketKey, modules));
+        }
         const refusal = await sessionRefusedForBucketDeletion(request, session, projectId, bucketKey);
         if (refusal) return sendSessionRefusal(reply, request, refusal, { message: BUCKET_SESSIONS_FORBIDDEN_MESSAGE });
         await startBucketDeletion({
@@ -666,6 +671,10 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!body.data || typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required' });
       }
+      // Metadata is a set of named values: a text or a list would be stored as something other than what was sent.
+      if (!isUploadMetadata(body.metadata)) {
+        return reply.code(400).send({ error: 'metadata must be an object' });
+      }
       // `folder` (alias `prefix`) = upload into that folder; `keyHint` is then the file's name in it.
       const destination = composeUploadKeyHint({ folder: body.folder ?? body.prefix, keyHint: body.keyHint });
       if ('error' in destination) return reply.code(400).send({ error: destination.error });
@@ -675,7 +684,18 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const bucket = await getFileBucket(session.tenantDbName, session.tenantId, projectId, bucketKey);
       if (bucket.status !== 'active') throw bucketInactiveError();
 
-      const estimatedFileBytes = estimateBase64Bytes(body.data) ?? 0;
+      // Before any quota is spent: bytes written under the key of a session's file are the session's to allow.
+      const sessionRefusal = await sessionRefusedForUpload(request, {
+        tenantDbName: session.tenantDbName,
+        projectId,
+        bucket,
+        keyHint: destination.keyHint,
+        fileName: body.fileName,
+      });
+      if (sessionRefusal) return sendSessionRefusal(reply, request, sessionRefusal);
+
+      // What the service will decode from `data`, not what the text claims: the quotas below are asked about it.
+      const estimatedFileBytes = decodedByteLength(body.data);
       const quotaContext = {
         domain: 'file' as const,
         licenseType,
@@ -742,7 +762,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         data: body.data as string,
         fileName: body.fileName as string,
         ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
-        metadata: body.metadata as Record<string, unknown> | undefined,
+        metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
 
@@ -790,8 +810,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const keys = readObjectKeys(readJsonObjectBody(request), BATCH_MAX_KEYS);
 
-      const { found, missing } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
-      const denials = await sessionDenials(request, found, 'manage');
+      const { found, missing, duplicates } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
+      // Every record of a key counts: the one that stands for it may not be the one that says it is a session's.
+      const denials = await sessionDenials(request, [...found, ...duplicates], 'manage');
       const refused = new Map<string, string>([
         ...missing.map((key): [string, string] => [key, 'File not found']),
         ...found.flatMap((record): Array<[string, string]> => {
@@ -830,19 +851,19 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         const { projectId, session } = await requireProjectContextForRequest(request);
         const keys = readObjectKeys(readJsonObjectBody(request), ARCHIVE_MAX_FILES);
 
-        const { found, missing } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
+        const { found, missing, duplicates } = await findFileRecordsByKeys(session.tenantDbName, session.tenantId, projectId, bucketKey, keys);
         if (missing.length > 0) {
           throw new FileServiceError('file_not_found', 404, 'File not found', { details: { keys: missing } });
         }
-        // A file a session holds is read as the session it belongs to: one the caller may not view is no part of an archive.
-        const denials = await sessionDenials(request, found, 'view');
+        // A file a session holds is read as the session it belongs to: one the caller may not view is no part of an
+        // archive. Every record of a key counts: the one that stands for it may not be the one that says so.
+        const denials = await sessionDenials(request, [...found, ...duplicates], 'view');
         const denied = found.find((record) => denials.has(record.key));
         if (denied) return sendSessionRefusal(reply, request, denials.get(denied.key)!);
 
         const archive = await createFilesArchive(session.tenantDbName, session.tenantId, projectId, bucketKey, found);
         reply.code(200).type('application/zip');
         setFileDownloadHeaders(reply, archive.fileName, 'attachment');
-        reply.header('Cache-Control', 'private, no-store');
         return reply.send(archive.stream);
       } catch (error) {
         return fail(reply, error, 'archive objects', { storage: true, body: true });
@@ -926,7 +947,6 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         reply.header('Content-Length', String(buffer.length));
         setFileDownloadHeaders(reply, result.fileName, 'inline');
         reply.header('Content-Security-Policy', 'sandbox');
-        reply.header('Cache-Control', 'private, no-store');
         return reply.send(buffer);
       }
 

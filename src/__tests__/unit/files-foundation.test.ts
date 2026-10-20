@@ -61,12 +61,19 @@ import {
   PREVIEW_MAX_BYTES,
   canPreviewMarkdown,
   fileKindOf,
+  hasMarkdownCopy,
   markdownFileName,
   previewKindOf,
   type FileKind,
   type FileLike,
 } from '@/components/files/shared/fileKind';
-import { FILES_CONTEXT_ERROR_KEYS, FILES_ERROR_CODE_KEYS, filesErrorMessage, type FilesTranslator } from '@/components/files/shared/filesErrors';
+import {
+  FILES_CONTEXT_ERROR_KEYS,
+  FILES_ERROR_CODE_KEYS,
+  FILES_ERROR_CODES_IN_SERVER_WORDS,
+  filesErrorMessage,
+  type FilesTranslator,
+} from '@/components/files/shared/filesErrors';
 import { formatBytes, formatCount } from '@/components/files/shared/format';
 import { providerHref } from '@/components/files/shared/links';
 import { filesAccessFromPermissions } from '@/components/files/useFilesAccess';
@@ -225,13 +232,24 @@ describe('previewKindOf', () => {
     }
   });
 
-  it('previews a Markdown copy only once the conversion succeeded and the copy is small', () => {
-    expect(canPreviewMarkdown({ markdownStatus: 'succeeded', markdownSize: 100 })).toBe(true);
-    expect(canPreviewMarkdown({ markdownStatus: 'succeeded' })).toBe(true);
-    expect(canPreviewMarkdown({ markdownStatus: 'succeeded', markdownSize: PREVIEW_MAX_BYTES + 1 })).toBe(false);
-    for (const markdownStatus of ['pending', 'failed', 'skipped', null, undefined]) {
-      expect(canPreviewMarkdown({ markdownStatus })).toBe(false);
+  it('previews a Markdown copy that exists and is small, whatever the status of the last conversion says', () => {
+    expect(canPreviewMarkdown({ markdownKey: 'a.md', markdownSize: 100 })).toBe(true);
+    expect(canPreviewMarkdown({ markdownKey: 'a.md' })).toBe(true);
+    expect(canPreviewMarkdown({ markdownKey: 'a.md', markdownSize: PREVIEW_MAX_BYTES })).toBe(true);
+    expect(canPreviewMarkdown({ markdownKey: 'a.md', markdownSize: PREVIEW_MAX_BYTES + 1 })).toBe(false);
+    for (const markdownKey of ['', null, undefined]) {
+      expect(canPreviewMarkdown({ markdownKey })).toBe(false);
+      expect(canPreviewMarkdown({ markdownKey, markdownSize: 100 })).toBe(false);
     }
+    expect(canPreviewMarkdown({})).toBe(false);
+  });
+
+  it('keeps showing the earlier Markdown copy while a new conversion runs, or after one failed or was skipped', () => {
+    // The server keeps the old `markdownKey` through a re-conversion; only a record without a copy has nothing to show.
+    expect(hasMarkdownCopy({ markdownKey: 'a.md' })).toBe(true);
+    expect(hasMarkdownCopy({ markdownKey: '' })).toBe(false);
+    expect(hasMarkdownCopy({ markdownKey: null })).toBe(false);
+    expect(hasMarkdownCopy({})).toBe(false);
   });
 });
 
@@ -360,10 +378,26 @@ describe('FilesApiError', () => {
 
   it('names the codes the Files routes answer with', () => {
     expect([...FILES_ERROR_CODES].sort()).toEqual([
-      'archive_too_large', 'bucket_in_use', 'bucket_inactive', 'bucket_not_found', 'conversion_unsupported',
-      'file_too_large', 'object_too_large', 'prefix_locked', 'preview_unsupported', 'provider_inactive',
-      'storage_location_shared',
+      'archive_too_large', 'bucket_deleting', 'bucket_in_use', 'bucket_inactive', 'bucket_not_empty', 'bucket_not_found',
+      'content_type_not_allowed', 'conversion_too_large', 'conversion_unsupported', 'duplicate_key', 'file_not_found',
+      'file_too_large', 'import_in_progress', 'internal_error', 'invalid_content_type', 'invalid_request',
+      'markdown_unavailable', 'object_too_large', 'prefix_locked', 'preview_unsupported',
+      'provider_endpoint_not_allowed', 'provider_inactive', 'provider_invalid', 'provider_mismatch', 'provider_missing',
+      'provider_settings_invalid', 'provider_unassigned', 'queue_unavailable', 'quota_exceeded', 'storage_failure',
+      'storage_location_shared', 'storage_timeout', 'storage_unavailable',
     ]);
+    expect(new Set(FILES_ERROR_CODES).size).toBe(FILES_ERROR_CODES.length);
+  });
+
+  it('reads the reason a refusal adds next to its code', () => {
+    const tooLarge = FilesApiError.fromBody(415, { error: 'Preview is limited to 5 MB', code: 'preview_unsupported', reason: 'too_large' });
+    expect(tooLarge.code).toBe('preview_unsupported');
+    expect(tooLarge.reason).toBe('too_large');
+    expect(FilesApiError.fromBody(415, { error: 'No preview', code: 'preview_unsupported', reason: 'unsupported_type' }).reason).toBe('unsupported_type');
+    // An answer without a reason, or with one that is not a string, has none.
+    expect(FilesApiError.fromBody(409, { error: 'x', code: 'bucket_inactive' }).reason).toBeUndefined();
+    expect(FilesApiError.fromBody(415, { error: 'x', code: 'preview_unsupported', reason: 7 }).reason).toBeUndefined();
+    expect(FilesApiError.fromBody(415, { error: 'x', code: 'preview_unsupported', reason: '  ' }).reason).toBeUndefined();
   });
 });
 
@@ -378,6 +412,11 @@ describe('routes', () => {
     expect(filesRoutes.bucket('a b')).toBe('/api/files/buckets/a%20b');
     expect(filesRoutes.bucketDelete('b')).toBe('/api/files/buckets/b');
     expect(filesRoutes.bucketDelete('b', { deleteFiles: true })).toBe('/api/files/buckets/b?deleteFiles=true');
+    expect(filesRoutes.bucketDelete('b', { force: true })).toBe('/api/files/buckets/b?force=true');
+    expect(filesRoutes.bucketDelete('b', {})).toBe('/api/files/buckets/b');
+    expect(filesRoutes.bucketDelete('b', { deleteFiles: false, force: false })).toBe('/api/files/buckets/b');
+    // Asking for the files to go wins, as it does on the server (the two are never sent together).
+    expect(filesRoutes.bucketDelete('a b', { deleteFiles: true, force: true })).toBe('/api/files/buckets/a%20b?deleteFiles=true');
     expect(filesRoutes.objects('b')).toBe('/api/files/buckets/b/objects');
     expect(filesRoutes.batchDelete('b')).toBe('/api/files/buckets/b/objects/batch-delete');
     expect(filesRoutes.archive('b')).toBe('/api/files/buckets/b/objects/archive');
@@ -502,6 +541,24 @@ describe('Files API fetchers', () => {
     ]);
   });
 
+  it('removes only the bucket, whatever it holds, when asked to', async () => {
+    const calls = mockFetch(() => json({ success: true }));
+    expect(await deleteBucket('docs', { force: true })).toEqual({ status: 'deleted' });
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(['DELETE /api/files/buckets/docs?force=true']);
+  });
+
+  it('asks for the files to go when it is asked for both, as the server does', async () => {
+    const calls = mockFetch(() => json({ status: 'deleting' }, 202));
+    expect(await deleteBucket('docs', { deleteFiles: true, force: true })).toEqual({ status: 'deleting' });
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(['DELETE /api/files/buckets/docs?deleteFiles=true']);
+  });
+
+  it('keeps the code of a delete refused for a storage location another bucket uses', async () => {
+    mockFetch(() => json({ error: 'Another bucket uses this storage location.', code: 'storage_location_shared' }, 409));
+    const error = await deleteBucket('docs', { deleteFiles: true }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ status: 409, code: 'storage_location_shared' });
+  });
+
   it('also reads a bucket delete that continues in the background from the body', async () => {
     mockFetch(() => json({ status: 'deleting' }));
     expect(await deleteBucket('docs', { deleteFiles: true })).toEqual({ status: 'deleting' });
@@ -620,6 +677,11 @@ describe('Files API fetchers', () => {
   it('answers 415 preview_unsupported by code', async () => {
     mockFetch(() => json({ error: 'No preview', code: 'preview_unsupported' }, 415));
     await expect(fetchObjectText('docs', 'a.bin')).rejects.toMatchObject({ status: 415, code: 'preview_unsupported' });
+  });
+
+  it('tells a file too large to preview from a type that cannot be previewed', async () => {
+    mockFetch(() => json({ error: 'Preview is limited to 5 MB', code: 'preview_unsupported', reason: 'too_large' }, 415));
+    await expect(fetchObjectText('docs', 'big.txt')).rejects.toMatchObject({ status: 415, code: 'preview_unsupported', reason: 'too_large' });
   });
 
   it('tests a saved provider by its record id', async () => {
@@ -777,6 +839,45 @@ describe('filesErrorMessage', () => {
     expect(filesErrorMessage(make(409, 'storage_location_shared'), t)).toBe(errors.storageLocationShared);
   });
 
+  it('words the refusals of a bucket that is being deleted, one that still holds files and a key taken', () => {
+    expect(filesErrorMessage(make(409, 'bucket_deleting'), t)).toBe(errors.bucketDeleting);
+    expect(filesErrorMessage(make(409, 'bucket_not_empty'), t)).toBe(errors.bucketNotEmpty);
+    expect(filesErrorMessage(make(409, 'duplicate_key'), t)).toBe(errors.duplicateKey);
+    expect(filesErrorMessage(make(404, 'file_not_found'), t)).toBe(errors.fileNotFound);
+  });
+
+  it('words a provider the bucket cannot use, and a Markdown copy that is not there', () => {
+    expect(filesErrorMessage(make(409, 'provider_missing'), t)).toBe(errors.providerMissing);
+    expect(filesErrorMessage(make(409, 'provider_unassigned'), t)).toBe(errors.providerUnassigned);
+    expect(filesErrorMessage(make(409, 'provider_invalid'), t)).toBe(errors.providerInvalid);
+    expect(filesErrorMessage(make(404, 'markdown_unavailable'), t)).toBe(errors.markdownUnavailable);
+  });
+
+  it('words an upload the server refuses for its type, an import already running and a queue that is down', () => {
+    // The type that was refused is in the server's sentence, so that is what is shown.
+    expect(filesErrorMessage(make(415, 'content_type_not_allowed', 'Content type "text/plain" is not allowed.'), t)).toBe('Content type "text/plain" is not allowed.');
+    expect(filesErrorMessage(make(400, 'invalid_content_type'), t)).toBe(errors.invalidContentType);
+    expect(filesErrorMessage(make(409, 'import_in_progress'), t)).toBe(errors.importInProgress);
+    expect(filesErrorMessage(make(503, 'queue_unavailable'), t)).toBe(errors.queueUnavailable);
+  });
+
+  it('words a storage provider that is down or too slow, and an error the server could not explain', () => {
+    expect(filesErrorMessage(make(503, 'storage_unavailable'), t)).toBe(errors.storageUnavailable);
+    expect(filesErrorMessage(make(504, 'storage_timeout'), t)).toBe(errors.storageTimeout);
+    expect(filesErrorMessage(make(500, 'internal_error', 'Internal details'), t)).toBe(errors.generic);
+  });
+
+  it('tells a file too large to preview from a type that cannot be previewed', () => {
+    const tooLarge = new FilesApiError({ message: 'Preview is limited to 5 MB', status: 415, code: 'preview_unsupported', reason: 'too_large' });
+    const unsupported = new FilesApiError({ message: 'No preview', status: 415, code: 'preview_unsupported', reason: 'unsupported_type' });
+    expect(filesErrorMessage(tooLarge, t)).toBe(errors.previewTooLarge);
+    expect(filesErrorMessage(unsupported, t)).toBe(errors.previewUnsupported);
+    expect(filesErrorMessage(make(415, 'preview_unsupported'), t)).toBe(errors.previewUnsupported);
+    const trT = commonTranslator(tr);
+    expect(filesErrorMessage(tooLarge, trT)).toBe(tr.files.common.errors.previewTooLarge);
+    expect(tr.files.common.errors.previewTooLarge).not.toBe(errors.previewTooLarge);
+  });
+
   it('words a storage location that another bucket uses for the place it was met: the import dialog and the delete dialog', () => {
     const shared = make(409, 'storage_location_shared', 'Another bucket uses this storage location, so objects in it cannot be imported.');
 
@@ -799,10 +900,73 @@ describe('filesErrorMessage', () => {
     expect(filesErrorMessage(make(404), t)).toBe(errors.notFound);
   });
 
+  describe('a 403', () => {
+    const viewSession = 'This session was started by someone else, and you are not allowed to view it.';
+    const changeSession = 'This session was started by someone else, and you are not allowed to change it.';
+    const bucketSessions = 'This bucket holds files of sessions started by someone else, and you are not allowed to change them, so it cannot be deleted with its files.';
+    const gate = 'Forbidden: files requires write permission';
+    const refused = (body: unknown, statusText?: string) => FilesApiError.fromBody(403, body, statusText);
+
+    it('shows the reason a refusal gives in words of its own: a file of a session somebody else started', () => {
+      // The answer is { error } alone, or the gates' shape with the sentence in it; neither has a code to translate by.
+      expect(filesErrorMessage(refused({ error: viewSession }), t)).toBe(viewSession);
+      expect(filesErrorMessage(refused({ error: changeSession, code: 'forbidden', message: changeSession, service: 'agents', required: 'write', decisionId: 'd-1' }), t)).toBe(changeSession);
+      // The same words in every place a file or a bucket is opened, changed or deleted.
+      expect(filesErrorMessage(refused({ error: bucketSessions }), t, 'deleteBucket')).toBe(bucketSessions);
+      expect(filesErrorMessage(refused({ error: viewSession }), t, 'importFromStorage')).toBe(viewSession);
+      expect(filesErrorMessage(refused({ error: `  ${changeSession}  ` }), t)).toBe(changeSession);
+    });
+
+    it('words the gates’ own answer, which says no more than the viewer’s language does, as a missing permission', () => {
+      const bodies: unknown[] = [
+        undefined,
+        {},
+        { error: 'Forbidden' },
+        { error: 'forbidden.' },
+        { error: gate, code: 'forbidden', message: gate, service: 'files', required: 'write', decisionId: 'd-2' },
+        { statusCode: 403, error: 'Forbidden', message: 'Forbidden' },
+        { error: '   ', message: '' },
+        { error: 42, message: null },
+        'Request blocked',
+      ];
+      for (const body of bodies) {
+        expect(filesErrorMessage(refused(body), t), JSON.stringify(body) ?? 'no body').toBe(errors.forbidden);
+      }
+      // The status line is not a reason either.
+      expect(filesErrorMessage(refused(undefined, 'Forbidden'), t)).toBe(errors.forbidden);
+      expect(filesErrorMessage(make(403), t)).toBe(errors.forbidden);
+    });
+
+    it('reads Fastify’s own shape the way the error does: the reason is `message`', () => {
+      expect(filesErrorMessage(refused({ statusCode: 403, error: 'Forbidden', message: 'Origin not allowed' }), t)).toBe('Origin not allowed');
+    });
+
+    it('keeps the provider test’s own words, and the message of a code that has one', () => {
+      expect(filesErrorMessage(refused({ error: viewSession }), t, 'providerTest')).toBe(errors.providerAccess);
+      expect(filesErrorMessage(FilesApiError.fromBody(403, { error: viewSession, code: 'bucket_inactive' }), t)).toBe(errors.bucketInactive);
+    });
+
+    it('tells the gates’ answer in the viewer’s language, while a reason stays the words the server wrote', () => {
+      const trT = commonTranslator(tr);
+      expect(tr.files.common.errors.forbidden).not.toBe(errors.forbidden);
+      expect(filesErrorMessage(refused({ error: gate, code: 'forbidden', message: gate }), trT)).toBe(tr.files.common.errors.forbidden);
+      expect(filesErrorMessage(refused({ error: viewSession }), trT)).toBe(viewSession);
+    });
+  });
+
   it('shows the server’s own words for a refusal that carries details', () => {
     expect(filesErrorMessage(make(409, 'bucket_in_use', 'Bucket is used by 2 agents: a, b'), t)).toBe('Bucket is used by 2 agents: a, b');
     expect(filesErrorMessage(make(429, undefined, 'Storage quota exceeded'), t)).toBe('Storage quota exceeded');
     expect(filesErrorMessage(make(500, undefined, '   '), t)).toBe(errors.generic);
+  });
+
+  it('shows the server’s own words for every code listed as carrying details', () => {
+    for (const code of FILES_ERROR_CODES_IN_SERVER_WORDS) {
+      expect(filesErrorMessage(make(400, code, `Sentence for ${code}`), t), code).toBe(`Sentence for ${code}`);
+    }
+    // The settings of a provider and the explanation of a storage driver are the server's sentences, field and all.
+    expect(filesErrorMessage(make(400, 'provider_settings_invalid', 'Bucket name is not valid.'), t)).toBe('Bucket name is not valid.');
+    expect(filesErrorMessage(make(502, 'storage_failure', 'The provider refused the credentials.'), t)).toBe('The provider refused the credentials.');
   });
 
   it('does not guess about errors that are not Files errors', () => {
@@ -820,7 +984,13 @@ describe('filesErrorMessage', () => {
       expect(turkish.length, code).toBeGreaterThan(0);
       expect(turkish, code).not.toBe(english);
     }
-    expect(FILES_ERROR_CODES.filter((code) => !(code in FILES_ERROR_CODE_KEYS))).toEqual(['bucket_in_use']);
+    // Every code the Files routes answer with is worded one way or the other, and never both.
+    const inServerWords: readonly string[] = FILES_ERROR_CODES_IN_SERVER_WORDS;
+    expect(FILES_ERROR_CODES.filter((code) => !(code in FILES_ERROR_CODE_KEYS)).sort()).toEqual([...inServerWords].sort());
+    expect(FILES_ERROR_CODES.filter((code) => code in FILES_ERROR_CODE_KEYS && inServerWords.includes(code))).toEqual([]);
+    expect(FILES_ERROR_CODES_IN_SERVER_WORDS.filter((code) => !(FILES_ERROR_CODES as readonly string[]).includes(code))).toEqual([]);
+    // What the client raises itself is worded too, though it is not a code the server answers with.
+    expect(Object.keys(FILES_ERROR_CODE_KEYS).filter((code) => !(FILES_ERROR_CODES as readonly string[]).includes(code)).sort()).toEqual(['invalid_response', 'read_failed']);
   });
 
   it('has a translated message for every code it words differently in a place, and only for codes it knows', () => {
@@ -966,6 +1136,19 @@ describe('polling rules', () => {
     expect(deletingBucketsSignature([{ key: 'z', deleting: true }, { key: 'y', deleting: true }, { key: 'x' }])).toBe('y\nz');
     expect(deletingBucketsSignature([{ key: 'x' }])).toBeNull();
     expect(deletingBucketsSignature(null)).toBeNull();
+  });
+
+  it('restarts the clock when the same job is asked for again', () => {
+    const early = '2026-10-20T10:00:00.000Z';
+    const late = '2026-10-20T10:10:00.000Z';
+    const converting = (updatedAt: string) => [{ key: 'a', markdownStatus: 'pending', updatedAt }];
+    expect(pendingMarkdownSignature(converting(early))).not.toBeNull();
+    expect(pendingMarkdownSignature(converting(early))).toBe(pendingMarkdownSignature(converting(early)));
+    expect(pendingMarkdownSignature(converting(late))).not.toBe(pendingMarkdownSignature(converting(early)));
+    const deleting = (updatedAt: string) => [{ key: 'z', deleting: true, updatedAt }];
+    expect(deletingBucketsSignature(deleting(late))).not.toBe(deletingBucketsSignature(deleting(early)));
+    // A run without a time is named by its key alone.
+    expect(pendingMarkdownSignature([{ key: 'a', markdownStatus: 'pending', updatedAt: null }])).toBe('a');
   });
 
   it('retries a lost connection or a server error once, and never a refusal', () => {

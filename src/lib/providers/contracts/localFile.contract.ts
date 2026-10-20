@@ -4,8 +4,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import slugify from 'slugify';
 import { getConfig } from '@/lib/core/config';
 import type { Stats } from 'node:fs';
+import { ProviderSettingsError } from '../errors';
+import { isSafePathSegment, relativeFolderNames } from '../pathSegments';
 import type { ProviderContract } from '../types';
-import { maxStorageDownloadBytes, StorageObjectTooLargeError } from './storageLimits';
+import { resolveDownloadCeiling } from './downloadCeiling';
+import { hasLoneSurrogate, StorageInvalidKeyError, StorageObjectTooLargeError } from './storageLimits';
 import type {
   FileProviderRuntime,
   FileObjectHandle,
@@ -39,29 +42,78 @@ function resolveBasePath(settings: LocalFileSettings): string {
   return path.resolve(raw);
 }
 
+/**
+ * The folders of a subdirectory setting, inside the base directory. Blank is none. Anything that could leave the base
+ * directory (an absolute path, a drive, a `..`) is refused, whether it is being saved or comes from a provider that was
+ * saved before it was checked.
+ */
+function subdirectoryFolders(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  if (typeof raw !== 'string') throw new ProviderSettingsError('subdirectory', 'The subdirectory must be text.');
+  const text = raw.trim();
+  if (text === '') return [];
+  const names = relativeFolderNames(text);
+  if (!names) {
+    throw new ProviderSettingsError(
+      'subdirectory',
+      'The subdirectory must be a folder inside the base directory: a relative path with no "..", no leading "/" and no drive letter.',
+    );
+  }
+  return names;
+}
+
+/** Whether `relative` (a path from a folder to something) leaves that folder. */
+function leavesFolder(relative: string): boolean {
+  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/**
+ * `<base>[/<subdirectory>]/<organization id>/<provider key>`: the one folder this provider's files live in. It is always
+ * below `<base>[/<subdirectory>]/<organization id>`, which is what keeps one organization's files from another's: a
+ * provider key that points anywhere else (`..`, `../<another id>/<key>`, `.`) is refused, even for a provider that was
+ * saved before keys were checked. The organization id is one name of the path by construction.
+ */
 function buildTenantRoot(
   settings: LocalFileSettings,
   tenantId: string,
   providerKey: string,
 ): string {
-  const base = resolveBasePath(settings);
-  const segments = [base];
-
-  if (settings.subdirectory && settings.subdirectory.trim().length > 0) {
-    segments.push(settings.subdirectory.trim());
+  if (!isSafePathSegment(tenantId)) {
+    throw new Error('The organization id cannot be used as a folder name.');
   }
-
-  segments.push(tenantId, providerKey);
-  return path.join(...segments);
+  const parent = path.join(resolveBasePath(settings), ...subdirectoryFolders(settings.subdirectory), tenantId);
+  const root = path.join(parent, providerKey);
+  const relative = path.relative(parent, root);
+  if (relative === '' || leavesFolder(relative)) {
+    throw new ProviderSettingsError('key', 'The provider key cannot be used as a folder name: it must name a folder inside the organization folder (not empty, ".", or a path that goes up with "..").');
+  }
+  return root;
 }
 
 function sanitizeKey(rawKey: string): string {
   const normalized = rawKey.replace(/\\/g, '/').replace(/\.{2,}/g, '.');
   const trimmed = normalized.replace(/^\/+/, '').replace(/\/+$/, '');
   if (!trimmed || trimmed.includes('..')) {
-    throw new Error('Invalid file key provided.');
+    throw new StorageInvalidKeyError();
+  }
+  // Written to a path (or a file name), a lone surrogate turns into U+FFFD: two different keys would be one file.
+  if (hasLoneSurrogate(trimmed)) {
+    throw new StorageInvalidKeyError('it holds a character that has no UTF-8 form (a lone surrogate).');
   }
   return trimmed;
+}
+
+/** The file system refuses a name (a part of the path) that is longer than it takes: 255 bytes on the usual ones. */
+function isNameTooLong(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENAMETOOLONG';
+}
+
+/** A key whose name the file system cannot hold is a key to change, like any other the store refuses. */
+function refuseLongName(error: unknown): never {
+  if (isNameTooLong(error)) {
+    throw new StorageInvalidKeyError('a part of the name is longer than the file system allows (usually 255 bytes in UTF-8).');
+  }
+  throw error;
 }
 
 function generateKey(fileName: string | undefined): string {
@@ -229,7 +281,7 @@ export const LocalFileProviderContract: ProviderContract<
             required: false,
             placeholder: 'Defaults to DATA_DIR/files',
             description:
-              'Optional directory path used to store files for this provider. Leave empty to use the built-in data directory (DATA_DIR/files).',
+              'Optional directory path used to store files for this provider. Leave empty to use the built-in data directory (DATA_DIR/files). Only an owner or an admin of a self-hosted deployment can choose one.',
             scope: 'settings',
           },
           {
@@ -238,12 +290,29 @@ export const LocalFileProviderContract: ProviderContract<
             type: 'text',
             placeholder: 'files',
             description:
-              'Optional subdirectory created inside the base directory before tenant isolation.',
+              'Optional relative folder (no "..") created inside the base directory before tenant isolation.',
             scope: 'settings',
           },
         ],
       },
     ],
+  },
+  validateSettings({ settings, isOnPrem, allowHostPaths }) {
+    const { basePath, subdirectory } = (settings ?? {}) as Record<string, unknown>;
+    if (basePath !== undefined && basePath !== null && typeof basePath !== 'string') {
+      throw new ProviderSettingsError('basePath', 'The base directory must be text.');
+    }
+    // A directory of this server is named by whoever runs the server: never on a shared deployment, and on a
+    // self-hosted one only by the people who administer providers.
+    if (typeof basePath === 'string' && basePath.trim() !== '') {
+      if (!isOnPrem) {
+        throw new ProviderSettingsError('basePath', 'A base directory can only be chosen on a self-hosted deployment. Leave it empty to use the built-in data directory.');
+      }
+      if (allowHostPaths !== true) {
+        throw new ProviderSettingsError('basePath', 'Only an owner or an admin can choose the base directory. Leave it empty to use the built-in data directory.');
+      }
+    }
+    subdirectoryFolders(subdirectory);
   },
   // The files sit in a directory of this server: its path is not something to show.
   describeStorageLocation: () => null,
@@ -290,21 +359,25 @@ export const LocalFileProviderContract: ProviderContract<
 
     const runtime: FileProviderRuntime = {
       async uploadFile(input) {
-        const { destination, key } = await resolvePath(input.key);
+        const { destination, key } = await resolvePath(input.key).catch(refuseLongName);
         const data = Buffer.isBuffer(input.data)
           ? input.data
           : Buffer.from(input.data);
-        await fs.writeFile(destination, data);
-        const stats = await fs.stat(destination);
-        const checksum = createHash('sha256').update(data).digest('hex');
-
+        let stats: Awaited<ReturnType<typeof fs.stat>>;
         const metadata: LocalFileMetadata = {
-          checksum,
+          checksum: createHash('sha256').update(data).digest('hex'),
           contentType: input.contentType,
           custom: input.metadata,
         };
-
-        await writeMetadata(destination, metadata);
+        try {
+          await fs.writeFile(destination, data);
+          stats = await fs.stat(destination);
+          await writeMetadata(destination, metadata);
+        } catch (error) {
+          // The name fits the file but not its sidecar: nothing of this upload stays.
+          if (isNameTooLong(error)) await fs.rm(destination, { force: true }).catch(() => undefined);
+          return refuseLongName(error);
+        }
 
         logger?.info?.('Stored local file', { key, size: stats.size });
 
@@ -313,13 +386,13 @@ export const LocalFileProviderContract: ProviderContract<
         } satisfies UploadFileResult;
       },
 
-      async downloadFile(key) {
+      async downloadFile(key, options) {
         const sanitizedKey = sanitizeKey(key);
         const filePath = path.join(tenantRoot, sanitizedKey);
         ensureWithin(tenantRoot, filePath);
-        // The size first: an object put here by another tool is not read whole when it is larger than the server holds.
+        // The size first: an object put here by another tool is not read whole when it is larger than the caller holds.
         const stats = await fs.stat(filePath);
-        const ceiling = maxStorageDownloadBytes();
+        const ceiling = resolveDownloadCeiling(options);
         if (stats.size > ceiling) throw new StorageObjectTooLargeError(ceiling);
         const data = await fs.readFile(filePath);
         const metadata = await readMetadata(filePath);

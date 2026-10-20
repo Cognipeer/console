@@ -4,6 +4,7 @@ import { ActionIcon, Menu } from '@mantine/core';
 import { IconBan, IconCheck, IconDots, IconFolderOpen, IconSettings, IconTrash } from '@tabler/icons-react';
 import { RowActionItems, type DataGridRowAction } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
+import { deleteRules } from '../bucket/settingsModel';
 import type { BucketListItem } from '../filesApi';
 import { bucketHref } from './bucketListModel';
 
@@ -15,6 +16,8 @@ export interface BucketRowActionsProps {
   busy: boolean;
   onNavigate: (href: string) => void;
   onToggleStatus: (bucket: BucketListItem) => void;
+  /** The time the row is judged at (`useNow`): a bucket that has been `deleting` for long enough can be deleted again. */
+  now: number;
 }
 
 /**
@@ -22,11 +25,15 @@ export interface BucketRowActionsProps {
  * identical buttons is still a list a screen reader can tell apart.
  *
  * Deleting is not done here: it needs the choice of whether the files go too, an agent check and a confirmation,
- * which live on the bucket's Settings tab (its danger zone), so "Delete bucket…" opens that tab.
+ * which live on the bucket's Settings tab (its danger zone), so "Delete bucket…" opens that tab. For a bucket whose
+ * deletion stopped with an error, or whose background run has been going on for so long that it was probably lost,
+ * the same item reads "Delete again…" and goes to the same place.
  */
-export default function BucketRowActions({ bucket, canWrite, busy, onNavigate, onToggleStatus }: BucketRowActionsProps) {
+export default function BucketRowActions({ bucket, canWrite, busy, onNavigate, onToggleStatus, now }: BucketRowActionsProps) {
   const t = useTranslations('files.list');
   const disabled = bucket.status === 'disabled';
+  const rules = deleteRules(bucket, now);
+  const again = rules.stalled || rules.lastError !== null;
   // A bucket that is being deleted takes no more changes.
   const editable = canWrite && !bucket.deleting;
 
@@ -43,11 +50,11 @@ export default function BucketRowActions({ bucket, canWrite, busy, onNavigate, o
     },
     {
       id: 'delete',
-      label: t('actions.delete'),
+      label: again ? t('actions.deleteAgain') : t('actions.delete'),
       icon: <IconTrash size={14} />,
       color: 'red',
       divider: true,
-      hidden: !editable,
+      hidden: !canWrite || (bucket.deleting === true && !rules.stalled),
       onClick: () => onNavigate(bucketHref(bucket.key, 'settings')),
     },
   ];

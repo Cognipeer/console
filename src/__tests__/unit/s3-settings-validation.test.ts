@@ -27,12 +27,12 @@ function problem(run: () => unknown): ProviderSettingsError {
   throw new Error('expected a ProviderSettingsError, nothing was thrown');
 }
 
-function compatible(settings: Record<string, unknown>, credentials: Record<string, unknown> = KEYS, isOnPrem = true) {
-  return () => validateS3Settings({ credentials, settings, isOnPrem, requireEndpoint: true });
+function compatible(settings: Record<string, unknown>, credentials: Record<string, unknown> = KEYS) {
+  return () => validateS3Settings({ credentials, settings, requireEndpoint: true });
 }
 
-function amazon(settings: Record<string, unknown>, credentials: Record<string, unknown> = KEYS, isOnPrem = true) {
-  return () => validateS3Settings({ credentials, settings, isOnPrem, requireEndpoint: false });
+function amazon(settings: Record<string, unknown>, credentials: Record<string, unknown> = KEYS) {
+  return () => validateS3Settings({ credentials, settings, requireEndpoint: false });
 }
 
 describe('S3-compatible storage settings', () => {
@@ -43,6 +43,32 @@ describe('S3-compatible storage settings', () => {
     expect(compatible(BASE, { ...KEYS, sessionToken: 'FQoGZXIvYXdzE...token+with/base64==' })).not.toThrow();
     expect(compatible({ ...BASE, endpoint: 'http://[::1]:9000' })).not.toThrow();
     expect(compatible({ ...BASE, endpoint: 'https://gw.example.com/s3' })).not.toThrow();
+  });
+
+  // Where the endpoint may point (private networks, metadata addresses) is the network policy's job, at save and again
+  // at runtime; the scheme is the provider's own choice on every deployment.
+  it('takes plain http as well as https for the endpoint', () => {
+    for (const endpoint of ['http://minio.example.com:9000', 'HTTP://minio.example.com', 'http://[::1]:9000', 'http://10.0.0.5/s3', 'HTTPS://gw.example.com/s3']) {
+      expect(compatible({ ...BASE, endpoint }), endpoint).not.toThrow();
+    }
+  });
+
+  it('takes a plain-http custom endpoint in the Amazon form too', () => {
+    const settings = { bucket: 'abc', region: 'eu-central-1' };
+    expect(amazon({ ...settings, endpoint: 'http://minio.example.com' })).not.toThrow();
+    expect(amazon(settings)).not.toThrow();
+  });
+
+  it('answers the same through both contracts\' validateSettings, on a hosted and on a self-hosted deployment', () => {
+    const settings = { ...BASE, region: 'us-east-1', endpoint: 'http://minio.example.com:9000' };
+    for (const validate of [validateCompatible, validateAmazon]) {
+      for (const isOnPrem of [false, true]) {
+        expect(() => validate({ credentials: KEYS, settings, isOnPrem }), String(isOnPrem)).not.toThrow();
+        expect(() => validate({ credentials: KEYS, settings: { ...settings, allowInsecureTls: true }, isOnPrem }), String(isOnPrem)).not.toThrow();
+        expect(problem(() => validate({ credentials: KEYS, settings: { ...settings, endpoint: 'http://u:p@minio:9000' }, isOnPrem })).field).toBe('endpoint');
+        expect(problem(() => validate({ credentials: KEYS, settings: { ...settings, allowInsecureTls: 'true' }, isOnPrem })).field).toBe('allowInsecureTls');
+      }
+    }
   });
 
   it('is what the contract runs through validateSettings', () => {
@@ -107,11 +133,9 @@ describe('S3-compatible storage settings', () => {
       expect(withKey.message).not.toContain('AAAA');
     });
 
-    it('lets a self-hosted deployment skip verification and refuses it everywhere else', () => {
-      expect(compatible({ ...BASE, allowInsecureTls: true }, KEYS, true)).not.toThrow();
-      const saas = problem(compatible({ ...BASE, allowInsecureTls: true }, KEYS, false));
-      expect(saas.field).toBe('allowInsecureTls');
-      expect(compatible({ ...BASE, allowInsecureTls: false }, KEYS, false)).not.toThrow();
+    it('lets a provider skip verification on any deployment', () => {
+      expect(compatible({ ...BASE, allowInsecureTls: true })).not.toThrow();
+      expect(compatible({ ...BASE, allowInsecureTls: false })).not.toThrow();
     });
 
     it('wants a real boolean for it', () => {
@@ -145,7 +169,7 @@ describe('Amazon S3 settings', () => {
   it('holds the bucket, the keys and the TLS settings to the same rules', () => {
     expect(problem(amazon({ region: 'eu-central-1', bucket: 's3://abc' })).field).toBe('bucket');
     expect(problem(amazon({ region: 'eu-central-1', bucket: 'abc' }, { accessKeyId: 'x' })).field).toBe('secretAccessKey');
-    expect(problem(amazon({ region: 'eu-central-1', bucket: 'abc', allowInsecureTls: true }, KEYS, false)).field).toBe('allowInsecureTls');
+    expect(problem(amazon({ region: 'eu-central-1', bucket: 'abc', allowInsecureTls: 'yes' })).field).toBe('allowInsecureTls');
     expect(problem(amazon({ region: 'eu-central-1', bucket: 'abc', caCertificate: 'nope' })).field).toBe('caCertificate');
   });
 });

@@ -10,6 +10,7 @@
  *  - the service's own default (the client API, agents) still converts before it returns.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { existsSync, promises as fsPromises, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
@@ -433,6 +434,162 @@ describe('the conversion job', () => {
   });
 });
 
+/**
+ * The copy is written before the record says so. Whatever happened to the record or its bucket meanwhile is read again
+ * before anything is settled, and a copy that nothing will carry is removed - in the provider, where nothing lists it.
+ */
+describe('a conversion that is settled after another writer acted', () => {
+  const copyWrites = (writes: { mock: { calls: unknown[][] } }) => writes.mock.calls.filter(([file]) => /\.md$/.test(String(file)));
+
+  /** Runs the job queued for this record (a job names the record it was queued for). */
+  const runFor = (record: { key: string; _id?: unknown }) =>
+    stack.db.runWithTenant(FILES_DB_NAME, () => runMarkdownConversionJob({ ...jobPayload(record.key), recordId: String(record._id) }));
+
+  /** Runs `act` at the second read of the record by id: the one the job makes after it has converted. */
+  function afterConversion(act: (id: string) => Promise<unknown>) {
+    const real = stack.db.findFileRecordById.bind(stack.db);
+    let reads = 0;
+    return vi.spyOn(stack.db, 'findFileRecordById').mockImplementation(async (id: string) => {
+      reads += 1;
+      if (reads === 2) await act(id);
+      return real(id);
+    });
+  }
+
+  describe('two jobs for one record', () => {
+    it('take turns: the second finds the record settled and converts nothing, so the copy is written once and the record names it', async () => {
+      const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes: revenue grew.', { markdownStatus: 'pending' });
+      const writes = vi.spyOn(fsPromises, 'writeFile');
+      const job = { ...jobPayload('notes.txt'), recordId: String(waiting._id) };
+
+      await Promise.all([
+        stack.db.runWithTenant(FILES_DB_NAME, () => runMarkdownConversionJob(job)),
+        stack.db.runWithTenant(FILES_DB_NAME, () => runMarkdownConversionJob(job)),
+      ]);
+
+      expect(await stack.record('work', 'notes.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'notes.md' });
+      expect(copyWrites(writes)).toHaveLength(1);
+      expect(readFileSync(stack.objectPath('work', 'notes.md'), 'utf8')).toContain('revenue grew');
+      expect(existsSync(stack.objectPath('work', 'notes.txt.md'))).toBe(false);
+    });
+
+    it('do not hold up the jobs of other records', async () => {
+      const first = await stack.putFile('work', 'one.txt', 'first words', { markdownStatus: 'pending' });
+      const second = await stack.putFile('work', 'two.txt', 'second words', { markdownStatus: 'pending' });
+
+      await Promise.all([first, second].map((record) => stack.db.runWithTenant(FILES_DB_NAME, () => runMarkdownConversionJob({ ...jobPayload(String(record.key)), recordId: String(record._id) }))));
+
+      expect(await stack.record('work', 'one.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'one.md' });
+      expect(await stack.record('work', 'two.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'two.md' });
+    });
+
+    it('take turns by the key too when the job comes from a node that sent no record id', async () => {
+      await stack.putFile('work', 'older.txt', 'old node words', { markdownStatus: 'pending' });
+      const writes = vi.spyOn(fsPromises, 'writeFile');
+
+      await Promise.all([runJob('older.txt'), runJob('older.txt')]);
+
+      expect(await stack.record('work', 'older.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'older.md' });
+      expect(copyWrites(writes)).toHaveLength(1);
+    });
+  });
+
+  it('leaves the record to the run that settled it first, and removes its own copy: no object is left that the record does not name', async () => {
+    const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+    // Another node settles the record while this run converts, with a copy of its own under the other name.
+    afterConversion(async (id) => {
+      stack.putObject('work', 'notes.txt.md', '# the other run\'s copy');
+      await stack.db.updateFileRecord(id, { markdownStatus: 'succeeded', markdownKey: 'notes.txt.md', markdownSize: 21, markdownContentType: 'text/markdown' });
+    });
+
+    await runFor(waiting);
+
+    expect(await stack.record('work', 'notes.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'notes.txt.md', markdownSize: 21 });
+    expect(readFileSync(stack.objectPath('work', 'notes.txt.md'), 'utf8')).toBe('# the other run\'s copy');
+    expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+  });
+
+  it('keeps the copy the record already names when the other run wrote the same object', async () => {
+    const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+    afterConversion(async (id) => {
+      await stack.db.updateFileRecord(id, { markdownStatus: 'succeeded', markdownKey: 'notes.md', markdownSize: 15, markdownContentType: 'text/markdown' });
+    });
+
+    await runFor(waiting);
+
+    expect(await stack.record('work', 'notes.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'notes.md', markdownSize: 15 });
+    expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(true);
+  });
+
+  it('leaves a record as it is that another run settled and a new request has put back to waiting: this run\'s copy would be a second one', async () => {
+    const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+    // The first run settled (a copy under another name), and a new request put the record back to waiting.
+    afterConversion(async (id) => {
+      stack.putObject('work', 'notes.txt.md', '# first run');
+      await stack.db.updateFileRecord(id, { markdownStatus: 'pending', markdownKey: 'notes.txt.md', markdownSize: 11 });
+    });
+
+    await runFor(waiting);
+
+    // The new request has its own job: this run neither settles the record nor leaves a second copy beside the first.
+    expect(await stack.record('work', 'notes.txt')).toMatchObject({ markdownStatus: 'pending', markdownKey: 'notes.txt.md' });
+    expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+    expect(existsSync(stack.objectPath('work', 'notes.txt.md'))).toBe(true);
+  });
+
+  describe('when the bucket stops taking files while the file is converted', () => {
+    it('removes the copy and marks the file failed, with why, when the bucket began to be deleted', async () => {
+      const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+      afterConversion(async () => stack.db.updateFileBucket(String((await stack.bucket('work'))!._id), { status: 'disabled', metadata: { deleting: true } }));
+
+      await runFor(waiting);
+
+      const record = await stack.record('work', 'notes.txt');
+      expect(record?.markdownStatus).toBe('failed');
+      expect(record?.markdownError).toMatch(/being deleted/i);
+      expect(record?.markdownKey ?? null).toBeNull();
+      expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+      expect(existsSync(stack.objectPath('work', 'notes.txt'))).toBe(true);
+    });
+
+    it('does the same for a bucket that was only switched off', async () => {
+      const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+      afterConversion(async () => stack.db.updateFileBucket(String((await stack.bucket('work'))!._id), { status: 'disabled' }));
+
+      await runFor(waiting);
+
+      const record = await stack.record('work', 'notes.txt');
+      expect(record?.markdownStatus).toBe('failed');
+      expect(record?.markdownError).toMatch(/not active/i);
+      expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+    });
+
+    it('leaves no copy when the bucket is gone', async () => {
+      const waiting = await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+      afterConversion(async () => stack.db.deleteFileBucket(String((await stack.bucket('work'))!._id)));
+
+      await expect(runFor(waiting)).resolves.toBeUndefined();
+
+      expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(false);
+    });
+
+    it('settles the file as usual when the bucket cannot be read again: not knowing is not a reason to drop a finished copy', async () => {
+      await stack.putFile('work', 'notes.txt', 'Quarterly notes', { markdownStatus: 'pending' });
+      const real = stack.db.findFileBucketByKey.bind(stack.db);
+      vi.spyOn(stack.db, 'findFileBucketByKey').mockImplementation(async (...args) => {
+        // Every lookup before the copy was written works; the first one after it fails.
+        if (existsSync(stack.objectPath('work', 'notes.md'))) throw new Error('SQLITE_BUSY: database is locked');
+        return real(...args);
+      });
+
+      await runJob('notes.txt');
+
+      expect(await stack.record('work', 'notes.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'notes.md' });
+      expect(existsSync(stack.objectPath('work', 'notes.md'))).toBe(true);
+    });
+  });
+});
+
 describe('the consumer of the files queue', () => {
   it('registers once on a node, however often it is started', async () => {
     const queue = await getQueue();
@@ -629,25 +786,202 @@ describe('the name of a Markdown copy', () => {
 });
 
 describe('uploading again under a whole key', () => {
-  it('settles both records: neither stays waiting for a conversion that never comes', async () => {
-    const first = stack.json(await upload('nda.txt', 'first version', { keyHint: 'contracts/nda.txt' })).record;
-    const second = stack.json(await upload('nda.txt', 'second, longer version', { keyHint: 'contracts/nda.txt' })).record;
+  const ofKey = async (key: string) => (await stack.records('work')).filter((record) => record.key === key);
+
+  it('replaces the file: one record, the same id, now describing the new bytes', async () => {
+    const first = stack.json(await upload('nda.txt', 'first version', { keyHint: 'contracts/nda.txt', metadata: { round: 1 } })).record;
+    const before = await stack.record('work', 'contracts/nda.txt');
+
+    const second = stack.json(await upload('nda-final.txt', 'second, longer version', { keyHint: 'contracts/nda.txt', metadata: { round: 2 } })).record;
+
     expect(second.key).toBe(first.key);
-    expect(second.id).not.toBe(first.id);
+    expect(second.id).toBe(first.id);
+    const records = await ofKey('contracts/nda.txt');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      name: 'nda-final.txt',
+      size: Buffer.byteLength('second, longer version'),
+      markdownStatus: 'pending',
+      createdBy: before!.createdBy,
+      updatedBy: stack.userId,
+    });
+    expect(records[0]!.checksum).not.toBe(before!.checksum);
+    expect(records[0]!.metadata).toMatchObject({ round: 2 });
+    expect(records[0]!.metadata).not.toHaveProperty('round', 1);
+    expect(new Date(records[0]!.createdAt!).getTime()).toBe(new Date(before!.createdAt!).getTime());
+    expect(readFileSync(stack.objectPath('work', 'contracts/nda.txt'), 'utf8')).toBe('second, longer version');
+  });
+
+  it('converts the new bytes: the job settles the one record, and its copy is of the new text', async () => {
+    await upload('nda.txt', 'first version of the agreement', { keyHint: 'contracts/nda.txt' });
+    await upload('nda.txt', 'second version of the agreement', { keyHint: 'contracts/nda.txt' });
     // Both uploads are done and the one object holds the last version: the jobs, which wait in the queue, read it whole
     // (a job that read while the second upload was still writing could see half of it).
     await startFilesQueueConsumer();
 
-    const ofKey = async () => (await stack.records('work')).filter((record) => record.key === 'contracts/nda.txt');
-    await vi.waitFor(async () => {
-      const records = await ofKey();
-      expect(records).toHaveLength(2);
-      expect(records.map((record) => record.markdownStatus)).toEqual(['succeeded', 'succeeded']);
+    const done = await settled('contracts/nda.txt');
+
+    expect(done.markdownStatus).toBe('succeeded');
+    expect(await ofKey('contracts/nda.txt')).toHaveLength(1);
+    const copy = readFileSync(stack.objectPath('work', done.markdownKey!), 'utf8');
+    expect(copy).toContain('second version');
+    expect(copy).not.toContain('first version');
+  });
+
+  it('lets go of the Markdown copy of the old bytes, and its object is removed', async () => {
+    await startFilesQueueConsumer();
+    await upload('nda.txt', 'first version of the agreement', { keyHint: 'contracts/nda.txt' });
+    const converted = await settled('contracts/nda.txt');
+    const oldCopy = stack.objectPath('work', converted.markdownKey!);
+    expect(existsSync(oldCopy)).toBe(true);
+
+    const second = stack.json(await upload('nda.txt', 'second version of the agreement', { keyHint: 'contracts/nda.txt', convertToMarkdown: false })).record;
+
+    expect(second).toMatchObject({ markdownStatus: 'skipped' });
+    expect(second.markdownKey ?? null).toBeNull();
+    expect(second.markdownSize ?? null).toBeNull();
+    expect(second.markdownContentType ?? null).toBeNull();
+    expect(existsSync(oldCopy)).toBe(false);
+    const stored = await stack.record('work', 'contracts/nda.txt');
+    expect(stored).toMatchObject({ markdownStatus: 'skipped' });
+    expect(stored!.markdownKey ?? null).toBeNull();
+    const served = await stack.request('GET', '/files/buckets/work/objects/contracts%2Fnda.txt?download=markdown');
+    expect(served.statusCode).toBe(409);
+  });
+
+  it('takes the name of the copy again when the new bytes are converted', async () => {
+    await startFilesQueueConsumer();
+    await upload('nda.txt', 'first version of the agreement', { keyHint: 'contracts/nda.txt' });
+    const first = await settled('contracts/nda.txt');
+    expect(first.markdownKey).toBe('contracts/nda.md');
+
+    await upload('nda.txt', 'second version of the agreement', { keyHint: 'contracts/nda.txt' });
+    const second = await vi.waitFor(async () => {
+      const record = await stack.record('work', 'contracts/nda.txt');
+      expect(record!.markdownStatus).toBe('succeeded');
+      expect(readFileSync(stack.objectPath('work', record!.markdownKey!), 'utf8')).toContain('second version');
+      return record!;
     }, { timeout: 15_000 });
 
-    const records = await ofKey();
-    expect(new Set(records.map((record) => record.markdownKey)).size).toBe(2);
-    for (const record of records) expect(existsSync(stack.objectPath('work', record.markdownKey!))).toBe(true);
+    expect(second.markdownKey).toBe('contracts/nda.md');
+    expect(existsSync(stack.objectPath('work', 'contracts/nda.txt.md'))).toBe(false);
+  });
+
+  it('with the service\'s own default (converting before it returns) leaves one copy, under one name', async () => {
+    const put = (content: string) => uploadFile(FILES_DB_NAME, stack.tenantId, stack.projectId, {
+      bucketKey: 'work', fileName: 'sync.txt', keyHint: 'docs/sync.txt', data: base64(content), createdBy: stack.userId,
+    } as never);
+
+    const first = (await put('first words')).record;
+    const second = (await put('second words')).record;
+
+    expect(second.id).toBe(first.id);
+    expect(second).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'docs/sync.md' });
+    expect(readFileSync(stack.objectPath('work', 'docs/sync.md'), 'utf8')).toContain('second words');
+    expect(await ofKey('docs/sync.txt')).toHaveLength(1);
+    expect((await stack.records('work')).map((record) => record.key)).toEqual(['docs/sync.txt']);
+  });
+
+  it('keeps what the record says about its place: the session a file belongs to, and when it expires', async () => {
+    const expiresAt = new Date(Date.now() + 86_400_000);
+    await stack.putFile('work', 'chats/agent/s1/report.txt', 'old words', {
+      purpose: 'conversation', conversationId: 'conv-1', agentKey: 'agent', uploadedBy: stack.userId, expiresAt,
+    });
+
+    const { record } = await uploadFile(FILES_DB_NAME, stack.tenantId, stack.projectId, {
+      bucketKey: 'work', fileName: 'report.txt', keyHint: 'chats/agent/s1/report.txt', data: base64('new words'), convertToMarkdown: false, createdBy: stack.userId,
+    } as never);
+
+    expect(record).toMatchObject({ purpose: 'conversation', conversationId: 'conv-1', agentKey: 'agent', uploadedBy: stack.userId });
+    expect(new Date(record.expiresAt!).getTime()).toBe(expiresAt.getTime());
+    expect(await ofKey('chats/agent/s1/report.txt')).toHaveLength(1);
+    expect(readFileSync(stack.objectPath('work', 'chats/agent/s1/report.txt'), 'utf8')).toBe('new words');
+  });
+
+  it('settles on one record when two uploads to the key are made at the same moment', async () => {
+    const results = await Promise.all([
+      upload('race.txt', 'the first of two uploads', { keyHint: 'race/race.txt' }),
+      upload('race.txt', 'the second upload, which is longer than the first', { keyHint: 'race/race.txt' }),
+    ]);
+
+    expect(results.map((res) => res.statusCode)).toEqual([201, 201]);
+    const records = await ofKey('race/race.txt');
+    expect(records).toHaveLength(1);
+    // The record describes the bytes that are stored, whichever upload came last.
+    const stored = readFileSync(stack.objectPath('work', 'race/race.txt'));
+    expect(records[0]!.size).toBe(stored.length);
+    expect(records[0]!.checksum).toBe(createHash('sha256').update(stored).digest('hex'));
+  });
+
+  it('does not touch the uploads to a folder or with no key: each is a file of its own', async () => {
+    const one = stack.json(await upload('same.txt', 'one', { keyHint: 'folder/' })).record;
+    const two = stack.json(await upload('same.txt', 'two', { keyHint: 'folder/' })).record;
+    const three = stack.json(await upload('same.txt', 'three')).record;
+    const four = stack.json(await upload('same.txt', 'four')).record;
+
+    expect(new Set([one.id, two.id, three.id, four.id]).size).toBe(4);
+    expect(new Set([one.key, two.key, three.key, four.key]).size).toBe(4);
+  });
+
+  it('keeps the object when the record could not be updated: the file is still there to be listed and deleted', async () => {
+    await upload('keep.txt', 'first words', { keyHint: 'keep/keep.txt' });
+    vi.spyOn(stack.db, 'updateFileRecord').mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'));
+
+    const res = await upload('keep.txt', 'second words', { keyHint: 'keep/keep.txt' });
+
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+    expect(await ofKey('keep/keep.txt')).toHaveLength(1);
+    expect(existsSync(stack.objectPath('work', 'keep/keep.txt'))).toBe(true);
+  });
+
+  it('keeps the file\'s record when the bucket stopped taking files during the upload, and refuses the upload', async () => {
+    await upload('closing.txt', 'first words', { keyHint: 'closing/closing.txt' });
+    const bucket = await stack.bucket('work');
+    const real = stack.db.updateFileRecord.bind(stack.db);
+    vi.spyOn(stack.db, 'updateFileRecord').mockImplementationOnce(async (id, patch) => {
+      const updated = await real(id, patch);
+      await stack.db.updateFileBucket(String(bucket!._id), { status: 'disabled' } as never);
+      return updated;
+    });
+
+    const res = await upload('closing.txt', 'second words', { keyHint: 'closing/closing.txt' });
+
+    expect(res.statusCode).toBe(409);
+    // The record of the file that was there stays, and describes the object as it is.
+    const records = await ofKey('closing/closing.txt');
+    expect(records).toHaveLength(1);
+    expect(records[0]!.size).toBe(Buffer.byteLength('second words'));
+    expect(existsSync(stack.objectPath('work', 'closing/closing.txt'))).toBe(true);
+  });
+
+  it('drops a conversion whose bytes were replaced while it ran: it settles nothing and leaves no copy of the old bytes', async () => {
+    const waiting = await stack.putFile('work', 'moving.txt', 'the bytes that were read', { markdownStatus: 'pending', checksum: 'before', etag: '"before"' });
+    const real = stack.db.findFileRecordById.bind(stack.db);
+    let reads = 0;
+    vi.spyOn(stack.db, 'findFileRecordById').mockImplementation(async (id: string) => {
+      reads += 1;
+      // The first read is the job's own, at its start; the second is after the conversion: an upload has replaced the file.
+      if (reads === 2) await stack.db.updateFileRecord(id, { size: 99, checksum: 'after', etag: '"after"', markdownStatus: 'pending' });
+      return real(id);
+    });
+
+    await stack.db.runWithTenant(FILES_DB_NAME, () => runMarkdownConversionJob({ ...jobPayload('moving.txt'), recordId: String(waiting._id) }));
+
+    expect(reads).toBeGreaterThanOrEqual(2);
+    const record = await stack.record('work', 'moving.txt');
+    expect(record).toMatchObject({ markdownStatus: 'pending', checksum: 'after' });
+    expect(record!.markdownKey ?? null).toBeNull();
+    expect(String(waiting._id)).toBe(String(record!._id));
+    expect(existsSync(stack.objectPath('work', 'moving.md'))).toBe(false);
+    expect(existsSync(stack.objectPath('work', 'moving.txt.md'))).toBe(false);
+  });
+
+  it('settles a conversion whose file was written again with the very same bytes', async () => {
+    await stack.putFile('work', 'same.txt', 'unchanged words', { markdownStatus: 'pending', checksum: 'same', etag: '"same"' });
+
+    await runJob('same.txt');
+
+    expect(await stack.record('work', 'same.txt')).toMatchObject({ markdownStatus: 'succeeded', markdownKey: 'same.md' });
   });
 
   it('runs the job of the record it was queued for, not the first record of the key', async () => {

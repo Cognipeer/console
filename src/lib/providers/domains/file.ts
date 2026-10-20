@@ -35,7 +35,32 @@ export interface FileDownloadResult {
   etag?: string;
 }
 
+/** What a caller may ask of one `downloadFile` call. */
+export interface DownloadFileOptions {
+  /**
+   * The most bytes this call reads into memory. A larger object is refused with the driver's "too large" error
+   * (`object_too_large`; Azure Blob Storage spells it `ObjectTooLarge`) before it is read to the end. Left out, the
+   * server-wide ceiling applies (`maxStorageDownloadBytes`: twice the upload limit, at least 100 MiB), which suits
+   * the objects the Files service wrote itself. A caller that reads objects the upload limit never applied to (the
+   * files of a sandbox volume) states the bound it can hold. Only a positive number counts, and no bound goes
+   * beyond what one Buffer can hold.
+   */
+  maxBytes?: number;
+}
+
 export interface ListFilesOptions {
+  /**
+   * Narrows the listing to the keys under this prefix. The drivers do NOT mean the same thing by it, so a caller that
+   * needs the files of one folder lists with the folder's name and keeps the keys that start with `<folder>/` itself
+   * (the import from storage does):
+   *  - S3-compatible and MongoDB GridFS: the prefix is text, read as a key, so its trailing slash is dropped - `dir/`
+   *    and `dir` both list `dir/a.txt`, and also `dir-other/b.txt` and `dirx.txt`;
+   *  - Azure Blob Storage: the prefix is text and a trailing slash is kept - `dir/` lists the folder only, `dir` every
+   *    key that starts with those letters;
+   *  - local disk: the prefix names a folder - its files at any depth, and nothing for a name that is not a folder
+   *    (`dirx.txt` is not in the listing of `dir`, and `di` lists nothing).
+   * A blank prefix is the whole provider in every driver.
+   */
   prefix?: string;
   cursor?: string;
   limit?: number;
@@ -60,7 +85,7 @@ export interface FileConnectionCheck {
 
 export interface FileProviderRuntime {
   uploadFile(input: UploadFileInput): Promise<UploadFileResult>;
-  downloadFile(key: string): Promise<FileDownloadResult>;
+  downloadFile(key: string, options?: DownloadFileOptions): Promise<FileDownloadResult>;
   deleteFile(key: string): Promise<void>;
   listFiles(options?: ListFilesOptions): Promise<ListFilesResult>;
   getFileMetadata(key: string): Promise<FileObjectHandle | null>;

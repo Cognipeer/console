@@ -97,7 +97,7 @@ export interface BlobEndpointInput {
   endpointSuffix?: string;
   /** Scheme used with `accountName` when there is no endpoint (a connection string's DefaultEndpointsProtocol). */
   protocol?: 'https' | 'http';
-  /** `http:` endpoints are accepted only when the caller says plaintext is tolerable (not SaaS). */
+  /** `http:` endpoints are accepted only when the caller allows them (the provider runtime and its save check do, on every deployment). */
   allowHttp: boolean;
   /** A SAS token or a Microsoft Entra token does not need the account name to sign, so a custom domain may leave it out. */
   accountOptional?: boolean;
@@ -203,6 +203,8 @@ export interface SasInfo {
    */
   token: string;
   expiresAt?: Date;
+  /** The `st` of the SAS: before this moment the service refuses it. */
+  startsAt?: Date;
   permissions?: string;
   /** `c` / `s` for a container or service SAS, undefined for an account SAS (`ss` / `srt` instead). */
   resource?: string;
@@ -269,7 +271,9 @@ export function parseSasToken(raw: string | undefined, now: Date = new Date(), f
       }
     }
   }
-  return { token, expiresAt, permissions: params.get('sp') ?? undefined, resource };
+  const st = params.get('st');
+  const startsAt = st && !Number.isNaN(new Date(st).getTime()) ? new Date(st) : undefined;
+  return { token, expiresAt, startsAt, permissions: params.get('sp') ?? undefined, resource };
 }
 
 export interface ParsedConnectionString {

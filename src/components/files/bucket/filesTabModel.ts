@@ -88,10 +88,9 @@ export function showsSessionColumns(state: Pick<FilesTabState, 'show'>, records:
   return state.show === 'session' || records.some(isSessionFile);
 }
 
-/** The Markdown copy of a file can be downloaded: the conversion succeeded and left a copy. */
-export function hasMarkdownCopy(record: Pick<FileRecordView, 'markdownKey' | 'markdownStatus'>): boolean {
-  return Boolean(record.markdownKey) && (record.markdownStatus === 'succeeded' || record.markdownStatus == null);
-}
+// The Markdown copy of a file can be downloaded when there is one (`markdownKey`): the status of the last conversion
+// does not decide it (a failed or skipped re-conversion leaves the earlier copy). The rule is shared with the drawer.
+export { hasMarkdownCopy } from '../shared/fileKind';
 
 /** The time a file last changed (a file never updated has its creation time). */
 export function modifiedAt(record: Pick<FileRecordView, 'updatedAt' | 'createdAt'>): Date | string | null {

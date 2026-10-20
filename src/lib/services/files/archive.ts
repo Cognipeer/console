@@ -15,9 +15,8 @@ import { Readable } from 'node:stream';
 import JSZip from 'jszip';
 import type { FileProviderRuntime } from '@/lib/providers';
 import type { IFileBucketRecord } from '@/lib/database';
-import { withResilience } from '@/lib/core/resilience';
 import { FileServiceError } from './errors';
-import { assertWithinReadCeiling, composeProviderObjectKey, fileResilience, requireBucketContext } from './fileService';
+import { assertWithinReadCeiling, composeProviderObjectKey, readStoredObject, requireBucketContext } from './fileService';
 import type { FileRecordView } from './types';
 
 /** The most files one archive holds. */
@@ -75,10 +74,11 @@ function isCompressible(record: Pick<FileRecordView, 'name' | 'contentType'>): b
 function lazyObject(runtime: FileProviderRuntime, bucket: IFileBucketRecord, record: FileRecordView): Readable {
   return Readable.from(
     (async function* () {
-      const result = await withResilience(
-        () => runtime.downloadFile(composeProviderObjectKey(bucket, record.key)),
-        fileResilience('download', bucket.tenantId, bucket.providerKey),
-      );
+      const result = await readStoredObject(runtime, composeProviderObjectKey(bucket, record.key), {
+        tenantId: bucket.tenantId,
+        providerKey: bucket.providerKey,
+        size: record.size,
+      });
       yield result.data;
     })(),
     { objectMode: false },

@@ -77,9 +77,10 @@ afterEach(() => setConfigSource(original));
 
 /**
  * A replica-set member that answers every driver message with the same `hello`: enough protocol for the driver to
- * accept it as the primary and to learn the other members it announces.
+ * accept it as the primary and to learn the other members it announces (`announce` lists `hosts`; `extra` adds fields
+ * such as `passives` and `arbiters`).
  */
-function fakeSeed(announce: (own: string) => string[]) {
+function fakeSeed(announce: (own: string) => string[], extra: (own: string) => Record<string, unknown> = () => ({})) {
   const sockets = new Set<net.Socket>();
   const state = { connections: 0, port: 0 };
   const server = net.createServer((socket) => {
@@ -99,7 +100,7 @@ function fakeSeed(announce: (own: string) => string[]) {
         const own = `localhost:${state.port}`;
         const doc = Buffer.from(BSON.serialize({
           ismaster: true, isWritablePrimary: true, helloOk: true, setName: 'rs0', setVersion: 1,
-          hosts: announce(own), primary: own, me: own,
+          hosts: announce(own), primary: own, me: own, ...extra(own),
           maxBsonObjectSize: 16777216, maxMessageSizeBytes: 48000000, maxWriteBatchSize: 100000,
           localTime: new Date(), logicalSessionTimeoutMinutes: 30, connectionId: 1,
           minWireVersion: 0, maxWireVersion: 21, readOnly: false, ok: 1,
@@ -127,6 +128,28 @@ function fakeSeed(announce: (own: string) => string[]) {
       state.port = (server.address() as AddressInfo).port;
       return state.port;
     },
+    async stop() {
+      sockets.forEach((socket) => socket.destroy());
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+/** A loopback listener that counts the connections made to it and the bytes it is sent: a member the seed announces. */
+async function memberListener() {
+  const state = { connections: 0, bytes: 0, port: 0 };
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    state.connections += 1;
+    sockets.add(socket);
+    socket.on('data', (chunk) => { state.bytes += chunk.length; });
+    socket.on('error', () => undefined);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  state.port = (server.address() as AddressInfo).port;
+  return {
+    state,
     async stop() {
       sockets.forEach((socket) => socket.destroy());
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -182,13 +205,41 @@ describe('save and test: SaaS', () => {
 
   it('refuses certificate files, which the driver would read from the server', async () => {
     use(saas);
-    for (const option of ['tlsCAFile=/etc/hosts', 'tlsCertificateKeyFile=/etc/hosts']) {
+    for (const option of ['tlsCAFile=/etc/hosts', 'tlsCertificateKeyFile=/etc/hosts', 'tlsCRLFile=/etc/hosts']) {
       await expect(validate(`mongodb://mongo.example.com/?tls=true&${option}`), option).rejects.toMatchObject({
         name: 'ProviderSettingsError',
         code: 'provider_settings_invalid',
         field: 'uri',
       });
     }
+  });
+
+  it('refuses a file before it is touched, so the answer never says which paths exist on the server', async () => {
+    use(saas);
+    // a file, a directory and a path that is not there: the driver would answer each differently
+    for (const option of ['tlsCRLFile', 'tlsCAFile', 'tlsCertificateKeyFile']) {
+      for (const file of ['/etc/hosts', '/etc', '/no/such/dir/list.pem']) {
+        const uri = `mongodb://mongo.example.com/?tls=true&${option}=${file}`;
+        for (const [step, run] of [['save', () => validate(uri)], ['runtime', () => create(uri)]] as const) {
+          const error = await run().catch((e: unknown) => e);
+          expect(error, `${step} ${option}=${file}`).toBeInstanceOf(ProviderSettingsError);
+          expect((error as Error).message, `${step} ${option}=${file}`).toBe(
+            'Certificate files (tlsCAFile, tlsCertificateKeyFile, tlsCRLFile) in the connection URI are only available on self-hosted deployments.',
+          );
+        }
+      }
+    }
+    expect(connections).toBe(0);
+  });
+
+  it('leaves turning certificate verification off to the provider, as it does for a storage endpoint: the hosts stay held to the policy', async () => {
+    use(saas);
+    for (const option of ['tlsInsecure=true', 'tlsAllowInvalidCertificates=true', 'tlsAllowInvalidHostnames=true']) {
+      await expect(validate(`mongodb://mongo.example.com/?tls=true&${option}`), option).resolves.toBeUndefined();
+      await expect(validate(`mongodb://10.0.0.5/?tls=true&${option}`), option).rejects.toBeInstanceOf(ProviderEndpointError);
+      await expect(create(`mongodb://127.0.0.1:${port}/?tls=true&${option}`), option).rejects.toBeInstanceOf(ProviderEndpointError);
+    }
+    expect(connections).toBe(0);
   });
 
   it('accepts public hosts: names, addresses, several seeds, a public proxy', async () => {
@@ -294,6 +345,7 @@ describe('save and test: on-prem', () => {
       'mongodb://%2Ftmp%2Fmongodb-27017.sock',
       'mongodb+srv://cluster0.corp.example/files',
       'mongodb://mongo.example.com/?tls=true&tlsCAFile=/etc/ssl/mongo-ca.pem',
+      'mongodb://mongo.example.com/?tls=true&tlsCRLFile=/etc/ssl/mongo-crl.pem',
       'mongodb://mongo.example.com/?proxyHost=10.0.0.9&proxyPort=1080',
     ]) {
       await expect(validate(uri, true), uri).resolves.toBeUndefined();
@@ -327,6 +379,111 @@ describe('save and test: on-prem', () => {
     await expect(validate('mongodb://10.0.0.6:27017', true)).rejects.toBeInstanceOf(ProviderEndpointError);
     // a certificate file is a self-hosted option, whatever the network policy
     await expect(validate('mongodb://mongo.example.com/?tls=true&tlsCAFile=/etc/ssl/mongo-ca.pem', true)).resolves.toBeUndefined();
+    await expect(validate('mongodb://mongo.example.com/?tls=true&tlsCRLFile=/etc/ssl/mongo-crl.pem', true)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The sign-in method of a URI that was typed into the form: the credentials must be the ones written in the URI. A
+ * method that makes the driver sign in as the machine the console runs on (a cloud role, a Kerberos ticket, a client
+ * certificate, a workload identity token) is for self-hosted deployments, where the operator owns that machine.
+ */
+describe('sign-in methods', () => {
+  const HOST = 'mongo.example.com';
+  const UI = 'user:pw';
+
+  /** Credentials that are written in the URI. */
+  const FROM_URI: Array<[string, string]> = [
+    ['no method: the default', `mongodb://${UI}@${HOST}/files`],
+    ['DEFAULT', `mongodb://${UI}@${HOST}/?authMechanism=DEFAULT`],
+    ['SCRAM-SHA-1', `mongodb://${UI}@${HOST}/?authMechanism=SCRAM-SHA-1`],
+    ['SCRAM-SHA-256', `mongodb://${UI}@${HOST}/?authMechanism=SCRAM-SHA-256`],
+    ['PLAIN', `mongodb://${UI}@${HOST}/?authMechanism=PLAIN`],
+    ['MONGODB-AWS with the access key and the secret', `mongodb://AKIAEXAMPLE:secret%2Fkey@${HOST}/?authMechanism=MONGODB-AWS`],
+    ['MONGODB-AWS with a session token', `mongodb://AKIAEXAMPLE:secret%2Fkey@${HOST}/?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:token-1`],
+    ['no credentials at all', `mongodb://${HOST}/files`],
+  ];
+
+  /** Credentials that come from the server: the method, and what the message names. */
+  const FROM_SERVER: Array<[string, string, RegExp]> = [
+    ['MONGODB-OIDC in a Kubernetes workload', `mongodb://${HOST}/?authMechanism=MONGODB-OIDC&authMechanismProperties=ENVIRONMENT:k8s`, /Authentication method MONGODB-OIDC /],
+    ['MONGODB-OIDC in an Azure workload', `mongodb://${HOST}/?authMechanism=MONGODB-OIDC&authMechanismProperties=ENVIRONMENT:azure,TOKEN_RESOURCE:resource-id`, /Authentication method MONGODB-OIDC /],
+    ['GSSAPI', `mongodb://svc%40EXAMPLE.COM@${HOST}/?authMechanism=GSSAPI`, /Authentication method GSSAPI /],
+    ['MONGODB-X509', `mongodb://${HOST}/?tls=true&authMechanism=MONGODB-X509`, /Authentication method MONGODB-X509 /],
+    ['MONGODB-AWS without an access key', `mongodb://${HOST}/?authMechanism=MONGODB-AWS`, /MONGODB-AWS needs the access key and the secret/],
+    ['an ENVIRONMENT property on a method that would be accepted', `mongodb://${UI}@${HOST}/?authMechanism=SCRAM-SHA-256&authMechanismProperties=ENVIRONMENT:azure`, /property ENVIRONMENT /],
+    ['a TOKEN_RESOURCE property on a method that would be accepted', `mongodb://${UI}@${HOST}/?authMechanismProperties=TOKEN_RESOURCE:resource-id`, /property TOKEN_RESOURCE /],
+  ];
+
+  beforeEach(() => {
+    // the AWS variables of this process are the identity of the server; a test machine may have its own
+    vi.stubEnv('AWS_ACCESS_KEY_ID', '');
+    vi.stubEnv('AWS_SECRET_ACCESS_KEY', '');
+    vi.stubEnv('AWS_SESSION_TOKEN', '');
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('SaaS accepts DEFAULT, SCRAM-SHA-1, SCRAM-SHA-256, PLAIN and MONGODB-AWS with the key and the secret in the URI', async () => {
+    use(saas);
+    for (const [label, uri] of FROM_URI) await expect(validate(uri), label).resolves.toBeUndefined();
+  });
+
+  it('SaaS refuses the methods that use the identity of the server, with a message that names the method and not the URI', async () => {
+    use(saas);
+    for (const [label, uri, message] of FROM_SERVER) {
+      const error = await validate(uri).catch((e: unknown) => e);
+      expect(error, label).toBeInstanceOf(ProviderSettingsError);
+      expect(error, label).toMatchObject({ name: 'ProviderSettingsError', code: 'provider_settings_invalid', field: 'uri' });
+      expect((error as Error).message, label).toMatch(message);
+      expect((error as Error).message, label).toMatch(/self-hosted deployments only/);
+      expect((error as Error).message, label).not.toMatch(/example\.com|svc|pw/);
+    }
+  });
+
+  it('SaaS does not take the AWS variables of the server process for the access key and the secret of the URI', async () => {
+    use(saas);
+    vi.stubEnv('AWS_ACCESS_KEY_ID', 'AKIASERVERKEY');
+    vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'server-secret');
+    vi.stubEnv('AWS_SESSION_TOKEN', 'server-token');
+    for (const uri of [
+      // nothing in the URI: the driver would fill in both from the process
+      `mongodb://${HOST}/?authMechanism=MONGODB-AWS`,
+      // the key only: the driver would fill in the secret from the process
+      `mongodb://AKIAEXAMPLE@${HOST}/?authMechanism=MONGODB-AWS`,
+    ]) {
+      await expect(validate(uri), uri).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri', message: expect.stringMatching(/MONGODB-AWS needs the access key and the secret/) });
+    }
+    // written in the URI, they are the caller's own
+    await expect(validate(`mongodb://AKIAEXAMPLE:secret@${HOST}/?authMechanism=MONGODB-AWS`)).resolves.toBeUndefined();
+  });
+
+  it('a self-hosted install that does not block private networks accepts every method', async () => {
+    use(onprem);
+    for (const [label, uri] of [...FROM_URI, ...FROM_SERVER.map(([name, value]) => [name, value] as [string, string])]) {
+      await expect(validate(uri, true), label).resolves.toBeUndefined();
+    }
+  });
+
+  it('a self-hosted install that blocks private networks holds the methods to the same rule', async () => {
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
+    for (const [label, uri] of FROM_URI) await expect(validate(uri, true), label).resolves.toBeUndefined();
+    for (const [label, uri, message] of FROM_SERVER) {
+      await expect(validate(uri, true), label).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri', message: expect.stringMatching(message) });
+    }
+  });
+
+  it('is checked again when the runtime is created, before anything is dialled', async () => {
+    use(saas);
+    for (const [label, uri] of FROM_SERVER) {
+      await expect(create(uri), label).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri' });
+    }
+    expect(connections).toBe(0);
+    // the same on a self-hosted install that blocks private networks
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
+    for (const [label, uri] of FROM_SERVER) {
+      await expect(create(uri), label).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri' });
+    }
+    expect(connections).toBe(0);
   });
 });
 
@@ -359,35 +516,71 @@ describe('creating the runtime', () => {
     expect(connections).toBeGreaterThan(0);
   });
 
-  it('a member the servers announce by address is refused, and nothing is sent to it', async () => {
-    // a self-hosted install that blocks private networks and trusts the seed's name; the announced member is a bare address
-    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: 'localhost' });
-    dns.answers.set('localhost', ['127.0.0.1']);
-    let memberBytes = 0;
-    const member = net.createServer((socket) => {
-      socket.on('data', (chunk) => { memberBytes += chunk.length; });
-      socket.on('error', () => undefined);
+  describe('a member the servers announce', () => {
+    // A self-hosted install that blocks private networks and trusts the seed's name: the members the seed announces are bare addresses.
+    beforeEach(() => {
+      use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: 'localhost' });
+      dns.answers.set('localhost', ['127.0.0.1']);
     });
-    await new Promise<void>((resolve) => member.listen(0, '127.0.0.1', resolve));
-    const memberPort = (member.address() as AddressInfo).port;
-    const seed = fakeSeed((own) => [own, `127.0.0.1:${memberPort}`]);
-    try {
-      const seedPort = await seed.start();
-      const uri = `mongodb://localhost:${seedPort}/?replicaSet=rs0&serverSelectionTimeoutMS=2000&connectTimeoutMS=1500`;
+    const seedUri = (seedPort: number) => `mongodb://localhost:${seedPort}/?replicaSet=rs0&serverSelectionTimeoutMS=2000&connectTimeoutMS=1500`;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
 
-      await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(memberBytes).toBe(0);
+    it('by address is refused, and no connection is made to it', async () => {
+      const member = await memberListener();
+      const seed = fakeSeed((own) => [own, `127.0.0.1:${member.state.port}`]);
+      try {
+        const uri = seedUri(await seed.start());
 
-      // a client that was refused is not kept: the next attempt connects again, and is refused again
-      const before = seed.state.connections;
-      await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError' });
-      expect(seed.state.connections).toBeGreaterThan(before);
-      expect(memberBytes).toBe(0);
-    } finally {
-      await seed.stop();
-      await new Promise<void>((resolve) => member.close(() => resolve()));
-    }
+        await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+        await settle();
+        // not a byte, and not a connection either: the member is taken out of the answer before the driver reads it
+        expect(member.state).toMatchObject({ connections: 0, bytes: 0 });
+
+        // a client that was refused is not kept: the next attempt connects again, and is refused again
+        const before = seed.state.connections;
+        await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError' });
+        expect(seed.state.connections).toBeGreaterThan(before);
+        await settle();
+        expect(member.state).toMatchObject({ connections: 0, bytes: 0 });
+      } finally {
+        await seed.stop();
+        await member.stop();
+      }
+    });
+
+    it('is refused with the first answer, however many are announced: not one of them gets a connection', async () => {
+      const members = await Promise.all(Array.from({ length: 12 }, () => memberListener()));
+      const seed = fakeSeed((own) => [own, ...members.map((member) => `127.0.0.1:${member.state.port}`)]);
+      try {
+        const uri = seedUri(await seed.start());
+
+        await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+        await settle();
+        expect(members.map((member) => member.state.connections)).toEqual(members.map(() => 0));
+        expect(members.map((member) => member.state.bytes)).toEqual(members.map(() => 0));
+      } finally {
+        await seed.stop();
+        await Promise.all(members.map((member) => member.stop()));
+      }
+    });
+
+    it('as a passive or an arbiter is refused the same way', async () => {
+      const [passive, arbiter] = await Promise.all([memberListener(), memberListener()]);
+      const seed = fakeSeed(
+        (own) => [own],
+        () => ({ passives: [`127.0.0.1:${passive.state.port}`], arbiters: [`127.0.0.1:${arbiter.state.port}`] }),
+      );
+      try {
+        const uri = seedUri(await seed.start());
+
+        await expect(create(uri)).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+        await settle();
+        expect([passive.state.connections, arbiter.state.connections]).toEqual([0, 0]);
+      } finally {
+        await seed.stop();
+        await Promise.all([passive.stop(), arbiter.stop()]);
+      }
+    });
   });
 
   it('a name that is public when the URI is checked and private when the socket connects does not get through', async () => {

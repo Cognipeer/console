@@ -5,11 +5,22 @@
  */
 
 import { resolveServiceCatalogEntry } from '@/lib/services/serviceCatalog';
-import type { BucketDetail, BucketUsedByAgent, FilesLimits, UpdateBucketInput } from '../filesApi';
+import type { BucketDetail, BucketUser, FileLimits, UpdateBucketInput } from '../filesApi';
+import {
+  BUCKET_DESCRIPTION_MAX,
+  BUCKET_NAME_MAX,
+  BUCKET_PREFIX_MAX,
+  bucketDescriptionFault,
+  bucketNameFault,
+  bucketPrefixFault,
+  normalizeBucketPrefix,
+} from '../shared/bucketRules';
+import { DELETE_STALLED_AFTER_MS, isQuietFor } from '../shared/jobClock';
 
 /* ── General ─────────────────────────────────────────────────────────────── */
 
-export const NAME_MAX_LENGTH = 120;
+export const NAME_MAX_LENGTH = BUCKET_NAME_MAX;
+export const DESCRIPTION_MAX_LENGTH = BUCKET_DESCRIPTION_MAX;
 
 export type BucketStatusValue = 'active' | 'disabled';
 
@@ -31,9 +42,13 @@ export function valuesOf(bucket: Pick<BucketDetail, 'name' | 'description' | 'st
 export type NameProblem = 'required' | 'tooLong';
 
 export function nameProblem(name: string): NameProblem | null {
-  const trimmed = name.trim();
-  if (!trimmed) return 'required';
-  return trimmed.length > NAME_MAX_LENGTH ? 'tooLong' : null;
+  return bucketNameFault(name);
+}
+
+export type DescriptionProblem = 'tooLong';
+
+export function descriptionProblem(description: string): DescriptionProblem | null {
+  return bucketDescriptionFault(description);
 }
 
 /** The fields that differ from the saved bucket, as the PATCH body; empty when nothing changed. */
@@ -68,8 +83,8 @@ export function mayOpenProviders(role: string | null | undefined): boolean {
 
 /* ── Prefix ──────────────────────────────────────────────────────────────── */
 
-/** The longest prefix the field takes. */
-export const PREFIX_MAX_LENGTH = 256;
+/** The longest prefix the field takes (the server's limit, after the slashes around it are dropped). */
+export const PREFIX_MAX_LENGTH = BUCKET_PREFIX_MAX;
 
 /**
  * Where the bucket's objects sit inside the provider: its own prefix, or its key when it has none (`''` is the
@@ -81,19 +96,18 @@ export function effectivePrefix(bucket: Pick<BucketDetail, 'key' | 'prefix'>): s
   return own.replace(/^\/+|\/+$/g, '');
 }
 
-/** A prefix as typed: surrounding blanks and slashes do not count (the server trims them as well). */
+/** A prefix as typed: blanks and the slashes around it do not count, and a doubled slash inside is one. */
 export function normalizePrefixInput(text: string): string {
-  return text.trim().replace(/^\/+|\/+$/g, '');
+  return normalizeBucketPrefix(text);
 }
 
+/** `controlChars` is a backslash or a control character; `dotSegments` a `.` folder or `..` anywhere. */
 export type PrefixProblem = 'dotSegments' | 'controlChars' | 'tooLong';
 
 export function prefixProblem(text: string): PrefixProblem | null {
-  const prefix = normalizePrefixInput(text);
-  if (prefix.length > PREFIX_MAX_LENGTH) return 'tooLong';
-  if (/[\u0000-\u001f]/.test(prefix)) return 'controlChars';
-  if (prefix.split('/').some((segment) => segment === '.' || segment === '..')) return 'dotSegments';
-  return null;
+  const fault = bucketPrefixFault(text);
+  if (fault === null) return null;
+  return fault === 'dots' ? 'dotSegments' : fault === 'control' ? 'controlChars' : 'tooLong';
 }
 
 /** The prefix is fixed once the bucket holds a file (changing it would orphan them): the server answers `prefix_locked`. */
@@ -118,7 +132,7 @@ export function gaugeOf(used: number, limit: number | null | undefined): Gauge {
   return { percent, tone: share >= 0.95 ? 'err' : share >= 0.8 ? 'warn' : 'ok' };
 }
 
-export function quotaOf(limits: FilesLimits | null | undefined): {
+export function quotaOf(limits: FileLimits | null | undefined): {
   storage: Gauge & { used: number; limit: number | null };
   files: Gauge & { used: number; limit: number | null };
 } | null {
@@ -133,35 +147,49 @@ export function quotaOf(limits: FilesLimits | null | undefined): {
 /* ── Delete ──────────────────────────────────────────────────────────────── */
 
 /** The agent's Files settings, where its bucket is chosen. */
-export function agentFilesHref(agent: Pick<BucketUsedByAgent, 'agentId'>): string {
+export function agentFilesHref(agent: Pick<BucketUser, 'agentId'>): string {
   return `/dashboard/agents/${encodeURIComponent(agent.agentId)}?tab=files`;
 }
 
 export interface DeleteRules {
   /** An agent keeps its session files here: the bucket cannot be deleted until it picks another. */
   blocked: boolean;
-  agents: BucketUsedByAgent[];
+  agents: BucketUser[];
   fileCount: number;
-  /** The bucket holds files: deleting it needs the explicit choice to remove them from the provider too. */
-  needsFilesConsent: boolean;
-  /** A delete-with-files job is already running. */
+  /** The bucket holds files: deleting it asks what becomes of them (removed from the provider too, or left there). */
+  holdsFiles: boolean;
+  /** A delete-with-files job is running (or was, before it was lost). */
   deleting: boolean;
+  /** `deleting` for so long that the job was most likely lost with a restart: asking again queues it anew. */
+  stalled: boolean;
+  /** Why the last delete-with-files run stopped before the bucket was gone; null when it did not stop. */
+  lastError: string | null;
 }
 
-export function deleteRules(bucket: Partial<Pick<BucketDetail, 'usedBy' | 'stats' | 'deleting'>>): DeleteRules {
+type DeleteSubject = Partial<Pick<BucketDetail, 'usedBy' | 'stats' | 'deleting' | 'deleteError' | 'metadata' | 'updatedAt'>>;
+
+export function deleteRules(bucket: DeleteSubject, now: number = Date.now()): DeleteRules {
   const agents = Array.isArray(bucket.usedBy) ? bucket.usedBy : [];
   const fileCount = bucket.stats?.fileCount ?? 0;
+  const deleting = bucket.deleting === true;
   return {
     blocked: agents.length > 0,
     agents,
     fileCount,
-    needsFilesConsent: fileCount > 0,
-    deleting: bucket.deleting === true,
+    holdsFiles: fileCount > 0,
+    deleting,
+    // The server marks the bucket (and so touches `updatedAt`) when the job is asked for, and not again until it ends.
+    stalled: deleting && isQuietFor(bucket.updatedAt, DELETE_STALLED_AFTER_MS, now),
+    lastError: deleting ? null : deleteErrorOf(bucket),
   };
 }
 
-/** Why the last delete attempt failed, when the bucket's record says so (a job that could not finish). */
-export function deleteErrorOf(bucket: Pick<BucketDetail, 'metadata'>): string | null {
+/**
+ * Why the last delete-with-files run stopped, when the bucket says so. The list and the bucket carry it as
+ * `deleteError`; an answer to an update (which returns the bare bucket) only has it in `metadata`.
+ */
+export function deleteErrorOf(bucket: Pick<DeleteSubject, 'deleteError' | 'metadata'>): string | null {
+  if (typeof bucket.deleteError === 'string' && bucket.deleteError.trim()) return bucket.deleteError.trim();
   const value = bucket.metadata?.deleteError;
   if (typeof value === 'string' && value.trim()) return value.trim();
   if (value && typeof value === 'object') {

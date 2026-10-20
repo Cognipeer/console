@@ -10,6 +10,7 @@ import {
   bucketDeleteError,
   isBucketDeleting,
   parseBucketDescription,
+  parseBucketKey,
   parseBucketMetadata,
   parseBucketName,
   parseBucketPatch,
@@ -29,6 +30,25 @@ function refusal(run: () => unknown) {
   }
   throw new Error('expected a refusal');
 }
+
+describe('parseBucketKey', () => {
+  it('keeps a key of 1 to 64 lowercase letters, digits, hyphens and underscores, trimmed', () => {
+    expect(parseBucketKey('  contracts-2025_q3 ')).toBe('contracts-2025_q3');
+    expect(parseBucketKey('x')).toBe('x');
+    expect(parseBucketKey('k'.repeat(64))).toHaveLength(64);
+  });
+
+  it('refuses a key no route could address, or that is too long, or not text', () => {
+    for (const value of [
+      '', '   ', 'k'.repeat(65), 5, null, undefined, ['a'], { a: 1 },
+      'a/b', '../up', '..', '.', 'dot.ted', 'back\\slash', 'Upper', 'with space', 'q?x', 'h#x', 'p%2Fq', 'tab\tbed', 'nul\u0000', 'türkçe',
+    ]) {
+      expect(refusal(() => parseBucketKey(value)), String(value)).toMatchObject({ code: 'invalid_request', status: 400 });
+    }
+    expect(refusal(() => parseBucketKey('a/b')).message).toMatch(/\bkey\b/);
+    expect(refusal(() => parseBucketKey('k'.repeat(65))).message).toMatch(/at most 64/);
+  });
+});
 
 describe('parseBucketName', () => {
   it('keeps a name of 1 to 120 characters, trimmed', () => {

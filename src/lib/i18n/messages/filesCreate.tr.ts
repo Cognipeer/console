@@ -76,6 +76,7 @@ export const filesCreateTr: typeof filesCreateEn = {
     generic: 'Bucket oluşturulamadı. Yeniden deneyin.',
     nameRequired: 'Bucket’a bir ad verin.',
     nameTooLong: 'Ad en fazla {max} karakter olabilir.',
+    descriptionTooLong: 'Açıklama en fazla {max} karakter olabilir.',
     keyRequired: 'Bucket’ın bir anahtarı olmalı.',
     keyInvalid: 'Yalnızca küçük harf, rakam, tire ve alt çizgi kullanın.',
     keyTooLong: 'Anahtar en fazla {max} karakter olabilir.',

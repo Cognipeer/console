@@ -18,15 +18,18 @@ import { ENTRA_TIMEOUT_MS } from '@/lib/providers/contracts/azure/blobEntra';
 import { AzureBlobError } from '@/lib/providers/contracts/azure/blobErrors';
 import type { AzureBlobCredentials, AzureBlobSettings } from '@/lib/providers/contracts/azure/blobConfig';
 import type { FileConnectionCheck, FileProviderRuntime } from '@/lib/providers/domains/file';
-import { OutboundNetworkError } from '@/lib/security/outboundFetch';
-import { startBlobServer, type BlobServer, type BlobServerOptions, type SeenRequest } from '../helpers/fakeAzureBlobServer';
+import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+import { startBlobServer, startTokenServer, type BlobServer, type BlobServerOptions, type SeenRequest, type TokenServer } from '../helpers/fakeAzureBlobServer';
 
 // What the guarded agent's lookup answers: the tests of the connect-time check change it after the runtime exists.
-const dns = vi.hoisted(() => ({ answer: '20.60.1.1', lookups: [] as string[] }));
+// `scripts` gives a name its answers one lookup at a time (the last one stays): `<name>.authority.test` is a token server.
+const dns = vi.hoisted(() => ({ answer: '20.60.1.1', lookups: [] as string[], scripts: {} as Record<string, string[]> }));
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async (host: string) => {
     dns.lookups.push(host);
     if (/\.blob\.core\.windows\.net$/.test(host)) return [{ address: dns.answer, family: 4 }];
+    const script = dns.scripts[host];
+    if (script?.length) return [{ address: script.length > 1 ? script.shift()! : script[0], family: 4 }];
     throw Object.assign(new Error(`ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
   }),
 }));
@@ -56,6 +59,7 @@ function mode(overrides: Record<string, string> = {}) {
 }
 
 const servers: BlobServer[] = [];
+const authorities: TokenServer[] = [];
 const closers: Array<() => void> = [];
 
 async function serve(options: Partial<BlobServerOptions> = {}): Promise<BlobServer> {
@@ -92,13 +96,14 @@ beforeEach(() => {
   logs.length = 0;
   dns.answer = '20.60.1.1';
   dns.lookups.length = 0;
+  dns.scripts = {};
   mode({ DEPLOYMENT_MODE: 'onprem' });
 });
 
 afterEach(async () => {
   setConfigSource(original);
   for (const close of closers.splice(0)) close();
-  await Promise.all(servers.splice(0).map((server) => server.close()));
+  await Promise.all([...servers.splice(0), ...authorities.splice(0)].map((server) => server.close()));
 });
 
 /** The Shared Key signature the service would compute for a request it received (https://learn.microsoft.com/rest/api/storageservices/authorize-with-shared-key). */
@@ -273,7 +278,10 @@ describe('what the SDK puts on the wire', () => {
     const server = await serve();
     server.containers.set('cont1', new Map());
     mode({ DEPLOYMENT_MODE: 'onprem', OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true' });
-    await expect(runtimeFor(server.endpoint)).rejects.toBeInstanceOf(OutboundNetworkError);
+    // the refusal is the provider-endpoint error the save and the test answer with, so the person is told which setting it is
+    const refused = await runtimeFor(server.endpoint).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(ProviderEndpointError);
+    expect(refused).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: false });
     expect(server.seen).toEqual([]);
     mode({ DEPLOYMENT_MODE: 'onprem', OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: '127.0.0.1' });
     const rt = await runtimeFor(server.endpoint);
@@ -604,6 +612,69 @@ describe('what the SDK reports back', () => {
   }, 30_000);
 });
 
+describe('a download whose connection drops', () => {
+  const content = Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 7) % 251));
+
+  async function storedServer(options: Partial<BlobServerOptions>): Promise<{ server: BlobServer; rt: Runtime; etag: string }> {
+    const server = await serve(options);
+    server.containers.set('cont1', new Map());
+    const rt = await runtimeFor(server.endpoint);
+    const { handle } = await rt.uploadFile({ key: 'big.bin', name: 'big.bin', data: content });
+    server.seen.length = 0;
+    return { server, rt, etag: handle.etag! };
+  }
+
+  it('asks for the rest of the object under the version it started with and joins the parts', async () => {
+    const { server, rt, etag } = await storedServer({ dropDownloads: { afterBytes: 1500, times: 1 } });
+    const downloaded = await rt.downloadFile('big.bin');
+    expect(downloaded.data.equals(content)).toBe(true);
+    expect(downloaded).toMatchObject({ size: content.length, etag });
+
+    const gets = server.seen.filter((request) => request.method === 'GET');
+    expect(gets).toHaveLength(2);
+    expect(gets[0].headers['x-ms-range']).toBeUndefined();
+    const resumedAt = Number(/^bytes=(\d+)-5999$/.exec(String(gets[1].headers['x-ms-range']))?.[1]);
+    expect(resumedAt).toBeGreaterThan(0);
+    expect(resumedAt).toBeLessThanOrEqual(1500);
+    expect(gets[1].headers['if-match']).toBe(etag);
+    // the continuation is signed like any other request, with its range and condition among what is signed
+    for (const request of gets) expect(request.headers.authorization).toBe(`SharedKey ${ACCOUNT}:${sharedKeySignature(request, ACCOUNT, KEY)}`);
+  });
+
+  it('gives up after two continuations and says the connection was interrupted, not that nothing answered', async () => {
+    const { server, rt } = await storedServer({ dropDownloads: { afterBytes: 1000, times: 99 } });
+    const error = await rt.downloadFile('big.bin').catch((e) => e);
+    expect(error).toBeInstanceOf(AzureBlobError);
+    expect(error.message).toBe('The connection to Azure Blob Storage was interrupted (download).');
+    expect(error.retryable).toBe(true);
+    expect(server.seen.filter((request) => request.method === 'GET')).toHaveLength(3);
+  });
+
+  it('does not stitch parts of two versions together: a file replaced in between is reported', async () => {
+    const replace: { run?: () => void } = {};
+    const { server } = await storedServer({ dropDownloads: { afterBytes: 1000, times: 1, onDrop: () => replace.run?.() } });
+    replace.run = () => {
+      server.containers.get('cont1')!.set('t1/prov/big.bin', { data: Buffer.alloc(6000, 9), contentType: 'x', metadata: {}, etag: '"0x8Dreplaced"', lastModified: new Date() });
+    };
+    const rt = await runtimeFor(server.endpoint);
+    const error = await rt.downloadFile('big.bin').catch((e) => e);
+    expect(error).toBeInstanceOf(AzureBlobError);
+    expect(error).toMatchObject({ code: 'BlobChangedDuringDownload', retryable: true });
+    expect(error.message).toBe('The file changed while it was being downloaded; try again.');
+  });
+
+  it('Test connection says the same when its read step loses the connection', async () => {
+    const server = await serve({ dropDownloads: { afterBytes: 1, times: 99 } });
+    server.containers.set('cont1', new Map());
+    const rt = await runtimeFor(server.endpoint);
+    const check = await rt.checkConnection();
+    expect(check.ok).toBe(false);
+    const steps = check.steps ?? [];
+    expect(steps.map((step) => `${step.step}:${step.ok}`)).toEqual(['list:true', 'write:true', 'read:false', 'delete:true']);
+    expect(steps[2].message).toBe('The connection to Azure Blob Storage was interrupted (download).');
+  });
+});
+
 describe('deadlines', () => {
   it('abandons a request that never gets an answer, and a body that stops mid-stream', async () => {
     mode({ DEPLOYMENT_MODE: 'onprem', GATEWAY_REQUEST_TIMEOUT_MS: '7000' }); // budget: 7 s - 2 s, never below 5 s
@@ -647,10 +718,21 @@ describe('the network policy on real sockets', () => {
   it('SaaS: refuses a loopback endpoint when the runtime is built, before any request', async () => {
     mode({ DEPLOYMENT_MODE: 'saas' });
     const server = await serve();
-    // plain http is refused as plain http; an https spelling of the same address is refused as a private one
-    await expect(runtimeFor(server.endpoint)).rejects.toMatchObject({ field: 'endpoint', code: 'provider_settings_invalid' });
-    await expect(runtimeFor(server.endpoint.replace('http://', 'https://'))).rejects.toBeInstanceOf(OutboundNetworkError);
+    // plain http or https, the address is refused as a private one
+    await expect(runtimeFor(server.endpoint)).rejects.toMatchObject({ name: 'ProviderEndpointError', code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: false });
+    await expect(runtimeFor(server.endpoint.replace('http://', 'https://'))).rejects.toBeInstanceOf(ProviderEndpointError);
     expect(server.seen).toEqual([]);
+  });
+
+  it('SaaS: skipping TLS verification is the provider\'s own choice and does not open a loopback endpoint', async () => {
+    mode({ DEPLOYMENT_MODE: 'saas' });
+    const server = await serve();
+    const settings = { allowInsecureTls: true };
+    await expect(runtimeFor(server.endpoint, { settings })).rejects.toMatchObject({ name: 'ProviderEndpointError', code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: false });
+    await expect(runtimeFor(server.endpoint.replace('http://', 'https://'), { settings })).rejects.toBeInstanceOf(ProviderEndpointError);
+    expect(server.seen).toEqual([]);
+    // a public endpoint is built with the switch on: the deployment does not refuse the setting
+    await expect(runtimeFor('https://acctname1.blob.core.windows.net', { settings: { accountName: 'acctname1', allowInsecureTls: true } })).resolves.toBeDefined();
   });
 
   it('SaaS: validateSettings refuses it too, and a self-hosted deployment accepts it', async () => {
@@ -660,8 +742,8 @@ describe('the network policy on real sockets', () => {
       settings: { accountName: ACCOUNT, endpoint: server.endpoint, container: 'cont1' },
     };
     mode({ DEPLOYMENT_MODE: 'saas' });
-    // plain http is refused first on SaaS; an https spelling of the same address is refused as private
-    await expect(AzureBlobFileProviderContract.validateSettings!({ ...input, isOnPrem: false })).rejects.toMatchObject({ field: 'endpoint' });
+    // plain http or https, the address is refused as a private one on SaaS
+    await expect(AzureBlobFileProviderContract.validateSettings!({ ...input, isOnPrem: false })).rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint' });
     await expect(AzureBlobFileProviderContract.validateSettings!({
       ...input,
       settings: { ...input.settings, endpoint: server.endpoint.replace('http://', 'https://') },
@@ -704,19 +786,26 @@ describe.runIf(openSslAvailable())('TLS and Microsoft Entra against a server wit
   let certDir = '';
   let key = '';
   let cert = '';
+  // a second, unrelated self-signed certificate: what a token server presents when the provider's CA is not its issuer
+  let otherKey = '';
+  let otherCert = '';
 
-  beforeAll(() => {
-    certDir = mkdtempSync(join(tmpdir(), 'azure-blob-tls-'));
-    const keyPath = join(certDir, 'key.pem');
-    const certPath = join(certDir, 'cert.pem');
+  function makeCertificate(name: string): { key: string; cert: string } {
+    const keyPath = join(certDir, `${name}-key.pem`);
+    const certPath = join(certDir, `${name}-cert.pem`);
     execFileSync('openssl', [
       'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
       '-keyout', keyPath, '-out', certPath,
       '-days', '1', '-subj', '/CN=localhost',
       '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
     ], { stdio: 'ignore' });
-    key = readFileSync(keyPath, 'utf8');
-    cert = readFileSync(certPath, 'utf8');
+    return { key: readFileSync(keyPath, 'utf8'), cert: readFileSync(certPath, 'utf8') };
+  }
+
+  beforeAll(() => {
+    certDir = mkdtempSync(join(tmpdir(), 'azure-blob-tls-'));
+    ({ key, cert } = makeCertificate('storage'));
+    ({ key: otherKey, cert: otherCert } = makeCertificate('other'));
   }, 30_000);
 
   afterAll(() => {
@@ -729,6 +818,24 @@ describe.runIf(openSslAvailable())('TLS and Microsoft Entra against a server wit
     return server;
   }
 
+  /** A token server; it presents the storage certificate unless it is given another. */
+  async function tokenServer(pair: { key: string; cert: string } = { key, cert }, token = 'tok-authority'): Promise<TokenServer> {
+    const authority = await startTokenServer({ tls: pair, token });
+    authorities.push(authority);
+    return authority;
+  }
+
+  const SECRET = 'super-secret-value';
+  /** The settings of a service principal whose token server is at `authorityHost`. */
+  function entraFor(authorityHost: string, extra: Record<string, unknown> = {}): RuntimeOverrides {
+    return {
+      credentials: { accountKey: undefined, clientSecret: SECRET },
+      settings: { authMethod: 'entra', entraTenantId: 'contoso.onmicrosoft.com', clientId: CLIENT, authorityHost, ...extra },
+    };
+  }
+  const NOT_TRUSTED = (authority: string) =>
+    `The TLS certificate of Microsoft Entra at ${authority} is not trusted (DEPTH_ZERO_SELF_SIGNED_CERT). Paste the issuing CA certificate into the "CA certificate" setting, or turn on "Skip TLS verification" for a test setup.`;
+
   it('does not trust the certificate by default, and says what to add', async () => {
     const server = await secureServer();
     const rt = await runtimeFor(server.endpoint);
@@ -736,7 +843,7 @@ describe.runIf(openSslAvailable())('TLS and Microsoft Entra against a server wit
     expect(error).toBeInstanceOf(AzureBlobError);
     expect(error.message).toContain('"CA certificate" setting');
     expect(error.message).toContain('DEPTH_ZERO_SELF_SIGNED_CERT');
-    expect(error.message).toContain('Skip TLS verification'); // self-hosted: the escape hatch is named
+    expect(error.message).toContain('Skip TLS verification'); // the provider's own switch is named, on any deployment
     expect(error.retryable).toBe(false);
     expect(server.seen).toEqual([]);
 
@@ -767,7 +874,7 @@ describe.runIf(openSslAvailable())('TLS and Microsoft Entra against a server wit
     expect(error.message).toContain('DEPTH_ZERO_SELF_SIGNED_CERT');
   });
 
-  it('skips verification on a self-hosted deployment when asked to, and keeps verifying for anything but true', async () => {
+  it('skips verification when the provider asks for it, and keeps verifying for anything but true', async () => {
     const server = await secureServer();
     const insecure = await runtimeFor(server.endpoint, { settings: { allowInsecureTls: true } });
     expect((await insecure.listFiles({ limit: 1 })).items).toEqual([]);
@@ -889,4 +996,122 @@ describe.runIf(openSslAvailable())('TLS and Microsoft Entra against a server wit
       fetchSpy.mockRestore();
     }
   }, 20_000);
+
+  it('Microsoft Entra: a token server behind the provider\'s CA certificate is reached with that trust, once, and its token is what the SDK sends', async () => {
+    const authority = await tokenServer();
+    const server = await secureServer({
+      authorize: (request) => (request.headers.authorization === 'Bearer tok-authority' ? undefined : { status: 403, code: 'AuthenticationFailed' }),
+    });
+    const rt = await runtimeFor(server.endpoint, entraFor(authority.authority, { caCertificate: cert }));
+    expect(await rt.checkConnection()).toMatchObject({ ok: true });
+    expect(authority.seen).toHaveLength(1);
+    expect(authority.seen[0]).toMatchObject({ method: 'POST', url: '/contoso.onmicrosoft.com/oauth2/v2.0/token' });
+    expect(Object.fromEntries(new URLSearchParams(authority.seen[0].body.toString()))).toEqual({
+      grant_type: 'client_credentials',
+      client_id: CLIENT,
+      client_secret: SECRET,
+      scope: 'https://storage.azure.com/.default',
+    });
+    expect(server.seen.length).toBeGreaterThan(0);
+    expect(server.seen.every((request) => request.headers.authorization === 'Bearer tok-authority')).toBe(true);
+    expect(JSON.stringify(server.seen)).not.toContain(SECRET);
+    // the token is kept: later operations do not ask the authority again
+    await rt.listFiles({ limit: 1 });
+    expect(authority.seen).toHaveLength(1);
+  });
+
+  it('Microsoft Entra: a token the storage service keeps refusing is reported as rejected credentials, without the token or the challenge', async () => {
+    const authority = await tokenServer({ key, cert }, 'tok-refused-by-storage');
+    const server = await secureServer({
+      authorize: () => ({
+        status: 401,
+        code: 'InvalidAuthenticationInfo',
+        headers: { 'www-authenticate': 'Bearer authorization_uri=https://login.microsoftonline.com/contoso/oauth2/authorize resource_id=https://storage.azure.com error="invalid_token" error_description="Lifetime validation failed. The token is expired."' },
+      }),
+    });
+    const rt = await runtimeFor(server.endpoint, entraFor(authority.authority, { caCertificate: cert }));
+    const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(AzureBlobError);
+    expect(error.message).toBe('Azure rejected the credentials (InvalidAuthenticationInfo): the Microsoft Entra token was not accepted; check the authority host, the tenant ID and the clock of this server.');
+    expect(error).toMatchObject({ statusCode: 401, code: 'InvalidAuthenticationInfo', retryable: false });
+    // one token, one answer to the challenge: the SDK does not go round in circles
+    expect(authority.seen.length).toBeLessThanOrEqual(2);
+    expect(server.seen.length).toBeLessThanOrEqual(2);
+    expect(JSON.stringify([error.message, logs])).not.toContain('tok-refused-by-storage');
+    expect(JSON.stringify([error.message, logs])).not.toContain(SECRET);
+  });
+
+  it('Microsoft Entra: a token server whose certificate the CA certificate does not cover is named as such, and neither server is sent a request', async () => {
+    const authority = await tokenServer({ key: otherKey, cert: otherCert });
+    const server = await secureServer();
+    const rt = await runtimeFor(server.endpoint, entraFor(authority.authority, { caCertificate: cert }));
+    const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(AzureBlobError);
+    expect(error.message).toBe(NOT_TRUSTED(authority.authority));
+    expect(error).toMatchObject({ code: 'EntraTokenRequestFailed', retryable: false });
+    expect(authority.seen).toEqual([]);
+    expect(server.seen).toEqual([]);
+    expect(JSON.stringify([error.message, logs])).not.toContain(SECRET);
+
+    const check = await rt.checkConnection();
+    expect(check.ok).toBe(false);
+    expect(check.steps).toEqual([{ step: 'list', ok: false, message: NOT_TRUSTED(authority.authority) }]);
+  });
+
+  it('Microsoft Entra: without a CA certificate the token server\'s private certificate is not trusted either, and the endpoint is never dialled', async () => {
+    const authority = await tokenServer();
+    // the endpoint is a public name nothing listens behind: the token is asked for before the first request leaves
+    const rt = await runtimeFor('https://acctname1.blob.core.windows.net', entraFor(authority.authority, { accountName: 'acctname1' }));
+    const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
+    expect(error.message).toBe(NOT_TRUSTED(authority.authority));
+    expect(error.retryable).toBe(false);
+    expect(authority.seen).toEqual([]);
+    expect(dns.lookups).toEqual([]);
+  });
+
+  it('Microsoft Entra: skipping verification covers the token server as well', async () => {
+    const authority = await tokenServer({ key: otherKey, cert: otherCert }, 'tok-insecure');
+    const server = await secureServer({
+      authorize: (request) => (request.headers.authorization === 'Bearer tok-insecure' ? undefined : { status: 403, code: 'AuthenticationFailed' }),
+    });
+    const rt = await runtimeFor(server.endpoint, entraFor(authority.authority, { allowInsecureTls: true }));
+    expect(await rt.checkConnection()).toMatchObject({ ok: true });
+    expect(authority.seen).toHaveLength(1);
+    expect(server.seen.every((request) => request.headers.authorization === 'Bearer tok-insecure')).toBe(true);
+    // anything but true keeps verifying
+    const strict = await runtimeFor(server.endpoint, entraFor(authority.authority, { allowInsecureTls: 'true' }));
+    await expect(strict.listFiles({ limit: 1 })).rejects.toThrow(/TLS certificate of Microsoft Entra/);
+  });
+
+  it('Microsoft Entra: a token server on a private address is refused under the SaaS policy when the runtime is built, whatever the provider\'s TLS settings are', async () => {
+    mode({ DEPLOYMENT_MODE: 'saas' });
+    let n = 0;
+    // nothing set, a CA certificate, and skipped verification: none of them opens a private address
+    for (const extra of [{}, { caCertificate: cert }, { allowInsecureTls: true }]) {
+      n += 1;
+      const host = `login.private${n}.authority.test`;
+      dns.scripts[host] = ['10.1.2.3'];
+      await expect(runtimeFor(`https://acctname${n}.blob.core.windows.net`, entraFor(`https://${host}`, { accountName: `acctname${n}`, ...extra })))
+        .rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'authorityHost' });
+    }
+  });
+
+  describe('a token server whose name turns private after the runtime was built', () => {
+    const refusal = (host: string) => `Could not reach Microsoft Entra at https://${host}: Refusing outbound request to private/loopback host: ${host}.`;
+
+    it('is refused when the request is checked', async () => {
+      mode({ DEPLOYMENT_MODE: 'saas' });
+      const host = 'login.changing1.authority.test';
+      // answers: the check at build time (the verdict is kept for a while), its pin, then the pin of the request
+      dns.scripts[host] = ['20.60.2.2', '20.60.2.2', '127.0.0.1'];
+      const authority = await tokenServer();
+      const rt = await runtimeFor('https://acctname1.blob.core.windows.net', entraFor(`https://${host}`, { accountName: 'acctname1', caCertificate: cert }));
+      const error = await rt.listFiles({ limit: 1 }).catch((e) => e);
+      expect(dns.lookups.filter((name) => name === host)).toHaveLength(3);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error.message).toBe(refusal(host));
+      expect(error.retryable).toBe(false);
+      expect(authority.seen).toEqual([]);
+    }, 15_000);
+  });
 });

@@ -25,7 +25,16 @@ import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { FileDetailDrawer } from '../detail/FileDetailDrawer';
 import { UploadFilesForm } from '../upload/UploadFilesForm';
-import { BucketStatusBadge, filesErrorMessage, formatBytes, formatCount, ProviderHealthChip, providerHref, ReadOnlyHint } from '../shared';
+import {
+  BucketStatusBadge,
+  filesErrorMessage,
+  formatBytes,
+  formatCount,
+  ProviderHealthChip,
+  providerHref,
+  ReadOnlyHint,
+  useNow,
+} from '../shared';
 import { useFilesAccess } from '../useFilesAccess';
 import { useBucket, useFilesInvalidation, useUpdateBucket } from '../useFilesQueries';
 import { BucketApiTab } from './BucketApiTab';
@@ -34,6 +43,7 @@ import { BucketSettingsTab } from './BucketSettingsTab';
 import DeleteBucketDialog from './DeleteBucketDialog';
 import ImportFromStorageDialog from './ImportFromStorageDialog';
 import StateCard from './StateCard';
+import styles from './bucket.module.css';
 import { bucketErrorMessage, isBucketGone } from './bucketErrors';
 import {
   hrefWithQuery,
@@ -43,7 +53,7 @@ import {
   withFilesTabState,
   type BucketTab,
 } from './filesTabState';
-import { driverNameOf, mayOpenProviders } from './settingsModel';
+import { deleteRules, driverNameOf, mayOpenProviders } from './settingsModel';
 
 /** The bucket list. */
 const LIST_HREF = '/dashboard/files';
@@ -74,6 +84,8 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
   const bucketQuery = useBucket(bucketKey);
   const bucket = bucketQuery.data;
   const gone = isBucketGone(bucketQuery.error);
+  // A deletion that has been running for long enough is offered again: the page keeps a clock while one runs.
+  const now = useNow(30_000, bucket?.deleting === true);
 
   const params = new URLSearchParams(paramsText);
   const tab = resolveBucketTab(params.get('tab'));
@@ -137,7 +149,7 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
     }
   };
 
-  const changeStatus = (status: 'active' | 'disabled') => {
+  const changeStatus = (status: 'active' | 'disabled', kept = false) => {
     if (!bucket) return;
     updateBucket.mutate(
       { bucketKey, patch: { status } },
@@ -145,7 +157,11 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
         onSuccess: () =>
           notifications.show({
             color: 'green',
-            message: status === 'active' ? t('actions.enabled', { name: bucket.name }) : t('actions.disabledDone', { name: bucket.name }),
+            message: kept
+              ? t('actions.kept', { name: bucket.name })
+              : status === 'active'
+                ? t('actions.enabled', { name: bucket.name })
+                : t('actions.disabledDone', { name: bucket.name }),
           }),
         // A bucket an agent keeps its session files in cannot be disabled: the refusal names the agents.
         onError: (error) =>
@@ -186,7 +202,8 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
 
   /* ── The page ────────────────────────────────────────────────────────── */
 
-  const deleting = bucket.deleting === true;
+  const rules = deleteRules(bucket, now);
+  const deleting = rules.deleting;
   const disabled = bucket.status !== 'active';
   // Changes need someone who may write, and a bucket that is not being deleted.
   const canChange = canWrite && !deleting;
@@ -253,8 +270,38 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
   const notices = [
     !canWrite ? <ReadOnlyHint key="read-only" variant="banner" /> : null,
     deleting ? (
-      <Alert key="deleting" color="blue" icon={<Loader size={14} />} role="status">
-        {t('banner.deleting')}
+      rules.stalled ? (
+        <Alert key="deleting-stalled" variant="light" color="yellow" icon={<IconAlertTriangle size={16} />} role="status">
+          <Group justify="space-between" gap="sm" wrap="wrap">
+            <span>{t('banner.deletingStalled')}</span>
+            {canWrite ? (
+              <Button size="xs" color="red" onClick={() => setDeleteOpen(true)}>
+                {t('banner.deleteAgain')}
+              </Button>
+            ) : null}
+          </Group>
+        </Alert>
+      ) : (
+        <Alert key="deleting" color="blue" icon={<Loader size={14} />} role="status">
+          {t('banner.deleting')}
+        </Alert>
+      )
+    ) : rules.lastError !== null ? (
+      <Alert key="delete-failed" variant="light" color="red" icon={<IconAlertTriangle size={16} />} title={t('banner.deleteFailedTitle')} role="alert">
+        <div style={{ overflowWrap: 'anywhere' }}>{rules.lastError}</div>
+        <div className="ds-muted" style={{ marginTop: 4 }}>
+          {t('banner.deleteFailedHint')}
+        </div>
+        {canWrite ? (
+          <Group gap="xs" mt="xs">
+            <Button size="xs" color="red" onClick={() => setDeleteOpen(true)}>
+              {t('banner.deleteRetry')}
+            </Button>
+            <Button size="xs" variant="default" loading={updateBucket.isPending} onClick={() => changeStatus('active', true)}>
+              {t('banner.keep')}
+            </Button>
+          </Group>
+        ) : null}
       </Alert>
     ) : disabled ? (
       <Alert key="disabled" variant="light" color="yellow" icon={<IconBan size={16} />} role="note">
@@ -271,90 +318,94 @@ export default function BucketPage({ bucketKey }: BucketPageProps) {
   ].filter(Boolean);
 
   return (
-    <DetailShell
-      backHref={LIST_HREF}
-      backLabel={t('header.back')}
-      icon={
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 10,
-            background: 'var(--ds-accent-soft)',
-            color: 'var(--ds-accent)',
-            display: 'grid',
-            placeItems: 'center',
-          }}
-        >
-          <IconBucket size={22} stroke={1.7} aria-hidden="true" />
-        </div>
-      }
-      title={
-        <>
-          <h1 className="ds-h2" style={{ margin: 0, overflowWrap: 'anywhere' }}>
-            {bucket.name}
-          </h1>
-          <BucketStatusBadge status={bucket.status} deleting={deleting} />
-        </>
-      }
-      meta={
-        <>
-          <span className="ds-mono">{bucket.key}</span>
-          {provider ? (
-            <>
-              <span className="ds-faint">·</span>
-              <span>
-                {provider.label}
-                <span className="ds-faint">{` · ${driverNameOf(provider)}`}</span>
+    <div className={styles.page}>
+      <DetailShell
+        backHref={LIST_HREF}
+        backLabel={t('header.back')}
+        icon={
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 10,
+              background: 'var(--ds-accent-soft)',
+              color: 'var(--ds-accent)',
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <IconBucket size={22} stroke={1.7} aria-hidden="true" />
+          </div>
+        }
+        title={
+          <>
+            <h1 className="ds-h2" style={{ margin: 0, overflowWrap: 'anywhere' }}>
+              {bucket.name}
+            </h1>
+            <BucketStatusBadge status={bucket.status} deleting={deleting} deleteError={rules.lastError} />
+          </>
+        }
+        meta={
+          <div className={styles.facts}>
+            <div className={styles.factsRow}>
+              <span className={`${styles.fact} ${styles.factBare} ds-mono`}>{bucket.key}</span>
+              {provider ? (
+                <span className={styles.fact}>
+                  {provider.label}
+                  <span className="ds-faint">{` · ${driverNameOf(provider)}`}</span>
+                </span>
+              ) : null}
+              {bucket.providerHealth ? (
+                <span className={`${styles.fact} ${styles.factBare}`}>
+                  <ProviderHealthChip health={bucket.providerHealth} href={providerLink} />
+                </span>
+              ) : null}
+              <span className={styles.fact}>
+                {fileCount === 1
+                  ? t('header.statsOne', { size })
+                  : t('header.statsMany', { count: formatCount(fileCount, locale), size })}
               </span>
-            </>
-          ) : null}
-          <ProviderHealthChip health={bucket.providerHealth} href={providerLink} />
-          <span className="ds-faint">·</span>
-          <span>
-            {fileCount === 1
-              ? t('header.statsOne', { size })
-              : t('header.statsMany', { count: formatCount(fileCount, locale), size })}
-          </span>
-        </>
-      }
-      actions={actions}
-      tabs={tabs}
-      activeTab={tab}
-      onTabChange={changeTab}
-    >
-      {notices.length > 0 ? <div className="ds-col ds-gap-sm">{notices}</div> : null}
+            </div>
+          </div>
+        }
+        actions={actions}
+        tabs={tabs}
+        activeTab={tab}
+        onTabChange={changeTab}
+      >
+        {notices.length > 0 ? <div className="ds-col ds-gap-sm">{notices}</div> : null}
 
-      {tab === 'files' ? (
-        <BucketFilesTab
+        {tab === 'files' ? (
+          <BucketFilesTab
+            bucket={bucket}
+            canWrite={canWrite}
+            onOpenUpload={setUploadFolder}
+            onOpenFile={openFile}
+            onOpenImport={canImport ? () => setImportOpen(true) : undefined}
+          />
+        ) : null}
+        {tab === 'settings' ? <BucketSettingsTab bucket={bucket} canWrite={canWrite} /> : null}
+        {tab === 'api' ? <BucketApiTab bucket={bucket} canWrite={canWrite} /> : null}
+
+        <FileDetailDrawer
           bucket={bucket}
-          canWrite={canWrite}
-          onOpenUpload={setUploadFolder}
-          onOpenFile={openFile}
-          onOpenImport={canImport ? () => setImportOpen(true) : undefined}
+          fileKey={fileKey}
+          onClose={closeFile}
+          onChanged={() => void invalidation.bucketContent(bucketKey)}
+          // The delete itself has refreshed the lists (`useDeleteObject`): the page only closes the drawer.
+          onDeleted={closeFile}
         />
-      ) : null}
-      {tab === 'settings' ? <BucketSettingsTab bucket={bucket} canWrite={canWrite} /> : null}
-      {tab === 'api' ? <BucketApiTab bucket={bucket} canWrite={canWrite} /> : null}
-
-      <FileDetailDrawer
-        bucket={bucket}
-        fileKey={fileKey}
-        onClose={closeFile}
-        onChanged={() => void invalidation.bucketContent(bucketKey)}
-        // The delete itself has refreshed the lists (`useDeleteObject`): the page only closes the drawer.
-        onDeleted={closeFile}
-      />
-      <UploadFilesForm
-        opened={uploadFolder !== null}
-        onClose={() => setUploadFolder(null)}
-        bucket={bucket}
-        folder={uploadFolder ?? ''}
-        // The upload screen refreshes the lists itself when its queue finishes.
-        onUploaded={() => undefined}
-      />
-      <ImportFromStorageDialog bucket={bucket} opened={importOpen} onClose={() => setImportOpen(false)} />
-      <DeleteBucketDialog bucket={bucket} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />
-    </DetailShell>
+        <UploadFilesForm
+          opened={uploadFolder !== null}
+          onClose={() => setUploadFolder(null)}
+          bucket={bucket}
+          folder={uploadFolder ?? ''}
+          // The upload screen refreshes the lists itself when its queue finishes.
+          onUploaded={() => undefined}
+        />
+        <ImportFromStorageDialog bucket={bucket} opened={importOpen} onClose={() => setImportOpen(false)} />
+        <DeleteBucketDialog bucket={bucket} opened={deleteOpen} onClose={() => setDeleteOpen(false)} />
+      </DetailShell>
+    </div>
   );
 }

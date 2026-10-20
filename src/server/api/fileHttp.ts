@@ -11,6 +11,8 @@
  * - a missing object: 404 "File not found" - by the driver's typed signal (`object_missing`, `BlobNotFound`,
  *   `NoSuchKey`, `ENOENT`, a 404 status with a "not found" message), and as a last resort by the wording, for
  *   drivers that only say it in words;
+ * - a key the store refuses (the driver's typed `invalid_key` / `InvalidFileKey`): 400 `invalid_request` with its
+ *   message, which says what to change;
  * - a failure the S3 or Azure driver has put into words for people, or a provider setting or endpoint the
  *   console refuses: 502 with that message, which is written to be shown (no keys, no raw XML, no server paths);
  * - anything else from a call that talks to the provider: 502 with a generic sentence, the details only in the
@@ -28,6 +30,7 @@ import {
   isCircuitOpenError,
   isCuratedStorageError,
   isFileServiceError,
+  isInvalidKeyError,
   isObjectMissingError,
   isRequestTimeoutError,
   type FileServiceErrorCode,
@@ -107,6 +110,11 @@ export function describeFileError(error: unknown, options: FileErrorOptions = {}
     return typed('file_not_found', 404, 'File not found');
   }
 
+  // A key the store refuses (too long for it, empty, text it cannot write) is the caller's to change, on every driver.
+  if (isInvalidKeyError(error)) {
+    return typed('invalid_request', 400, error.message);
+  }
+
   // Failures worded for people.
   if (isProviderConfigError(error)) {
     return storageFailure(502, 'storage_failure', error.message, { field: error.field });
@@ -143,12 +151,23 @@ export function sendFileError(
 }
 
 /**
+ * The `metadata` of an upload is a set of named values (an object), or absent. A text or a list would be stored as
+ * something other than what was sent (a text as an object of its characters).
+ */
+export function isUploadMetadata(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'object' && !Array.isArray(value));
+}
+
+/**
  * `Content-Disposition` for a file name, and `X-Content-Type-Options: nosniff`: the bytes are served as the type
- * stored with them, and the browser is not left to guess a more active one.
+ * stored with them, and the browser is not left to guess a more active one. A file is for the caller who asked
+ * for it: `Cache-Control: private, no-store` keeps a shared cache or a proxy from keeping the body (a stored key
+ * keeps the extension of its file, which is what such caches go by), on every path that serves a file's bytes.
  */
 export function setFileDownloadHeaders(reply: FastifyReply, fileName: string, type: ContentDispositionType = 'attachment'): void {
   reply.header('Content-Disposition', contentDisposition(fileName, type));
   reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('Cache-Control', 'private, no-store');
 }
 
 /**

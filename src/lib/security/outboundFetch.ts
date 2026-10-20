@@ -32,6 +32,7 @@
 
 import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
+import type { SecureContext } from 'node:tls';
 import { Agent, buildConnector } from 'undici';
 
 import { getConfig } from '@/lib/core/config';
@@ -298,8 +299,28 @@ async function resolvePinnedAddresses(host: string): Promise<ResolvedAddress[]> 
 }
 
 /**
+ * The TLS trust of one target, for a request whose destination has settings of its own (a storage service or an
+ * identity provider behind a private CA). `fetch` knows only Node's default roots.
+ */
+export interface SafeFetchTls {
+  /**
+   * The trust for this target: a context the CALLER builds once (`tls.createSecureContext({ ca })`). Parsing the
+   * roots for every request would cost milliseconds each time.
+   */
+  secureContext?: SecureContext;
+  /**
+   * `false` skips certificate verification for this target. The caller decides, on any deployment (the storage
+   * providers pass it for a provider whose own "Skip TLS verification" setting is the boolean `true`); this module only
+   * does as it is told. It does not touch the address policy: the guard options of the same call (`forceBlock`,
+   * `privateNetworks`) are applied on every hop either way.
+   */
+  rejectUnauthorized?: false;
+}
+
+/**
  * An undici dispatcher whose connector resolves ONLY to `pinned`, regardless
- * of what DNS says for the hostname in the request URL. Built fresh per
+ * of what DNS says for the hostname in the request URL, and that trusts what
+ * `tls` says when the target has trust settings of its own. Built fresh per
  * fetch call (never shared/cached) so it can never be reused for an
  * unrelated request.
  *
@@ -309,18 +330,29 @@ async function resolvePinnedAddresses(host: string): Promise<ResolvedAddress[]> 
  * `fetch` has — a host whose first DNS answer is an AAAA record this
  * container cannot route would go from "works" to "always fails".
  *
+ * The URL's hostname still decides the TLS server name and the name the
+ * certificate is checked against: pinning an address never weakens verification.
+ *
  * Keep-alive is turned down to the minimum because this dispatcher serves
  * exactly ONE request and is then dropped: undici's default would hold the
  * socket open for another request that, by construction, never comes — one
  * leaked file descriptor per outbound call, which a crawl run reaches the
  * process FD limit with.
+ *
+ * Exported for the tests of the connector contract, which a mocked `fetch` never reaches.
  */
-function pinnedDispatcher(pinned: ResolvedAddress[]): Agent {
+export function outboundDispatcher(pinned: ResolvedAddress[], tlsOptions?: SafeFetchTls): Agent {
   return new Agent({
     connect: buildConnector({
-      lookup: (_hostname, _options, callback) => {
-        callback(null, pinned.map(({ address, family }) => ({ address, family })));
-      },
+      ...(tlsOptions?.secureContext ? { secureContext: tlsOptions.secureContext } : {}),
+      ...(tlsOptions?.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
+      ...(pinned.length > 0
+        ? {
+          lookup: (_hostname, _options, callback) => {
+            callback(null, pinned.map(({ address, family }) => ({ address, family })));
+          },
+        }
+        : {}),
     }),
     keepAliveTimeout: 1,
     keepAliveMaxTimeout: 1,
@@ -486,6 +518,11 @@ export interface SafeFetchOptions extends OutboundGuardOptions {
   /** Abort the request after this many ms (default `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS`). */
   timeoutMs?: number;
   /**
+   * The TLS trust of the target (see `SafeFetchTls`). The request then goes through a dispatcher of its own, pinned or not.
+   * Without it, `fetch` trusts Node's default roots and a literal-IP or allow-listed target is fetched plainly.
+   */
+  tls?: SafeFetchTls;
+  /**
    * `false` hands a 3xx back to the caller as it is instead of following it
    * (default `true`). For callers that treat "the target moved" as an answer.
    */
@@ -582,7 +619,7 @@ export async function safeFetch(
       // rebinding). Absent (plain fetch) when there was nothing to pin:
       // a literal-IP URL, or the private-network guard was bypassed
       // (allowlisted host / allowPrivate / blocking disabled).
-      const dispatcher = pinned.length > 0 ? pinnedDispatcher(pinned) : undefined;
+      const dispatcher = pinned.length > 0 || options?.tls ? outboundDispatcher(pinned, options?.tls) : undefined;
       discardDispatcher(liveDispatcher); // previous hop's, now unread
       liveDispatcher = dispatcher;
 

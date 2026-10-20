@@ -15,8 +15,8 @@ export function bucketHref(bucketKey: string, tab: BucketTab = 'files'): string 
   return tab === 'files' ? base : `${base}?tab=${tab}`;
 }
 
-/** Where the product documentation describes the Document Store. */
-export const FILES_DOCS_URL = 'https://docs.cognipeer.com/console/guide/files';
+/** Where the product documentation describes the Document Store (its canonical address; the old one redirects here). */
+export const FILES_DOCS_URL = 'https://docs.cognipeer.com/console/guide/knowledge/files';
 
 /* ── Filters ─────────────────────────────────────────────────────────────── */
 

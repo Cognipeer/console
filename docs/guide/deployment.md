@@ -74,7 +74,7 @@ volumes:
   console-data:
 ```
 
-If you want MongoDB instead, set `DB_PROVIDER=mongodb`, add `MONGODB_URI`, and provision the database separately.
+If you want MongoDB instead, set `DB_PROVIDER=mongodb`, add `MONGODB_URI`, and provision the database separately. An installation on MongoDB defaults to the hosted (`saas`) deployment mode, which refuses provider endpoints on private networks unless the operator opens them for an organization; for an installation you run yourself also set `DEPLOYMENT_MODE=onprem` (see [Deployment mode](/guide/configuration#deployment-mode), including what it does to `MONGODB_SINGLE_DATABASE`).
 
 ## Kubernetes
 
@@ -181,6 +181,7 @@ pm2 start npm --name cognipeer-console -- start
 | Variable | Description |
 |----------|-------------|
 | `MONGODB_URI` | Required only when `DB_PROVIDER=mongodb` |
+| `DEPLOYMENT_MODE` | Set to `onprem` for a self-hosted installation on MongoDB (it defaults to `saas` there; SQLite installations default to `onprem`). It also changes the default of `MONGODB_SINGLE_DATABASE` to `true`: an installation that keeps its tenants in per-tenant databases sets `MONGODB_SINGLE_DATABASE=false` as well (see [Deployment mode](/guide/configuration#deployment-mode)) |
 
 ### Recommended Production Settings
 

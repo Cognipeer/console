@@ -22,6 +22,8 @@ export const filesListEn = {
     disable: 'Disable',
     // Opens the bucket's Settings tab, where the delete (and the choice about its files) is confirmed.
     delete: 'Delete bucket…',
+    // For a bucket whose deletion stopped with an error, or whose background run seems lost: same place, same dialog.
+    deleteAgain: 'Delete again…',
   },
   tiles: {
     buckets: 'Buckets',

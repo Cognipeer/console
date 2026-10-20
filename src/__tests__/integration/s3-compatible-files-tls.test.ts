@@ -134,7 +134,7 @@ describe.runIf(openSslAvailable())('S3-compatible storage behind a certificate f
     expect(server.objects.size).toBe(0);
   });
 
-  it('accepts the certificate on a self-hosted deployment that skips verification', async () => {
+  it('accepts the certificate when the provider skips verification', async () => {
     const server = await tlsStore();
     const runtime = await runtimeFor(server.url, { allowInsecureTls: true });
     await expect(runtime.checkConnection()).resolves.toMatchObject({ ok: true });
@@ -148,13 +148,13 @@ describe.runIf(openSslAvailable())('S3-compatible storage behind a certificate f
     await expect(runtime.listFiles()).rejects.toMatchObject({ code: 'tls_untrusted' });
   });
 
-  it('does not skip verification on SaaS, even when the setting is stored', async () => {
+  it('lets a provider skip verification on SaaS too, where the network policy still applies', async () => {
     useDeployment('saas');
-    // a public literal address passes the network policy; the TLS setting is what is refused
-    await expect(runtimeFor('https://93.184.216.34:9000', { allowInsecureTls: true })).rejects.toMatchObject({
-      name: 'ProviderSettingsError',
-      field: 'allowInsecureTls',
-    });
+    // a public literal address passes the network policy, and the runtime is built with the setting
+    await expect(runtimeFor('https://93.184.216.34:9000', { allowInsecureTls: true })).resolves.toBeDefined();
+    // skipping verification does not open a loopback store
+    const server = await tlsStore();
+    await expect(runtimeFor(server.url, { allowInsecureTls: true })).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'endpoint' });
   });
 
   it('trusts the CA certificate for this provider only', async () => {

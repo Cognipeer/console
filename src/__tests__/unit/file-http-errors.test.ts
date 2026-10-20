@@ -259,6 +259,18 @@ describe('setFileDownloadHeaders', () => {
     setFileDownloadHeaders(reply as unknown as FastifyReply, 'a.png');
     expect(reply.headers['Content-Disposition']).toMatch(/^attachment;/);
   });
+
+  it.each(['attachment', 'inline'] as const)('keeps a shared cache from storing the body, as %s: private, no-store', (type) => {
+    const reply = fakeReply();
+    setFileDownloadHeaders(reply as unknown as FastifyReply, 'report.pdf', type);
+    expect(reply.headers['Cache-Control']).toBe('private, no-store');
+  });
+
+  it('says so by default too', () => {
+    const reply = fakeReply();
+    setFileDownloadHeaders(reply as unknown as FastifyReply, 'report.pdf');
+    expect(reply.headers['Cache-Control']).toBe('private, no-store');
+  });
 });
 
 describe('uploadRouteErrorHandler', () => {

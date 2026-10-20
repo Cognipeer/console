@@ -6,7 +6,7 @@
 
 import { QueryClient } from '@tanstack/react-query';
 import type { FileBucketView, FileRecordView } from '@/lib/services/files';
-import type { FilesLimits } from '@/components/files/filesApi';
+import type { FileLimits } from '@/components/files/filesApi';
 import { wait } from './iamCenterUi';
 
 /** A query client that does not retry and answers an error at once. */
@@ -61,7 +61,7 @@ export function fileRecord(over: Record<string, unknown> = {}): FileRecordView {
   } as unknown as FileRecordView;
 }
 
-export function limitsPayload(over: Partial<FilesLimits> = {}): FilesLimits {
+export function limitsPayload(over: Partial<FileLimits> = {}): FileLimits {
   return {
     maxFileBytes: 1_000_000,
     maxRequestBytes: 2_000_000,

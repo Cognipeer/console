@@ -375,6 +375,7 @@ describe('getFileBucketDetail', () => {
         { agentId: 'id-of-support', agentKey: 'support', name: 'Support bot' },
         { agentId: 'id-of-sales', agentKey: 'sales', name: 'Sales bot' },
       ],
+      usedByCount: 2,
       storageLocation: 's3://files/tenant-1/s3-main/invoices/',
     });
     expect(mocks.findAgentsUsingBucket).toHaveBeenCalledWith(TENANT_DB, PROJECT, 'docs');
@@ -389,13 +390,18 @@ describe('getFileBucketDetail', () => {
   });
 
   it('lists nobody when no agent keeps session files in the bucket', async () => {
-    expect((await getFileBucketDetail(TENANT_DB, TENANT, PROJECT, 'docs')).usedBy).toEqual([]);
+    const detail = await getFileBucketDetail(TENANT_DB, TENANT, PROJECT, 'docs');
+    expect(detail.usedBy).toEqual([]);
+    expect(detail.usedByCount).toBe(0);
   });
 
   it('leaves out an agent that was deleted between the two reads (it has no page to link to)', async () => {
     mocks.findAgentsUsingBucket.mockResolvedValue([{ key: 'gone', name: 'Gone' }, { key: 'support', name: 'Support bot' }]);
     db.findAgentByKey.mockImplementation((async (key: string) => (key === 'gone' ? null : { _id: 'a1', key })) as never);
-    expect((await getFileBucketDetail(TENANT_DB, TENANT, PROJECT, 'docs')).usedBy).toEqual([{ agentId: 'a1', agentKey: 'support', name: 'Support bot' }]);
+    const detail = await getFileBucketDetail(TENANT_DB, TENANT, PROJECT, 'docs');
+    expect(detail.usedBy).toEqual([{ agentId: 'a1', agentKey: 'support', name: 'Support bot' }]);
+    // The count is of the agents that are listed, so it never says more than the list would.
+    expect(detail.usedByCount).toBe(1);
   });
 
   it('has zero numbers for a bucket with no files', async () => {

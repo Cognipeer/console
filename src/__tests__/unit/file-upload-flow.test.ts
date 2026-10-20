@@ -43,12 +43,14 @@ import { getConfigSource, setConfigSource } from '@/lib/core/config';
 import { runtimePool } from '@/lib/core/runtimePool';
 import { getDatabase, type IFileRecord } from '@/lib/database';
 import { FileServiceError } from '@/lib/services/files/errors';
+import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import {
   cleanContentType,
   createFileBucket,
   deleteFile,
   deleteFileBucket,
   downloadFile,
+  FILE_RUNTIME_POOL_PREFIX,
   getFileBucket,
   getFileRecord,
   listFiles,
@@ -134,7 +136,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  runtimePool.invalidateByPrefix('file:');
+  runtimePool.invalidateByPrefix(FILE_RUNTIME_POOL_PREFIX);
   resetAllCircuits();
   setConfigSource(ORIGINAL_SOURCE);
 });
@@ -147,6 +149,36 @@ const refusal = (promise: Promise<unknown>) => promise.then(
     return { code, status, message };
   },
 );
+
+// ── The data, as text ─────────────────────────────────────────────────────
+
+describe('the data of an upload, given as text', () => {
+  const bytes = Buffer.from(Array.from({ length: 300 }, (_, index) => (index * 37 + 11) % 256));
+  const standard = bytes.toString('base64');
+  const lines = (text: string, width: number) => (text.match(new RegExp(`.{1,${width}}`, 'g')) ?? []).join('\r\n');
+  const storedBytes = () => (runtime.uploadFile.mock.calls[0]![0] as { data: Buffer }).data;
+
+  it.each([
+    ['base64', standard],
+    ['base64 without its padding', standard.replace(/=+$/, '')],
+    ['base64 in the URL-safe alphabet', standard.replace(/\+/g, '-').replace(/\//g, '_')],
+    ['base64 in lines of 76 characters', lines(standard, 76)],
+    ['a data URL', `data:application/octet-stream;base64,${standard}`],
+    ['a data URL whose payload runs over several lines', `data:application/octet-stream;base64,${lines(standard, 20)}`],
+  ])('%s is stored as the bytes that were encoded, and is counted as that many', async (_name, data) => {
+    await upload({ data });
+    expect(storedBytes().equals(bytes)).toBe(true);
+    expect(decodedByteLength(data)).toBe(bytes.length);
+  });
+
+  it('is never stored larger than the number the quotas are asked about', async () => {
+    for (const data of [`${Buffer.alloc(2001, 9).toString('base64')}base64,AA`, 'hello, this is not base64!', 'QQ==QUJD', `${standard}, data:x;base64,AAAA`]) {
+      runtime.uploadFile.mockClear();
+      await upload({ data });
+      expect(storedBytes().length, JSON.stringify(data.slice(0, 30))).toBeLessThanOrEqual(decodedByteLength(data));
+    }
+  });
+});
 
 // ── Content type ──────────────────────────────────────────────────────────
 

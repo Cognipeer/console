@@ -5,7 +5,7 @@
  * test); what the routes do with the answer is what is checked, over the real plugin, database and disk.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import JSZip from 'jszip';
 
 const hoisted = vi.hoisted(() => ({
@@ -186,6 +186,84 @@ describe('archive', () => {
   });
 });
 
+/**
+ * Nothing stops two records from carrying one key (rows written before an upload replaced the record of its key, or
+ * two nodes uploading a new key at the same moment). They describe one object, so the one that says it is a
+ * session's decides for the key, whichever the database happens to return last.
+ */
+describe('two records under one key, one of them a session\'s', () => {
+  const record = (over: Record<string, unknown>) => stack.db.createFileRecord({
+    tenantId: stack.tenantId, projectId: stack.projectId, providerKey: 'local', bucketKey: 'work', key: 'shared.txt', name: 'shared.txt',
+    size: 11, contentType: 'text/plain', markdownStatus: 'skipped', createdBy: stack.userId, ...over,
+  } as never);
+  const plain = () => record({});
+  const linked = () => record({ purpose: 'conversation', conversationId: 'conv-theirs' });
+
+  describe.each([
+    ['the session\'s record first', async () => { await linked(); await plain(); }],
+    ['the plain record first', async () => { await plain(); await linked(); }],
+  ])('%s', (_label, arrange) => {
+    beforeEach(async () => {
+      stack.putObject('work', 'shared.txt', 'their bytes');
+      await arrange();
+      refusals['conv-theirs'] = { status: 403, need: 'manage' };
+    });
+
+    it('batch-delete leaves the key alone, as it does for any file of a session the caller may not manage', async () => {
+      const res = await stack.request('POST', '/files/buckets/work/objects/batch-delete', { keys: ['shared.txt'] });
+
+      expect(res.statusCode).toBe(200);
+      expect(stack.json(res)).toEqual({ deleted: [], failed: [{ key: 'shared.txt', error: SESSION_FORBIDDEN_MESSAGE.manage }] });
+      expect(existsSync(stack.objectPath('work', 'shared.txt'))).toBe(true);
+      expect(await stack.records('work')).toHaveLength(2);
+    });
+
+    it('batch-delete still deletes the other keys it names', async () => {
+      await stack.putFile('work', 'plain.txt', 'plain');
+
+      const res = await stack.request('POST', '/files/buckets/work/objects/batch-delete', { keys: ['shared.txt', 'plain.txt'] });
+
+      expect(stack.json(res)).toEqual({ deleted: ['plain.txt'], failed: [{ key: 'shared.txt', error: SESSION_FORBIDDEN_MESSAGE.manage }] });
+      expect(existsSync(stack.objectPath('work', 'shared.txt'))).toBe(true);
+    });
+
+    it('archive is refused with the session\'s own 403: no ZIP, and the bytes are not served', async () => {
+      const res = await stack.request('POST', '/files/buckets/work/objects/archive', { keys: ['shared.txt'] });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain(SESSION_FORBIDDEN_MESSAGE.view);
+      expect(res.body).not.toContain('their bytes');
+      expect(res.rawPayload.subarray(0, 2).toString()).not.toBe('PK');
+    });
+  });
+
+  it('changes nothing for a key whose records are all plain: it is deleted and archived as before', async () => {
+    stack.putObject('work', 'shared.txt', 'plain bytes');
+    await plain();
+    await plain();
+
+    const archived = await stack.request('POST', '/files/buckets/work/objects/archive', { keys: ['shared.txt'] });
+    expect(archived.statusCode).toBe(200);
+    const deleted = await stack.request('POST', '/files/buckets/work/objects/batch-delete', { keys: ['shared.txt'] });
+    expect(stack.json(deleted)).toEqual({ deleted: ['shared.txt'], failed: [] });
+    expect(existsSync(stack.objectPath('work', 'shared.txt'))).toBe(false);
+    expect(hoisted.refuse).not.toHaveBeenCalled();
+  });
+
+  it('is decided by asking about the session once, as a change for batch-delete and as a view for an archive', async () => {
+    stack.putObject('work', 'shared.txt', 'their bytes');
+    await linked();
+    await plain();
+    await linked();
+    refusals['conv-theirs'] = { status: 403, need: 'manage' };
+
+    await stack.request('POST', '/files/buckets/work/objects/batch-delete', { keys: ['shared.txt'] });
+    await stack.request('POST', '/files/buckets/work/objects/archive', { keys: ['shared.txt'] });
+
+    expect(hoisted.refuse.mock.calls.map((call) => [call[1], call[2]])).toEqual([['conv-theirs', 'manage'], ['conv-theirs', 'view']]);
+  });
+});
+
 describe('convert', () => {
   const convert = (key: string) => stack.request('POST', '/files/buckets/work/convert', { key });
 
@@ -210,6 +288,76 @@ describe('convert', () => {
     expect(res.body).toContain(SESSION_FORBIDDEN_MESSAGE.manage);
     expect((await stack.record('work', 'theirs.txt'))?.markdownStatus).toBe('skipped');
     expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('upload under the key of a file', () => {
+  const uploadAt = (keyHint: string, content = 'new bytes') => stack.request('POST', '/files/buckets/work/objects', {
+    fileName: 'x.txt', data: Buffer.from(content).toString('base64'), contentType: 'text/plain', convertToMarkdown: false, keyHint,
+  });
+  const stored = (key: string) => readFileSync(stack.objectPath('work', key), 'utf8');
+
+  it('writes over the file of a session the caller may manage, after asking about that session as a change', async () => {
+    await sessionFile('mine.txt', 'conv-mine', 'old bytes');
+
+    const res = await uploadAt('mine.txt');
+
+    expect(res.statusCode).toBe(201);
+    expect(stored('mine.txt')).toBe('new bytes');
+    expect(hoisted.refuse.mock.calls.map((call) => [call[1], call[2]])).toEqual([['conv-mine', 'manage']]);
+  });
+
+  it('is refused with the session\'s own 403 for the file of a session the caller may not manage: the file and its record stay as they were', async () => {
+    await sessionFile('theirs.txt', 'conv-theirs', 'their bytes');
+    refusals['conv-theirs'] = { status: 403, need: 'manage' };
+
+    const res = await uploadAt('theirs.txt');
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain(SESSION_FORBIDDEN_MESSAGE.manage);
+    expect(stored('theirs.txt')).toBe('their bytes');
+    const records = (await stack.records('work')).filter((record) => record.key === 'theirs.txt');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ purpose: 'conversation', conversationId: 'conv-theirs', size: Buffer.byteLength('their bytes') });
+  });
+
+  it('is refused whatever way the key is spelled: slashes, backslashes and a leading slash name the same file', async () => {
+    await sessionFile('agent-sessions/bot/s1/theirs.txt', 'conv-theirs', 'their bytes');
+    refusals['conv-theirs'] = { status: 403, need: 'manage' };
+
+    for (const spelling of ['agent-sessions//bot/s1/theirs.txt', 'agent-sessions\\bot\\s1\\theirs.txt', '/agent-sessions/bot/s1/theirs.txt', '  agent-sessions/bot/s1//theirs.txt  ']) {
+      const res = await uploadAt(spelling);
+      expect(res.statusCode, spelling).toBe(403);
+    }
+    expect(stored('agent-sessions/bot/s1/theirs.txt')).toBe('their bytes');
+    expect(await stack.records('work')).toHaveLength(1);
+  });
+
+  it('is a 503 when the session cannot be checked: no answer is never a yes', async () => {
+    await sessionFile('unknown.txt', 'conv-down', 'their bytes');
+    refusals['conv-down'] = { status: 503, need: 'manage' };
+
+    const res = await uploadAt('unknown.txt');
+
+    expect(res.statusCode).toBe(503);
+    expect(stored('unknown.txt')).toBe('their bytes');
+  });
+
+  it('asks nothing for a key that holds a plain file, a key nobody uses, or a folder', async () => {
+    await stack.putFile('work', 'plain.txt', 'plain');
+
+    expect((await uploadAt('plain.txt')).statusCode).toBe(201);
+    expect((await uploadAt('fresh/key.txt')).statusCode).toBe(201);
+    expect((await uploadAt('some/folder/')).statusCode).toBe(201);
+    expect(hoisted.refuse).not.toHaveBeenCalled();
+  });
+
+  it('asks about the session when a plain file and a session file share the key', async () => {
+    await stack.putFile('work', 'shared.txt', 'plain', {});
+    await stack.putFile('work', 'shared.txt', 'session', { purpose: 'conversation', conversationId: 'conv-theirs' });
+    refusals['conv-theirs'] = { status: 403, need: 'manage' };
+
+    expect((await uploadAt('shared.txt')).statusCode).toBe(403);
   });
 });
 

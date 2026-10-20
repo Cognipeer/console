@@ -65,6 +65,21 @@ export class S3OperationError extends Error {
 }
 
 /**
+ * A key the driver cannot send: nothing is left of it once the slashes are trimmed, or it holds a character that has no
+ * UTF-8 form. The text matches what the other file drivers throw; the status and `retryable: false` keep a rejected key
+ * from being retried and from counting as an outage of the store (it would otherwise open the circuit breaker of the
+ * provider for every caller).
+ */
+export function invalidKeyError(detail?: string): S3OperationError {
+  return new S3OperationError({
+    code: 'invalid_key',
+    message: detail ? `Invalid file key provided: ${detail}` : 'Invalid file key provided.',
+    statusCode: 400,
+    retryable: false,
+  });
+}
+
+/**
  * True for an error `createS3FileRuntime` raised for a failed storage call. The Files backend uses it to show the
  * message (which is safe and written for people) instead of a generic failure. Checks the name as well as the class, so
  * a copy of this module loaded twice by a bundler still matches.
@@ -195,6 +210,11 @@ export function describeS3Error(error: unknown, ctx: S3ErrorContext): MappedS3Er
       return mapped('bucket_name_taken', `Bucket name "${bucket}" is already taken by another account on ${host}.`);
     case 'RequestTimeTooSkewed':
       return mapped('clock_skew', 'The clocks of this server and the storage service differ by more than 15 minutes.');
+    case 'KeyTooLongError':
+      return mapped('invalid_key', 'Invalid file key provided: it is longer than the store allows (Amazon S3: 1024 bytes in UTF-8, the provider prefix included).');
+    case 'XMinioInvalidObjectName':
+    case 'InvalidObjectName':
+      return mapped('invalid_key', `Invalid file key provided: ${raw || 'the store does not accept this key'}`);
     case 'MetadataTooLarge':
       return mapped('metadata_too_large', 'The object metadata is larger than the store allows (2 KB for S3).');
     case 'EntityTooLarge':
@@ -222,6 +242,12 @@ export function describeS3Error(error: unknown, ctx: S3ErrorContext): MappedS3Er
       return mapped('store_unavailable', `${host} is overloaded or unavailable (${name}).`, true);
     default:
       break;
+  }
+
+  // Thrown by the SDK before anything is sent (a lone surrogate in a key, a prefix or a continuation token): the same
+  // request fails the same way, so it is not a store failure to retry.
+  if (name === 'URIError') {
+    return mapped('invalid_request', 'A value of the request (a key, a prefix or a continuation token) holds a character that cannot be sent in a URL.');
   }
 
   const code = nodeCodeOf(error);
@@ -302,7 +328,10 @@ export function describeS3Error(error: unknown, ctx: S3ErrorContext): MappedS3Er
       ? mapped('object_missing', 'The object does not exist.')
       : mapped('bucket_or_object_missing', `Bucket "${bucket}" or the object is missing (HTTP 404).`);
   }
-  if (status === 403) return mapped('access_denied', `Access denied (HTTP 403) on bucket "${bucket}".`);
+  // A HEAD answer has no body to name the cause: the secret may be wrong as well as the permission missing.
+  if (status === 403) {
+    return mapped('access_denied', `Access denied (HTTP 403) on bucket "${bucket}". The store gave no reason: the secret access key may be wrong, or the credentials may lack permission.`);
+  }
   if (status === 429) return mapped('rate_limited', `${host} is limiting the request rate (HTTP 429).`, true);
   if (status !== undefined && status >= 500) return mapped('store_unavailable', `${host} answered HTTP ${status}.`, true);
   // The SDK found no S3 error code in the reply and names it "Unknown": an error page that is not S3's, such as the

@@ -6,9 +6,41 @@ import zlib from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
 import { inspectZip, MAX_ARCHIVE_ENTRIES, MAX_UNPACKED_BYTES, startsLikeZip } from '@/lib/services/files/zipGuard';
-import { buildZip, documentOf, filler, MIB } from '../helpers/zipFixtures';
+import { buildZip, documentOf, filler, MIB, type FixturePart } from '../helpers/zipFixtures';
 
 const SMALL = { maxUnpackedBytes: 1000 };
+
+/** An end record that lists nothing: the 22 bytes a tool writes for an empty archive. */
+function emptyEndRecord(): Buffer {
+  const record = Buffer.alloc(22);
+  record.writeUInt32LE(0x06054b50, 0);
+  return record;
+}
+
+/** The pieces of a one-part container as `buildZip` writes it: the part, its directory and the end record. */
+function piecesOf(part: FixturePart) {
+  const zip = buildZip([part]);
+  const end = zip.length - 22;
+  const directoryOffset = zip.readUInt32LE(end + 16);
+  return { local: zip.subarray(0, directoryOffset), directory: zip.subarray(directoryOffset, end), end: zip.subarray(end) };
+}
+
+/**
+ * One file with two directories. The end record states where the first one is; the second sits right before the
+ * record, where a reader that counts back from the record looks. Which of the two a reader follows depends on the
+ * reader, so both have to be measured.
+ */
+function twoDirectories(stated: FixturePart, near: FixturePart): Buffer {
+  const first = piecesOf(stated);
+  const second = piecesOf(near);
+  if (first.local.length < second.local.length) throw new Error('the part at the stated offset must not be the shorter one');
+  // Counted back from the end record, the second directory's offsets start after the first directory and the second part.
+  const directory = Buffer.from(second.directory);
+  directory.writeUInt32LE(first.local.length - second.local.length, 42);
+  const end = Buffer.from(first.end);
+  end.writeUInt32LE(directory.length, 12);
+  return Buffer.concat([first.local, first.directory, second.local, directory, end]);
+}
 
 describe('the product limits', () => {
   it('are 100 MiB unpacked and 5000 parts', () => {
@@ -162,6 +194,61 @@ describe('the parts of a container', () => {
   });
 });
 
+describe('where the directory starts', () => {
+  // Readers differ: one goes by the offset the end record states, another counts back from the record. A file that
+  // has a directory in both places is measured by both.
+  const stated = { name: 'a-part-at-the-stated-offset.xml', data: filler(600) };
+  const near = { name: 'near.xml', data: filler(600) };
+
+  it('adds up what the two places hold: neither is over the limit alone', async () => {
+    expect(await inspectZip(buildZip([stated]), SMALL)).toMatchObject({ kind: 'ok', unpackedBytes: 600 });
+    expect(await inspectZip(twoDirectories(stated, near), SMALL)).toEqual({ kind: 'too_large', limitBytes: 1000 });
+  });
+
+  it('follows the directory the end record states, even when another one sits before the record', async () => {
+    const buffer = twoDirectories({ ...stated, data: filler(2000) }, { ...near, data: filler(10) });
+
+    expect(await inspectZip(buffer, SMALL)).toEqual({ kind: 'too_large', limitBytes: 1000 });
+  });
+
+  it('follows the directory before the record, even when the stated offset leads to a small one', async () => {
+    const buffer = twoDirectories({ ...stated, data: filler(10) }, { ...near, data: filler(2000) });
+
+    expect(await inspectZip(buffer, SMALL)).toEqual({ kind: 'too_large', limitBytes: 1000 });
+  });
+
+  it('counts the parts of both places together', async () => {
+    const buffer = twoDirectories({ ...stated, data: filler(10) }, { ...near, data: filler(10) });
+
+    expect(await inspectZip(buffer)).toEqual({ kind: 'ok', entries: 2, unpackedBytes: 20 });
+    expect(await inspectZip(buffer, { maxEntries: 2 })).toMatchObject({ kind: 'ok', entries: 2 });
+    expect(await inspectZip(buffer, { maxEntries: 1 })).toEqual({ kind: 'too_many_entries', limit: 1 });
+  });
+});
+
+describe('an end record that claims less than the directory holds', () => {
+  it('is not believed when it claims no parts: the directory after it is followed', async () => {
+    const buffer = buildZip([{ name: 'word/document.xml', data: filler(3 * MIB) }], { claimedEntries: 0 });
+
+    expect(await inspectZip(buffer, { maxUnpackedBytes: MIB })).toEqual({ kind: 'too_large', limitBytes: MIB });
+  });
+
+  it('is not believed when it states a directory of no size: the directory at the stated offset is followed', async () => {
+    const buffer = documentOf(3 * MIB);
+    buffer.writeUInt32LE(0, buffer.length - 22 + 12);
+
+    expect(await inspectZip(buffer, { maxUnpackedBytes: MIB })).toEqual({ kind: 'too_large', limitBytes: MIB });
+  });
+
+  it('is an empty archive only when it claims no parts and no directory', async () => {
+    const empty = buildZip([]);
+
+    expect(empty.readUInt16LE(empty.length - 22 + 10)).toBe(0);
+    expect(empty.readUInt32LE(empty.length - 22 + 12)).toBe(0);
+    expect(await inspectZip(empty)).toEqual({ kind: 'ok', entries: 0, unpackedBytes: 0 });
+  });
+});
+
 describe('a file that is not a container', () => {
   it('is not a zip when it has no end record: text, a short buffer, nothing', async () => {
     expect(await inspectZip(Buffer.from('just some text, nothing to unpack'.repeat(10)))).toEqual({ kind: 'not_zip' });
@@ -183,6 +270,16 @@ describe('where the end record is', () => {
     const buffer = Buffer.concat([documentOf(3 * MIB), Buffer.from([0x50, 0x4b, 0x05, 0x06, 1, 2, 3])]);
 
     expect(await inspectZip(buffer, { maxUnpackedBytes: MIB })).toEqual({ kind: 'too_large', limitBytes: MIB });
+  });
+
+  it('is the last one, not the first: bytes inside a part that look like an empty end record hide nothing', async () => {
+    const buffer = buildZip([
+      { name: 'note.bin', data: emptyEndRecord(), method: 0 },
+      { name: 'word/document.xml', data: filler(2000) },
+    ]);
+
+    expect(buffer.indexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))).toBeLessThan(buffer.length - 22);
+    expect(await inspectZip(buffer, SMALL)).toEqual({ kind: 'too_large', limitBytes: 1000 });
   });
 
   it('may be followed by a comment', async () => {
@@ -215,6 +312,30 @@ describe('a container that cannot be followed to the end', () => {
     expect(await inspectZip(buildZip([{ name: 'a.xml', data: filler(10) }], { zip64Entry: true }))).toEqual({
       kind: 'unreadable', reason: 'it is a ZIP64 container',
     });
+  });
+
+  it.each([
+    { what: 'the number of parts', at: 10, width: 2, value: 0xffff },
+    { what: 'the size of the directory', at: 12, width: 4, value: 0xffffffff },
+    { what: 'where the directory starts', at: 16, width: 4, value: 0xffffffff },
+  ])('is unreadable when the end record carries the ZIP64 marker for $what', async ({ at, width, value }) => {
+    const buffer = documentOf(100);
+    const field = buffer.length - 22 + at;
+    if (width === 2) buffer.writeUInt16LE(value, field);
+    else buffer.writeUInt32LE(value, field);
+
+    expect(await inspectZip(buffer)).toEqual({ kind: 'unreadable', reason: 'it is a ZIP64 container' });
+  });
+
+  it.each([
+    { what: 'the size of a part', at: 20 },
+    { what: 'where a part starts', at: 42 },
+  ])('is unreadable when a directory entry carries the ZIP64 marker for $what', async ({ at }) => {
+    const buffer = documentOf(100);
+    const directoryOffset = buffer.readUInt32LE(buffer.length - 22 + 16);
+    buffer.writeUInt32LE(0xffffffff, directoryOffset + at);
+
+    expect(await inspectZip(buffer)).toEqual({ kind: 'unreadable', reason: 'it is a ZIP64 container' });
   });
 
   it('is unreadable when a part uses a compression the converter cannot read', async () => {

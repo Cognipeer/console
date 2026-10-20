@@ -38,7 +38,7 @@ vi.mock('@/lib/core/logger', () => ({
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { hashCredentials, hashRuntimeConfig, runtimePool } from '@/lib/core/runtimePool';
 import { getDatabase } from '@/lib/database';
-import { downloadFile } from '@/lib/services/files/fileService';
+import { downloadFile, FILE_RUNTIME_POOL_PREFIX } from '@/lib/services/files/fileService';
 import { createMockDb } from '../helpers/db.mock';
 
 interface FakeRuntime {
@@ -125,6 +125,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  runtimePool.invalidateByPrefix(FILE_RUNTIME_POOL_PREFIX);
   runtimePool.invalidateByPrefix('file:');
   await flush();
   setConfigSource(ORIGINAL_SOURCE);
@@ -286,6 +287,64 @@ describe('the pooled file runtime', () => {
 
       expect(mocks.createRuntime).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+describe('the pool the file service keeps its runtimes in', () => {
+  /** Another caller's runtime of the same provider: the sandbox volumes pool theirs under `file:<tenant>:<key>`, hashed their own way. */
+  function foreignRuntime() {
+    return { close: vi.fn(), tag: 'foreign' };
+  }
+
+  it('is its own: a runtime another caller pooled under file:<tenant>:<key> is neither evicted nor closed by a file call', async () => {
+    setProvider('t1');
+    const foreign = foreignRuntime();
+    await runtimePool.getOrCreate('file:t1:store', 'a-hash-of-the-credentials-only', async () => foreign);
+
+    await touch('t1');
+    await touch('t1');
+    await flush();
+
+    expect(mocks.createRuntime).toHaveBeenCalledTimes(1);
+    expect(foreign.close).not.toHaveBeenCalled();
+    // Still the pooled one: asking again with its hash builds nothing.
+    const factory = vi.fn(async () => foreignRuntime());
+    expect(await runtimePool.getOrCreate('file:t1:store', 'a-hash-of-the-credentials-only', factory)).toBe(foreign);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('does not lose its own runtime to that caller either: the two alternate without rebuilding each other', async () => {
+    setProvider('t1');
+    const foreign = foreignRuntime();
+
+    for (let round = 0; round < 3; round += 1) {
+      await runtimePool.getOrCreate('file:t1:store', 'a-hash-of-the-credentials-only', async () => foreign);
+      await touch('t1');
+    }
+    await flush();
+
+    expect(mocks.createRuntime).toHaveBeenCalledTimes(1);
+    expect(created[0].close).not.toHaveBeenCalled();
+    expect(foreign.close).not.toHaveBeenCalled();
+  });
+
+  it('keeps its runtimes under file-runtime:<tenant>:<key>, which is what FILE_RUNTIME_POOL_PREFIX names', async () => {
+    setProvider('t1');
+    await touch('t1');
+    const adopted = vi.fn(async () => ({ close: vi.fn(), tag: 'rebuilt' }));
+
+    // With the hash the file service used, the entry is the one it made: nothing is rebuilt.
+    const settings = { bucket: 'docs', region: 'eu-west-1' };
+    const credentials = { accessKeyId: 'AKIA-TEST', secretAccessKey: 'secret-1' };
+    const pooled = await runtimePool.getOrCreate(
+      `${FILE_RUNTIME_POOL_PREFIX}t1:store`,
+      hashRuntimeConfig({ driver: 'aws-s3-files', credentials, settings }),
+      adopted,
+    );
+
+    expect(FILE_RUNTIME_POOL_PREFIX).toBe('file-runtime:');
+    expect(pooled).toBe(created[0]);
+    expect(adopted).not.toHaveBeenCalled();
   });
 });
 

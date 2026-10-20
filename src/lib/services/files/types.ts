@@ -80,7 +80,10 @@ export interface BucketUser {
 
 /** `GET /files/buckets/:bucketKey`. */
 export interface BucketDetail extends BucketListItem {
+  /** The agents that keep session files in the bucket. The route leaves the list empty for a caller who cannot read agents. */
   usedBy: BucketUser[];
+  /** How many agents `usedBy` lists, or would list: what a caller who may not see them is still told. */
+  usedByCount: number;
   /** Where the bucket's files are, in words (no credentials, no server paths); `null` for the server's own disk. */
   storageLocation: string | null;
 }

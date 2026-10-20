@@ -11,13 +11,14 @@ import type { FileRecordView } from '@/lib/services/files';
 import type {
   BucketDetail,
   FileProviderListItem,
-  FileProviderTestResult,
-  FilesLimits,
-  ImportResult,
+  ProviderTestResult,
+  FileLimits,
+  ImportFromStorageResult,
 } from '@/components/files/filesApi';
 import { fileKindOf } from '@/components/files/shared/fileKind';
 import { installApiMock, jsonResponse, type ApiMock, type RecordedCall } from './iamCenterUi';
 
+export const MINUTE = 60_000;
 export const HOUR = 3_600_000;
 export const MIB = 1024 * 1024;
 export const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -98,7 +99,26 @@ export function bucketDetail(extra: Partial<BucketDetail> = {}): BucketDetail {
   } as unknown as BucketDetail;
 }
 
-export const LIMITS: FilesLimits = {
+/**
+ * A bucket whose "delete with its files" job was asked for `askedAgoMs` ago: switched off, `deleting`, and touched
+ * when the job was marked (so `updatedAt` says how long it has been running).
+ */
+export function deletingBucket(askedAgoMs: number, extra: Partial<BucketDetail> = {}): BucketDetail {
+  return bucketDetail({ deleting: true, status: 'disabled', updatedAt: ago(askedAgoMs) as unknown as Date, ...extra });
+}
+
+/** A bucket whose last "delete with its files" run stopped: the reason is on the bucket, `deleting` is cleared. */
+export function failedDeleteBucket(reason: string, extra: Partial<BucketDetail> = {}): BucketDetail {
+  return bucketDetail({
+    deleting: false,
+    deleteError: reason,
+    status: 'disabled',
+    metadata: { deleteError: reason },
+    ...extra,
+  });
+}
+
+export const LIMITS: FileLimits = {
   maxFileBytes: 25 * MIB,
   maxRequestBytes: 30 * MIB,
   allowedMimeTypes: null,
@@ -146,27 +166,39 @@ export interface BucketServerOptions {
   level?: 'read' | 'write' | 'admin';
   bucket?: BucketDetail;
   records?: FileRecordView[];
-  limits?: FilesLimits;
+  limits?: FileLimits;
 }
 
 export interface BucketServer {
   api: ApiMock;
   bucket: BucketDetail;
   records: FileRecordView[];
-  limits: FilesLimits;
+  limits: FileLimits;
   /** key -> why a batch delete refuses it. */
   refuse: Map<string, string>;
-  /** What the bucket DELETE answers: gone, a job started, or a refusal. */
-  deleteAnswer: () => Response;
+  /** What the bucket DELETE answers: gone, a job started, or a refusal. It sees the request (`query` says which kind). */
+  deleteAnswer: (call: RecordedCall) => Response;
   /** What the provider test answers. */
   testAnswer: () => Response;
   /** The answers of the import scan, one per request; the last repeats. */
-  importPages: ImportResult[];
+  importPages: ImportFromStorageResult[];
   /** Make the next calls of a route fail with this answer until cleared. */
   fail: { bucket?: Response; objects?: Response; limits?: Response; patch?: Response };
 }
 
 const errorResponse = (status: number, body: Record<string, unknown>) => jsonResponse(body, status);
+
+/** The bucket without the reason its last delete stopped (the bucket view and its metadata both carry it). */
+function withoutDeleteError(bucket: BucketDetail): BucketDetail {
+  const cleared: Record<string, unknown> = { ...bucket };
+  delete cleared.deleteError;
+  if (bucket.metadata) {
+    const metadata: Record<string, unknown> = { ...bucket.metadata };
+    delete metadata.deleteError;
+    cleared.metadata = metadata;
+  }
+  return cleared as unknown as BucketDetail;
+}
 
 export function installBucketServer(options: BucketServerOptions = {}): BucketServer {
   const server: BucketServer = {
@@ -188,7 +220,7 @@ export function installBucketServer(options: BucketServerOptions = {}): BucketSe
             { step: 'read', ok: true },
             { step: 'delete', ok: true },
           ],
-        } satisfies FileProviderTestResult['details'],
+        } satisfies ProviderTestResult['details'],
       }),
     importPages: [{ scanned: 3, imported: 2, skipped: 1 }],
     fail: {},
@@ -206,7 +238,9 @@ export function installBucketServer(options: BucketServerOptions = {}): BucketSe
       /^\/api\/files\/buckets\/[^/]+$/,
       (call: RecordedCall) => {
         if (server.fail.patch) return server.fail.patch.clone();
-        server.bucket = { ...server.bucket, ...(call.body as object) } as BucketDetail;
+        const patch = call.body as Record<string, unknown>;
+        // Switching a bucket on again is how the server forgets why its last delete stopped.
+        server.bucket = { ...(patch.status === 'active' ? withoutDeleteError(server.bucket) : server.bucket), ...patch } as BucketDetail;
         return { bucket: server.bucket };
       },
     ],
@@ -231,7 +265,7 @@ export function installBucketServer(options: BucketServerOptions = {}): BucketSe
       /^\/api\/files\/buckets\/[^/]+\/objects\/.+$/,
       () => new Response('file-bytes', { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }),
     ],
-    ['DELETE', /^\/api\/files\/buckets\/[^/]+$/, () => server.deleteAnswer()],
+    ['DELETE', /^\/api\/files\/buckets\/[^/]+$/, (call: RecordedCall) => server.deleteAnswer(call)],
     [
       'POST',
       /^\/api\/files\/buckets\/[^/]+\/import$/,

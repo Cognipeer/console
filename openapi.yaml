@@ -86,7 +86,7 @@ tags:
     description: |-
       File storage providers, buckets, and objects. A bucket keeps its files in one of the storage providers of the project: the server's disk (`local-filesystem`), Amazon S3 (`aws-s3-files`), any store that speaks the S3 API at an endpoint of its own - MinIO, Ceph RGW, SeaweedFS, Garage, Cloudflare R2, Wasabi (`s3-compatible-files`) - Azure Blob Storage (`azure-blob-files`) or MongoDB GridFS (`mongodb-gridfs-files`).
 
-      A failed call answers `{ "error": "<a sentence that is safe to show>", "code": "<a stable word>" }`. `404`: `bucket_not_found`, `file_not_found`. `409`: `bucket_inactive` (the bucket is switched off: its files can still be listed and downloaded, nothing new is written), and `provider_inactive`, `provider_unassigned`, `provider_missing` or `provider_invalid` (the storage provider of the bucket cannot take files). `413`: `file_too_large` (an upload over the limit) and `object_too_large` (a download of a stored file that is larger than the server reads into memory at once). `415`: `content_type_not_allowed`. `400`: `invalid_content_type`, `invalid_request`, `markdown_unavailable`. `502`: `storage_failure` - the storage provider refused or failed the request; `error` says what to change when the driver can tell (a wrong access key, a missing bucket, an untrusted certificate), otherwise it is "The storage provider request failed.". `503`: `storage_unavailable` (the provider has been failing and calls to it are paused for a moment). `504`: `storage_timeout`.
+      A failed call answers `{ "error": "<a sentence that is safe to show>", "code": "<a stable word>" }`. `404`: `bucket_not_found`, `file_not_found`. `409`: `bucket_inactive` (the bucket is switched off: its files can still be listed and downloaded, nothing new is written), and `provider_inactive`, `provider_unassigned`, `provider_missing` or `provider_invalid` (the storage provider of the bucket cannot take files). `413`: `file_too_large` (an upload over the limit) and `object_too_large` (a download of a stored file that is larger than the server reads into memory at once). `415`: `content_type_not_allowed`. `400`: `invalid_content_type`, `invalid_request`, `markdown_unavailable`. `502`: `storage_failure` - the storage provider refused or failed the request; `error` says what to change when the driver can tell (a wrong access key, a missing bucket, an untrusted certificate), otherwise it is "The storage provider request failed.". `503`: `storage_unavailable` (the provider has been failing and calls to it are paused for a moment). `504`: `storage_timeout`. A `400` on creating a provider (`provider_settings_invalid`, `provider_endpoint_not_allowed`) and a `502` caused by a provider setting carry `field`, the name of the setting or credential to change. Quota and rate-limit refusals (`429`) have an `error` and no `code`.
   - name: Config
     description: Remote configuration groups, items, and resolution
   - name: Memory
@@ -6341,7 +6341,7 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum number of files to return. Defaults to 50.
+          description: "Maximum number of entries to return. Defaults to 50. A folder listing (`prefix`) holds at most 200, and sub-folders and files count together."
           schema:
             type: integer
             default: 50
@@ -6378,7 +6378,7 @@ paths:
                     example: 12
                   nextCursor:
                     type: string
-                    nullable: true
+                    description: Pass it as `cursor` to read the next page. Absent on the last page.
                     example: def
         "401":
           $ref: "#/components/responses/Unauthorized"
@@ -6386,11 +6386,13 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       tags:
         - Files
       summary: Upload file
-      description: "Upload a file to a bucket. The request is JSON and the file travels base64-encoded in `data` (a data URL is accepted too), so the request body is about a third larger than the file. A file larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default) is refused with `413` `file_too_large`; a body too big to hold such a file is refused the same way before it is read. A switched-off bucket takes no upload (`409` `bucket_inactive`) and nothing is counted against the quotas then. Optionally convert supported documents (PDF, DOCX, PPTX, HTML, plain text) to Markdown for the Knowledge Engine pipeline: the conversion runs before the response, so the Markdown copy can be downloaded right away."
+      description: "Upload a file to a bucket. The request is JSON and the file travels base64-encoded in `data` (a data URL is accepted too), so the request body is about a third larger than the file. A file larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default) is refused with `413` `file_too_large`; a body too big to hold such a file is refused the same way before it is read. A switched-off bucket takes no upload (`409` `bucket_inactive`) and nothing is counted against the quotas then. With `convertToMarkdown` a Markdown copy for the Knowledge Engine pipeline is made before the response, so it can be downloaded right away. The upload succeeds even when the conversion does not: read `markdownStatus` of the returned file. Ask for a copy only of PDF, Word, PowerPoint, Excel, EPUB, Outlook message, HTML, XML, plain text, CSV, JSON, YAML and Jupyter notebook files; the converter reads any other kind of file as text."
       operationId: uploadFile
       parameters:
         - name: bucketKey
@@ -6419,7 +6421,7 @@ paths:
                     type: string
                     example: File uploaded successfully
         "400":
-          description: "Bad request - `fileName` or `data` is missing, `keyHint` is not a valid key (`.` or `..` segments, control characters, more than 512 characters), `contentType` is not a content type (`invalid_content_type`), or the body is not a JSON object (`invalid_request`)."
+          description: "Bad request - `fileName` or `data` is missing, `keyHint` is not a valid key (`.` or `..` segments, control characters, unpaired surrogates, more than 512 characters), `contentType` is not a content type (`invalid_content_type`), or the request is refused as `invalid_request`: the body is not a JSON object, or the store cannot hold the key (a name over its limit, say)."
           content:
             application/json:
               schema:
@@ -6428,6 +6430,8 @@ paths:
                 error: fileName is required
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -6462,7 +6466,7 @@ paths:
       tags:
         - Files
       summary: Get file metadata
-      description: Get metadata for a specific file object in a bucket. Answers `404` (`bucket_not_found` or `file_not_found`) when either is missing.
+      description: "Get metadata for a specific file object in a bucket. Answers `404` (`bucket_not_found` or `file_not_found`) when either is missing. A file an agent session holds is read as that session: the token's owner needs the permission to view it (`403` `session_forbidden`)."
       operationId: getFileObject
       parameters:
         - name: bucketKey
@@ -6474,7 +6478,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
       responses:
@@ -6489,15 +6493,19 @@ paths:
                     $ref: "#/components/schemas/FileObject"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
     delete:
       tags:
         - Files
       summary: Delete file
-      description: "Delete a specific file object from a bucket: its stored object and its Markdown copy, then its record. An object that is already gone from the storage provider does not stop the delete. A switched-off bucket keeps its files (`409` `bucket_inactive`)."
+      description: "Delete a specific file object from a bucket: its stored object and its Markdown copy, then its record. An object that is already gone from the storage provider does not stop the delete. A switched-off bucket keeps its files (`409` `bucket_inactive`). A file an agent session holds is changed as that session: the token's owner needs the permission to change it (`403` `session_forbidden`)."
       operationId: deleteFile
       parameters:
         - name: bucketKey
@@ -6509,7 +6517,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
       responses:
@@ -6529,6 +6537,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -6553,7 +6563,7 @@ paths:
       tags:
         - Files
       summary: Download file
-      description: Download the binary content of a file object. Use the `variant` query parameter to download the original file or its Markdown conversion (if available). Response headers include `Content-Type`, `Content-Disposition`, `Content-Length`, `ETag`, `X-Content-Type-Options` (always `nosniff`) and `X-File-Metadata`. A switched-off bucket still gives its files back.
+      description: "Download the binary content of a file object. Use the `variant` query parameter to download the original file or its Markdown conversion (if available). Response headers include `Content-Type`, `Content-Disposition`, `Content-Length`, `ETag`, `X-Content-Type-Options` (always `nosniff`), `Cache-Control` (always `private, no-store`) and `X-File-Metadata`. A switched-off bucket still gives its files back. A file an agent session holds is read as that session: the token's owner needs the permission to view it (`403` `session_forbidden`)."
       operationId: downloadFile
       parameters:
         - name: bucketKey
@@ -6565,7 +6575,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
         - name: variant
@@ -6595,8 +6605,12 @@ paths:
               description: Always `nosniff`.
               schema:
                 type: string
+            Cache-Control:
+              description: "Always `private, no-store`: the file is for the caller who asked for it, so a shared cache or a proxy does not keep it."
+              schema:
+                type: string
             X-File-Metadata:
-              description: JSON-serialized file metadata, when available. Every character outside printable ASCII is escaped as `\uXXXX`, so the value is plain ASCII and `JSON.parse` reads it back unchanged.
+              description: "The file's metadata as JSON, when the file has any. Every character outside printable ASCII is escaped as `\\uXXXX`, so the value is plain ASCII and `JSON.parse` reads it back unchanged. Left out when the escaped JSON is longer than 8,192 characters, because clients refuse very large response headers; the file's record (`metadata`) always has it all."
               schema:
                 type: string
           content:
@@ -6615,6 +6629,8 @@ paths:
                 code: markdown_unavailable
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "413":
@@ -6638,10 +6654,10 @@ paths:
         - name: driver
           in: query
           required: false
-          description: Filter providers by driver identifier (e.g. `s3`).
+          description: Filter providers by driver identifier (e.g. `s3-compatible-files`).
           schema:
             type: string
-            example: s3
+            example: s3-compatible-files
         - name: status
           in: query
           required: false
@@ -6650,8 +6666,8 @@ paths:
             type: string
             enum:
               - active
-              - inactive
-              - error
+              - disabled
+              - errored
             example: active
       responses:
         "200":
@@ -6673,7 +6689,7 @@ paths:
       tags:
         - Files
       summary: Create file provider
-      description: "Create a new file storage provider configuration for the current project. Requires `key`, `driver`, `label`, and `credentials`. The driver checks the settings before anything is saved: a setting it cannot work with is a `400` with `code: provider_settings_invalid` and the `field` to change; an endpoint this deployment does not allow (a private or loopback address on the hosted service) is a `400` with `code: provider_endpoint_not_allowed`."
+      description: "Create a new file storage provider configuration for the current project. Requires `key`, `driver`, `label`, and `credentials`. The driver checks the settings before anything is saved: a setting it cannot work with is a `400` with `code: provider_settings_invalid` and the `field` to change; an endpoint this deployment does not allow (on the hosted service a private or loopback address, unless the operator has opened that private network for the organization) is a `400` with `code: provider_endpoint_not_allowed`. The `key` names the provider's folder in the store, so it cannot be `.` or `..` and cannot hold `/`, `\\` or a control character (`400`, `code: provider_settings_invalid`, `field: key`); a `key` that another provider of the organization already uses, of any kind, is a `409` with `code: duplicate_key`. A `local-filesystem` provider takes `basePath` only on a self-hosted installation and only from an owner or an admin (the person the call acts for), and `subdirectory` only as a relative folder inside it."
       operationId: createFileProvider
       requestBody:
         required: true
@@ -6734,7 +6750,14 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "409":
-          $ref: "#/components/responses/Conflict"
+          description: "Conflict - another provider of the organization already has this `key` (`code: duplicate_key`). Provider keys are unique across the organization, whatever the kind of provider."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: Provider with key "minio-archive" already exists.
+                code: duplicate_key
         "500":
           $ref: "#/components/responses/InternalError"
   /guardrails:
@@ -20766,7 +20789,13 @@ components:
                         type: string
         code:
           type: string
-          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`."
+          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`. The Files API adds its own (`bucket_not_found`, `file_not_found`, `bucket_inactive`, `file_too_large`, `storage_failure`, `provider_settings_invalid`, `provider_endpoint_not_allowed` and the others named in the Files section)."
+        field:
+          type: string
+          description: "The provider setting or credential to change, on a refusal of a provider configuration (`provider_settings_invalid`, `provider_endpoint_not_allowed`) and on a `storage_failure` that one of its settings caused."
+        limitBytes:
+          type: integer
+          description: "`object_too_large` only: the largest object, in bytes, the server reads into memory at once."
         message:
           type: string
           description: Repeats `error` on a refusal by the permission gate.
@@ -20975,20 +21004,44 @@ components:
       type: object
       description: A file storage bucket.
       properties:
-        _id:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
           type: string
         key:
           type: string
+          description: The bucket's key, as used in the paths.
+          example: contracts
         name:
           type: string
+          example: Contracts
         description:
           type: string
-        provider:
+        providerKey:
           type: string
+          description: Key of the file provider that stores the bucket's files.
+          example: minio-archive
+        provider:
+          allOf:
+            - $ref: "#/components/schemas/FileProvider"
+          description: The provider named by `providerKey`; absent when that provider no longer exists.
         status:
           type: string
+          enum:
+            - active
+            - disabled
+          description: A disabled bucket takes no new files (`409` `bucket_inactive`); its files can still be listed and downloaded.
+        prefix:
+          type: string
+          description: The folder inside the provider's storage that holds the bucket's files. When it is not set, the bucket key is the folder.
         metadata:
           type: object
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -21006,7 +21059,7 @@ components:
       properties:
         key:
           type: string
-          description: Unique provider key.
+          description: "Unique provider key. It is unique in the organization across every kind of provider (`409` `duplicate_key` when it is taken), and it names the provider's folder in the store, so it cannot be `.` or `..` and cannot hold `/`, `\\` or a control character (`400` `provider_settings_invalid`, `field: key`)."
           example: s3-prod
         driver:
           type: string
@@ -21020,10 +21073,10 @@ components:
           type: string
         credentials:
           type: object
-          description: "Driver-specific credentials. `aws-s3-files` and `s3-compatible-files`: `accessKeyId`, `secretAccessKey`, optional `sessionToken`. `azure-blob-files`: the secret of the chosen `authMethod` - `accountKey`, `sasToken`, `connectionString` or `clientSecret`. Stored encrypted and never returned."
+          description: "Driver-specific credentials. `aws-s3-files` and `s3-compatible-files`: `accessKeyId`, `secretAccessKey`, optional `sessionToken`. `azure-blob-files`: the secret of the chosen `authMethod` - `accountKey`, `sasToken`, `connectionString` or `clientSecret`. `mongodb-gridfs-files`: `uri` (optional; the console's own MongoDB connection is used when it is left out). `local-filesystem`: none, send `{}`. Stored encrypted and never returned."
         settings:
           type: object
-          description: "Driver-specific settings. `aws-s3-files`: `region` (required without `endpoint`), `bucket`, `prefix`, `endpoint` (providers set up before `s3-compatible-files` existed), `usePathStyleEndpoint`, `caCertificate`, `allowInsecureTls`. `s3-compatible-files`: `endpoint` (required, with `http://` or `https://`), `bucket`, `region` (default `us-east-1`), `usePathStyleEndpoint` (default `true`), `prefix`, `createBucketIfMissing` (default `false`), `caCertificate`, `allowInsecureTls`. `azure-blob-files`: `container`, `authMethod` (`accountKey`, `sas`, `connectionString` or `entra`; default `accountKey`), `accountName`, `prefix`, `createContainer`, `entraTenantId` and `clientId` (for `entra`), `endpoint`, `authorityHost`, `apiVersion`, `caCertificate`, `allowInsecureTls`. `caCertificate` is a PEM bundle trusted for this provider only; `allowInsecureTls` skips certificate verification and is refused on the hosted service."
+          description: "Driver-specific settings. `aws-s3-files`: `region` (required without `endpoint`), `bucket`, `prefix`, `endpoint` (providers set up before `s3-compatible-files` existed), `usePathStyleEndpoint`, `caCertificate`, `allowInsecureTls`. `s3-compatible-files`: `endpoint` (required, with `http://` or `https://`), `bucket`, `region` (default `us-east-1`), `usePathStyleEndpoint` (default `true`), `prefix`, `createBucketIfMissing` (default `false`), `caCertificate`, `allowInsecureTls`. `azure-blob-files`: `container`, `authMethod` (`accountKey`, `sas`, `connectionString` or `entra`; default `accountKey`), `accountName`, `prefix`, `createContainer`, `entraTenantId` and `clientId` (for `entra`), `endpoint`, `authorityHost`, `apiVersion`, `caCertificate`, `allowInsecureTls`. `mongodb-gridfs-files`: `database`, `bucketName`, `chunkSizeBytes`. `local-filesystem`: `basePath` (a directory of the server; accepted only on a self-hosted installation and only from an owner or an admin, the person the call acts for, and refused with `400 provider_settings_invalid` otherwise) and `subdirectory` (a relative folder inside the base directory: no `..`, no leading `/` or `\\`, no drive letter). `caCertificate` is a PEM bundle trusted for this provider only; `allowInsecureTls` skips certificate verification on any deployment (only the boolean `true` does; a value of another type, such as a string, is refused with `400 provider_settings_invalid`)."
         capabilitiesOverride:
           type: array
           description: Optional override of provider capability flags.
@@ -21035,39 +21088,96 @@ components:
           type: string
           enum:
             - active
-            - inactive
+            - disabled
           default: active
     FileObject:
       type: object
-      description: A file object stored in a bucket.
+      description: The record of a file stored in a bucket.
       properties:
-        _id:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        providerKey:
+          type: string
+        bucketKey:
           type: string
         key:
           type: string
-          example: report-pdf
-        bucketKey:
+          description: "The file's key inside the bucket - the `objectKey` of the other file operations. It can hold slashes; in a path it is sent as one segment with the slashes percent-encoded."
+          example: 2026/q3/report-1760947200123-3f9a1c2e.pdf
+        name:
           type: string
-        fileName:
-          type: string
+          description: The file name as uploaded.
           example: report.pdf
-        originalName:
-          type: string
-          example: report.pdf
+        size:
+          type: integer
+          description: Size of the original in bytes.
+          example: 12345
         contentType:
           type: string
           example: application/pdf
-        size:
-          type: integer
-          example: 12345
-        sizeBytes:
-          type: integer
-          example: 12345
+        checksum:
+          type: string
+          description: SHA-256 of the original, as hex.
+        etag:
+          type: string
+          description: The storage provider's entity tag, when it gives one.
         metadata:
           type: object
-        markdownContent:
+        markdownStatus:
           type: string
+          enum:
+            - pending
+            - succeeded
+            - failed
+            - skipped
+          description: "Where the latest Markdown conversion stands. `skipped` when none was asked for or the file cannot be converted."
+        markdownKey:
+          type: string
+          description: "Key of the Markdown copy the file has, if any, whatever the status of its latest conversion. A copy made earlier stays while a new conversion is `pending` and when that one ends `failed` or `skipped`, and `variant=markdown` still downloads it. Uploading to the same key again removes it."
+        markdownSize:
+          type: integer
+          description: Size of the Markdown copy in bytes. Present with `markdownKey`.
+        markdownContentType:
+          type: string
+          description: Content type of the Markdown copy. Present with `markdownKey`.
+          example: text/markdown
+        markdownError:
+          type: string
+          description: Why the conversion failed or was skipped.
+        purpose:
+          type: string
+          enum:
+            - conversation
+          description: "`conversation` on a file that belongs to an agent session; absent on every other file."
+        conversationId:
+          type: string
+          description: The session a session file belongs to.
+        agentKey:
+          type: string
+          description: The agent of the session a session file belongs to.
+        expiresAt:
+          type: string
+          format: date-time
           nullable: true
+          description: When the retention cleanup removes a session file.
+        uploadedBy:
+          type: string
+          description: Who uploaded a session file.
+        origin:
+          type: string
+          enum:
+            - agent_output
+            - import
+          description: "`import` for an object that was already in the storage provider and was registered afterwards, `agent_output` for a file an agent wrote. Absent on an upload."
+        createdBy:
+          type: string
+          description: The user the call ran as, or `api` when there was none.
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -21076,37 +21186,77 @@ components:
           format: date-time
     FileProvider:
       type: object
-      description: A configured file storage provider.
+      description: A configured file storage provider. Credentials are never returned.
       properties:
         _id:
           type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        projectIds:
+          type: array
+          description: The projects the provider is assigned to.
+          items:
+            type: string
         key:
           type: string
-          example: s3-prod
+          example: minio-archive
+        type:
+          type: string
+          enum:
+            - file
         driver:
           type: string
-          example: s3
+          description: "`local-filesystem`, `aws-s3-files`, `s3-compatible-files`, `azure-blob-files` or `mongodb-gridfs-files`."
+          example: s3-compatible-files
         label:
           type: string
-          example: Production Storage
+          example: Archive (MinIO)
         description:
           type: string
         status:
           type: string
           enum:
             - active
-            - inactive
-            - error
+            - disabled
+            - errored
           example: active
-        credentials:
-          type: object
-          description: Provider-specific credentials (returned redacted/encrypted).
         settings:
           type: object
+          description: The driver's settings (endpoint, bucket, region and so on). Secrets are credentials and are not part of it.
+        hasCredentials:
+          type: boolean
+          description: Whether credentials are stored. Their values are never returned.
+        driverCapabilities:
+          type: object
+          description: What the driver supports, such as `supportsMarkdownConversion` and `supportsBulkListing`.
+        capabilitiesOverride:
+          type: array
+          items:
+            type: string
         metadata:
           type: object
-        capabilities:
+        lastTest:
           type: object
+          nullable: true
+          description: The result of the last Test connection run in the console. Absent when there is none, and cleared when the connection changes.
+          properties:
+            ok:
+              type: boolean
+              nullable: true
+              description: "`null` when the driver has no test."
+            at:
+              type: string
+              format: date-time
+            latencyMs:
+              type: integer
+            message:
+              type: string
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -21137,7 +21287,7 @@ components:
           description: Convert supported documents to Markdown for the Knowledge Engine pipeline.
         keyHint:
           type: string
-          description: "Optional key for the stored object. Without it the key is generated from the file name. A value ending in `/` names a folder and the file is stored in it under a generated name. At most 512 characters, no `.` or `..` segments and no control characters."
+          description: "Optional key for the stored object. Without it the key is generated from the file name. A value ending in `/` names a folder and the file is stored in it under a generated name. At most 512 characters, no `.` or `..` segments, no control characters and no unpaired surrogates. A value that is the whole key of a file an agent session holds needs the permission to change that session (`403` `session_forbidden`)."
         metadata:
           type: object
           description: "Arbitrary metadata to attach to the file. Values may be any text, in any language."
@@ -29346,7 +29496,7 @@ components:
               value:
                 error: This feature is not available in your license
     SessionForbidden:
-      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`)."
+      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`). The same refusal answers a file an agent session holds on the Files API: getting or downloading it needs the first permission, deleting it or uploading to its key the second."
       content:
         application/json:
           schema:
@@ -29393,7 +29543,7 @@ components:
             endpoint:
               summary: An endpoint this deployment does not allow
               value:
-                error: 'Provider endpoint "endpoint" is not allowed: private address'
+                error: 'Provider endpoint "endpoint" is not allowed: private network addresses are reachable only through networks the operator has opened for this organization'
                 code: provider_endpoint_not_allowed
                 field: endpoint
     FileTooLarge:
@@ -29416,7 +29566,7 @@ components:
             code: object_too_large
             limitBytes: 104857600
     FileStorageFailure:
-      description: "The storage provider refused or failed the request (`code: storage_failure`). For an Amazon S3, S3-compatible or Azure Blob provider `error` says what to change (a wrong access key or secret, a missing bucket or container, a region that does not match, an untrusted certificate); for any other failure it is \"The storage provider request failed.\" and the details stay in the server log."
+      description: "The storage provider refused or failed the request (`code: storage_failure`). For an Amazon S3, S3-compatible or Azure Blob provider `error` says what to change (a wrong access key or secret, a missing bucket or container, a region that does not match, an untrusted certificate); for any other failure it is \"The storage provider request failed.\" and the details stay in the server log. When one of the provider's settings is the cause - including an endpoint this deployment does not allow - `field` names it."
       content:
         application/json:
           schema:
@@ -29425,14 +29575,30 @@ components:
             error: minio.internal:9000 does not recognise this access key ID.
             code: storage_failure
     FileStorageUnavailable:
-      description: "The storage provider has been failing and calls to it are paused for a short time (`code: storage_unavailable`). Retry in a moment."
+      description: "The call is refused for now and can be retried in a moment. Either the storage provider has been failing and calls to it are paused for a short time (`code: storage_unavailable`), or, for a file an agent session holds, the permission engine could not decide whether the token's owner may touch the session (`error.code: authorization_unavailable`, in the nested form, with a `Retry-After` header; the call was refused, never allowed)."
+      headers:
+        Retry-After:
+          description: "Seconds to wait before retrying. Present on `authorization_unavailable`."
+          schema:
+            type: integer
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
-          example:
-            error: The storage provider is temporarily unavailable. Try again in a moment.
-            code: storage_unavailable
+          examples:
+            storage:
+              summary: The storage provider is paused
+              value:
+                error: The storage provider is temporarily unavailable. Try again in a moment.
+                code: storage_unavailable
+            authorization:
+              summary: The permission engine could not decide
+              value:
+                error:
+                  type: api_error
+                  code: authorization_unavailable
+                  message: Authorization is temporarily unavailable
+                  decision_id: 0b6f2c3e-8d41-4f0a-b7c2-6a1d9e5f3c70
     FileStorageTimeout:
       description: "The storage provider did not answer in time (`code: storage_timeout`). Retry in a moment."
       content:

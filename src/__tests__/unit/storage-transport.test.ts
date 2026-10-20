@@ -243,22 +243,22 @@ describe('buildTrustedCaList', () => {
 });
 
 describe('validateStorageTlsSettings', () => {
-  it('accepts no TLS settings, a CA bundle, and the insecure switch on a self-hosted deployment', () => {
-    expect(() => validateStorageTlsSettings({ isOnPrem: false })).not.toThrow();
-    expect(() => validateStorageTlsSettings({ isOnPrem: false, caCertificate: ROOT_A, allowInsecureTls: false })).not.toThrow();
-    expect(() => validateStorageTlsSettings({ isOnPrem: true, caCertificate: '', allowInsecureTls: true })).not.toThrow();
+  it('accepts no TLS settings, a CA bundle, and the insecure switch', () => {
+    expect(() => validateStorageTlsSettings({})).not.toThrow();
+    expect(() => validateStorageTlsSettings({ caCertificate: ROOT_A, allowInsecureTls: false })).not.toThrow();
+    expect(() => validateStorageTlsSettings({ caCertificate: '', allowInsecureTls: true })).not.toThrow();
   });
 
   it('names the field that is wrong', () => {
-    expect(settingsError(() => validateStorageTlsSettings({ isOnPrem: true, caCertificate: 'nope' })).field).toBe('caCertificate');
-    const insecure = settingsError(() => validateStorageTlsSettings({ isOnPrem: false, allowInsecureTls: true }));
+    expect(settingsError(() => validateStorageTlsSettings({ caCertificate: 'nope' })).field).toBe('caCertificate');
+    const insecure = settingsError(() => validateStorageTlsSettings({ allowInsecureTls: 'yes' }));
     expect(insecure.field).toBe('allowInsecureTls');
     expect(insecure.code).toBe('provider_settings_invalid');
   });
 
   it('says the same thing createStorageAgents does', () => {
-    const fromValidation = settingsError(() => validateStorageTlsSettings({ isOnPrem: false, allowInsecureTls: true }));
-    const fromAgents = settingsError(() => createStorageAgents({ isOnPrem: false, allowInsecureTls: true }));
+    const fromValidation = settingsError(() => validateStorageTlsSettings({ caCertificate: 'not pem' }));
+    const fromAgents = settingsError(() => createStorageAgents({ caCertificate: 'not pem' }));
     expect(fromValidation.message).toBe(fromAgents.message);
   });
 
@@ -275,23 +275,17 @@ describe('validateStorageTlsSettings', () => {
     ['an empty object', {}],
   ];
 
-  it.each(NOT_A_BOOLEAN)('refuses %s as the insecure switch, wherever the deployment runs, naming the field', (_label, value) => {
-    for (const isOnPrem of [true, false]) {
-      const error = settingsError(() => validateStorageTlsSettings({ isOnPrem, allowInsecureTls: value }));
-      expect(error.field).toBe('allowInsecureTls');
-      expect(error.code).toBe('provider_settings_invalid');
-      expect(error.message).toMatch(/true or false/);
-      // The self-hosted rule is not what is wrong with it.
-      expect(error.message).not.toMatch(/self-hosted/);
-    }
+  it.each(NOT_A_BOOLEAN)('refuses %s as the insecure switch, naming the field', (_label, value) => {
+    const error = settingsError(() => validateStorageTlsSettings({ allowInsecureTls: value }));
+    expect(error.field).toBe('allowInsecureTls');
+    expect(error.code).toBe('provider_settings_invalid');
+    expect(error.message).toMatch(/true or false/);
   });
 
-  it('treats an unset switch (undefined, null) as off and accepts both booleans on a self-hosted deployment', () => {
-    for (const allowInsecureTls of [undefined, null, false]) {
-      expect(() => validateStorageTlsSettings({ isOnPrem: false, allowInsecureTls })).not.toThrow();
-      expect(() => validateStorageTlsSettings({ isOnPrem: true, allowInsecureTls })).not.toThrow();
+  it('treats an unset switch (undefined, null) as off and accepts both booleans', () => {
+    for (const allowInsecureTls of [undefined, null, false, true]) {
+      expect(() => validateStorageTlsSettings({ allowInsecureTls })).not.toThrow();
     }
-    expect(() => validateStorageTlsSettings({ isOnPrem: true, allowInsecureTls: true })).not.toThrow();
   });
 });
 
@@ -301,7 +295,7 @@ const optionsOf = (agent: http.Agent): AgentOptions => (agent as unknown as { op
 describe('createStorageAgents', () => {
   const created: Array<{ destroy(): void }> = [];
   function make(input: Partial<Parameters<typeof createStorageAgents>[0]> = {}) {
-    const agents = createStorageAgents({ isOnPrem: false, guard: { allowPrivate: true }, guardHost: 'minio.example.com', ...input });
+    const agents = createStorageAgents({ guard: { allowPrivate: true }, guardHost: 'minio.example.com', ...input });
     created.push(agents);
     return agents;
   }
@@ -354,37 +348,53 @@ describe('createStorageAgents', () => {
   it('refuses a private literal-IP host the policy blocks, because a literal never reaches the lookup', () => {
     use();
     for (const host of ['127.0.0.1', '10.0.0.5', '169.254.169.254', '[::1]', '[fd00::5]', '192.168.1.10']) {
-      expect(() => createStorageAgents({ isOnPrem: false, guard: { forceBlock: true }, guardHost: host }), host).toThrow(OutboundNetworkError);
+      expect(() => createStorageAgents({ guard: { forceBlock: true }, guardHost: host }), host).toThrow(OutboundNetworkError);
     }
-    expect(() => createStorageAgents({ isOnPrem: false, guard: { forceBlock: true }, guardHost: '93.184.216.34' }).destroy()).not.toThrow();
+    expect(() => createStorageAgents({ guard: { forceBlock: true }, guardHost: '93.184.216.34' }).destroy()).not.toThrow();
     // Where private targets are allowed, or the host is on the allow-list, a literal is fine.
     make({ guard: { allowPrivate: true }, guardHost: '10.0.0.5' });
     use({ OUTBOUND_HTTP_ALLOWED_HOSTS: '10.0.0.5' });
     make({ guard: undefined, guardHost: '10.0.0.5' });
   });
 
-  it('skips certificate verification only on a self-hosted deployment', () => {
+  it('skips certificate verification when the provider asks for it, and the network policy still applies', () => {
     use();
-    const insecure = make({ allowInsecureTls: true, isOnPrem: true });
-    expect(optionsOf(insecure.httpsAgent).rejectUnauthorized).toBe(false);
-    expect(optionsOf(make({ isOnPrem: true }).httpsAgent).rejectUnauthorized).toBeUndefined();
-
-    const error = settingsError(() => createStorageAgents({ allowInsecureTls: true, isOnPrem: false }));
-    expect(error.field).toBe('allowInsecureTls');
-    expect(error.code).toBe('provider_settings_invalid');
-    expect(error.message).toMatch(/self-hosted/);
+    expect(optionsOf(make({ allowInsecureTls: true }).httpsAgent).rejectUnauthorized).toBe(false);
+    expect(optionsOf(make().httpsAgent).rejectUnauthorized).toBeUndefined();
+    // Where the policy blocks private targets, skipping verification does not open them.
+    expect(() => createStorageAgents({ allowInsecureTls: true, guard: { forceBlock: true }, guardHost: '10.0.0.5' })).toThrow(OutboundNetworkError);
+    const blocked = make({ allowInsecureTls: true, guard: { forceBlock: true } });
+    expect(typeof optionsOf(blocked.httpsAgent).lookup).toBe('function');
+    expect(optionsOf(blocked.httpsAgent).rejectUnauthorized).toBe(false);
   });
 
-  it('skips verification only for the boolean true: a stored "false", "0", 1 or {} leaves it on, on-prem and on SaaS alike', () => {
+  it('skips verification only for the boolean true: a stored "false", "0", 1 or {} leaves it on', () => {
     use();
     for (const value of ['false', 'true', '0', 'no', '', 1, 0, [], {}] as unknown as boolean[]) {
-      for (const isOnPrem of [true, false]) {
-        const agents = make({ allowInsecureTls: value, isOnPrem });
-        expect(optionsOf(agents.httpsAgent).rejectUnauthorized, `${JSON.stringify(value)} on ${isOnPrem ? 'on-prem' : 'SaaS'}`).toBeUndefined();
-      }
+      const agents = make({ allowInsecureTls: value });
+      expect(optionsOf(agents.httpsAgent).rejectUnauthorized, JSON.stringify(value)).toBeUndefined();
     }
-    expect(optionsOf(make({ allowInsecureTls: false, isOnPrem: true }).httpsAgent).rejectUnauthorized).toBeUndefined();
-    expect(optionsOf(make({ allowInsecureTls: true, isOnPrem: true }).httpsAgent).rejectUnauthorized).toBe(false);
+    expect(optionsOf(make({ allowInsecureTls: false }).httpsAgent).rejectUnauthorized).toBeUndefined();
+    expect(optionsOf(make({ allowInsecureTls: true }).httpsAgent).rejectUnauthorized).toBe(false);
+  });
+
+  it('hands the trust back as `tls` for the provider\'s other requests, whatever the network policy is', () => {
+    use();
+    // skipped verification is carried the same under a policy that blocks private targets (SaaS) as under one that does not
+    expect(make({ allowInsecureTls: true, guard: { forceBlock: true } }).tls).toEqual({ rejectUnauthorized: false });
+    expect(make({ allowInsecureTls: true, guard: { allowPrivate: true } }).tls).toEqual({ rejectUnauthorized: false });
+    // a CA certificate is one context, and does not switch verification off
+    const withCa = make({ caCertificate: ROOT_A, guard: { forceBlock: true } }).tls;
+    expect(withCa?.secureContext).toBeDefined();
+    expect(withCa).not.toHaveProperty('rejectUnauthorized');
+    const both = make({ caCertificate: ROOT_A, allowInsecureTls: true, guard: { forceBlock: true } }).tls;
+    expect(both?.secureContext).toBeDefined();
+    expect(both?.rejectUnauthorized).toBe(false);
+    // nothing set, or a value that is not the boolean true: no trust of its own, so those requests keep Node's defaults
+    expect(make().tls).toBeUndefined();
+    for (const value of ['false', 'true', '0', '', 0, 1, [], {}] as unknown as boolean[]) {
+      expect(make({ allowInsecureTls: value, guard: { forceBlock: true } }).tls, JSON.stringify(value)).toBeUndefined();
+    }
   });
 
   it('builds one secure context from a CA certificate, and none without one', () => {
@@ -398,7 +408,7 @@ describe('createStorageAgents', () => {
 
   it('reports a bad CA certificate as a settings error on the caCertificate field', () => {
     use();
-    const error = settingsError(() => createStorageAgents({ isOnPrem: true, caCertificate: 'not pem' }));
+    const error = settingsError(() => createStorageAgents({ caCertificate: 'not pem' }));
     expect(error.field).toBe('caCertificate');
   });
 
@@ -411,6 +421,72 @@ describe('createStorageAgents', () => {
     agents.destroy();
     expect(httpDestroy).toHaveBeenCalledTimes(2);
     expect(httpsDestroy).toHaveBeenCalledTimes(2);
+  });
+
+  describe('a request that reaches a destroyed agent (over a real socket)', () => {
+    let server: http.Server;
+    let port: number;
+    let open = 0;
+    let opened = 0;
+
+    beforeAll(async () => {
+      server = http.createServer((_request, response) => response.end('ok'));
+      server.on('connection', (socket) => {
+        open += 1;
+        opened += 1;
+        socket.on('close', () => { open -= 1; });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      port = (server.address() as AddressInfo).port;
+    });
+
+    afterAll(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    const get = (agent: http.Agent) => new Promise<string>((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, agent, path: '/' }, (response) => {
+        let body = '';
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve(body));
+      }).on('error', reject);
+    });
+
+    const settled = async (predicate: () => boolean) => {
+      for (let attempt = 0; attempt < 100 && !predicate(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+
+    it('does not leave its socket open: with keep-alive off the connection closes when the response ends', async () => {
+      use();
+      const agents = make();
+      open = 0;
+      opened = 0;
+
+      agents.destroy();
+      expect(await get(agents.httpAgent)).toBe('ok');
+      await settled(() => open === 0);
+
+      expect(opened).toBe(1);
+      expect(open).toBe(0);
+      expect(Object.keys(agents.httpAgent.freeSockets)).toEqual([]);
+    });
+
+    it('is the difference destroy() makes: an agent that is not destroyed keeps the connection for the next request', async () => {
+      use();
+      const agents = make();
+      open = 0;
+      opened = 0;
+
+      expect(await get(agents.httpAgent)).toBe('ok');
+      expect(await get(agents.httpAgent)).toBe('ok');
+
+      expect(opened).toBe(1);
+      expect(open).toBe(1);
+      agents.destroy();
+      await settled(() => open === 0);
+      expect(open).toBe(0);
+    });
   });
 });
 
@@ -475,7 +551,7 @@ describe.runIf(openSslAvailable())('createStorageAgents — TLS against a server
   });
 
   function agentsFor(input: Partial<Parameters<typeof createStorageAgents>[0]>) {
-    const agents = createStorageAgents({ isOnPrem: false, guard: { allowPrivate: true }, guardHost: '127.0.0.1', ...input });
+    const agents = createStorageAgents({ guard: { allowPrivate: true }, guardHost: '127.0.0.1', ...input });
     created.push(agents);
     return agents;
   }
@@ -500,25 +576,19 @@ describe.runIf(openSslAvailable())('createStorageAgents — TLS against a server
     await expect(fetchText(url, agentsFor({ caCertificate: ROOT_A }).httpsAgent)).rejects.toMatchObject({ code: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
   });
 
-  it('skips verification on a self-hosted deployment when asked to', async () => {
+  it('skips verification when asked to', async () => {
     use();
-    await expect(fetchText(url, agentsFor({ allowInsecureTls: true, isOnPrem: true }).httpsAgent)).resolves.toBe('private-store');
+    await expect(fetchText(url, agentsFor({ allowInsecureTls: true }).httpsAgent)).resolves.toBe('private-store');
   });
 
   it('keeps verifying when the switch is stored as anything but true (a JSON "false" is not "on")', async () => {
     use();
     for (const value of ['false', '0', 'no', 1, [], {}, false] as unknown as boolean[]) {
       await expect(
-        fetchText(url, agentsFor({ allowInsecureTls: value, isOnPrem: true }).httpsAgent),
+        fetchText(url, agentsFor({ allowInsecureTls: value }).httpsAgent),
         JSON.stringify(value),
       ).rejects.toMatchObject({ code: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
     }
-  });
-
-  it('refuses to skip verification anywhere else, before any connection is made', () => {
-    use();
-    const error = settingsError(() => agentsFor({ allowInsecureTls: true, isOnPrem: false }));
-    expect(error.field).toBe('allowInsecureTls');
   });
 });
 
@@ -544,7 +614,7 @@ describe('createStorageAgents — guarded lookup on real sockets', () => {
   });
 
   function agentsFor(guard: Parameters<typeof createStorageAgents>[0]['guard']) {
-    const agents = createStorageAgents({ isOnPrem: false, guard, guardHost: 'localhost' });
+    const agents = createStorageAgents({ guard, guardHost: 'localhost' });
     created.push(agents);
     return agents;
   }

@@ -5,9 +5,10 @@ import { Alert, Button, Group, Loader, Modal, Stack, Text } from '@mantine/core'
 import { IconAlertTriangle, IconCheck } from '@tabler/icons-react';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import type { BucketDetail } from '../filesApi';
+import { isLocalDiskProvider } from '../list/providerModel';
 import { filesErrorMessage, formatCount, StorageLocation } from '../shared';
 import { useImportFromStorage } from '../useFilesQueries';
-import { EMPTY_IMPORT_PROGRESS, runImportScan, type ImportProgress } from './importScan';
+import { canRetryImport, EMPTY_IMPORT_PROGRESS, runImportScan, type ImportProgress } from './importScan';
 
 export interface ImportFromStorageDialogProps {
   bucket: BucketDetail;
@@ -53,6 +54,8 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState<ImportProgress>(EMPTY_IMPORT_PROGRESS);
   const [error, setError] = useState<string | null>(null);
+  // A refusal that a second try cannot change (a storage location another bucket uses) has none.
+  const [retryable, setRetryable] = useState(true);
   const locale = useLocale();
   const stopRequested = useRef(false);
 
@@ -63,6 +66,7 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
     setPhase('idle');
     setProgress(EMPTY_IMPORT_PROGRESS);
     setError(null);
+    setRetryable(true);
   }, [opened]);
 
   // A scan that is still going when the dialog goes away stops after its current request.
@@ -77,6 +81,7 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
     stopRequested.current = false;
     setPhase('running');
     setError(null);
+    setRetryable(true);
     if (!from) setProgress(EMPTY_IMPORT_PROGRESS);
     const run = await runImportScan({
       step: (input) => importStep.mutateAsync({ bucketKey: bucket.key, input }),
@@ -85,7 +90,10 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
       onProgress: setProgress,
     });
     setProgress(run.progress);
-    if (run.outcome === 'failed') setError(filesErrorMessage(run.error, tc, 'importFromStorage'));
+    if (run.outcome === 'failed') {
+      setError(filesErrorMessage(run.error, tc, 'importFromStorage'));
+      setRetryable(canRetryImport(run.error));
+    }
     setPhase(run.outcome);
   };
 
@@ -113,7 +121,11 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
               <Text size="xs" c="dimmed" mb={4}>
                 {t('import.scansLabel')}
               </Text>
-              <StorageLocation location={bucket.storageLocation} copyable={false} />
+              <StorageLocation
+                location={bucket.storageLocation}
+                localDisk={bucket.provider ? isLocalDiskProvider(bucket.provider) : false}
+                copyable={false}
+              />
             </div>
             <Text size="sm" c="dimmed">
               {t('import.safe')}
@@ -167,7 +179,7 @@ export default function ImportFromStorageDialog({ bucket, opened, onClose }: Imp
                 </Button>
               ) : (
                 <>
-                  {phase === 'stopped' || phase === 'failed' ? (
+                  {phase === 'stopped' || (phase === 'failed' && retryable) ? (
                     <Button color="teal" onClick={() => void start(progress)} data-testid="import-resume">
                       {phase === 'failed' ? t('import.retry') : t('import.resume')}
                     </Button>

@@ -4,13 +4,13 @@ import { useRef, useState, type ChangeEvent, type DragEvent, type ReactNode, typ
 import { Button } from '@mantine/core';
 import { IconCloudUpload } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { FilesLimits } from '../filesApi';
+import type { FileLimits } from '../filesApi';
 import { formatBytes } from '../shared';
 import { collectDropped, MAX_QUEUE_FILES, storageLeft, summarizeTypes } from './uploadModel';
 import styles from './UploadFilesForm.module.css';
 
 export interface UploadDropZoneProps {
-  limits: FilesLimits | undefined;
+  limits: FileLimits | undefined;
   /** Where the limits stand: still loading, loaded, or could not be loaded. */
   limitsState: 'loading' | 'ready' | 'failed';
   /** Nothing can be added (no write access, the bucket is disabled). */
@@ -24,7 +24,7 @@ export interface UploadDropZoneProps {
 }
 
 /** What the server will take, in one line: the size, how many files, the types and the storage that is left. */
-function LimitsHint({ limits, state }: { limits: FilesLimits | undefined; state: UploadDropZoneProps['limitsState'] }) {
+function LimitsHint({ limits, state }: { limits: FileLimits | undefined; state: UploadDropZoneProps['limitsState'] }) {
   const t = useTranslations('files.upload');
   if (state === 'loading') return <>{t('drop.checking')}</>;
   if (state === 'failed' || !limits) return <>{t('drop.limitsFailed')}</>;

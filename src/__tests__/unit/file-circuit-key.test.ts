@@ -49,6 +49,7 @@ import { OutboundDnsError, OutboundNetworkError } from '@/lib/security/outboundF
 import {
   deleteFile,
   downloadFile,
+  FILE_RUNTIME_POOL_PREFIX,
   isTransientStorageError,
   replaceFileContent,
   uploadFile,
@@ -136,7 +137,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  runtimePool.invalidateByPrefix('file:');
+  runtimePool.invalidateByPrefix(FILE_RUNTIME_POOL_PREFIX);
   resetAllCircuits();
   setConfigSource(ORIGINAL_SOURCE);
 });

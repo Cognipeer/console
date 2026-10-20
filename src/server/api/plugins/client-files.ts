@@ -22,6 +22,8 @@ import {
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
 import { bucketInactiveError, isFileServiceError } from '@/lib/services/files/errors';
+import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
+import { decodedByteLength } from '@/lib/services/files/payloadSize';
 import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
 import { toHeaderSafeJson } from '@/lib/utils/headerSafeJson';
 import {
@@ -31,9 +33,9 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
-import { sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
+import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
 import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
-import { listVisibleFiles, sessionOfFile } from './session-linked-files';
+import { listVisibleFiles, sessionOfFile, sessionRefusedForUpload } from './session-linked-files';
 
 /** The caller of a client route, as the session checks name them: the token's owner, in the token's project. */
 const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { userId?: string } }): SessionActor => ({
@@ -44,22 +46,8 @@ const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { 
 
 const logger = createLogger('api:client-files');
 
-function estimateBase64Bytes(input: unknown): number | undefined {
-  if (typeof input !== 'string') {
-    return undefined;
-  }
-
-  const base64 = input.includes('base64,') ? input.split('base64,').pop() ?? '' : input;
-  if (!base64) {
-    return 0;
-  }
-
-  const normalized = base64.replace(/\s/g, '');
-  const paddingMatch = normalized.match(/=+$/);
-  const padding = paddingMatch ? paddingMatch[0].length : 0;
-  const bytes = Math.floor((normalized.length * 3) / 4) - padding;
-  return bytes > 0 ? bytes : 0;
-}
+/** The most the `X-File-Metadata` header carries: clients read at most 16 KB of response headers, all of them together. */
+const FILE_METADATA_HEADER_MAX_CHARS = 8 * 1024;
 
 /** A failed call, answered the way the Document Store answers it (status, code and a safe message). */
 function fail(reply: FastifyReply, error: unknown, action: string, options: FileErrorOptions = {}) {
@@ -107,6 +95,9 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         metadata: body.metadata as Record<string, unknown> | undefined,
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
+        // The files permission is enough to create a provider here, but naming a directory of this server (the base
+        // directory of the local disk driver) is for owners and admins, the role of the person the call acts for.
+        allowHostPaths: isOwnerOrAdmin(ctx.user?.role),
       });
 
       return reply.code(201).send({ provider });
@@ -193,8 +184,14 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       if (typeof body.fileName !== 'string') {
         return reply.code(400).send({ error: 'fileName is required' });
       }
+      // An empty string is content too: an empty file (a placeholder, a marker) is stored as it is. (The Document
+      // Store's own upload asks for a file to have bytes; this API is called by programs that may not.)
       if (typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required (base64 or data URL)' });
+      }
+      // Metadata is a set of named values: a text or a list would be stored as something other than what was sent.
+      if (!isUploadMetadata(body.metadata)) {
+        return reply.code(400).send({ error: 'metadata must be an object' });
       }
       // The same destination rules as the Document Store: no "." / ".." segments, no control characters.
       const destination = composeUploadKeyHint({ keyHint: body.keyHint });
@@ -205,8 +202,21 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const bucket = await getFileBucket(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey);
       if (bucket.status !== 'active') throw bucketInactiveError();
 
+      // Before any quota is spent: bytes written under the key of a session's file are the session's to allow. The
+      // token acts as its owner, who is held to the sessions they may change like anybody else.
+      const sessionRefusal = await sessionRefusedForUpload(request, {
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+        bucket,
+        keyHint: destination.keyHint,
+        fileName: body.fileName,
+        actor: actorOf(ctx),
+      });
+      if (sessionRefusal) return sendClientSessionRefusal(reply, request, sessionRefusal);
+
       const tokenId = ctx.tokenRecord._id?.toString() ?? ctx.token;
-      const estimatedFileBytes = estimateBase64Bytes(body.data);
+      // What the service will decode from `data`, not what the text claims: the quotas below are asked about it.
+      const estimatedFileBytes = decodedByteLength(body.data);
       const quotaContext = {
         domain: 'file' as const,
         licenseType: ctx.tenant.licenseType as LicenseType,
@@ -230,7 +240,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const rateLimitResult = await checkRateLimit(quotaContext, {
         files: 1,
         requests: 1,
-        storageBytes: estimatedFileBytes ?? 0,
+        storageBytes: estimatedFileBytes,
       });
       if (!rateLimitResult.allowed) {
         return reply.code(429).send({ error: rateLimitResult.reason || 'Rate limit exceeded' });
@@ -247,7 +257,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
       if (storageLimit !== undefined && storageLimit !== -1) {
         const currentBytes = await db.sumFileRecordBytes({ projectId: ctx.projectId });
-        const projected = currentBytes + (estimatedFileBytes ?? 0);
+        const projected = currentBytes + estimatedFileBytes;
         if (projected > storageLimit) {
           return reply.code(429).send({
             error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
@@ -263,7 +273,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         data: body.data,
         fileName: body.fileName,
         keyHint: destination.keyHint,
-        metadata: body.metadata as Record<string, unknown> | undefined,
+        metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 
       return reply.code(201).send({
@@ -356,10 +366,19 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         reply.header('ETag', result.etag);
       }
 
-      if (result.metadata) {
+      // The file's own metadata, as it was stored with the record: the same on every driver. (A store keeps its own
+      // spelling of it on the object - S3 lower-cases and re-encodes the names and adds a checksum.)
+      const metadata = wanted.metadata;
+      if (metadata && Object.keys(metadata).length > 0) {
         try {
           // A header value is ASCII: metadata in any language travels as \uXXXX escapes, which JSON.parse reads back.
-          reply.header('X-File-Metadata', toHeaderSafeJson(result.metadata));
+          const serialized = toHeaderSafeJson(metadata);
+          if (serialized.length <= FILE_METADATA_HEADER_MAX_CHARS) {
+            reply.header('X-File-Metadata', serialized);
+          } else {
+            // A header much larger than this is refused by the client that reads the response; the record has the metadata.
+            logger.warn('File metadata is too large for a header and was left out of the download', { size: serialized.length });
+          }
         } catch (error) {
           logger.warn('Failed to serialize client file metadata', { error });
         }

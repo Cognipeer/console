@@ -38,7 +38,8 @@ export function FolderPath({ prefix, onOpen }: FolderPathProps) {
         <Breadcrumbs separator={<IconChevronRight size={12} />} separatorMargin={4} style={{ flexWrap: 'wrap' }}>
           {crumbs.map((crumb, index) => {
             const label = crumb.label || t('browse.rootLabel');
-            const icon = index === 0 ? <IconHome size={13} style={{ marginRight: 4, verticalAlign: 'text-bottom' }} aria-hidden="true" /> : null;
+            // The page's reset draws every <svg> as a block, which would put the icon on a line of its own above the label.
+            const icon = index === 0 ? <IconHome size={13} style={{ display: 'inline-block', marginRight: 4, verticalAlign: 'text-bottom' }} aria-hidden="true" /> : null;
             return index === crumbs.length - 1 ? (
               <Text key={crumb.prefix} size="sm" fw={600} aria-current="page">{icon}{label}</Text>
             ) : (

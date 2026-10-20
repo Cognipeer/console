@@ -6,6 +6,8 @@ import {
 } from '@/lib/database';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
+import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
+import { isSafePathSegment } from '@/lib/providers/pathSegments';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
 import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
 
@@ -53,6 +55,12 @@ export interface CreateProviderConfigInput {
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
   createdBy: string;
+  /**
+   * The caller administers providers (an owner or an admin) and may name directories of this server, which the local
+   * disk driver takes as its base directory. Set by the route from the caller's role; it is never read from a request
+   * body and never stored. Left out, such a setting is refused.
+   */
+  allowHostPaths?: boolean;
 }
 
 export interface UpdateProviderConfigInput {
@@ -65,6 +73,8 @@ export interface UpdateProviderConfigInput {
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
   updatedBy?: string;
+  /** As in {@link CreateProviderConfigInput.allowHostPaths}. */
+  allowHostPaths?: boolean;
 }
 
 /**
@@ -158,14 +168,30 @@ export async function resolveTenantProjectIds(
   };
 }
 
+/**
+ * A provider key names the provider's folder on the disk drivers (`<base>/<organization id>/<key>`), so it has to be
+ * one name that stays inside the folder it is joined to: not `.` or `..`, and no separator or control character. Any
+ * other text is a key.
+ */
+function assertKeyIsAFolderName(key: unknown): void {
+  if (isSafePathSegment(key)) return;
+  throw new ProviderSettingsError(
+    'key',
+    'The provider key is used as a folder name: it cannot be empty, "." or "..", and it cannot hold "/", "\\" or a control character.',
+  );
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  assertKeyIsAFolderName(payload.key);
   // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
   // would say about the same value.
-  await validateProviderSettings(payload.driver, payload.credentials, payload.settings, { tenantId });
+  await validateProviderSettings(payload.driver, payload.credentials, payload.settings, { tenantId }, {
+    allowHostPaths: payload.allowHostPaths,
+  });
   await assertProviderEndpointsAllowed(payload.type, { tenantId }, payload.credentials, payload.settings);
   const settings = payload.type === 'websearch'
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
@@ -176,7 +202,7 @@ export async function createProviderConfig(
   // Provider keys are tenant-level; project assignment is handled via projectIds.
   const existing = await db.findProviderByKey(tenantId, payload.key);
   if (existing) {
-    throw new Error(`Provider with key "${payload.key}" already exists.`);
+    throw new ProviderKeyExistsError(payload.key);
   }
 
   let record: IProviderRecord;
@@ -201,7 +227,7 @@ export async function createProviderConfig(
     // Lost the create race: another request inserted the same key between the
     // findProviderByKey check above and this insert. Surface it as a conflict.
     if (isDuplicateKeyError(error)) {
-      throw new Error(`Provider with key "${payload.key}" already exists.`);
+      throw new ProviderKeyExistsError(payload.key);
     }
     throw error;
   }
@@ -324,7 +350,7 @@ async function validateUpdatedProvider(
   payload: UpdateProviderConfigInput,
   mergedCredentials: Record<string, unknown> | undefined,
 ): Promise<void> {
-  const validate = settingsValidatorOf(target?.driver, { tenantId: target?.tenantId });
+  const validate = settingsValidatorOf(target?.driver, { tenantId: target?.tenantId }, { allowHostPaths: payload.allowHostPaths });
   if (!target || !validate) return;
   const credentials = mergedCredentials ?? readStoredCredentials(target, false);
   // Credentials that cannot be opened say nothing about the settings: such a record still saves a settings-only edit,

@@ -1,15 +1,17 @@
 /**
- * What a bucket's name, description, prefix and status may be: the one set of rules the creation and the update of a
- * bucket both go through, so a value that is refused on one is refused on the other. A value that breaks a rule is a
- * `FileServiceError` (400 `invalid_request`) whose message names the field.
+ * What a bucket's key, name, description, prefix and status may be: the one set of rules the creation and the update
+ * of a bucket both go through, so a value that is refused on one is refused on the other. A value that breaks a rule
+ * is a `FileServiceError` (400 `invalid_request`) whose message names the field.
  *
  * It also names the two bucket `metadata` keys the file service keeps for itself while a bucket is deleted together
  * with its files (`deleting`, `deleteError`). They live in the metadata because the bucket has no column for them; a
  * caller can neither set nor erase them.
  */
 
-import { FileServiceError } from './errors';
+import { bucketDeletingError, bucketInactiveError, FileServiceError } from './errors';
 
+/** The longest key a bucket is created with; the create screen holds to the same limit. */
+export const BUCKET_KEY_MAX_LENGTH = 64;
 export const BUCKET_NAME_MAX_LENGTH = 120;
 export const BUCKET_DESCRIPTION_MAX_LENGTH = 1000;
 export const BUCKET_PREFIX_MAX_LENGTH = 200;
@@ -38,6 +40,23 @@ const TEXT_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
 
 function invalid(message: string): FileServiceError {
   return new FileServiceError('invalid_request', 400, message);
+}
+
+/** What a key is made of: the letters, digits, hyphens and underscores the create screen has always let through. */
+const BUCKET_KEY_PATTERN = /^[a-z0-9_-]+$/;
+
+/**
+ * The key a bucket is created with. It is the bucket's address in every route (`/files/buckets/<key>`) and the folder
+ * its files go in when no prefix is given, so a key that cannot sit in one URL segment (a slash, a dot segment, a
+ * percent sign, a blank) or that is longer than a route takes would make a bucket nothing can reach, change or delete.
+ */
+export function parseBucketKey(value: unknown): string {
+  if (typeof value !== 'string') throw invalid('key must be text.');
+  const key = value.trim();
+  if (key.length === 0) throw invalid('key is required.');
+  if (key.length > BUCKET_KEY_MAX_LENGTH) throw invalid(`key must be at most ${BUCKET_KEY_MAX_LENGTH} characters.`);
+  if (!BUCKET_KEY_PATTERN.test(key)) throw invalid('key can only hold lowercase letters, digits, hyphens and underscores.');
+  return key;
 }
 
 export function parseBucketName(value: unknown): string {
@@ -120,6 +139,17 @@ type WithMetadata = { metadata?: Record<string, unknown> | null };
 /** The "delete the bucket with its files" job is running. */
 export function isBucketDeleting(bucket: WithMetadata): boolean {
   return bucket.metadata?.[BUCKET_DELETING_KEY] === true;
+}
+
+/**
+ * Why a bucket no longer takes files, as the error a write to it is refused with: it is switched off
+ * (`bucket_inactive`), or it is being deleted or gone (`bucket_deleting`). `null`: it takes files. `current` is the
+ * bucket as it is stored now, `null` when it is gone - what a job asks after it wrote something, to find out whether
+ * the bucket was closed while it did.
+ */
+export function bucketClosedError(current: (WithMetadata & { status: string }) | null | undefined): FileServiceError | null {
+  if (current && current.status === 'active' && !isBucketDeleting(current)) return null;
+  return current && !isBucketDeleting(current) ? bucketInactiveError() : bucketDeletingError();
 }
 
 /** Why the last "delete the bucket with its files" run stopped, when it did. */

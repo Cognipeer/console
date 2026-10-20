@@ -168,10 +168,66 @@ describe('GET /files/buckets and /files/buckets/:bucketKey', () => {
     expect(json(res).bucket).toMatchObject({
       key: 'docs', status: 'active', stats: { fileCount: 0, totalBytes: 0 },
       usedBy: [{ agentId: expect.any(String), agentKey: 'support', name: 'Support' }],
+      usedByCount: 1,
       storageLocation: null,
     });
     const other = await get('/files/buckets/empty');
-    expect(json(other).bucket).toMatchObject({ usedBy: [], storageLocation: `MongoDB GridFS · uploads/${tenantId}/grid/e/` });
+    expect(json(other).bucket).toMatchObject({ usedBy: [], usedByCount: 0, storageLocation: `MongoDB GridFS · uploads/${tenantId}/grid/e/` });
+  });
+
+  describe('which agents are named', () => {
+    /** A member of the project with these service permissions. */
+    async function memberWith(email: string, servicePermissions: Record<string, string>) {
+      const user = await db.createUser({ tenantId, email, name: email, password: '$2b$10$x', role: 'user', licenseId: 'FREE', features: [], servicePermissions } as never);
+      await db.upsertUserProject({ tenantId, userId: String(user._id), projectId, role: 'member' } as never);
+      return String(user._id);
+    }
+    const getAs = (who: string, url: string) => app.inject({
+      method: 'GET',
+      url: `/api${url}`,
+      headers: {
+        'x-tenant-db-name': DB_NAME,
+        'x-tenant-id': tenantId,
+        'x-tenant-slug': 'files-reads',
+        'x-user-id': who,
+        'x-user-role': 'user',
+        'x-user-email': 'member@x.io',
+        'x-license-type': 'FREE',
+        cookie: `active_project_id=${projectId}`,
+      },
+    });
+
+    it('is told to a caller who may read agents', async () => {
+      const reader = await memberWith('reader@x.io', { files: 'read', agents: 'read' });
+
+      const res = await getAs(reader, '/files/buckets/docs');
+
+      expect(res.statusCode).toBe(200);
+      expect(json(res).bucket).toMatchObject({ usedBy: [{ agentKey: 'support', name: 'Support' }], usedByCount: 1 });
+    });
+
+    it('is not told to a caller who cannot read agents: only how many there are', async () => {
+      const blind = await memberWith('blind@x.io', { files: 'read', agents: 'none' });
+
+      const res = await getAs(blind, '/files/buckets/docs');
+
+      expect(res.statusCode).toBe(200);
+      expect(json(res).bucket).toMatchObject({ key: 'docs', status: 'active', usedBy: [], usedByCount: 1 });
+      // Neither the agent's name nor its key is anywhere in the answer.
+      expect(res.body).not.toContain('"Support"');
+      expect(res.body).not.toContain('agentKey');
+      // The rest of the page is the same for them.
+      expect(json(res).bucket).toMatchObject({ name: 'Documents', providerKey: 'local', stats: { fileCount: 0, totalBytes: 0 } });
+    });
+
+    it('is the same answer for a bucket no agent uses, whoever asks', async () => {
+      const blind = await memberWith('blind@x.io', { files: 'read', agents: 'none' });
+
+      const res = await getAs(blind, '/files/buckets/empty');
+
+      expect(res.statusCode).toBe(200);
+      expect(json(res).bucket).toMatchObject({ usedBy: [], usedByCount: 0 });
+    });
   });
 
   it('answers a bucket that does not exist with 404', async () => {

@@ -1,8 +1,10 @@
 /**
  * The ceiling for buffering one stored object in memory (shared by the S3 and Azure Blob drivers).
  */
+import { constants } from 'node:buffer';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
+import { resolveDownloadCeiling } from '@/lib/providers/contracts/downloadCeiling';
 import { isStorageObjectTooLargeError, maxStorageDownloadBytes, StorageObjectTooLargeError } from '@/lib/providers/contracts/storageLimits';
 
 const MIB = 1024 * 1024;
@@ -35,6 +37,40 @@ describe('maxStorageDownloadBytes', () => {
     expect(maxStorageDownloadBytes()).toBe(100 * MIB);
     withUploadLimit('-5');
     expect(maxStorageDownloadBytes()).toBe(100 * MIB);
+  });
+});
+
+describe('resolveDownloadCeiling', () => {
+  it('is the server-wide ceiling when the caller states no bound', () => {
+    withUploadLimit('80');
+    expect(resolveDownloadCeiling()).toBe(160 * MIB);
+    expect(resolveDownloadCeiling({})).toBe(160 * MIB);
+    expect(resolveDownloadCeiling({ maxBytes: undefined })).toBe(160 * MIB);
+  });
+
+  it('is the bound the caller states, above the server-wide ceiling or below it', () => {
+    withUploadLimit('50');
+    expect(resolveDownloadCeiling({ maxBytes: 300 * MIB })).toBe(300 * MIB);
+    expect(resolveDownloadCeiling({ maxBytes: 5 * MIB })).toBe(5 * MIB);
+    expect(resolveDownloadCeiling({ maxBytes: 1 })).toBe(1);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['a negative number', -1],
+    ['NaN', Number.NaN],
+    ['negative infinity', Number.NEGATIVE_INFINITY],
+    ['text', '5242880'],
+    ['null', null],
+  ])('ignores a bound that is %s: it is no bound', (_label, maxBytes) => {
+    withUploadLimit('50');
+    expect(resolveDownloadCeiling({ maxBytes } as never)).toBe(100 * MIB);
+  });
+
+  it('never goes beyond what one Buffer can hold: no bound at all means that much', () => {
+    withUploadLimit('50');
+    expect(resolveDownloadCeiling({ maxBytes: Number.POSITIVE_INFINITY })).toBe(constants.MAX_LENGTH);
+    expect(resolveDownloadCeiling({ maxBytes: Number.MAX_SAFE_INTEGER * 2 })).toBeLessThanOrEqual(constants.MAX_LENGTH);
   });
 });
 

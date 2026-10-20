@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { composeUploadKeyHint, generateFileRelativeKey } from '@/lib/services/files/fileService';
 import type { FileRecordView } from '@/lib/services/files';
-import type { FilesLimits, UploadFileOptions } from '@/components/files/filesApi';
+import type { FileLimits, UploadFileOptions } from '@/components/files/filesApi';
 import {
   collectDropped,
   effectiveContentType,
@@ -50,7 +50,7 @@ function item(name: string, over: Partial<QueueItem> & { size?: number; type?: s
   };
 }
 
-function limits(over: Partial<FilesLimits> = {}): FilesLimits {
+function limits(over: Partial<FileLimits> = {}): FileLimits {
   return {
     maxFileBytes: 1000,
     maxRequestBytes: 2000,
@@ -122,6 +122,10 @@ describe('key preview', () => {
   const NAMES = [
     'Report Q3.PDF',
     'şirket raporu.pdf',
+    'İstanbul ışık GÜNLÜĞÜ.txt',
+    'Straße Æble Øre Łódź.md',
+    'Ｆｕｌｌ ｗｉｄｔｈ.csv',
+    '報告書.pdf',
     'archive.tar.gz',
     '.env',
     '..hidden.txt',
@@ -137,6 +141,14 @@ describe('key preview', () => {
     'a.b.c.d',
     '-lead.txt',
     '___.txt',
+    // names too long for a key: the server cuts the stem, and the extension when it is long
+    `${'x'.repeat(250)}.md`,
+    'y'.repeat(300),
+    `${'quarterly-report-'.repeat(13)}final.pdf`,
+    `${'abc-'.repeat(60)}.docx`,
+    `report.${'日'.repeat(60)}`,
+    'photo.\ud800jpg',
+    'photo.😀',
   ];
 
   it('is the stem and extension the server builds the key from', () => {
@@ -146,12 +158,20 @@ describe('key preview', () => {
       expect(real.endsWith(extension), `extension of ${JSON.stringify(name)} in ${real}`).toBe(true);
       const withoutExtension = real.slice(0, real.length - extension.length);
       expect(withoutExtension, `stem of ${JSON.stringify(name)}`).toMatch(new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+-[0-9a-f]{8}$`));
+      expect(Buffer.byteLength(real), `size of ${JSON.stringify(name)}`).toBeLessThanOrEqual(200);
     }
+  });
+
+  it('shows the stem and the extension the server keeps when the name is too long for a key', () => {
+    expect(previewObjectKey('', `${'x'.repeat(250)}.md`)).toBe(`${'x'.repeat(174)}-….md`);
+    expect(keyStem(`${'abc-'.repeat(60)}.docx`)).toEqual({ stem: `${'abc-'.repeat(42)}abc`, extension: '.docx' });
+    expect(keyStem(`report.${'日'.repeat(60)}`).extension).toBe(`.${'日'.repeat(10)}`);
+    expect(keyStem('photo.\ud800jpg')).toEqual({ stem: 'photo', extension: '.jpg' });
   });
 
   it('shows the folder, the stem, an ellipsis for the unique part and the extension', () => {
     expect(previewObjectKey('', 'Report Q3.PDF')).toBe('report-q3-….PDF');
-    expect(previewObjectKey('reports/2026/', 'Şirket Raporu Q3.pdf')).toBe('reports/2026/irket-raporu-q3-….pdf');
+    expect(previewObjectKey('reports/2026/', 'Şirket Raporu Q3.pdf')).toBe('reports/2026/sirket-raporu-q3-….pdf');
     expect(previewObjectKey('a/', 'noextension')).toBe('a/noextension-…');
     expect(previewObjectKey('', '.env')).toBe('env-…');
   });
@@ -236,10 +256,26 @@ describe('summarizeQueue', () => {
     });
     expect(summary.readyIds).toEqual(['id-ok.txt', 'id-retry.txt']);
   });
+
+  it('counts the whole run as sendable, whatever has become of each row, and leaves the flagged rows out', () => {
+    const rows = [
+      item('queued.txt', { size: 10 }),
+      item('failed.txt', { size: 20, status: 'failed', error: 'x' }),
+      item('sending.txt', { size: 30, status: 'uploading' }),
+      item('waiting.txt', { size: 40, waiting: true }),
+      item('stored.txt', { size: 50, status: 'done' }),
+      item('big.txt', { size: 5000 }),
+    ];
+    const summary = summarizeQueue(rows, limits());
+    expect(summary).toMatchObject({ total: 6, sendable: 5, sendableBytes: 150, tooLarge: 1 });
+    // What the primary action would send now is a smaller set: it shrinks as the run goes on, the run does not.
+    expect(summary.readyIds).toEqual(['id-queued.txt', 'id-failed.txt']);
+    expect(summary.readyBytes).toBe(30);
+  });
 });
 
 describe('quota', () => {
-  const quota = (over: Partial<FilesLimits['quota']>) => limits({ quota: { usedBytes: 0, limitBytes: null, filesUsed: 0, filesLimit: null, ...over } });
+  const quota = (over: Partial<FileLimits['quota']>) => limits({ quota: { usedBytes: 0, limitBytes: null, filesUsed: 0, filesLimit: null, ...over } });
 
   it('knows what is left, and that unlimited has no end', () => {
     expect(storageLeft(quota({ usedBytes: 300, limitBytes: 1000 }))).toBe(700);
@@ -514,11 +550,42 @@ describe('UploadQueueEngine', () => {
     await flush();
 
     expect(settled).toHaveLength(1);
-    expect(settled[0]).toMatchObject({ failed: 0 });
+    // The removed upload was on the wire: whether the server stored it is not known, and the run says so.
+    expect(settled[0]).toMatchObject({ failed: 0, aborted: 1 });
     expect(settled[0]!.records.map((r) => r.key)).toEqual(['f1.txt']);
   });
 
-  it('stops everything on cancelAll: uploads are aborted, rows are ready again and no run is reported', async () => {
+  it('reports an upload that was removed while it was going out even when nothing else was stored', async () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload);
+    engine.add(stamped(2));
+    const ids = engine.getSnapshot().map((row) => row.id);
+    engine.start(ids, SETTINGS);
+
+    engine.remove(ids[0]!);
+    fake.calls[1]!.reject(new Error('boom'));
+    await flush();
+
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({ records: [], failed: 1, aborted: 1 });
+  });
+
+  it('does not count a row that was removed before it was sent as an upload that was cut off', async () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload, { concurrency: 1 });
+    engine.add(stamped(2));
+    const ids = engine.getSnapshot().map((row) => row.id);
+    engine.start(ids, SETTINGS);
+
+    engine.remove(ids[1]!);
+    fake.calls[0]!.resolve();
+    await flush();
+
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({ failed: 0, aborted: 0 });
+  });
+
+  it('stops everything on cancelAll: uploads are aborted, rows are ready again, and the run says what it cut off', async () => {
     const fake = fakeUpload();
     const { engine, settled } = engineWith(fake.upload);
     engine.add(stamped(4));
@@ -532,7 +599,76 @@ describe('UploadQueueEngine', () => {
     expect(fake.calls).toHaveLength(2);
     expect(status(engine)).toEqual(['f0.txt:queued', 'f1.txt:queued', 'f2.txt:queued', 'f3.txt:queued']);
     expect(engine.busy).toBe(false);
+    // Nothing was stored that the screen knows of, but two requests were cut off: the server may have kept them.
+    expect(settled).toEqual([{ records: [], failed: 0, aborted: 2 }]);
+  });
+
+  it('reports what was stored when the run is cancelled, once, and the stored row stays done', async () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload, { concurrency: 1 });
+    engine.add(stamped(3));
+    engine.start(engine.getSnapshot().map((row) => row.id), SETTINGS);
+    fake.calls[0]!.resolve();
+    await flush();
+    expect(status(engine)).toEqual(['f0.txt:done', 'f1.txt:uploading', 'f2.txt:queued+w']);
     expect(settled).toHaveLength(0);
+
+    engine.cancelAll();
+    await flush();
+
+    expect(status(engine)).toEqual(['f0.txt:done', 'f1.txt:queued', 'f2.txt:queued']);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.records.map((r) => r.key)).toEqual(['f0.txt']);
+    expect(settled[0]).toMatchObject({ failed: 0, aborted: 1 });
+    // The run is over: nothing is reported again when the cut-off request answers late.
+    fake.calls[1]!.resolve();
+    await flush();
+    expect(settled).toHaveLength(1);
+  });
+
+  it('reports a cancelled run with its failures, and starts the next run from nothing', async () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload);
+    engine.add(stamped(3));
+    const ids = engine.getSnapshot().map((row) => row.id);
+    engine.start(ids, SETTINGS);
+    fake.calls[0]!.reject(new Error('timeout'));
+    await flush();
+    engine.cancelAll();
+    await flush();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({ records: [], failed: 1 });
+
+    engine.start([ids[1]!], SETTINGS);
+    const latest = fake.calls.at(-1)!;
+    latest.resolve('again.txt');
+    await flush();
+    expect(settled).toHaveLength(2);
+    expect(settled[1]).toMatchObject({ failed: 0, aborted: 0 });
+    expect(settled[1]!.records.map((r) => r.key)).toEqual(['again.txt']);
+  });
+
+  it('reports nothing for a cancel when no run was going: files that were only added', () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload);
+    engine.add(stamped(2));
+    engine.cancelAll();
+    engine.cancelAll();
+    expect(settled).toHaveLength(0);
+    expect(status(engine)).toEqual(['f0.txt:queued', 'f1.txt:queued']);
+  });
+
+  it('reports nothing for a cancel after the run has been reported', async () => {
+    const fake = fakeUpload();
+    const { engine, settled } = engineWith(fake.upload);
+    engine.add(stamped(1));
+    engine.start(engine.getSnapshot().map((row) => row.id), SETTINGS);
+    fake.calls[0]!.resolve();
+    await flush();
+    expect(settled).toHaveLength(1);
+
+    engine.cancelAll();
+    expect(settled).toHaveLength(1);
   });
 
   it('ignores the answer of an upload that was cancelled and still came back', async () => {
@@ -551,7 +687,8 @@ describe('UploadQueueEngine', () => {
     await flush();
 
     expect(status(engine)).toEqual(['a.txt:queued', 'b.txt:queued']);
-    expect(settled).toHaveLength(0);
+    // The cancel reported the two cut-off requests; the late answers add neither a record nor a failure nor a second report.
+    expect(settled).toEqual([{ records: [], failed: 0, aborted: 2 }]);
   });
 
   it('caps the batch, skips a file that is already in the list and makes room again for uploaded ones', async () => {

@@ -304,7 +304,7 @@ describe('the lookup of a storage client\'s sockets (createGuardedLookup)', () =
 
 describe('a literal address in the storage agents (createStorageAgents)', () => {
   const agentsFor = (tenantId: string | undefined, guardHost: string) =>
-    createStorageAgents({ guard: endpointGuardOptions(tenantId), guardHost, isOnPrem: false });
+    createStorageAgents({ guard: endpointGuardOptions(tenantId), guardHost });
 
   it('is accepted inside the organization\'s network and refused for another organization', () => {
     agentsFor(TENANT_A, '10.50.1.5').destroy();
@@ -410,7 +410,7 @@ describe('a self-hosted install', () => {
         await expect(assertPublicUrl(url, endpointGuardOptions(tenant)), `${tenant} ${url}`).resolves.toBeInstanceOf(URL);
       }
     }
-    createStorageAgents({ guard: endpointGuardOptions(TENANT_B), guardHost: '10.99.0.7', isOnPrem: true }).destroy();
+    createStorageAgents({ guard: endpointGuardOptions(TENANT_B), guardHost: '10.99.0.7' }).destroy();
     // nothing was resolved: no check applies, so no name is looked up
     expect(dns.calls).toEqual([]);
   });
@@ -427,8 +427,8 @@ describe('a self-hosted install', () => {
     await expect(assertPublicUrl(`http://${host}`, endpointGuardOptions(TENANT_A))).resolves.toBeInstanceOf(URL);
     await expect(assertPublicUrl(`http://${host}`, endpointGuardOptions(TENANT_B))).rejects.toBeInstanceOf(OutboundPrivateTargetError);
 
-    createStorageAgents({ guard: endpointGuardOptions(TENANT_A), guardHost: '10.50.1.5', isOnPrem: true }).destroy();
-    expect(() => createStorageAgents({ guard: endpointGuardOptions(TENANT_B), guardHost: '10.50.1.5', isOnPrem: true })).toThrow(OutboundPrivateTargetError);
+    createStorageAgents({ guard: endpointGuardOptions(TENANT_A), guardHost: '10.50.1.5' }).destroy();
+    expect(() => createStorageAgents({ guard: endpointGuardOptions(TENANT_B), guardHost: '10.50.1.5' })).toThrow(OutboundPrivateTargetError);
   });
 
   it('that blocks private targets and has no network is what it was', async () => {

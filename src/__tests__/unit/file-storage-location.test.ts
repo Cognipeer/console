@@ -40,6 +40,27 @@ describe('storageFoldersOverlap', () => {
     expect(storageFoldersOverlap(b, a)).toBe(true);
   });
 
+  // A bucket stored before folders were validated can spell its folder in a way the drivers read as another one.
+  it.each([
+    ['docs', './docs', 'a leading dot segment'],
+    ['./docs', 'docs', 'a leading dot segment, the other way round'],
+    ['docs', 'docs/.', 'a trailing dot segment'],
+    ['docs', 'docs//', 'a doubled slash at the end'],
+    ['team/docs', 'team//docs', 'a doubled slash inside'],
+    ['team/docs', 'team/./docs', 'a dot segment inside'],
+    ['team/docs', 'team\\docs', 'a backslash, which the disk driver reads as a slash'],
+    ['docs', '..\\docs', 'a backslash and a run of dots'],
+    ['docs', '../docs', 'a run of dots, which the disk driver reads as one dot'],
+    ['team', './team/docs/', 'a folder inside, spelled with a dot segment'],
+    ['team/docs', './team//', 'a folder around, spelled with dot and doubled slash'],
+    ['', '.', 'the provider root, spelled as a dot'],
+    ['', './', 'the provider root, spelled as a dot and a slash'],
+    ['docs', './/docs//.', 'every one of them at once'],
+  ])('overlap when only the spelling differs: %j and %j (%s)', (a, b) => {
+    expect(storageFoldersOverlap(a, b)).toBe(true);
+    expect(storageFoldersOverlap(b, a)).toBe(true);
+  });
+
   it.each([
     ['a', 'ab', 'a folder whose name only starts the same way'],
     ['docs', 'docs-archive', 'a sibling that begins with the folder\'s name'],
@@ -47,6 +68,10 @@ describe('storageFoldersOverlap', () => {
     ['a/b', 'a/bc', 'a nested sibling that begins with the folder\'s name'],
     ['docs', 'archive/docs', 'the same name under another parent'],
     ['a', 'b', 'two folders'],
+    ['./a', 'b', 'two folders, one spelled with a dot segment'],
+    ['team\\docs', 'team/docs2', 'a backslash folder and a sibling that begins with its name'],
+    ['a.b', 'a', 'a name with a dot in it'],
+    ['./docs', './docs-archive', 'two siblings spelled with dot segments'],
   ])('do not overlap: %j and %j (%s)', (a, b) => {
     expect(storageFoldersOverlap(a, b)).toBe(false);
     expect(storageFoldersOverlap(b, a)).toBe(false);
@@ -143,6 +168,54 @@ describe('findBucketsSharingStorage', () => {
     expect(resolveBucketPrefix(spaced)).toBe('docs');
 
     expect(await findBucketsSharingStorage(dbOf([bucket(), spaced]), TENANT, bucket())).toEqual([spaced]);
+  });
+
+  it('finds a bucket whose key is spelled differently from this one but names the same folder', async () => {
+    // Keys written before they were validated: the key is the folder when a bucket has none, and the drivers read
+    // each of these as the folder `docs`.
+    const dot = bucket({ _id: 'b-dot', key: './docs', projectId: 'p2' });
+    const dotSlash = bucket({ _id: 'b-dot-slash', key: './docs/', projectId: 'p2' });
+    const doubled = bucket({ _id: 'b-doubled', key: 'docs//', projectId: 'p3' });
+    const back = bucket({ _id: 'b-back', key: '.\\docs', projectId: 'p3' });
+
+    const found = await findBucketsSharingStorage(dbOf([bucket(), dot, dotSlash, doubled, back]), TENANT, bucket());
+
+    expect(found.map((entry) => entry._id).sort()).toEqual(['b-back', 'b-dot', 'b-dot-slash', 'b-doubled']);
+    // And from the side of a bucket that is spelled that way.
+    expect(await findBucketsSharingStorage(dbOf([bucket(), dot]), TENANT, dot)).toEqual([bucket()]);
+  });
+
+  it('finds a bucket whose folder is spelled differently from this one but names the same folder, or one inside it', async () => {
+    const self = bucket({ prefix: 'team/docs' });
+    const spelled = [
+      bucket({ _id: 'b-dot', key: 'x1', prefix: './team/docs', projectId: 'p2' }),
+      bucket({ _id: 'b-doubled', key: 'x2', prefix: 'team//docs', projectId: 'p2' }),
+      bucket({ _id: 'b-back', key: 'x3', prefix: 'team\\docs', projectId: 'p3' }),
+      bucket({ _id: 'b-inside', key: 'x4', prefix: 'team/./docs/archive', projectId: 'p3' }),
+      bucket({ _id: 'b-around', key: 'x5', prefix: '.\\team', projectId: 'p3' }),
+    ];
+    const apart = bucket({ _id: 'b-apart', key: 'x6', prefix: 'team/./docs2', projectId: 'p3' });
+
+    const found = await findBucketsSharingStorage(dbOf([self, ...spelled, apart]), TENANT, self);
+
+    expect(found.map((entry) => entry._id).sort()).toEqual(['b-around', 'b-back', 'b-dot', 'b-doubled', 'b-inside']);
+  });
+
+  it('reads a bucket stored with a key or folder that is not text as the folder it would have had, and does not fail on it', async () => {
+    // A JSON number as a key was accepted before keys were validated, and stored as the folder.
+    const numeric = bucket({ _id: 'b-num', key: 123 as unknown as string, projectId: 'p2' });
+    const numericFolder = bucket({ _id: 'b-num-folder', key: 'plain', prefix: 456 as unknown as string, projectId: 'p2' });
+    const noKey = bucket({ _id: 'b-none', key: undefined as unknown as string, prefix: undefined, projectId: 'p2' });
+
+    expect(resolveBucketPrefix(numeric)).toBe('123');
+    expect(resolveBucketPrefix(numericFolder)).toBe('plain');
+    expect(resolveBucketPrefix(noKey)).toBe('');
+
+    // One such row must not take the check down for every other bucket of the tenant.
+    const found = await findBucketsSharingStorage(dbOf([bucket(), numeric, numericFolder, noKey]), TENANT, bucket());
+    expect(found.map((entry) => entry._id)).toEqual(['b-none']);
+    const sibling = bucket({ _id: 'b-sibling', key: '123', projectId: 'p3' });
+    expect((await findBucketsSharingStorage(dbOf([sibling, numeric]), TENANT, sibling)).map((entry) => entry._id)).toEqual(['b-num']);
   });
 
   it('tells the bucket itself by its id, so a second bucket with the same key in another project is not "itself"', async () => {

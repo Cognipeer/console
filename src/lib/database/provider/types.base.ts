@@ -989,13 +989,24 @@ export interface IFileRecord {
   updatedAt?: Date;
 }
 
+/** The fields of a file record that can be empty, and so can be cleared by a patch. */
+type ClearableFileRecordField =
+  | 'contentType'
+  | 'checksum'
+  | 'etag'
+  | 'markdownKey'
+  | 'markdownError'
+  | 'markdownSize'
+  | 'markdownContentType';
+
 /**
- * What `updateFileRecord` can change. `markdownError` also takes `null`: it clears an error a finished
- * conversion left behind (a field that is left out stays as it is).
+ * What `updateFileRecord` can change. The fields that can be empty also take `null`: it clears what an earlier run
+ * left there - an error a finished conversion left behind, or the type, checksum and Markdown copy of the bytes a
+ * new upload replaced (a field that is left out stays as it is).
  */
 export type FileRecordPatch =
-  Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy' | 'markdownError'>>
-  & { markdownError?: string | null };
+  Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy' | ClearableFileRecordField>>
+  & { [Field in ClearableFileRecordField]?: NonNullable<IFileRecord[Field]> | null };
 
 /** Which files a listing keeps: only session files, or only the ones uploaded some other way. */
 export type FileListPurpose = 'conversation' | 'other';

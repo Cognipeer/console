@@ -12,7 +12,7 @@ import { S3CompatibleFileProviderContract } from '@/lib/providers/contracts/s3Co
 import { isS3OperationError, type S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
 import type { S3FileRuntime } from '@/lib/providers/contracts/s3/s3FileRuntime';
 import type { S3CompatibleSettings } from '@/lib/providers/contracts/s3/s3Helpers';
-import { OutboundDnsError } from '@/lib/security/outboundFetch';
+import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import { s3Error, startFakeS3, type FakeS3, type FakeS3Options } from '../helpers/fakeS3Server';
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
@@ -113,10 +113,13 @@ describe('SaaS', () => {
     await expect(createRuntime('http://[::1]:9000')).rejects.toMatchObject({ name: 'ProviderEndpointError' });
   });
 
-  it('lets a resolver outage stay the retryable error it is, not a policy refusal', async () => {
+  it('answers a resolver outage as the setting it is about, and keeps it retryable: it is no policy refusal', async () => {
     const error = await createRuntime(`http://${uniqueHost('nowhere')}:9000`).catch((caught: Error) => caught);
-    expect(error).toBeInstanceOf(OutboundDnsError);
-    expect(error).toMatchObject({ retryable: true });
+    // the same error, with the same wording, as when the provider is saved or tested (a curated answer with a field)
+    expect(error).toBeInstanceOf(ProviderEndpointError);
+    expect(error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: true });
+    expect((error as Error).message).toMatch(/^Provider endpoint "endpoint" is not allowed: Could not resolve host: nowhere-\d+\.example\.test$/);
+    expect((error as Error).message).not.toMatch(/private network/);
   });
 
   it('refuses a name that is public when the URL is checked and points at this machine when the socket connects', async () => {
@@ -144,13 +147,16 @@ describe('SaaS', () => {
     expect(server.requests).toHaveLength(0);
   });
 
-  it('does not let a provider skip certificate verification', async () => {
-    // a public address: the endpoint itself is allowed, the TLS setting is not
-    await expect(createRuntime('https://93.184.216.34:9000', { allowInsecureTls: true })).rejects.toMatchObject({
-      name: 'ProviderSettingsError',
-      field: 'allowInsecureTls',
-      retryable: false,
-    });
+  it('lets a provider skip certificate verification without opening a private address', async () => {
+    // a public address: the runtime is built with the setting
+    await expect(createRuntime('https://93.184.216.34:9000', { allowInsecureTls: true })).resolves.toBeDefined();
+    for (const endpoint of ['https://10.0.0.5:9000', 'http://127.0.0.1:9000', 'https://169.254.169.254']) {
+      await expect(createRuntime(endpoint, { allowInsecureTls: true }), endpoint).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'endpoint' });
+    }
+  });
+
+  it('takes a plain-http endpoint at a public address', async () => {
+    await expect(createRuntime('http://93.184.216.34:9000')).resolves.toBeDefined();
   });
 
 });

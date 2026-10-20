@@ -53,11 +53,20 @@ export function previewKindOf(file: Pick<FileLike, 'contentType'> & { size?: num
 }
 
 /**
- * Whether the Markdown copy of a file can be shown as text: the conversion succeeded and the copy is small enough
- * (the server previews a Markdown copy as text whatever the original was).
+ * Whether a file has a Markdown copy to read or download. The server decides by the copy itself (`markdownKey`), not
+ * by the status of the last conversion: a re-conversion that fails or is skipped leaves the earlier copy in place,
+ * and one that is still running does not take it away.
  */
-export function canPreviewMarkdown(file: { markdownStatus?: string | null; markdownSize?: number | null }): boolean {
-  if (file.markdownStatus !== 'succeeded') return false;
+export function hasMarkdownCopy(file: { markdownKey?: string | null }): boolean {
+  return Boolean(file.markdownKey);
+}
+
+/**
+ * Whether the Markdown copy of a file can be shown as text: there is a copy and it is small enough (the server
+ * previews a Markdown copy as text whatever the original was; it judges the size of the copy, not of the original).
+ */
+export function canPreviewMarkdown(file: { markdownKey?: string | null; markdownSize?: number | null }): boolean {
+  if (!hasMarkdownCopy(file)) return false;
   return !(typeof file.markdownSize === 'number' && file.markdownSize > PREVIEW_MAX_BYTES);
 }
 

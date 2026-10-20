@@ -9,6 +9,9 @@ import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/
 import { providerRegistry } from '@/lib/providers';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import {
+  graceForLimit,
+  PROVIDER_TEST_GRACE_MS,
+  PROVIDER_TEST_TIMEOUT_MS,
   testProviderConnection,
   type ProviderTestInput,
 } from '@/lib/services/providers/providerConnectionTest';
@@ -247,6 +250,86 @@ describe('the time limit', () => {
     await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledTimes(1));
     expect(runtime.checkConnection).not.toHaveBeenCalled();
     expect(runtime.listFiles).not.toHaveBeenCalled();
+  });
+
+  describe('the grace a stopped check is given to hand in what it has', () => {
+    const stoppedSteps = [
+      { step: 'list', ok: true },
+      { step: 'write', ok: false, message: 'The test was stopped before it finished (time limit).' },
+    ];
+
+    /** A check that waits for the limit, then answers (after `delayMs`) with the steps it got through. */
+    const answeringAfterAbort = (delayMs: number, answer: Record<string, unknown>) => vi.fn((options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener('abort', () => { setTimeout(() => resolve(answer), delayMs); });
+    }));
+
+    it('tells the person the limit passed and what to look at, and keeps the steps the check got through', async () => {
+      const { runtime } = fakeRuntime({
+        checkConnection: answeringAfterAbort(2, { ok: false, message: 'The test was stopped before it finished (time limit).', steps: stoppedSteps }),
+      });
+
+      const result = await testProviderConnection(input(), { createRuntime: creating(runtime) as never, timeoutMs: 40, graceMs: 30 });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toMatch(/^Timed out after 0 s\. The service did not answer: check its address and port, and any firewall or proxy in between\.$/);
+      expect(result.message).not.toMatch(/stopped before it finished/);
+      expect(result.details?.steps).toEqual(stoppedSteps);
+      await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledTimes(1));
+    });
+
+    it('keeps a check that finished its work well: the limit passed, the answer is still good', async () => {
+      const { runtime } = fakeRuntime({
+        checkConnection: answeringAfterAbort(2, { ok: true, message: 'Connected to bucket "files" (list, write, read). Removing the test object did not finish in time.', steps: [{ step: 'list', ok: true }] }),
+      });
+
+      const result = await testProviderConnection(input(), { createRuntime: creating(runtime) as never, timeoutMs: 40, graceMs: 30 });
+
+      expect(result).toMatchObject({ ok: true, message: expect.stringContaining('Removing the test object did not finish in time') });
+    });
+
+    it('gives up on a check that answers after the grace: the timeout error, no steps', async () => {
+      const { runtime } = fakeRuntime({
+        checkConnection: answeringAfterAbort(120, { ok: false, message: 'too late', steps: stoppedSteps }),
+      });
+
+      const result = await testProviderConnection(input(), { createRuntime: creating(runtime) as never, timeoutMs: 40, graceMs: 10 });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toMatch(/^Timed out after 0 s\. The service did not answer:/);
+      expect(result.details).toBeUndefined();
+    });
+
+    it('does not wait at all with a grace of zero', async () => {
+      const { runtime } = fakeRuntime({
+        checkConnection: answeringAfterAbort(0, { ok: false, message: 'stopped', steps: stoppedSteps }),
+      });
+
+      const result = await testProviderConnection(input(), { createRuntime: creating(runtime) as never, timeoutMs: 20, graceMs: 0 });
+
+      expect(result.message).toMatch(/^Timed out after 0 s\./);
+      expect(result.details).toBeUndefined();
+    });
+
+    it('is half a second by default, and a quarter of the limit at most when the limit is short', () => {
+      expect(graceForLimit(PROVIDER_TEST_TIMEOUT_MS)).toBe(500);
+      expect(PROVIDER_TEST_GRACE_MS).toBe(500);
+      expect(graceForLimit(1_000)).toBe(250);
+      expect(graceForLimit(40)).toBe(10);
+      expect(graceForLimit(3)).toBe(0);
+    });
+
+    it('lets a rejection after the limit (an abort is one) be the timeout error, not its own message', async () => {
+      const { runtime } = fakeRuntime({
+        checkConnection: vi.fn((options: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })));
+        })),
+      });
+
+      const result = await testProviderConnection(input(), { createRuntime: creating(runtime) as never, timeoutMs: 40, graceMs: 30 });
+
+      expect(result.message).toMatch(/^Timed out after 0 s\./);
+      expect(result.message).not.toMatch(/aborted/i);
+    });
   });
 
   it('is not triggered by a check that finishes in time', async () => {

@@ -325,7 +325,8 @@ export default function WebSearchListPage() {
               body: JSON.stringify(payload),
             });
             const body = await res.json().catch(() => null);
-            if (!res.ok) throw new Error(body?.error || 'Failed to create instance');
+            // The refusal names the form field it is about: the form marks it, as it does for an edit.
+            if (!res.ok) throw providerRequestError(body, 'Failed to create instance');
             notifications.show({
               color: 'teal',
               title: 'Web Search',

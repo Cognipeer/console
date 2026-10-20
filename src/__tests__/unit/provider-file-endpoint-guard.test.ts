@@ -155,6 +155,39 @@ describe('assertProviderEndpointsAllowed for file stores', () => {
     await expect(assertProviderEndpointsAllowed('file', scope, { uri: 'mongodb://app:pw@minio.example.com:27017/files?replicaSet=rs0' })).resolves.toBeUndefined();
   });
 
+  // Every host a connection string names is dialled (a seed list, the options a driver reads before the authority), so
+  // the one that is private can be anywhere in it - not only the first.
+  const PRIVATE_HOST_NOT_FIRST: Array<[where: string, uri: string]> = [
+    ['the second of two seeds', 'mongodb://app:pw@minio.example.com:27017,10.0.0.5:27017/files?replicaSet=rs0'],
+    ['the third of three seeds', 'mongodb://minio.example.com:27017,archive.public.example:27017,storage.corp.example:27017/files'],
+    ['the last seed, written as an address', 'mongodb://minio.example.com:27017,archive.public.example:27017,[::1]:27017/files'],
+    ['a host given in the options', 'postgres://app@minio.example.com:5432/files?host=10.0.0.5'],
+    ['the second of several hosts in the options', 'postgres://app@minio.example.com:5432/files?host=archive.public.example,10.0.0.5&sslmode=require'],
+  ];
+
+  it.each(PRIVATE_HOST_NOT_FIRST)('SaaS refuses a connection string whose private host is %s, when saving and when testing', async (_where, uri) => {
+    use(saas);
+    for (const check of [assertProviderEndpointsAllowed, assertProviderTestEndpointsAllowed]) {
+      const error = await check('file', scope, { uri }).catch((e: unknown) => e);
+      expect(error, check.name).toBeInstanceOf(ProviderEndpointError);
+      expect(error, check.name).toMatchObject({ field: 'uri', code: 'provider_endpoint_not_allowed' });
+      // refused for the address it names, not because one of the other names did not resolve
+      expect((error as Error).message, check.name).toMatch(/private network addresses/);
+    }
+  });
+
+  it('SaaS accepts a connection string whose hosts are all public, however many it names', async () => {
+    use(saas);
+    for (const uri of [
+      'mongodb://app:pw@minio.example.com:27017,archive.public.example:27017,other.public.example:27018/files?replicaSet=rs0',
+      'postgres://app@minio.example.com:5432/files?host=archive.public.example,other.public.example',
+    ]) {
+      for (const check of [assertProviderEndpointsAllowed, assertProviderTestEndpointsAllowed]) {
+        await expect(check('file', scope, { uri }), `${check.name}: ${uri}`).resolves.toBeUndefined();
+      }
+    }
+  });
+
   it('SaaS refuses a connection string whose hosts it cannot read: a local socket, no host, a +srv string it cannot read the record of', async () => {
     use(saas);
     for (const uri of [

@@ -250,6 +250,7 @@ export async function getFileBucketDetail(
     return {
         ...bucketListItem(record, providerView, row ? { fileCount: row.fileCount, totalBytes: row.totalBytes } : undefined),
         usedBy,
+        usedByCount: usedBy.length,
         storageLocation: bucketStorageLocation(providerView, tenantId, record),
     };
 }

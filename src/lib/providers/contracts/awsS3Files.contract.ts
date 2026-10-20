@@ -117,15 +117,15 @@ export const AwsS3FileProviderContract: ProviderContract<
             type: 'switch',
             defaultValue: false,
             description:
-              'Only used with a custom endpoint. Accept any certificate, including self-signed ones. Self-hosted installations only; prefer the CA certificate.',
+              'Only used with a custom endpoint. Accept any certificate, including self-signed ones. Prefer the CA certificate.',
             scope: 'settings',
           },
         ],
       },
     ],
   },
-  validateSettings({ credentials, settings, isOnPrem }) {
-    validateS3Settings({ credentials, settings, isOnPrem, requireEndpoint: false });
+  validateSettings({ credentials, settings }) {
+    validateS3Settings({ credentials, settings, requireEndpoint: false });
   },
   describeStorageLocation({ settings, tenantId, providerKey }) {
     return describeS3Location(settings, tenantId, providerKey);

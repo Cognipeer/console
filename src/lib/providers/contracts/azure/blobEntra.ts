@@ -5,7 +5,8 @@
  * `ClientSecretCredential` does here, and it takes ~45 MB of MSAL dependencies to do it. This is one POST,
  * a cache and a single-flight guard. The request itself is made by the caller's `fetchImpl` (`safeFetch` in
  * production: DNS pinned to the vetted addresses, private targets refused under the deployment's policy,
- * redirects handed back instead of followed).
+ * redirects handed back instead of followed; for a provider with its own CA certificate or skipped verification,
+ * the same call carries that trust).
  *
  * The authority host is a setting, so the token server is not always Microsoft's: the whole exchange (the request
  * and every byte of the answer) runs under one deadline, and the answer is read only up to a size no token
@@ -13,7 +14,7 @@
  * credential.
  */
 
-import { AzureBlobError, isAzureBlobError, withoutMissingPhrases } from './blobErrors';
+import { AzureBlobError, isAzureBlobError, redactSecrets, tlsFailureCode, withoutMissingPhrases } from './blobErrors';
 import { validateClientSecretConfig } from './blobConfig';
 
 /**
@@ -57,6 +58,12 @@ export const ENTRA_TIMEOUT_MS = 10_000;
 
 /** The most of an answer that is read. A token response is about 2 KB; anything near this is not one. */
 export const ENTRA_MAX_RESPONSE_BYTES = 64 * 1024;
+
+/** The spellings a server may echo a secret in: as sent in the form, URL-encoded, and form-encoded (a space as `+`). */
+function secretSpellings(secret: string): string[] {
+  const spellings = new Set([secret, encodeURIComponent(secret), new URLSearchParams({ s: secret }).toString().slice(2)]);
+  return [...spellings];
+}
 
 /** Cuts at a word boundary so a long service sentence does not end mid-word. */
 function clip(text: string, max: number): string {
@@ -142,6 +149,10 @@ export function createClientSecretCredential(cfg: ClientSecretConfig): TokenCred
   const timeoutMs = cfg.timeoutMs ?? ENTRA_TIMEOUT_MS;
   const maxResponseBytes = cfg.maxResponseBytes ?? ENTRA_MAX_RESPONSE_BYTES;
 
+  // Whatever the authority writes back is its own text: the secret is taken out of it wherever it was echoed.
+  const secrets = secretSpellings(cfg.clientSecret);
+  const scrub = (text: string) => redactSecrets(text, secrets);
+
   const failed = (message: string) => new AzureBlobError(message, { code: 'EntraTokenRequestFailed', retryable: true });
   const timedOut = () => failed(`Microsoft Entra at ${authority} did not finish answering within ${durationText(timeoutMs)}.`);
   const tooLarge = () => failed(`Microsoft Entra at ${authority} answered with more than ${Math.round(maxResponseBytes / 1024)} KiB, which is not a token response.`);
@@ -193,6 +204,14 @@ export function createClientSecretCredential(cfg: ClientSecretConfig): TokenCred
     } catch (error) {
       if (isAzureBlobError(error)) throw error;
       if (deadline.aborted || isAbortLike(error)) throw timedOut();
+      const tlsCode = tlsFailureCode(error);
+      if (tlsCode) {
+        // The provider's CA certificate (or the verification switch) covers the authority as well as the blobs.
+        throw new AzureBlobError(
+          `The TLS certificate of Microsoft Entra at ${authority} is not trusted (${tlsCode}). Paste the issuing CA certificate into the "CA certificate" setting, or turn on "Skip TLS verification" for a test setup.`,
+          { code: 'EntraTokenRequestFailed', retryable: false },
+        );
+      }
       throw new AzureBlobError(`Could not reach Microsoft Entra at ${authority}: ${reasonText(error)}.`, {
         // A refusal by the network policy stays refused; an outage may pass.
         retryable: (error as { retryable?: unknown } | undefined)?.retryable !== false,
@@ -213,18 +232,34 @@ export function createClientSecretCredential(cfg: ClientSecretConfig): TokenCred
     } catch {
       body = undefined;
     }
-    if (!response.ok || typeof body?.access_token !== 'string') {
-      const code = tokenText(body?.error) ?? `HTTP ${response.status}`;
+    if (!response.ok || typeof body?.access_token !== 'string' || body.access_token.trim() === '') {
+      const status = response.status;
+      const errorCode = typeof body?.error === 'string' ? tokenText(scrub(body.error)) : undefined;
+      // An authority that is down or throttling is not a verdict on the service principal.
+      if (status >= 500 || status === 429 || status === 408) {
+        throw new AzureBlobError(
+          `Microsoft Entra at ${authority} is unavailable or throttling (HTTP ${status}${errorCode ? ` ${errorCode}` : ''}); try again.`,
+          { statusCode: status, code: 'EntraTokenRequestFailed' },
+        );
+      }
+      // An OAuth error object is a rejection, and so is a plain 401 or 403. A page, an empty answer or a token-less
+      // 200 means the URL is not a token endpoint.
+      if (errorCode === undefined && status !== 401 && status !== 403) {
+        throw new AzureBlobError(
+          `Microsoft Entra at ${authority} answered with something that is not a token response (HTTP ${status}). Check the authority host.`,
+          { code: 'EntraTokenRequestFailed', retryable: false },
+        );
+      }
       const aadsts = Array.isArray(body?.error_codes) && body.error_codes.length > 0 && tokenText(body.error_codes[0])
         ? ` AADSTS${tokenText(body.error_codes[0])}`
         : '';
       const description = typeof body?.error_description === 'string'
-        ? clip(withoutMissingPhrases(body.error_description.split(/\r?\n/, 1)[0].replace(/^AADSTS\d+:\s*/, '')), 240)
+        ? clip(withoutMissingPhrases(scrub(body.error_description.split(/\r?\n/, 1)[0]).replace(/^AADSTS\d+:\s*/, '')), 240)
         : '';
-      // A rejected service principal is the configuration's to fix (401); an authority that is down is not.
+      // A rejected service principal is the configuration's to fix (401).
       throw new AzureBlobError(
-        `Microsoft Entra rejected the service principal (${code}${aadsts})${description ? `: ${description}` : ''}`,
-        { statusCode: response.status === 401 || response.status === 400 ? 401 : response.status, code: 'EntraTokenRequestFailed' },
+        `Microsoft Entra rejected the service principal (${errorCode ?? `HTTP ${status}`}${aadsts})${description ? `: ${description}` : ''}`,
+        { statusCode: status === 400 || status === 401 || status === 200 ? 401 : status, code: 'EntraTokenRequestFailed' },
       );
     }
     const lifetime = typeof body.expires_in === 'number' ? body.expires_in : Number(body.expires_in) || 3600;

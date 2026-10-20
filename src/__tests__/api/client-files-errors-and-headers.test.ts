@@ -73,6 +73,7 @@ import { CircuitOpenError, RequestTimeoutError } from '@/lib/core/resilience';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import { AzureBlobError } from '@/lib/providers/contracts/azure/blobErrors';
 import { S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
+import { StorageInvalidKeyError } from '@/lib/providers/contracts/storageLimits';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { deleteFile, downloadFile, getFileBucket, getFileRecord, listFileBuckets, listFiles, uploadFile } from '@/lib/services/files';
 import { FileServiceError, bucketInactiveError } from '@/lib/services/files/errors';
@@ -130,6 +131,9 @@ describe('an upload that cannot be done answers with a status, a code and a safe
     ['a storage call that timed out: 504', () => mockFn(uploadFile).mockRejectedValue(new RequestTimeoutError('file-upload:tenant-1:s3-main', 30_000)), 504, { code: 'storage_timeout' }],
     ['a failure the S3 driver put into words: 502 with its message', () => mockFn(uploadFile).mockRejectedValue(new S3OperationError({ code: 'access_denied', message: 'The access key is not allowed to write to bucket "files".', statusCode: 403, retryable: false })), 502, { error: 'The access key is not allowed to write to bucket "files".', code: 'storage_failure' }],
     ['a failure the Azure driver put into words: 502 with its message', () => mockFn(uploadFile).mockRejectedValue(new AzureBlobError('The storage account key is not accepted. Check the account name and key.', { statusCode: 403, code: 'AuthenticationFailed' })), 502, { error: 'The storage account key is not accepted. Check the account name and key.', code: 'storage_failure' }],
+    ['a key the S3 store refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new S3OperationError({ code: 'invalid_key', message: 'Invalid file key provided: it is longer than the store allows (Amazon S3: 1024 bytes in UTF-8, the provider prefix included).', statusCode: 400, retryable: false })), 400, { error: 'Invalid file key provided: it is longer than the store allows (Amazon S3: 1024 bytes in UTF-8, the provider prefix included).', code: 'invalid_request' }],
+    ['a key the Azure driver refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new AzureBlobError('Invalid file key provided: the blob name would exceed 1024 characters or 254 path segments.', { statusCode: 400, code: 'InvalidFileKey', retryable: false })), 400, { error: 'Invalid file key provided: the blob name would exceed 1024 characters or 254 path segments.', code: 'invalid_request' }],
+    ['a key the disk or GridFS driver refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new StorageInvalidKeyError('it holds a character that has no UTF-8 form (a lone surrogate).')), 400, { error: 'Invalid file key provided: it holds a character that has no UTF-8 form (a lone surrogate).', code: 'invalid_request' }],
     ['an endpoint the outbound guard refuses: 502 with its message and field', () => mockFn(uploadFile).mockRejectedValue(new ProviderEndpointError('endpoint', 'private addresses are not allowed')), 502, { code: 'storage_failure', field: 'endpoint' }],
     ['anything else from the provider: a generic 502', () => mockFn(uploadFile).mockRejectedValue(sdkFailure), 502, { error: 'The storage provider request failed.', code: 'storage_failure' }],
   ])('%s', async (_name, arrange, status, body) => {
@@ -241,6 +245,8 @@ describe('a download', () => {
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-length']).toBe('5');
     expect(res.headers.etag).toBe('"abc"');
+    // The body is for the token that asked: a shared cache or a proxy keeps none of it.
+    expect(res.headers['cache-control']).toBe('private, no-store');
     expect(res.rawPayload.toString()).toBe('hello');
   });
 

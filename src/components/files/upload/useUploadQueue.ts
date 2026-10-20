@@ -32,7 +32,8 @@ export function isBusy(items: readonly QueueItem[]): boolean {
 }
 
 /**
- * One queue per mounted screen. Uploads still in flight when the screen goes away are aborted. The two
+ * One queue per mounted screen. Uploads still in flight when the screen goes away are aborted, and what the run had
+ * stored (or may have, if a request was cut off) is reported through `onSettled` as a finished run is. The two
  * callbacks may change on every render: the queue always calls the latest ones.
  */
 export function useUploadQueue({ describeError, onSettled, ...options }: UseUploadQueueOptions): UseUploadQueueResult {

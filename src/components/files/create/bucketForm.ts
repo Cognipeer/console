@@ -8,14 +8,15 @@
 
 import { isFilesApiError, type CreateBucketInput, type FileProviderListItem } from '../filesApi';
 import { isLocalDiskProvider } from '../list/providerModel';
+import { bucketDescriptionFault, bucketNameFault, bucketPrefixFault, normalizeBucketPrefix } from '../shared/bucketRules';
 
-/** The longest bucket name (the same limit the bucket's Settings tab applies). */
-export const BUCKET_NAME_MAX = 120;
+// The limits and the prefix rules are shared with the bucket's Settings tab (`shared/bucketRules.ts`).
+export { BUCKET_DESCRIPTION_MAX, BUCKET_NAME_MAX, BUCKET_PREFIX_MAX, normalizeBucketPrefix } from '../shared/bucketRules';
+
 /** The longest key a bucket is created with. */
 export const BUCKET_KEY_MAX = 64;
 /** The longest key the name alone turns into; a key typed by hand may be longer, up to `BUCKET_KEY_MAX`. */
 export const BUCKET_AUTO_KEY_MAX = 40;
-export const BUCKET_PREFIX_MAX = 200;
 
 /* ── The key ─────────────────────────────────────────────────────────────── */
 
@@ -61,14 +62,16 @@ export function normalizeKeyInput(raw: string): string {
 /* ── What the form accepts ───────────────────────────────────────────────── */
 
 export type NameIssue = 'required' | 'tooLong';
+export type DescriptionIssue = 'tooLong';
 export type KeyIssue = 'required' | 'invalid' | 'tooLong';
 export type PrefixIssue = 'invalid' | 'tooLong';
 
 export function bucketNameIssue(name: string): NameIssue | null {
-  const trimmed = name.trim();
-  if (!trimmed) return 'required';
-  if (trimmed.length > BUCKET_NAME_MAX) return 'tooLong';
-  return null;
+  return bucketNameFault(name);
+}
+
+export function bucketDescriptionIssue(description: string): DescriptionIssue | null {
+  return bucketDescriptionFault(description);
 }
 
 export function bucketKeyIssue(key: string): KeyIssue | null {
@@ -79,23 +82,11 @@ export function bucketKeyIssue(key: string): KeyIssue | null {
   return null;
 }
 
-/** The prefix as the server keeps it: no spaces around it, no leading or trailing slash, no doubled slash. */
-export function normalizeBucketPrefix(raw: string): string {
-  return raw
-    .trim()
-    .replace(/\/{2,}/g, '/')
-    .replace(/^\/+|\/+$/g, '');
-}
-
 /** A prefix is a path inside the provider: it cannot climb out of it, use backslashes or carry control characters. */
 export function bucketPrefixIssue(raw: string): PrefixIssue | null {
-  const prefix = normalizeBucketPrefix(raw);
-  if (!prefix) return null;
-  if (prefix.length > BUCKET_PREFIX_MAX) return 'tooLong';
-  if (/[\\\u0000-\u001f\u007f]/.test(prefix) || prefix.split('/').some((segment) => segment === '..' || segment === '.')) {
-    return 'invalid';
-  }
-  return null;
+  const fault = bucketPrefixFault(raw);
+  if (fault === null) return null;
+  return fault === 'tooLong' ? 'tooLong' : 'invalid';
 }
 
 /**
@@ -120,7 +111,7 @@ export type StoragePreview =
 
 /** Where the files of the bucket will physically be, from the provider's location base and the folder. */
 export function storagePreview(
-  provider: Pick<FileProviderListItem, 'driver' | 'storageLocationBase'> | null | undefined,
+  provider: Pick<FileProviderListItem, 'driver' | 'driverCapabilities' | 'storageLocationBase'> | null | undefined,
   folder: string,
   fileKeyLabel: string,
 ): StoragePreview {

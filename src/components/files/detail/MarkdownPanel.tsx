@@ -10,9 +10,13 @@ import {
   CopyButton,
   filesErrorMessage,
   formatBytes,
+  hasMarkdownCopy,
+  isQuietFor,
+  MARKDOWN_STALLED_AFTER_MS,
   MarkdownStatusBadge,
   PREVIEW_MAX_BYTES,
   ReadOnlyHint,
+  useNow,
 } from '../shared';
 import { useConvertObject, useObjectText } from '../useFilesQueries';
 import BucketLockHint from './BucketLockHint';
@@ -60,15 +64,23 @@ function MarkdownText({ bucketKey, record }: { bucketKey: string; record: FileRe
 }
 
 /**
- * The Markdown copy of the file: where the conversion stands, why it failed, the copy's text (as plain text),
- * and, for someone who may change files, the button that (re)starts the conversion. A conversion that is still
- * running is followed by the drawer's record query, which polls while it is pending.
+ * The Markdown copy of the file: where the conversion stands, why it failed or was skipped, the copy's text (as plain
+ * text), and, for someone who may change files, the button that (re)starts the conversion.
+ *
+ * The copy is judged by the copy itself (`markdownKey`), not by the status of the last conversion: a re-conversion
+ * that failed or was skipped leaves the earlier copy readable, and one that is running does not take it away. A
+ * conversion that is running is followed by the drawer's record query, which polls while it is pending; one that has
+ * been pending for so long that its job was probably lost (a restart drops the queue) can be started again.
  */
 export default function MarkdownPanel({ bucketKey, record, canWrite, lock = null, onStarted }: MarkdownPanelProps) {
   const t = useTranslations('files.detail');
   const tc = useTranslations('files.common');
   const convert = useConvertObject();
   const status = record.markdownStatus;
+  const copy = hasMarkdownCopy(record);
+  const now = useNow(30_000, status === 'pending');
+  const lost = status === 'pending' && isQuietFor(record.updatedAt ?? record.createdAt, MARKDOWN_STALLED_AFTER_MS, now);
+  const reason = record.markdownError?.trim() || null;
 
   const start = () => {
     if (convert.isPending) return;
@@ -96,12 +108,36 @@ export default function MarkdownPanel({ bucketKey, record, canWrite, lock = null
     <div>
       <div className={styles.statusRow} role="status">
         <MarkdownStatusBadge status={status} error={record.markdownError} />
-        {status === 'succeeded' && typeof record.markdownSize === 'number' ? (
+        {copy && typeof record.markdownSize === 'number' ? (
           <span className={styles.statusText}>{t('markdown.size', { size: formatBytes(record.markdownSize) })}</span>
         ) : null}
       </div>
 
-      {status === 'succeeded' ? (
+      {status === 'pending' ? (
+        <div className={styles.block}>
+          <p className={styles.note}>{lost ? t('markdown.pendingStale') : t('markdown.pendingHint')}</p>
+          {lost ? action(t('markdown.convertAgain')) : null}
+        </div>
+      ) : null}
+
+      {status === 'failed' ? (
+        <div className={styles.block}>
+          <Alert variant="light" color="red" icon={<IconAlertTriangle size={16} />} title={tc('markdown.failureTitle')}>
+            <p className={styles.reason}>{reason || tc('markdown.failureUnknown')}</p>
+          </Alert>
+          {copy ? <p className={styles.note}>{t('markdown.keptCopy')}</p> : null}
+        </div>
+      ) : null}
+
+      {/* A skipped conversion says why (a file over the limit); the earlier copy, if any, is still there. */}
+      {status === 'skipped' && reason ? (
+        <div className={styles.block}>
+          <p className={styles.note}>{reason}</p>
+          {copy ? <p className={styles.note}>{t('markdown.keptCopy')}</p> : null}
+        </div>
+      ) : null}
+
+      {copy ? (
         <div className={styles.block}>
           {canPreviewMarkdown(record) ? (
             <MarkdownText bucketKey={bucketKey} record={record} />
@@ -111,21 +147,13 @@ export default function MarkdownPanel({ bucketKey, record, canWrite, lock = null
         </div>
       ) : null}
 
-      {status === 'pending' ? <p className={styles.note}>{t('markdown.pendingHint')}</p> : null}
+      {status === 'failed' ? <div className={styles.block}>{action(t('markdown.retry'))}</div> : null}
 
-      {status === 'failed' ? (
+      {/* Nothing converted yet, or a conversion that was skipped: one can be started (again, when a copy is there). */}
+      {status !== 'pending' && status !== 'failed' && !(copy && status === 'succeeded') ? (
         <div className={styles.block}>
-          <Alert variant="light" color="red" icon={<IconAlertTriangle size={16} />} title={tc('markdown.failureTitle')}>
-            <p className={styles.reason}>{record.markdownError?.trim() || tc('markdown.failureUnknown')}</p>
-          </Alert>
-          {action(t('markdown.retry'))}
-        </div>
-      ) : null}
-
-      {status !== 'succeeded' && status !== 'pending' && status !== 'failed' ? (
-        <div className={styles.block}>
-          <p className={styles.note}>{t('markdown.noneHint')}</p>
-          {action(t('markdown.convert'))}
+          {copy ? null : <p className={styles.note}>{t('markdown.noneHint')}</p>}
+          {action(copy ? t('markdown.convertAgain') : t('markdown.convert'))}
         </div>
       ) : null}
 

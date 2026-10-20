@@ -5,7 +5,8 @@
  * and what a member the servers announce is allowed to be.
  *
  * Nothing connects: `MongoClient.prototype.connect` is replaced by a promise the test settles, DNS is answered by a
- * mock, and the events a replica set would raise are emitted by hand.
+ * mock, and the events a replica set would raise are emitted by hand. (The same checks against a real driver and real
+ * sockets are in mongo-gridfs-endpoint-policy.test.ts.)
  */
 import type { LookupOptions } from 'node:dns';
 import type { LookupFunction } from 'node:net';
@@ -66,6 +67,11 @@ const create = async (uri: string, tenantId: string) =>
 /** What a replica set raises when the driver starts connecting to a member. */
 function serverOpening(client: MongoClient, address: string): void {
   client.emit('serverOpening', { topologyId: 1, address } as never);
+}
+
+/** What a replica set raises when a server answers the driver's heartbeat: the answer is read into the topology right after. */
+function heartbeatAnswer(client: MongoClient, reply: Record<string, unknown>): void {
+  client.emit('serverHeartbeatSucceeded', { connectionId: 'seed:27017', duration: 1, reply, awaited: false } as never);
 }
 
 /** Starts a runtime, waits for the connection it starts, and returns both. */
@@ -219,6 +225,99 @@ describe('a member the servers announce', () => {
   });
 });
 
+describe('the members a heartbeat answer announces', () => {
+  /** Starts a runtime for `tenantId`, delivers `reply` as a server's answer while it connects, and settles the connection. */
+  async function answer(reply: Record<string, unknown>, tenantId: string) {
+    const { connect, result } = await start(freshUri('100.64.10.5'), tenantId);
+    heartbeatAnswer(connect.client, reply);
+    connect.settle();
+    const outcome = await result;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return { outcome, client: connect.client };
+  }
+
+  it('are taken out of the answer, in place, when the organization has not opened them: the driver never learns of them', async () => {
+    const reply = {
+      setName: 'rs0',
+      primary: 'seed.corp.example:27017',
+      hosts: ['seed.corp.example:27017', '10.50.1.5:27017', '127.0.0.1:27018', '100.64.10.7:27017'],
+      passives: ['169.254.169.254:80', 'passive.corp.example:27017'],
+      arbiters: ['[::1]:27017', '[fd12:3456::5]:27017'],
+    };
+
+    const { outcome, client } = await answer(reply, TENANT_B);
+
+    // what the organization may dial, and the names, stay, in their order; everything else of the answer is untouched
+    expect(reply).toEqual({
+      setName: 'rs0',
+      primary: 'seed.corp.example:27017',
+      hosts: ['seed.corp.example:27017', '100.64.10.7:27017'],
+      passives: ['passive.corp.example:27017'],
+      arbiters: [],
+    });
+    // and the attempt ends with a refusal: the client is closed and not kept
+    expect(outcome).toHaveProperty('error');
+    expect((outcome as { error: unknown }).error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'uri', retryable: false });
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
+    expect(close.mock.contexts).toEqual([client]);
+  });
+
+  it('are kept when they are inside the organization\'s networks, and so are the names', async () => {
+    const reply = {
+      hosts: ['10.50.1.5:27017', '[fd12:3456::5]:27017', '100.64.10.9:27017', 'shard-0.corp.example:27017'],
+      passives: ['10.50.2.2:27017'],
+      arbiters: ['[::ffff:10.50.1.6]:27017'],
+    };
+    const before = structuredClone(reply);
+
+    const { outcome } = await answer(reply, TENANT_A);
+
+    expect(reply).toEqual(before);
+    expect(outcome).toHaveProperty('runtime');
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('are all taken out, however many follow each other: none is skipped', async () => {
+    const adjacent = Array.from({ length: 12 }, (_, i) => `10.99.0.${i + 1}:27017`);
+    const reply = { hosts: ['a.corp.example:27017', ...adjacent, 'b.corp.example:27017', ...adjacent.map((address) => address.replace('10.99.', '10.98.'))] };
+
+    const { outcome } = await answer(reply, TENANT_A);
+
+    expect(reply.hosts).toEqual(['a.corp.example:27017', 'b.corp.example:27017']);
+    expect(outcome).toHaveProperty('error');
+  });
+
+  it('are refused for every organization when no network can open them', async () => {
+    for (const address of ['10.99.0.7:27017', '169.254.169.254:27017', '127.0.0.1:27017', '[::1]:27017', '[fd00:ec2::254]:27017', '[::ffff:10.99.0.7]:27017']) {
+      const reply = { hosts: ['seed.corp.example:27017', address] };
+      const { outcome } = await answer(reply, TENANT_A);
+      expect(reply.hosts, address).toEqual(['seed.corp.example:27017']);
+      expect(outcome, address).toHaveProperty('error');
+    }
+  });
+
+  it('are not looked for in an answer that does not list members, or lists what is not an address', async () => {
+    for (const reply of [{}, { ok: 1 }, { hosts: 'seed:27017' }, { hosts: null, passives: undefined }, { hosts: [5, null, {}, ['10.99.0.1:27017']], arbiters: 'x' }]) {
+      const before = structuredClone(reply);
+      const { outcome } = await answer(reply as Record<string, unknown>, TENANT_A);
+      expect(reply, JSON.stringify(before)).toEqual(before);
+      expect(outcome, JSON.stringify(before)).toHaveProperty('runtime');
+    }
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('are no reason to fail the connection when the answer cannot be read', async () => {
+    const reply = {};
+    Object.defineProperty(reply, 'hosts', { get() { throw new Error('unreadable'); }, enumerable: true });
+
+    const { outcome } = await answer(reply, TENANT_A);
+
+    // the second line (the member the driver is about to open) is still there for this connection
+    expect(outcome).toHaveProperty('runtime');
+    expect(close).not.toHaveBeenCalled();
+  });
+});
+
 describe('a self-hosted install', () => {
   it('that allows private targets (the default) shares one client per URI, as it always did, whatever is configured', async () => {
     useDeployment({ ...ONPREM, PROVIDER_PRIVATE_NETWORKS: NETWORKS });
@@ -233,8 +332,11 @@ describe('a self-hosted install', () => {
 
     // nothing the servers announce is refused there either
     serverOpening(connects[0]!.client, '127.0.0.1:27017');
+    const reply = { hosts: ['127.0.0.1:27017', '10.99.0.7:27017'] };
+    heartbeatAnswer(connects[0]!.client, reply);
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(close).not.toHaveBeenCalled();
+    expect(reply.hosts).toEqual(['127.0.0.1:27017', '10.99.0.7:27017']);
   });
 
   it('that blocks private targets keeps a client per organization, like SaaS', async () => {
@@ -246,5 +348,25 @@ describe('a self-hosted install', () => {
     for (const connect of connects) connect.settle();
     await Promise.all([a, b]);
     expect(connects[0]!.client).not.toBe(connects[1]!.client);
+  });
+});
+
+describe('the connection of the application itself', () => {
+  it('is dialled and monitored as it always was, on a deployment that blocks private targets', async () => {
+    const appUri = `mongodb://10.99.0.7:27017/?replicaSet=rs-${++counter}`;
+    useDeployment({ ...SAAS, PROVIDER_PRIVATE_NETWORKS: NETWORKS, DB_PROVIDER: 'mongodb', MONGODB_URI: appUri });
+
+    const result = MongoGridFsFileProviderContract.createRuntime({ tenantId: TENANT_B, providerKey: 'p', credentials: {}, settings: {} });
+    await vi.waitFor(() => expect(connects.length).toBe(1));
+    const reply = { hosts: ['10.99.0.7:27017', '10.99.0.8:27017', '127.0.0.1:27017'] };
+    serverOpening(connects[0]!.client, '10.99.0.8:27017');
+    heartbeatAnswer(connects[0]!.client, reply);
+    connects[0]!.settle();
+
+    await expect(result).resolves.toBeDefined();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reply.hosts).toEqual(['10.99.0.7:27017', '10.99.0.8:27017', '127.0.0.1:27017']);
+    expect(close).not.toHaveBeenCalled();
+    expect((connects[0]!.client.options as unknown as { lookup?: unknown }).lookup).toBeUndefined();
   });
 });

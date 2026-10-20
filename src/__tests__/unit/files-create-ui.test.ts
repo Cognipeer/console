@@ -33,9 +33,11 @@ import { CreateFileBucketForm } from '@/components/files/create/CreateFileBucket
 import { ProviderCards } from '@/components/files/create/ProviderCards';
 import {
   BUCKET_AUTO_KEY_MAX,
+  BUCKET_DESCRIPTION_MAX,
   BUCKET_KEY_MAX,
   BUCKET_NAME_MAX,
   BUCKET_PREFIX_MAX,
+  bucketDescriptionIssue,
   bucketKeyIssue,
   bucketNameIssue,
   bucketPrefixIssue,
@@ -213,6 +215,23 @@ describe('what the form accepts', () => {
     expect(bucketPrefixIssue('p'.repeat(BUCKET_PREFIX_MAX + 1))).toBe('tooLong');
   });
 
+  it('refuses what the server refuses in a prefix: two dots anywhere, the delete character, and more than 200 characters', () => {
+    expect(BUCKET_PREFIX_MAX).toBe(200);
+    expect(bucketPrefixIssue('release..notes')).toBe('invalid');
+    expect(bucketPrefixIssue('v1.2/notes')).toBeNull();
+    expect(bucketPrefixIssue('a\u007fb')).toBe('invalid');
+    expect(bucketPrefixIssue('p'.repeat(BUCKET_PREFIX_MAX))).toBeNull();
+    // the slashes around the prefix are not counted
+    expect(bucketPrefixIssue(`/${'p'.repeat(BUCKET_PREFIX_MAX)}/`)).toBeNull();
+  });
+
+  it('asks for a description of at most 1000 characters', () => {
+    expect(bucketDescriptionIssue('')).toBeNull();
+    expect(bucketDescriptionIssue('d'.repeat(BUCKET_DESCRIPTION_MAX))).toBeNull();
+    expect(bucketDescriptionIssue(` ${'d'.repeat(BUCKET_DESCRIPTION_MAX)} `)).toBeNull();
+    expect(bucketDescriptionIssue('d'.repeat(BUCKET_DESCRIPTION_MAX + 1))).toBe('tooLong');
+  });
+
   it('uses the key as the folder when no prefix is given, as the server does', () => {
     expect(effectiveBucketPrefix('', 'marketing-assets')).toBe('marketing-assets');
     expect(effectiveBucketPrefix('   ', 'marketing-assets')).toBe('marketing-assets');
@@ -239,10 +258,19 @@ describe('where the files will be stored', () => {
   it('says so when there is nothing to preview', () => {
     expect(storagePreview(undefined, 'docs', '<file key>')).toEqual({ kind: 'none' });
     expect(storagePreview({ driver: 'local-filesystem', storageLocationBase: null }, 'docs', '<file key>')).toEqual({ kind: 'localDisk' });
-    expect(storagePreview({ driver: 'aws-s3-files', storageLocationBase: null }, 'docs', '<file key>')).toEqual({ kind: 'localDisk' });
     // a server that does not send the field at all (as opposed to sending null for its own disk)
     const withoutBase = { driver: 'aws-s3-files' } as Parameters<typeof storagePreview>[0];
     expect(storagePreview(withoutBase, 'docs', '<file key>')).toEqual({ kind: 'unknown' });
+  });
+
+  it('tells the server’s own disk by its driver, not by an address that is missing', () => {
+    // An object store whose settings name no bucket or container yet has no address either, and is not a disk.
+    expect(storagePreview({ driver: 'aws-s3-files', storageLocationBase: null }, 'docs', '<file key>')).toEqual({ kind: 'unknown' });
+    expect(storagePreview({ driver: 'azure-blob-files', storageLocationBase: null }, 'docs', '<file key>')).toEqual({ kind: 'unknown' });
+    expect(storagePreview({ driver: 'aws-s3-files', storageLocationBase: '' }, 'docs', '<file key>')).toEqual({ kind: 'unknown' });
+    // A driver that says it is built in is the disk, whatever its name.
+    const builtin = { driver: 'future-disk', driverCapabilities: { builtin: true }, storageLocationBase: null } as Parameters<typeof storagePreview>[0];
+    expect(storagePreview(builtin, 'docs', '<file key>')).toEqual({ kind: 'localDisk' });
   });
 });
 
@@ -465,6 +493,24 @@ describe('CreateFileBucketForm', () => {
     // so is a name too long to keep
     await setInput(nameInput(), 'n'.repeat(BUCKET_NAME_MAX + 1));
     expect(text()).toContain('The name can have at most 120 characters.');
+  });
+
+  it('calls out a description that is too long, and holds Create back until it fits', async () => {
+    installForm();
+    await open();
+    await setInput(nameInput(), 'Docs');
+    await click(radioOf('MinIO (on-prem)'));
+    expect(primary().disabled).toBe(false);
+
+    await setInput(descriptionInput(), 'd'.repeat(BUCKET_DESCRIPTION_MAX + 1));
+    expect(text()).toContain('The description can have at most 1000 characters.');
+    expect(descriptionInput().getAttribute('aria-invalid')).toBe('true');
+    expect(primary().disabled).toBe(true);
+    expect(footer()).toContain('2 of 3 ready');
+
+    await setInput(descriptionInput(), 'd'.repeat(BUCKET_DESCRIPTION_MAX));
+    expect(text()).not.toContain('The description can have at most 1000 characters.');
+    expect(primary().disabled).toBe(false);
   });
 
   it('asks for a key at once when a name was given that no key can be made of', async () => {

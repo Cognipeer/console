@@ -28,7 +28,19 @@ import {
   wait,
   type Mounted,
 } from '../helpers/iamCenterUi';
-import { MIB, ago, bucketDetail, fileRecord, HOUR, installBucketServer, refusal, type BucketServer } from '../helpers/filesBucketUi';
+import {
+  MIB,
+  MINUTE,
+  ago,
+  bucketDetail,
+  deletingBucket,
+  failedDeleteBucket,
+  fileRecord,
+  HOUR,
+  installBucketServer,
+  refusal,
+  type BucketServer,
+} from '../helpers/filesBucketUi';
 
 /* ── Navigation, notifications, downloads and the parts built elsewhere ─── */
 
@@ -199,7 +211,7 @@ const rowTexts = () => rows().map((row) => row.textContent ?? '');
 const rowOf = (name: string) => rows().find((row) => row.textContent?.includes(name));
 const objectCalls = () => server.api.to('GET', '/api/files/buckets/docs/objects');
 const lastListing = () => objectCalls().at(-1)!.query;
-const searchBox = () => q<HTMLInputElement>('input[placeholder="Search files by name or key…"]')!;
+const searchBox = () => q<HTMLInputElement>('input[placeholder="Search files by name…"]')!;
 const typeSelect = () => q<HTMLSelectElement>('select[aria-label="Filter by file type"]');
 const showSelect = () => q<HTMLSelectElement>('select[aria-label="Show"]');
 const menuButton = (name: string) => q<HTMLButtonElement>(`button[aria-label="Actions for ${name}"]`);
@@ -294,7 +306,7 @@ describe('the bucket page’s header', () => {
     expect(buttonByText('Yükle')).toBeTruthy();
     expect(q('a[aria-label="Doküman Deposu’na dön"]')).toBeTruthy();
     expect(text()).toContain('Bucket kökü');
-    expect(q('input[placeholder="Dosyaları ad veya anahtara göre ara…"]')).toBeTruthy();
+    expect(q('input[placeholder="Dosyaları ada göre ara…"]')).toBeTruthy();
   });
 });
 
@@ -381,7 +393,7 @@ describe('before the bucket is there', () => {
   });
 
   it('goes back to the list when the bucket vanishes after its files were being deleted', async () => {
-    server = installBucketServer({ records: RECORDS, bucket: bucketDetail({ deleting: true, status: 'disabled' }) });
+    server = installBucketServer({ records: RECORDS, bucket: deletingBucket(MINUTE) });
     await openPage();
     expect(text()).toContain('This bucket is being deleted');
 
@@ -471,7 +483,7 @@ describe('a disabled bucket', () => {
 
 describe('a bucket whose files are being deleted', () => {
   it('takes no changes: a banner says so, and neither the actions nor the file menus offer any', async () => {
-    server = installBucketServer({ records: RECORDS, bucket: bucketDetail({ deleting: true, status: 'disabled' }) });
+    server = installBucketServer({ records: RECORDS, bucket: deletingBucket(MINUTE) });
     await openPage();
 
     expect(q('[role="status"]')?.textContent).toContain('This bucket is being deleted');
@@ -480,6 +492,96 @@ describe('a bucket whose files are being deleted', () => {
     expect(q('button[aria-label="More actions"]')).toBeNull();
     expect(buttonByText('Enable bucket')).toBeUndefined();
     expect(buttonByText('Refresh')).toBeTruthy();
+    // A run that has only just been asked for is not offered again.
+    expect(buttonByText('Delete again')).toBeUndefined();
+  });
+
+  describe('whose job was most likely lost', () => {
+    it('offers to run it again from the page’s notice, on the Files tab too, and nothing else', async () => {
+      server = installBucketServer({ records: RECORDS, bucket: deletingBucket(2 * HOUR) });
+      await openPage();
+
+      expect(text()).toContain('The deletion has not finished for a while.');
+      expect(buttonByText('Delete again')).toBeTruthy();
+      expect(q('.detail-header')!.textContent).toContain('Deleting…');
+      expect(buttonByText('Upload')).toBeUndefined();
+      expect(q('button[aria-label="More actions"]')).toBeNull();
+      expect(buttonByText('Enable bucket')).toBeUndefined();
+    });
+
+    it('asks the delete dialog, which runs it with the files, and then waits as before', async () => {
+      server = installBucketServer({ records: RECORDS, bucket: deletingBucket(2 * HOUR) });
+      server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+      await openPage();
+
+      await click(buttonByText('Delete again'));
+      expect(modalOpen('delete-bucket-modal')).toBe(true);
+      await click(q('[data-testid="delete-bucket-confirm"]'));
+      await waitFor(() => server.api.to('DELETE', '/api/files/buckets/docs').length === 1, 'the DELETE');
+      expect(server.api.to('DELETE', '/api/files/buckets/docs')[0]!.query).toEqual({ deleteFiles: 'true' });
+      await waitFor(() => !modalOpen('delete-bucket-modal'), 'the dialog to close');
+      expect(nav.store.pushes).toEqual([]);
+    });
+
+    it('is not offered to someone who can only read', async () => {
+      server = installBucketServer({ level: 'read', records: RECORDS, bucket: deletingBucket(2 * HOUR) });
+      await openPage();
+      await waitFor(() => text().includes('read-only access'), 'the read-only notice');
+      expect(text()).toContain('The deletion has not finished for a while.');
+      expect(buttonByText('Delete again')).toBeUndefined();
+    });
+  });
+});
+
+describe('a bucket whose delete stopped with an error', () => {
+  const REASON = 'The provider refused the credentials';
+
+  it('says so in the header and in a notice with the reason, and keeps the actions of a bucket that is not being deleted', async () => {
+    server = installBucketServer({ records: RECORDS, bucket: failedDeleteBucket(REASON) });
+    await openPage();
+
+    expect(q('.detail-header')!.textContent).toContain('Deletion failed');
+    expect(q('[role="alert"]')!.textContent).toContain('Deleting this bucket did not finish');
+    expect(q('[role="alert"]')!.textContent).toContain(REASON);
+    expect(buttonByText('Try again')).toBeTruthy();
+    expect(buttonByText('Keep the bucket')).toBeTruthy();
+    // It is a bucket like any other disabled one: the menu is there, to enable it or delete it.
+    await click(q('button[aria-label="More actions"]'));
+    expect(menuItems()).toContain('Delete bucket…');
+  });
+
+  it('opens the delete dialog from “Try again”, with the reason, and deletes with the files when told to', async () => {
+    server = installBucketServer({ records: RECORDS, bucket: failedDeleteBucket(REASON) });
+    server.deleteAnswer = () => jsonResponse({ status: 'deleting' }, 202);
+    await openPage();
+
+    await click(buttonByText('Try again'));
+    expect(modalOpen('delete-bucket-modal')).toBe(true);
+    expect(q('[data-testid="delete-bucket-modal"]')!.textContent).toContain(REASON);
+    await click(q('input[type="radio"][value="files"]'));
+    await click(q('[data-testid="delete-bucket-confirm"]'));
+    await waitFor(() => server.api.to('DELETE', '/api/files/buckets/docs').length === 1, 'the DELETE');
+    expect(server.api.to('DELETE', '/api/files/buckets/docs')[0]!.query).toEqual({ deleteFiles: 'true' });
+  });
+
+  it('keeps the bucket: it is switched on again and the notice goes', async () => {
+    server = installBucketServer({ records: RECORDS, bucket: failedDeleteBucket(REASON) });
+    await openPage();
+
+    await click(buttonByText('Keep the bucket'));
+    await waitFor(() => server.api.to('PATCH', '/api/files/buckets/docs').length === 1, 'the PATCH');
+    expect(server.api.to('PATCH', '/api/files/buckets/docs')[0]!.body).toEqual({ status: 'active' });
+    await waitFor(() => !text().includes('Deleting this bucket did not finish'), 'the notice to go');
+    expect(q('.detail-header')!.textContent).not.toContain('Deletion failed');
+    expect(toasts().at(-1)).toMatchObject({ color: 'green', message: 'Docs is kept and switched on again.' });
+    expect(buttonByText('Upload')).toBeTruthy();
+  });
+
+  it('speaks Turkish', async () => {
+    server = installBucketServer({ records: RECORDS, bucket: failedDeleteBucket(REASON) });
+    await openPage({ locale: 'tr' });
+    expect(q('.detail-header')!.textContent).toContain('Silme başarısız');
+    expect(text()).toContain('Bu bucket’ın silinmesi tamamlanmadı');
   });
 });
 
@@ -892,6 +994,30 @@ describe('the menu of a file', () => {
     await click(q('button[aria-label="Open folder 2026"]'));
     await waitFor(() => rowOf('q2.pdf') !== undefined, 'the sub-folder');
     await click(menuButton('q2.pdf'));
+    expect(menuItems()).toEqual(['Download original', 'Copy key', 'Delete…']);
+  });
+
+  it('offers the Markdown copy a file still has while its last conversion failed or runs again, and none it never had', async () => {
+    // The server keeps the earlier copy through a conversion that is asked for again, whatever becomes of that run.
+    const keepsCopy = (name: string, markdownStatus: 'failed' | 'pending' | 'skipped') =>
+      fileRecord(`reports/${name}.pdf`, { markdownStatus, markdownKey: `reports/${name}.md`, markdownSize: 400 });
+    server = installBucketServer({
+      records: [
+        keepsCopy('failed-again', 'failed'),
+        keepsCopy('running-again', 'pending'),
+        keepsCopy('skipped-now', 'skipped'),
+        fileRecord('reports/never.pdf', { markdownStatus: 'failed', markdownError: 'The PDF is password protected.' }),
+      ],
+    });
+    await openPage({ search: 'path=reports%2F' });
+
+    for (const name of ['failed-again.pdf', 'running-again.pdf', 'skipped-now.pdf']) {
+      await click(menuButton(name));
+      expect(menuItems()).toEqual(['Download original', 'Download Markdown', 'Copy key', 'Delete…']);
+      await click(menuItem('Copy key'));
+      await waitFor(MENU_NOT_OPEN, 'the menu to close');
+    }
+    await click(menuButton('never.pdf'));
     expect(menuItems()).toEqual(['Download original', 'Copy key', 'Delete…']);
   });
 

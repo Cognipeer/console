@@ -4,7 +4,9 @@
  * scheduling rules (bounded concurrency, retry, abort, one "run finished" per run) are tested without a DOM.
  *
  * A *run* starts when rows are handed over with `start()` and ends when nothing is uploading or waiting any more;
- * `handlers.onSettled` is called once per run with the records the server created in it.
+ * `handlers.onSettled` is called once per run with the records the server created in it. A run that is cancelled
+ * (`cancelAll()`) is reported as well when it stored something or cut a request off: the screen has to read the bucket
+ * again, because a request that was aborted may still have reached the server.
  */
 
 import type { FileRecordView } from '@/lib/services/files';
@@ -24,12 +26,18 @@ export interface RunResult {
   /** The records the server created during the run (failed and cancelled files are not in it). */
   records: FileRecordView[];
   failed: number;
+  /**
+   * Uploads cut off while their request was on the wire (removed from the list, or stopped with the run). The browser
+   * cannot tell whether the server stored them before the request ended, so a run that cut some off may have changed
+   * the bucket by more than `records` say.
+   */
+  aborted: number;
 }
 
 export interface QueueHandlers {
   /** The sentence a failed row shows. */
   describeError(error: unknown, item: QueueItem): string;
-  /** A run finished. Called once per run, with the records it created. */
+  /** A run finished, or was cancelled with something stored or cut off. Called once per run, with the records it created. */
   onSettled(result: RunResult): void;
 }
 
@@ -62,6 +70,7 @@ export class UploadQueueEngine {
   private runOpen = false;
   private runRecords: FileRecordView[] = [];
   private runFailures = 0;
+  private runAborted = 0;
   private counter = 0;
 
   private readonly bucketKey: string;
@@ -142,7 +151,12 @@ export class UploadQueueEngine {
 
   /** Takes a row out of the list; an upload in flight is cancelled. A stored file stays stored. */
   remove(id: string): void {
-    this.running.get(id)?.abort();
+    const controller = this.running.get(id);
+    if (controller) {
+      // Only a request still on the wire has an outcome nobody knows; one that has answered is counted already.
+      if (this.find(id)?.status === 'uploading') this.runAborted += 1;
+      controller.abort();
+    }
     this.waiting = this.waiting.filter((waitingId) => waitingId !== id);
     this.settingsById.delete(id);
     this.commit(this.items.filter((item) => item.id !== id));
@@ -185,9 +199,19 @@ export class UploadQueueEngine {
     this.pump();
   }
 
-  /** Stops everything: running uploads are aborted, waiting rows go back to ready. Nothing is reported as a run. */
+  /**
+   * Stops everything: running uploads are aborted, waiting rows go back to ready (the files that are stored stay
+   * done). A run that had stored files, or whose requests were cut off, is reported once, as a finished run is: the
+   * files already stored are in the bucket, and a request that was aborted may have been stored as well, so the screen
+   * reads the bucket again instead of showing a list that is behind.
+   */
   cancelAll(): void {
     const hadWork = this.running.size > 0 || this.waiting.length > 0;
+    // A request still on the wire is cut off now; one that has answered (its row is done or failed) is not.
+    const cutOff = [...this.running.keys()].filter((id) => this.find(id)?.status === 'uploading').length;
+    const report: RunResult | null = this.runOpen
+      ? { records: this.runRecords, failed: this.runFailures, aborted: this.runAborted + cutOff }
+      : null;
     this.waiting = [];
     for (const controller of this.running.values()) controller.abort();
     this.running.clear();
@@ -195,6 +219,7 @@ export class UploadQueueEngine {
     this.runOpen = false;
     this.runRecords = [];
     this.runFailures = 0;
+    this.runAborted = 0;
     if (hadWork) {
       this.commit(
         this.items.map((item) =>
@@ -202,6 +227,7 @@ export class UploadQueueEngine {
         ),
       );
     }
+    if (report && (report.records.length > 0 || report.aborted > 0)) this.handlers.onSettled(report);
   }
 
   private pump(): void {
@@ -273,9 +299,10 @@ export class UploadQueueEngine {
   private settleIfIdle(): void {
     if (!this.runOpen || this.running.size > 0 || this.waiting.length > 0) return;
     this.runOpen = false;
-    const result: RunResult = { records: this.runRecords, failed: this.runFailures };
+    const result: RunResult = { records: this.runRecords, failed: this.runFailures, aborted: this.runAborted };
     this.runRecords = [];
     this.runFailures = 0;
+    this.runAborted = 0;
     this.handlers.onSettled(result);
   }
 }

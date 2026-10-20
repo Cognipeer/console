@@ -29,8 +29,10 @@ import {
   isBlobMissing,
   isContainerMissing,
   isHopelessFailure,
+  isInterruptedRead,
   isRetryableStatus,
   redactSecrets,
+  tlsFailureCode,
   withoutMissingPhrases,
   type AzureErrorInfo,
 } from '@/lib/providers/contracts/azure/blobErrors';
@@ -151,6 +153,15 @@ describe('blob keys', () => {
     expect(generateKey('report.pdf')).toMatch(/^report-\d+-[a-f0-9]{8}\.pdf$/);
     expect(generateKey()).toMatch(/^\d+-[0-9a-f-]{36}$/);
     expect(generateKey('Şirket Raporu.pdf')).toMatch(/^[a-z0-9_-]+-\d+-[a-f0-9]{8}\.pdf$/);
+  });
+
+  it('does not start or end a generated slug with a dash, and has a name for text with no letters it keeps', () => {
+    // a letter outside a-z leaves a dash at the front of the slug; a key that starts with one reads as an option to command-line tools
+    expect(generateKey('Şirket Raporu.pdf')).toMatch(/^irket-raporu-\d+-[a-f0-9]{8}\.pdf$/);
+    expect(generateKey('rapor (final)!.pdf')).toMatch(/^rapor-final-\d+-[a-f0-9]{8}\.pdf$/);
+    expect(generateKey('日本語.txt')).toMatch(/^file-\d+-[a-f0-9]{8}\.txt$/);
+    expect(generateKey('..')).toMatch(/^file-\d+-[a-f0-9]{8}$/);
+    expect(generateKey('_keep-these_.md')).toMatch(/^_keep-these_-\d+-[a-f0-9]{8}\.md$/);
   });
 
   it('quotes an etag once, and hashes bytes', () => {
@@ -360,6 +371,13 @@ describe('credentials', () => {
     expect(parseSasToken(`https://acct.blob.core.windows.net/files?${SAS}`).token).toBe(SAS);
     expect(parseSasToken(SAS)).toMatchObject({ resource: 'c', permissions: 'racwdl', expiresAt: new Date('2099-01-01T00:00:00Z') });
     expect(parseSasToken('sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&se=2099-01-01T00:00:00Z&sig=x').resource).toBeUndefined();
+  });
+
+  it('SAS: reads the start time next to the expiry, and ignores one that is not a date', () => {
+    const base = 'sv=2022-11-02&sr=c&sp=racwdl&se=2099-01-01T00:00:00Z&sig=x';
+    expect(parseSasToken(`${base}&st=2098-06-01T00:00:00Z`)).toMatchObject({ startsAt: new Date('2098-06-01T00:00:00Z'), expiresAt: new Date('2099-01-01T00:00:00Z') });
+    expect(parseSasToken(base).startsAt).toBeUndefined();
+    expect(parseSasToken(`${base}&st=not-a-date`).startsAt).toBeUndefined();
   });
 
   it('SAS: a literal = inside a value is written %3D, because the SDK cuts a value at its second =', () => {
@@ -765,12 +783,103 @@ describe('failure classification', () => {
     expect(describeFailure({ ...base, aborted: true }, ctx)).toBe('Azure Blob Storage did not answer in time (upload).');
   });
 
-  it('explains an untrusted certificate and mentions the verification switch only where it exists', () => {
+  it('tells a connection that went away from a service that never answered', () => {
+    const info = { aborted: true, blocked: false };
+    expect(describeFailure(info, ctx)).toBe('Azure Blob Storage did not answer in time (upload).');
+    expect(describeFailure(info, { ...ctx, interrupted: true })).toBe('The connection to Azure Blob Storage was interrupted (upload).');
+    expect(describeFailure({ aborted: false, blocked: false, status: 503, code: 'ServerBusy' }, { ...ctx, interrupted: true })).toMatch(/busy or timing out/);
+  });
+
+  it('names the window of the SAS in use when the service only refuses, and only then', () => {
+    const base = { aborted: false, blocked: false, status: 403 };
+    const sas = { expiresAt: new Date('2026-01-01T00:00:00Z'), startsAt: new Date('2025-01-01T00:00:00Z') };
+    const now = Date.parse('2026-06-01T00:00:00Z');
+    const expired = 'Azure rejected the SAS token: it expired on 2026-01-01T00:00:00.000Z. Create a new one and replace it in the provider settings.';
+    expect(describeFailure({ ...base, code: 'AuthorizationFailure' }, { ...ctx, authMethod: 'sas', sas }, now)).toBe(expired);
+    expect(describeFailure({ ...base, code: 'AuthenticationFailed' }, { ...ctx, authMethod: 'sas', sas }, now)).toBe(expired);
+    // not started: the start time is after now
+    const early = describeFailure({ ...base, code: 'AuthorizationFailure' }, { ...ctx, authMethod: 'sas', sas: { startsAt: new Date('2027-01-01T00:00:00Z') } }, now);
+    expect(early).toBe('Azure rejected the SAS token: it is not valid before 2027-01-01T00:00:00.000Z. Check the start time of the SAS and the clock of this server.');
+    // inside its window: the old sentences stand
+    const fine = { ...ctx, authMethod: 'sas', sas: { expiresAt: new Date('2099-01-01T00:00:00Z'), startsAt: new Date('2025-01-01T00:00:00Z') } };
+    expect(describeFailure({ ...base, code: 'AuthorizationFailure' }, fine, now)).toMatch(/firewall/);
+    expect(describeFailure({ ...base, code: 'AuthenticationFailed' }, fine, now)).toBe('Azure rejected the credentials (AuthenticationFailed): check the SAS signature and validity window.');
+    // a different code is not a verdict on the window
+    expect(describeFailure({ ...base, code: 'AuthorizationPermissionMismatch' }, { ...ctx, authMethod: 'sas', sas }, now)).toContain('A SAS needs');
+    // and no SAS in play means no window to name
+    expect(describeFailure({ ...base, code: 'AuthorizationFailure' }, ctx, now)).toMatch(/firewall/);
+  });
+
+  it('says what to check for the credential that was sent, unless the service gave a detail', () => {
+    const info = { aborted: false, blocked: false, status: 403, code: 'AuthenticationFailed' };
+    expect(describeFailure(info, ctx)).toBe('Azure rejected the credentials (AuthenticationFailed): check the account name and key.');
+    expect(describeFailure(info, { ...ctx, authMethod: 'sas', sas: {} })).toBe('Azure rejected the credentials (AuthenticationFailed): check the SAS signature and validity window.');
+    expect(describeFailure(info, { ...ctx, authMethod: 'entra' })).toBe('Azure rejected the credentials (AuthenticationFailed): the Microsoft Entra token was not accepted; check the authority host, the tenant ID and the clock of this server.');
+    expect(describeFailure({ ...info, detail: "MAC signature found in the HTTP request 'x' is not the same as any computed signature." }, { ...ctx, authMethod: 'entra' })).toContain('wrong or rotated account key');
+  });
+
+  it('treats a bearer token the service cannot accept like any other rejected credential, and names the code it got', () => {
+    const info = { aborted: false, blocked: false, status: 401, code: 'InvalidAuthenticationInfo', detail: 'Server failed to authenticate the request. Please refer to the information in the www-authenticate header.' };
+    expect(describeFailure(info, { ...ctx, authMethod: 'entra' })).toBe('Azure rejected the credentials (InvalidAuthenticationInfo): the Microsoft Entra token was not accepted; check the authority host, the tenant ID and the clock of this server.');
+    expect(describeFailure(info, ctx)).toBe('Azure rejected the credentials (InvalidAuthenticationInfo): check the account name and key.');
+    expect(isHopelessFailure(info)).toBe(true);
+  });
+
+  it('points at the API version setting that is in use when the service rejects a header', () => {
+    const info = { aborted: false, blocked: false, status: 400, code: 'InvalidHeaderValue', detail: 'The value for one of the HTTP headers is not in the correct format.' };
+    expect(describeFailure(info, { ...ctx, apiVersion: '2099-01-01' })).toContain('may not support 2099-01-01: change or clear "API version"');
+    expect(describeFailure(info, ctx)).toContain('set "API version" in the provider settings');
+  });
+
+  it('ends a sentence it builds around the service\'s own text once, whatever punctuation that text ends with', () => {
+    const base = { aborted: false, blocked: false, status: 409, code: 'BlobArchived' };
+    for (const detail of ['This operation is not permitted on an archived blob.', 'This operation is not permitted on an archived blob', 'This operation is not permitted on an archived blob. ', 'This operation is not permitted on an archived blob...']) {
+      expect(describeFailure({ ...base, detail }, ctx)).toBe('Azure Blob Storage upload failed with HTTP 409 (BlobArchived): This operation is not permitted on an archived blob.');
+    }
+    // no detail, no colon
+    expect(describeFailure({ aborted: false, blocked: false, status: 409, code: 'BlobArchived' }, ctx)).toBe('Azure Blob Storage upload failed with HTTP 409 (BlobArchived).');
+    // inside parentheses too
+    const header = describeFailure({ aborted: false, blocked: false, status: 400, code: 'InvalidHeaderValue', detail: 'The value for one of the HTTP headers is not in the correct format.' }, ctx);
+    expect(header).toContain('(The value for one of the HTTP headers is not in the correct format). ');
+  });
+
+  it('finds the TLS verdict wherever the error carries it', () => {
+    expect(tlsFailureCode(Object.assign(new Error('x'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }))).toBe('DEPTH_ZERO_SELF_SIGNED_CERT');
+    expect(tlsFailureCode(Object.assign(new TypeError('fetch failed'), { cause: { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' } }))).toBe('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(tlsFailureCode(Object.assign(new Error('outer'), { cause: Object.assign(new Error('mid'), { cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }) }))).toBe('ERR_TLS_CERT_ALTNAME_INVALID');
+    for (const other of [Object.assign(new Error('x'), { code: 'ECONNREFUSED' }), new Error('plain'), 'text', undefined, null, { cause: { code: 'ENOTFOUND' } }]) {
+      expect(tlsFailureCode(other)).toBeUndefined();
+    }
+    // a cause chain that loops back on itself ends
+    const loop: { cause?: unknown } = {};
+    loop.cause = loop;
+    expect(tlsFailureCode(loop)).toBeUndefined();
+  });
+
+  it('knows a body that stopped before its last byte from every other failure', () => {
+    // the SDK ends its body stream with an AbortError when the connection drops
+    expect(isInterruptedRead(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }))).toBe(true);
+    expect(isInterruptedRead(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isInterruptedRead(Object.assign(new Error('premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' }))).toBe(true);
+    expect(isInterruptedRead(Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET' } }))).toBe(true);
+    expect(isInterruptedRead(new Error('Data corruption failure: received less data than required. Received data offset: 9, data needed offset: 99, retries: 0, max retries: 0'))).toBe(true);
+    for (const other of [
+      new Error('boom'),
+      Object.assign(new Error('x'), { statusCode: 412, code: 'ConditionNotMet' }),
+      Object.assign(new Error('x'), { code: 'ECONNREFUSED' }),
+      Object.assign(new Error('x'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
+      new Error('Data corruption failure: Received more data than original request'),
+      'AbortError', 42, null, undefined,
+    ]) {
+      expect(isInterruptedRead(other), String(other)).toBe(false);
+    }
+  });
+
+  it('explains an untrusted certificate and names both ways out', () => {
     const info = { aborted: false, blocked: false, systemCode: 'DEPTH_ZERO_SELF_SIGNED_CERT' };
-    const saas = describeFailure(info, ctx);
-    expect(saas).toContain('"CA certificate" setting');
-    expect(saas).not.toContain('Skip TLS verification');
-    expect(describeFailure(info, { ...ctx, onPrem: true })).toContain('Skip TLS verification');
+    expect(describeFailure(info, ctx)).toBe(
+      'The TLS certificate of acctname1.blob.core.windows.net is not trusted (DEPTH_ZERO_SELF_SIGNED_CERT). Paste the issuing CA certificate into the "CA certificate" setting, or turn on "Skip TLS verification" for a test setup.',
+    );
   });
 
   it('says which address a refused host resolves to without naming the target of a redirect or a URL', () => {
@@ -801,6 +910,17 @@ describe('failure classification', () => {
     expect(scrubbed).not.toContain('secret-value-1');
     expect(scrubbed).toContain('sig=[redacted]');
     expect(redactSecrets('plain', [])).toBe('plain');
+  });
+
+  it('scrubs a token request that was echoed back, a Shared Key signature and a bare token', () => {
+    const form = redactSecrets('Bad request: grant_type=client_credentials&client_secret=Sup3r~Secret&scope=x', []);
+    expect(form).toBe('Bad request: grant_type=client_credentials&client_secret=[redacted]&scope=x');
+    expect(redactSecrets('{"client_id":"c","client_secret":"Sup3r~Secret","scope":"s"}', [])).toBe('{"client_id":"c","client_secret":"[redacted]","scope":"s"}');
+    expect(redactSecrets('headers {"authorization":"SharedKey acct1:abcd+EFGH/ijkl=="}', [])).toBe('headers {"authorization":"SharedKey acct1:[redacted]"}');
+    const jwt = 'eyJhbGciOiJub25lIn0.eyJhdWQiOiJodHRwczovL3N0b3JhZ2UuYXp1cmUuY29tIn0.c2lnbmF0dXJl';
+    expect(redactSecrets(`token ${jwt} was refused`, [])).toBe('token [redacted] was refused');
+    // ordinary sentences are left alone
+    expect(redactSecrets('The client secret value is wrong. SharedKey is the scheme; see eyJ for details.', [])).toBe('The client secret value is wrong. SharedKey is the scheme; see eyJ for details.');
   });
 });
 
@@ -917,6 +1037,86 @@ describe('Microsoft Entra client-credentials token source', () => {
     const error = await createClientSecretCredential({ ...config, fetchImpl: echoing }).getToken().catch((e) => e);
     // the description is the authority's own sentence; the runtime scrubs known secrets again before it leaves
     expect(redactSecrets(error.message, [config.clientSecret])).not.toContain('super-secret-value');
+  });
+
+  it('takes the secret out of whatever the authority echoes, in the spellings it can come back in', async () => {
+    const secret = 'Cl13nt Secret~value+1/2=';
+    const spellings = [secret, encodeURIComponent(secret), new URLSearchParams({ s: secret }).toString().slice(2)];
+    for (const spelling of spellings) {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+        error: 'invalid_client',
+        error_codes: [7000215],
+        error_description: `AADSTS7000215: Bad credentials ${spelling} were refused.\r\nTrace ID: t`,
+      }), { status: 401 }));
+      const error = await createClientSecretCredential({ ...config, clientSecret: secret, fetchImpl }).getToken().catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error.message).toBe('Microsoft Entra rejected the service principal (invalid_client AADSTS7000215): Bad credentials [redacted] were refused.');
+    }
+    // the same in the error code: only plain characters survive there, and the secret is gone before they are picked
+    const inCode = vi.fn(async () => new Response(JSON.stringify({ error: `bad-Cl13ntSecret-value-123`, error_description: 'x' }), { status: 400 }));
+    const codeError = await createClientSecretCredential({ ...config, clientSecret: 'bad-Cl13ntSecret-value-123', fetchImpl: inCode }).getToken().catch((e) => e);
+    expect(codeError.message).not.toContain('Cl13ntSecret');
+    // and in a 5xx answer
+    const unavailable = vi.fn(async () => new Response(JSON.stringify({ error: 'temporarily_unavailable_for_super-secret-value' }), { status: 503 }));
+    const down = await createClientSecretCredential({ ...config, fetchImpl: unavailable }).getToken().catch((e) => e);
+    expect(down.message).not.toContain('super-secret-value');
+  });
+
+  it('does not accept an answer without a token: an empty one, a page, a token-less 200, a redirect', async () => {
+    const answers: Array<[Response, number | undefined]> = [
+      [new Response(JSON.stringify({ token_type: 'Bearer', expires_in: 3600, access_token: '' }), { status: 200 }), 200],
+      [new Response(JSON.stringify({ access_token: '   ' }), { status: 200 }), 200],
+      [new Response(JSON.stringify({ token_type: 'Bearer' }), { status: 200 }), 200],
+      [new Response('<html>sign in to the portal</html>', { status: 200 }), 200],
+      [new Response('', { status: 302, headers: { location: 'https://elsewhere.example/' } }), 302],
+      [new Response('{"message":"no such route"}', { status: 404 }), 404],
+    ];
+    for (const [response, status] of answers) {
+      const error = await createClientSecretCredential({ ...config, fetchImpl: async () => response }).getToken().catch((e) => e);
+      expect(error).toBeInstanceOf(AzureBlobError);
+      expect(error.message).toBe(`Microsoft Entra at https://login.microsoftonline.com answered with something that is not a token response (HTTP ${status}). Check the authority host.`);
+      expect(error).toMatchObject({ code: 'EntraTokenRequestFailed', retryable: false });
+      expect(error.statusCode).toBeUndefined();
+    }
+  });
+
+  it('does not call an authority that is down or throttling a rejected service principal', async () => {
+    const cases: Array<[number, unknown, string]> = [
+      [503, { error: 'temporarily_unavailable' }, 'Microsoft Entra at https://login.microsoftonline.com is unavailable or throttling (HTTP 503 temporarily_unavailable); try again.'],
+      [500, 'upstream exploded', 'Microsoft Entra at https://login.microsoftonline.com is unavailable or throttling (HTTP 500); try again.'],
+      [429, { error: 'too_many_requests' }, 'Microsoft Entra at https://login.microsoftonline.com is unavailable or throttling (HTTP 429 too_many_requests); try again.'],
+    ];
+    for (const [status, body, message] of cases) {
+      const response = new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+      const error = await createClientSecretCredential({ ...config, fetchImpl: async () => response }).getToken().catch((e) => e);
+      expect(error.message).toBe(message);
+      expect(error).toMatchObject({ statusCode: status, code: 'EntraTokenRequestFailed', retryable: true });
+    }
+  });
+
+  it('still reports a rejection as one: an OAuth error object in any status below 500, and a bare 401 or 403', async () => {
+    const error200 = await createClientSecretCredential({
+      ...config,
+      fetchImpl: async () => new Response(JSON.stringify({ error: 'invalid_client', error_description: 'AADSTS70011: The provided request must include a scope.' }), { status: 200 }),
+    }).getToken().catch((e) => e);
+    expect(error200).toMatchObject({ statusCode: 401, retryable: false });
+    expect(error200.message).toBe('Microsoft Entra rejected the service principal (invalid_client): The provided request must include a scope.');
+    for (const status of [401, 403]) {
+      const bare = await createClientSecretCredential({ ...config, fetchImpl: async () => new Response('', { status }) }).getToken().catch((e) => e);
+      expect(bare.message).toBe(`Microsoft Entra rejected the service principal (HTTP ${status})`);
+      expect(bare).toMatchObject({ statusCode: status, retryable: false });
+    }
+  });
+
+  it('says a token server\'s certificate is not trusted, and what to do about it', async () => {
+    const tlsFailure = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }) });
+    const untrusted = await createClientSecretCredential({ ...config, fetchImpl: async () => { throw tlsFailure(); } }).getToken().catch((e) => e);
+    expect(untrusted.message).toBe('The TLS certificate of Microsoft Entra at https://login.microsoftonline.com is not trusted (DEPTH_ZERO_SELF_SIGNED_CERT). Paste the issuing CA certificate into the "CA certificate" setting, or turn on "Skip TLS verification" for a test setup.');
+    expect(untrusted).toMatchObject({ code: 'EntraTokenRequestFailed', retryable: false });
+    // a refused connection is still just unreachable
+    const refused = await createClientSecretCredential({ ...config, fetchImpl: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); } }).getToken().catch((e) => e);
+    expect(refused.message).toBe('Could not reach Microsoft Entra at https://login.microsoftonline.com: fetch failed (ECONNREFUSED).');
+    expect(refused.retryable).toBe(true);
   });
 
   it('refuses invalid configuration before any request', () => {

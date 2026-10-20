@@ -80,6 +80,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /* ── Fixtures ────────────────────────────────────────────────────────────── */
 
+const MINUTE = 60_000;
 const HOUR = 3_600_000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 const MIB = 1024 * 1024;
@@ -146,7 +147,8 @@ const BUCKETS: BucketListItem[] = [
   bucket('contracts', 'Contracts', AZURE, { fileCount: 87, totalBytes: 310 * MIB }),
   bucket('support-exports', 'Support exports', S3_PROD, { fileCount: 532, totalBytes: Math.round(1.6 * GIB) }),
   bucket('agent-sessions', 'Agent sessions', LOCAL, { fileCount: 451, totalBytes: 96 * MIB }, { status: 'disabled' }),
-  bucket('old-archive', 'Old archive', MINIO, { fileCount: 12, totalBytes: 4 * MIB }, { status: 'disabled', deleting: true }),
+  // Asked for a minute ago: the job is running, and not yet taken for lost.
+  bucket('old-archive', 'Old archive', MINIO, { fileCount: 12, totalBytes: 4 * MIB }, { status: 'disabled', deleting: true, updatedAt: ago(MINUTE) as unknown as Date }),
 ];
 
 const SESSION_WRITE = { effectivePermissions: { files: 'write' } };
@@ -277,10 +279,15 @@ describe('what the list knows about a provider', () => {
     expect(hasUsableProvider([{ status: 'disabled', providerHealth: { state: 'inactive' } }, MINIO])).toBe(true);
   });
 
-  it('knows the server’s own disk', () => {
+  it('knows the server’s own disk by its driver, never by a missing address', () => {
     expect(isLocalDiskProvider(LOCAL)).toBe(true);
-    expect(isLocalDiskProvider({ driver: 'local-filesystem', storageLocationBase: 'file:///x/' })).toBe(true);
+    expect(isLocalDiskProvider({ driver: 'local-filesystem' })).toBe(true);
+    expect(isLocalDiskProvider({ driver: 'some-future-disk', driverCapabilities: { builtin: true } as never })).toBe(true);
     expect(isLocalDiskProvider(MINIO)).toBe(false);
+    // An S3 or Azure provider whose settings name no bucket or container yet has no address either: it is not a disk.
+    const unfinished = provider('s3-new', 'Amazon S3 new', 'aws-s3-files', { state: 'untested' }, { storageLocationBase: null });
+    expect(isLocalDiskProvider(unfinished)).toBe(false);
+    expect(isLocalDiskProvider({ driver: 'azure-blob-files', driverCapabilities: { builtin: false } as never })).toBe(false);
   });
 
   it('names the driver from the catalog, and by its id when the catalog does not know it', () => {
@@ -376,6 +383,48 @@ describe('BucketListPage', () => {
     expect(rowOf('Orphan')!.textContent).toContain('Provider unavailable');
   });
 
+  it('marks a bucket whose last deletion failed, with the reason one hover away', async () => {
+    const failed = bucket('stuck-export', 'Stuck export', MINIO, { fileCount: 40, totalBytes: 8 * MIB }, {
+      status: 'disabled',
+      deleteError: 'Access denied by the provider',
+    } as Partial<BucketListItem>);
+    installList({ buckets: [...BUCKETS, failed] });
+    mounted = await mount(page());
+    await settle(100);
+
+    const row = rowOf('Stuck export')!;
+    expect(row.textContent).toContain('Deletion failed');
+    expect(row.textContent).not.toContain('Disabled');
+    expect(q('button[aria-label="Deletion failed: Access denied by the provider"]', row)).not.toBeNull();
+    // A bucket that merely is disabled is not marked as failed.
+    expect(rowOf('Agent sessions')!.textContent).not.toContain('Deletion failed');
+  });
+
+  it('reads the reason a bucket carries in its metadata when the list does not say it outright', async () => {
+    const failed = bucket('stuck-export', 'Stuck export', MINIO, { fileCount: 40, totalBytes: 8 * MIB }, {
+      status: 'disabled',
+      metadata: { deleteError: 'Timed out' },
+    });
+    installList({ buckets: [...BUCKETS, failed] });
+    mounted = await mount(page());
+    await settle(100);
+    expect(q('button[aria-label="Deletion failed: Timed out"]', rowOf('Stuck export'))).not.toBeNull();
+  });
+
+  it('shows a bucket that is deleting as deleting, even when it carries the reason of an earlier run', async () => {
+    const again = bucket('again', 'Run again', MINIO, { fileCount: 3, totalBytes: MIB }, {
+      status: 'disabled',
+      deleting: true,
+      updatedAt: ago(MINUTE) as unknown as Date,
+      deleteError: 'An earlier run',
+    } as Partial<BucketListItem>);
+    installList({ buckets: [...BUCKETS, again] });
+    mounted = await mount(page());
+    await settle(100);
+    expect(rowOf('Run again')!.textContent).toContain('Deleting…');
+    expect(rowOf('Run again')!.textContent).not.toContain('Deletion failed');
+  });
+
   it('opens a bucket from its row, and from the header’s docs link to the guide', async () => {
     installList();
     mounted = await mount(page());
@@ -383,7 +432,9 @@ describe('BucketListPage', () => {
 
     await click(rowOf('Contracts')!);
     expect(push.mock.calls.map((call) => call[0])).toEqual(['/dashboard/files/contracts']);
+    expect(FILES_DOCS_URL).toBe('https://docs.cognipeer.com/console/guide/knowledge/files');
     const docs = q<HTMLAnchorElement>(`a[href="${FILES_DOCS_URL}"]`)!;
+    expect(docs.getAttribute('href')).toBe('https://docs.cognipeer.com/console/guide/knowledge/files');
     expect(docs.textContent).toBe('Docs');
     expect(docs.getAttribute('target')).toBe('_blank');
     expect(docs.getAttribute('rel')).toContain('noopener');
@@ -718,6 +769,65 @@ describe('the row menu', () => {
     await click(q('button[aria-label="Actions for Old archive"]'));
     await settle(30);
     expect(menuItems()).toEqual(['Open bucket', 'Bucket settings']);
+  });
+
+  describe('for a bucket whose deletion did not finish', () => {
+    const FAILED = bucket('stuck-export', 'Stuck export', MINIO, { fileCount: 40, totalBytes: 8 * MIB }, {
+      status: 'disabled',
+      deleteError: 'Access denied by the provider',
+    } as Partial<BucketListItem>);
+    const LOST = bucket('lost-job', 'Lost job', MINIO, { fileCount: 9, totalBytes: 2 * MIB }, {
+      status: 'disabled',
+      deleting: true,
+      updatedAt: ago(2 * HOUR) as unknown as Date,
+    });
+
+    it('reads “Delete again…” instead of “Delete bucket…” after a failure, and goes to the same place', async () => {
+      installList({ buckets: [...BUCKETS, FAILED] });
+      mounted = await mount(page());
+      await settle(100);
+
+      await click(q('button[aria-label="Actions for Stuck export"]'));
+      await settle(30);
+      expect(menuItems()).toEqual(['Open bucket', 'Bucket settings', 'Enable', 'Delete again…']);
+      await click(qa('[role="menuitem"]').find((item) => item.textContent === 'Delete again…'));
+      expect(push.mock.calls.map((call) => call[0])).toEqual(['/dashboard/files/stuck-export?tab=settings']);
+      expect(api.to('DELETE', '/api/files/buckets/stuck-export')).toHaveLength(0);
+    });
+
+    it('offers “Delete again…” for a bucket that has been deleting for so long that the job was probably lost', async () => {
+      installList({ buckets: [...BUCKETS, LOST] });
+      mounted = await mount(page());
+      await settle(100);
+
+      await click(q('button[aria-label="Actions for Lost job"]'));
+      await settle(30);
+      // Changing it is still refused (it is being deleted); running the deletion again is not.
+      expect(menuItems()).toEqual(['Open bucket', 'Bucket settings', 'Delete again…']);
+    });
+
+    it('offers it to nobody who cannot write', async () => {
+      installList({ buckets: [...BUCKETS, FAILED, LOST], session: SESSION_READ });
+      mounted = await mount(page());
+      await settle(100);
+
+      for (const name of ['Stuck export', 'Lost job']) {
+        await click(q(`button[aria-label="Actions for ${name}"]`));
+        await settle(30);
+        expect(menuItems()).toEqual(['Open bucket', 'Bucket settings']);
+        await click(qa('[role="menuitem"]').find((item) => item.textContent === 'Open bucket'));
+      }
+    });
+
+    it('speaks Turkish', async () => {
+      installList({ buckets: [...BUCKETS, FAILED] });
+      mounted = await mount(page(), 'tr');
+      await settle(100);
+
+      await click(q('button[aria-label="Stuck export için işlemler"]'));
+      await settle(30);
+      expect(menuItems()).toContain('Yeniden sil…');
+    });
   });
 });
 

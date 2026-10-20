@@ -6,6 +6,9 @@
  * sees. (The rules alone are in files-detail-model.test.ts.)
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { act, createElement as h, useState } from 'react';
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -166,6 +169,24 @@ async function press(key: string) {
   });
 }
 
+/* ── Layout ───────────────────────────────────────────────────────────────── */
+
+describe('the drawer body', () => {
+  it('keeps air between the header rule and the facts under the name, which the library would take away after a header', async () => {
+    await open({ record: { contentType: 'text/plain' } });
+    const body = q('.mantine-Drawer-body')!;
+    expect(body).not.toBeNull();
+    // Beside the library's own classes (`mantine-Drawer-body`, `m_…`) the body carries one of the module's.
+    const own = Array.from(body.classList).filter((name) => /body/i.test(name) && !name.startsWith('mantine-') && !name.startsWith('m_'));
+    expect(own).toHaveLength(1);
+    // The header comes first, so the library's "no top padding on a body that follows a header" rule applies; the
+    // module's rule is the more specific one.
+    expect(body.previousElementSibling?.classList.contains('mantine-Drawer-header')).toBe(true);
+    const css = readFileSync(join(process.cwd(), 'src/components/files/detail/FileDetailDrawer.module.css'), 'utf8');
+    expect(css).toMatch(/\.body:not\(:only-child\) \{\s*padding-top: 16px;/);
+  });
+});
+
 /* ── Preview ──────────────────────────────────────────────────────────────── */
 
 describe('Preview tab', () => {
@@ -274,7 +295,10 @@ describe('Markdown tab', () => {
 
   it('follows a conversion that is running, and tells the host when it ends', async () => {
     let status = 'pending';
-    await open({ records: () => (status === 'pending' ? { markdownStatus: 'pending' } : { ...ready }), markdownText: 'done text' });
+    await open({
+      records: () => (status === 'pending' ? { markdownStatus: 'pending', updatedAt: isoAgo(30_000) } : { ...ready }),
+      markdownText: 'done text',
+    });
     await tab('Markdown');
     expect(panel().textContent).toContain('Converting…');
     expect(panel().textContent).toContain('This page updates by itself');
@@ -287,6 +311,123 @@ describe('Markdown tab', () => {
     });
     await until(() => panel().textContent!.includes('done text'), 'the finished copy');
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a conversion that has been pending for so long that its job was probably lost', () => {
+    it('says so, and starts it anew on Convert again', async () => {
+      let state: Record<string, unknown> = { markdownStatus: 'pending', updatedAt: isoAgo(10 * 60_000) };
+      await open({
+        records: () => state,
+        convertAnswer: () => {
+          state = { markdownStatus: 'pending', updatedAt: isoAgo(0) };
+          return jsonResponse({ record: fileRecord(state) }, 202);
+        },
+      });
+      await tab('Markdown');
+      expect(panel().textContent).toContain('Converting…');
+      expect(panel().textContent).toContain('This conversion has not finished for a while.');
+      expect(panel().textContent).not.toContain('This page updates by itself');
+      expect(buttonByText('Retry conversion')).toBeUndefined();
+
+      await click(buttonByText('Convert again'));
+      const posts = api.to('POST', '/api/files/buckets/docs/convert');
+      await until(() => api.to('POST', '/api/files/buckets/docs/convert').length === 1, 'the request');
+      expect(posts[0]!.body).toEqual({ key: fileRecord().key });
+      expect(onChanged).toHaveBeenCalledTimes(1);
+      // The new run is as fresh as a conversion can be: the page waits for it again.
+      await until(() => panel().textContent!.includes('This page updates by itself'), 'the waiting state');
+      expect(buttonByText('Convert again')).toBeUndefined();
+    });
+
+    it('does not say so before the time has come', async () => {
+      await open({ record: { markdownStatus: 'pending', updatedAt: isoAgo(2 * 60_000) } });
+      await tab('Markdown');
+      expect(panel().textContent).toContain('This page updates by itself');
+      expect(panel().textContent).not.toContain('has not finished for a while');
+      expect(buttonByText('Convert again')).toBeUndefined();
+    });
+
+    it('does not say so to someone who can only read, who has no button for it', async () => {
+      await open({ record: { markdownStatus: 'pending', updatedAt: isoAgo(10 * 60_000) }, level: 'read' });
+      await until(() => drawerText().includes('read-only access'), 'the read-only note');
+      await tab('Markdown');
+      expect(panel().textContent).toContain('This conversion has not finished for a while.');
+      expect(buttonByText('Convert again')).toBeUndefined();
+      expect(panel().textContent).toContain('read-only access');
+    });
+
+    it('goes by the time the file was created when it was never updated', async () => {
+      await open({ record: { markdownStatus: 'pending', updatedAt: undefined, createdAt: isoAgo(10 * 60_000) } });
+      await tab('Markdown');
+      expect(panel().textContent).toContain('This conversion has not finished for a while.');
+      expect(buttonByText('Convert again')).toBeTruthy();
+    });
+
+    it('speaks Turkish', async () => {
+      await open({ record: { markdownStatus: 'pending', updatedAt: isoAgo(10 * 60_000) } }, { locale: 'tr' });
+      await tab('Markdown');
+      expect(buttonByText('Yeniden dönüştür')).toBeTruthy();
+    });
+  });
+
+  describe('a Markdown copy that is there while the last conversion says otherwise', () => {
+    const copy = { markdownKey: 'q3.md', markdownSize: 3 * KB };
+
+    it('keeps showing the earlier copy while a new conversion runs', async () => {
+      await open({ record: { ...copy, markdownStatus: 'pending', updatedAt: isoAgo(30_000) }, markdownText: 'earlier text' });
+      await tab('Markdown');
+      await until(() => Boolean(panel().querySelector('pre')), 'the earlier copy');
+      expect(panel().textContent).toContain('Converting…');
+      expect(panel().querySelector('pre')!.textContent).toBe('earlier text');
+      expect(panel().textContent).toContain(`Markdown copy · ${formatBytes(3 * KB)}`);
+    });
+
+    it('keeps showing it after a conversion failed, says so, and offers Retry conversion', async () => {
+      await open({ record: { ...copy, markdownStatus: 'failed', markdownError: 'The file is password protected.' }, markdownText: 'earlier text' });
+      await tab('Markdown');
+      await until(() => Boolean(panel().querySelector('pre')), 'the earlier copy');
+      expect(panel().textContent).toContain('The Markdown conversion failed');
+      expect(panel().textContent).toContain('The file is password protected.');
+      expect(panel().textContent).toContain('The earlier Markdown copy is still here.');
+      expect(panel().querySelector('pre')!.textContent).toBe('earlier text');
+      expect(buttonByText('Retry conversion')).toBeTruthy();
+    });
+
+    it('keeps showing it after a conversion was skipped, with the reason, and offers Convert again', async () => {
+      await open({ record: { ...copy, markdownStatus: 'skipped', markdownError: 'The file is larger than the limit for conversion.' }, markdownText: 'earlier text' });
+      await tab('Markdown');
+      await until(() => Boolean(panel().querySelector('pre')), 'the earlier copy');
+      expect(panel().textContent).toContain('The file is larger than the limit for conversion.');
+      expect(panel().textContent).toContain('The earlier Markdown copy is still here.');
+      expect(buttonByText('Convert again')).toBeTruthy();
+      expect(buttonByText('Convert to Markdown')).toBeUndefined();
+    });
+
+    it('offers nothing more for a copy that is current', async () => {
+      await open({ record: { ...copy, markdownStatus: 'succeeded' } });
+      await tab('Markdown');
+      await until(() => Boolean(panel().querySelector('pre')), 'the copy');
+      expect(buttonByText('Convert again')).toBeUndefined();
+      expect(buttonByText('Retry conversion')).toBeUndefined();
+      expect(buttonByText('Convert to Markdown')).toBeUndefined();
+    });
+
+    it('shows no copy for a record that says it succeeded but has none', async () => {
+      await open({ record: { markdownStatus: 'succeeded', markdownKey: undefined } });
+      await tab('Markdown');
+      expect(panel().querySelector('pre')).toBeNull();
+      expect(api.calls.some((call) => call.query.variant === 'markdown')).toBe(false);
+      expect(buttonByText('Convert to Markdown')).toBeTruthy();
+    });
+
+    it('offers the Markdown download in the header exactly when there is a copy', async () => {
+      await open({ record: { ...copy, markdownStatus: 'failed', markdownError: 'Broken.' } });
+      expect(buttonByText('Download Markdown')).toBeTruthy();
+      await mounted!.unmount();
+
+      await open({ record: { markdownStatus: 'succeeded', markdownKey: undefined } });
+      expect(buttonByText('Download Markdown')).toBeUndefined();
+    });
   });
 
   it('tells why a conversion failed and starts it again on Retry conversion', async () => {
@@ -317,6 +458,26 @@ describe('Markdown tab', () => {
     expect(panel().textContent).toContain('No reason was recorded.');
   });
 
+  it('tells why a conversion was skipped when there is no copy, and offers to convert it', async () => {
+    const reason = 'The file is larger than the limit for Markdown conversion.';
+    await open({ record: { markdownStatus: 'skipped', markdownError: reason } });
+    await tab('Markdown');
+    expect(panel().textContent).toContain(reason);
+    // The status line carries it too, for whoever reads the page aloud.
+    expect(panel().querySelector('[role="status"]')!.textContent).toContain(`Not converted: ${reason}`);
+    expect(panel().textContent).toContain('This file has no Markdown copy.');
+    expect(buttonByText('Convert to Markdown')).toBeTruthy();
+    expect(panel().querySelector('pre')).toBeNull();
+  });
+
+  it('says nothing about a reason for a file that was never converted', async () => {
+    await open({ record: { markdownStatus: 'skipped', markdownError: undefined } });
+    await tab('Markdown');
+    expect(panel().textContent).toContain('This file has no Markdown copy.');
+    expect(panel().querySelector('[role="status"]')!.textContent).toContain('Not converted');
+    expect(panel().querySelector('[role="status"]')!.textContent).not.toContain('Not converted:');
+  });
+
   it('offers to convert a file that was never converted', async () => {
     await open({ record: { markdownStatus: 'skipped' } });
     await tab('Markdown');
@@ -335,6 +496,28 @@ describe('Markdown tab', () => {
     await until(() => Boolean(panel().querySelector('[role="alert"]')), 'the alert');
     expect(panel().querySelector('[role="alert"]')!.textContent).toBe('This file type cannot be converted to Markdown.');
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('says why a conversion was refused when the file belongs to a session somebody else started', async () => {
+    const sentence = 'This session was started by someone else, and you are not allowed to change it.';
+    await open({ record: { markdownStatus: 'skipped' }, convertAnswer: () => jsonResponse({ error: sentence }, 403) });
+    await tab('Markdown');
+    await click(buttonByText('Convert to Markdown'));
+    await until(() => Boolean(panel().querySelector('[role="alert"]')), 'the alert');
+    expect(panel().querySelector('[role="alert"]')!.textContent).toBe(sentence);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('words a conversion the gates refused as a missing permission', async () => {
+    const gate = 'Forbidden: files requires write permission';
+    await open({
+      record: { markdownStatus: 'skipped' },
+      convertAnswer: () => jsonResponse({ error: gate, code: 'forbidden', message: gate, service: 'files', required: 'write' }, 403),
+    });
+    await tab('Markdown');
+    await click(buttonByText('Convert to Markdown'));
+    await until(() => Boolean(panel().querySelector('[role="alert"]')), 'the alert');
+    expect(panel().querySelector('[role="alert"]')!.textContent).toBe('You do not have permission to do this.');
   });
 
   it('shows someone who can only read the state but no button to change it', async () => {
@@ -586,6 +769,17 @@ describe('actions', () => {
       expect(notify.show).not.toHaveBeenCalled();
     });
 
+    it('says why a file of somebody else’s session cannot be deleted, in the server’s sentence, and keeps the file', async () => {
+      const sentence = 'This session was started by someone else, and you are not allowed to change it.';
+      await open({ deleteAnswer: () => jsonResponse({ error: sentence }, 403) });
+      await click(buttonByText('Delete…'));
+      await until(() => dialogs().length > 0, 'the question');
+      await click(buttonByText('Delete', dialogs()[0]!));
+      await until(() => dialogs()[0]?.textContent?.includes(sentence) ?? false, 'the refusal');
+      expect(dialogs()[0]!.textContent).not.toContain('You do not have permission to do this.');
+      expect(onDeleted).not.toHaveBeenCalled();
+    });
+
     it('leaves Escape to the question: it closes the question, not the drawer', async () => {
       await open({});
       await click(buttonByText('Delete…'));
@@ -699,6 +893,21 @@ describe('states', () => {
     await open({ recordAnswer: () => jsonResponse({ error: 'File not found' }, 404) });
     await until(() => drawerText().includes('This file no longer exists.'), 'the message');
     expect(q('[role="tab"]')).toBeNull();
+  });
+
+  it('says why a file of somebody else’s session cannot be opened, in the server’s sentence', async () => {
+    const sentence = 'This session was started by someone else, and you are not allowed to view it.';
+    await open({ recordAnswer: () => jsonResponse({ error: sentence }, 403) });
+    await until(() => drawerText().includes(sentence), 'the reason');
+    expect(drawerText()).not.toContain('You do not have permission to do this.');
+    expect(q('[role="tab"]')).toBeNull();
+  });
+
+  it('words an open the gates refused as a missing permission', async () => {
+    const gate = 'Forbidden: files requires read permission';
+    await open({ recordAnswer: () => jsonResponse({ error: gate, code: 'forbidden', message: gate, service: 'files', required: 'read' }, 403) });
+    await until(() => drawerText().includes('You do not have permission to do this.'), 'the message');
+    expect(drawerText()).not.toContain('Forbidden');
   });
 
   it('says why the file could not be loaded and tries again on request', async () => {

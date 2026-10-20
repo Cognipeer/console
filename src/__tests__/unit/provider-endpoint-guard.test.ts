@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
+import { OutboundDnsError, OutboundNetworkError, OutboundPrivateTargetError } from '@/lib/security/outboundFetch';
 import {
   assertProviderEndpointsAllowed,
   ProviderEndpointError,
+  toProviderEndpointError,
 } from '@/lib/services/providers/providerEndpointGuard';
 
 const original = getConfigSource();
@@ -50,6 +52,26 @@ describe('assertProviderEndpointsAllowed', () => {
       .resolves.toBeUndefined();
   });
 
+  // The switch is read the way the rest of the configuration reads a boolean: "true" and "1" are on, everything else is off.
+  const SOURCES: Array<[type: 'model' | 'file', sources: Array<Record<string, unknown>>]> = [
+    ['model', [{ baseUrl: 'http://10.0.0.5:11434/v1' }]],
+    ['file', [{}, { endpoint: 'http://10.0.0.5:9000' }]],
+  ];
+
+  it.each(['true', '1'])('on-prem refuses private endpoints of every guarded domain when OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK is %j', async (value) => {
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: value });
+    for (const [type, sources] of SOURCES) {
+      await expect(assertProviderEndpointsAllowed(type, scope, ...sources), `${type} with ${value}`).rejects.toBeInstanceOf(ProviderEndpointError);
+    }
+  });
+
+  it.each(['false', '0', ''])('on-prem allows private endpoints of every guarded domain when OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK is %j', async (value) => {
+    use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: value });
+    for (const [type, sources] of SOURCES) {
+      await expect(assertProviderEndpointsAllowed(type, scope, ...sources), `${type} with ${value}`).resolves.toBeUndefined();
+    }
+  });
+
   it('on-prem allows private and loopback endpoints by default', async () => {
     use(onprem);
     for (const url of ['http://127.0.0.1:8000/v1', 'http://10.1.2.3:11434/v1']) {
@@ -95,5 +117,40 @@ describe('assertProviderEndpointsAllowed', () => {
     await expect(assertProviderEndpointsAllowed('file', scope, undefined, { endpoint: '10.0.0.5:9000' })).rejects.toBeInstanceOf(ProviderEndpointError);
     use({ ...onprem, OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK: 'true', OUTBOUND_HTTP_ALLOWED_HOSTS: '10.0.0.5' });
     await expect(assertProviderEndpointsAllowed('file', scope, undefined, { endpoint: '10.0.0.5:9000' })).resolves.toBeUndefined();
+  });
+});
+
+describe('toProviderEndpointError', () => {
+  it('words a refused private address neutrally: no host, no range, and no second try', () => {
+    const error = toProviderEndpointError('endpoint', new OutboundPrivateTargetError('storage.internal.example'));
+    expect(error).toBeInstanceOf(ProviderEndpointError);
+    expect(error).toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'endpoint', retryable: false });
+    expect((error as Error).message).toBe('Provider endpoint "endpoint" is not allowed: private network addresses are reachable only through networks the operator has opened for this organization');
+  });
+
+  it('keeps a name that did not resolve retryable, with the words of the error it comes from', () => {
+    const error = toProviderEndpointError('connectionString', new OutboundDnsError('Could not resolve host: files.example.test'));
+    expect(error).toBeInstanceOf(ProviderEndpointError);
+    expect(error).toMatchObject({ field: 'connectionString', retryable: true });
+    expect((error as Error).message).toBe('Provider endpoint "connectionString" is not allowed: Could not resolve host: files.example.test');
+  });
+
+  it('keeps every other refusal as one that stays refused', () => {
+    const error = toProviderEndpointError('endpoint', new OutboundNetworkError('Unsupported protocol for outbound request: ftp:'));
+    expect(error).toMatchObject({ name: 'ProviderEndpointError', field: 'endpoint', retryable: false });
+    expect((error as Error).message).toContain('Unsupported protocol');
+  });
+
+  it('hands back an error that is not a refusal as it is', () => {
+    const other = new Error('socket hang up');
+    expect(toProviderEndpointError('endpoint', other)).toBe(other);
+    expect(toProviderEndpointError('endpoint', 'text')).toBe('text');
+  });
+
+  it('is an error that is not retryable unless it says so', () => {
+    expect(new ProviderEndpointError('endpoint', 'x').retryable).toBe(false);
+    expect(new ProviderEndpointError('endpoint', 'x', { retryable: false }).retryable).toBe(false);
+    expect(new ProviderEndpointError('endpoint', 'x', {}).retryable).toBe(false);
+    expect(new ProviderEndpointError('endpoint', 'x', { retryable: true }).retryable).toBe(true);
   });
 });

@@ -292,7 +292,8 @@ export function BucketFilesTab({ bucket, canWrite, onOpenUpload, onOpenFile, onO
       key: 'size',
       label: tb('columns.size'),
       align: 'right',
-      render: (row) => (row.kind === 'file' ? <span className="ds-mono">{formatBytes(row.record.size)}</span> : <span className="ds-faint">—</span>),
+      // "11 MB" and "1 hour ago" stay on one line: in a narrow table the number would otherwise break from its unit.
+      render: (row) => (row.kind === 'file' ? <span className="ds-mono" style={{ whiteSpace: 'nowrap' }}>{formatBytes(row.record.size)}</span> : <span className="ds-faint">—</span>),
     },
     {
       key: 'type',
@@ -336,7 +337,7 @@ export function BucketFilesTab({ bucket, canWrite, onOpenUpload, onOpenFile, onO
     {
       key: 'modified',
       label: tb('columns.modified'),
-      render: (row) => (row.kind === 'file' ? <RelativeTime value={modifiedAt(row.record)} /> : <span className="ds-faint">—</span>),
+      render: (row) => (row.kind === 'file' ? <span style={{ whiteSpace: 'nowrap' }}><RelativeTime value={modifiedAt(row.record)} /></span> : <span className="ds-faint">—</span>),
     },
     {
       key: 'actions',

@@ -138,15 +138,15 @@ export const S3CompatibleFileProviderContract: ProviderContract<
             type: 'switch',
             defaultValue: false,
             description:
-              'Accept any certificate, including self-signed ones. Self-hosted installations only; use the CA certificate field instead whenever possible.',
+              'Accept any certificate, including self-signed ones. Use the CA certificate field instead whenever possible.',
             scope: 'settings',
           },
         ],
       },
     ],
   },
-  validateSettings({ credentials, settings, isOnPrem }) {
-    validateS3Settings({ credentials, settings, isOnPrem, requireEndpoint: true });
+  validateSettings({ credentials, settings }) {
+    validateS3Settings({ credentials, settings, requireEndpoint: true });
   },
   describeStorageLocation({ settings, tenantId, providerKey }) {
     return describeS3Location(settings, tenantId, providerKey);

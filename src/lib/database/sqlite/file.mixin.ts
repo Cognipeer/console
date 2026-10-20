@@ -184,7 +184,13 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       const purposeClause = this.filePurposeClause(filters.purpose);
       if (purposeClause) clauses.push(purposeClause);
       if (filters.type) clauses.push(this.fileTypeClause(filters.type));
-      if (filters.search) { clauses.push('name LIKE @search'); params.search = this.likePattern(filters.search.trim()); }
+      if (filters.search) {
+        // Folded on both sides (`LIKE` alone folds the case of ASCII letters only, so "ŞÖYLE" never found "şöyle.txt"
+        // although MongoDB's `$regex` did), and with the escape character declared: `%` and `_` typed in the box are
+        // looked for as typed, not read as wildcards.
+        clauses.push("iam_fold(name) LIKE iam_fold(@search) ESCAPE '\\'");
+        params.search = `%${filters.search.trim().replace(/[\\%_]/g, '\\$&')}%`;
+      }
       if (filters.cursor) { clauses.push('id > @cursor'); params.cursor = filters.cursor; }
 
       const limit = (filters.limit ?? 50) + 1;

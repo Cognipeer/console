@@ -21,7 +21,8 @@ export default function BucketProviderCell({ bucket, canManageProviders }: Bucke
   const driver = provider ? driverInfo(provider) : null;
 
   return (
-    <div className="ds-col" style={{ gap: 3, minWidth: 0 }}>
+    // A provider's own message (why a test failed) can be a long sentence: it wraps at this width instead of widening the column.
+    <div className="ds-col" style={{ gap: 3, minWidth: 0, maxWidth: 380 }}>
       {provider ? (
         <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}>{provider.label}</span>
       ) : (

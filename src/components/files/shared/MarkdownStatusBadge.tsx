@@ -8,7 +8,7 @@ import { useTranslations } from '@/lib/i18n';
 export interface MarkdownStatusBadgeProps {
   /** `markdownStatus` of the file record. */
   status?: FileMarkdownStatus | null;
-  /** `markdownError` of the record; shown for a failed conversion. */
+  /** `markdownError` of the record; shown for a failed conversion, and as the reason of a skipped one. */
   error?: string | null;
 }
 
@@ -51,11 +51,13 @@ export default function MarkdownStatusBadge({ status, error }: MarkdownStatusBad
     );
   }
 
-  // Not converted (skipped, or nothing recorded): a dash that still says why to a screen reader.
+  // Not converted (skipped, or nothing recorded): a dash that still says why to a screen reader. A skipped
+  // conversion carries its reason (a file over the conversion limit), which is added when there is one.
+  const skipped = status === 'skipped' ? [t('markdown.skipped'), error?.trim()].filter(Boolean).join(': ') : '';
   return (
-    <span className="ds-faint" title={status === 'skipped' ? t('markdown.skipped') : undefined}>
+    <span className="ds-faint" title={skipped || undefined}>
       —
-      {status === 'skipped' ? <VisuallyHidden>{t('markdown.skipped')}</VisuallyHidden> : null}
+      {skipped ? <VisuallyHidden>{skipped}</VisuallyHidden> : null}
     </span>
   );
 }

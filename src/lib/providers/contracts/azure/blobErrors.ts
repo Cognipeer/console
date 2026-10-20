@@ -148,6 +148,41 @@ export function isHopelessFailure(info: AzureErrorInfo): boolean {
   return !isRetryableStatus(info.status);
 }
 
+/**
+ * The TLS code (`DEPTH_ZERO_SELF_SIGNED_CERT`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, ...) an error carries itself or in
+ * its cause chain, when it is a certificate verdict. `fetch` hides it one level down (`TypeError: fetch failed`).
+ */
+export function tlsFailureCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth += 1) {
+    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    if (typeof code === 'string' && TLS_CODE.test(code)) return code;
+    current = cause;
+  }
+  return undefined;
+}
+
+/** What Node and undici call a connection that went away in the middle of a body. */
+const CONNECTION_LOST_CODE = /^(?:ECONNRESET|ECONNABORTED|EPIPE|ETIMEDOUT|ERR_STREAM_PREMATURE_CLOSE|UND_ERR_SOCKET|UND_ERR_ABORTED|UND_ERR_CLOSED)$/;
+
+/**
+ * Whether a body read stopped before its last byte for a reason another request for the rest of it can fix: a
+ * connection that dropped, or a body that ended short.
+ *
+ * The SDK reports a dropped connection to its body stream as an `AbortError` it cannot tell from a cancelled
+ * request (it ends the stream with that error and does not retry), so the name alone proves nothing: a caller
+ * rules out its own deadline and signal first.
+ */
+export function isInterruptedRead(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const { name, code, message, cause } = error as { name?: unknown; code?: unknown; message?: unknown; cause?: { code?: unknown } };
+  if (name === 'AbortError') return true;
+  const systemCode = typeof code === 'string' ? code : typeof cause?.code === 'string' ? cause.code : undefined;
+  if (systemCode && CONNECTION_LOST_CODE.test(systemCode)) return true;
+  // the SDK's own wording for a body that ended short once it is told not to retry
+  return typeof message === 'string' && message.startsWith('Data corruption failure: received less data than required');
+}
+
 /* ------------------------------------------------------------------ */
 /*  Wording                                                           */
 /* ------------------------------------------------------------------ */
@@ -166,6 +201,12 @@ const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(\bAccountKey=)[^;\s"']+/gi, '$1[redacted]'],
   [/(\bSharedAccessSignature=)[^;\s"']+/gi, '$1[redacted]'],
   [/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]'],
+  // a token request echoed back: the form field, or the same field in a JSON answer
+  [/(\bclient_secret=)[^&\s"']+/gi, '$1[redacted]'],
+  [/("client_secret"\s*:\s*")[^"]*"/gi, '$1[redacted]"'],
+  // the signature of a Shared Key Authorization header, and a bare token (three base64url parts) in any text
+  [/(\bSharedKey(?:Lite)?\s+[^\s:]+:)[A-Za-z0-9+/=]+/g, '$1[redacted]'],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '[redacted]'],
 ];
 
 /**
@@ -206,8 +247,30 @@ export interface FailureContext {
   container: string;
   host: string;
   authMethod: string;
-  /** Self-hosted deployment: the TLS hint may mention the verification switch. */
-  onPrem?: boolean;
+  /** The validity window of the SAS in use, when one is (a connection string's SAS included). */
+  sas?: { expiresAt?: Date; startsAt?: Date };
+  /** The "API version" setting, when the provider pins one. */
+  apiVersion?: string;
+  /**
+   * An abort that neither the operation's own deadline nor the caller's signal raised: the connection went away
+   * while the request or its body was in flight, which is a different story from "no answer in time".
+   */
+  interrupted?: boolean;
+}
+
+/**
+ * Whether the SAS the provider holds is outside its own validity window right now, as a sentence tail. The service
+ * says so itself (`AuthenticationFailed` with the window in its detail); an emulator only refuses, and a SAS that
+ * expires while the runtime is cached is the case this exists for. `undefined` when the window is fine.
+ */
+function sasWindowHint(sas: FailureContext['sas'], now: number): string | undefined {
+  if (sas?.expiresAt && sas.expiresAt.getTime() <= now) {
+    return `it expired on ${sas.expiresAt.toISOString()}. Create a new one and replace it in the provider settings.`;
+  }
+  if (sas?.startsAt && sas.startsAt.getTime() > now) {
+    return `it is not valid before ${sas.startsAt.toISOString()}. Check the start time of the SAS and the clock of this server.`;
+  }
+  return undefined;
 }
 
 /** The SAS permission letters an operation needs, for a "your SAS lacks X" sentence. */
@@ -219,20 +282,28 @@ const SAS_PERMISSION: Readonly<Record<string, string>> = {
   delete: 'd (delete)',
 };
 
+/** The service's own sentence without its closing punctuation, for a place where this module adds its own. */
+function withoutFinalStop(text: string): string {
+  return text.replace(/[\s.!?;,]+$/, '');
+}
+
 /**
  * A sentence a person can act on. It never repeats a request URL, a header or a credential, and
  * it deliberately avoids the phrases "not found" / "does not exist" for anything but a missing file:
  * the client download route turns those into `404 File not found`.
  */
-export function describeFailure(info: AzureErrorInfo, ctx: FailureContext): string {
+export function describeFailure(info: AzureErrorInfo, ctx: FailureContext, now: number = Date.now()): string {
   const where = `${ctx.account}/${ctx.container}`;
-  if (info.aborted) return `Azure Blob Storage did not answer in time (${ctx.operation}).`;
+  if (info.aborted) {
+    return ctx.interrupted
+      ? `The connection to Azure Blob Storage was interrupted (${ctx.operation}).`
+      : `Azure Blob Storage did not answer in time (${ctx.operation}).`;
+  }
   if (info.blocked) {
     return `${ctx.host} resolves to a private or loopback address, which this deployment does not allow.`;
   }
   if (info.systemCode && TLS_CODE.test(info.systemCode)) {
-    const escape = ctx.onPrem ? ', or turn on "Skip TLS verification" for a test setup' : '';
-    return `The TLS certificate of ${ctx.host} is not trusted (${info.systemCode}). Paste the issuing CA certificate into the "CA certificate" setting${escape}.`;
+    return `The TLS certificate of ${ctx.host} is not trusted (${info.systemCode}). Paste the issuing CA certificate into the "CA certificate" setting, or turn on "Skip TLS verification" for a test setup.`;
   }
   if (info.systemCode && REQUEST_REJECTED_CODE.test(info.systemCode)) {
     return `The ${ctx.operation} request was rejected before it was sent (${info.systemCode}).`;
@@ -252,9 +323,19 @@ export function describeFailure(info: AzureErrorInfo, ctx: FailureContext): stri
       return `The storage endpoint answered 404 (ResourceNotFound) for ${where}. Check the account name and the endpoint.`;
     case 'KeyBasedAuthenticationNotPermitted':
       return 'Key-based access is turned off for this storage account. Use a SAS token or Microsoft Entra ID.';
+    // The service answers a bearer token it cannot accept (wrong audience or issuer, expired, bad signature) with
+    // InvalidAuthenticationInfo; the reason is in a response header that never leaves the runtime.
+    case 'InvalidAuthenticationInfo':
     case 'AuthenticationFailed': {
-      const hint = authenticationHint(info.detail);
-      return `Azure rejected the credentials (AuthenticationFailed): ${hint ?? 'check the account name and key, or the SAS signature and validity window'}.`;
+      const window = sasWindowHint(ctx.sas, now);
+      if (window) return `Azure rejected the SAS token: ${window}`;
+      // What to check depends on what was sent; the service's own detail, when it gives one, says more.
+      const fallback = ctx.authMethod === 'entra'
+        ? 'the Microsoft Entra token was not accepted; check the authority host, the tenant ID and the clock of this server'
+        : ctx.sas
+          ? 'check the SAS signature and validity window'
+          : 'check the account name and key';
+      return `Azure rejected the credentials (${info.code}): ${authenticationHint(info.detail) ?? fallback}.`;
     }
     case 'AuthorizationPermissionMismatch': {
       if (ctx.operation === 'create the container') {
@@ -266,8 +347,12 @@ export function describeFailure(info: AzureErrorInfo, ctx: FailureContext): stri
       const letters = SAS_PERMISSION[ctx.operation];
       return `The credentials do not allow "${ctx.operation}" in ${where}. A SAS needs the ${letters ? `${letters} permission` : 'matching permission letters (racwdl)'}.`;
     }
-    case 'AuthorizationFailure':
+    case 'AuthorizationFailure': {
+      // Emulators answer a SAS outside its window with this code, where the service names the window.
+      const window = sasWindowHint(ctx.sas, now);
+      if (window) return `Azure rejected the SAS token: ${window}`;
       return `Azure refused the request (AuthorizationFailure). Either the credentials were rejected or the storage account's firewall, virtual network or "public network access" setting blocks this server (${ctx.host}).`;
+    }
     case 'AuthorizationServiceMismatch':
       return 'The SAS token is not valid for the Blob service (its "ss" field lacks b).';
     case 'AuthorizationResourceTypeMismatch':
@@ -280,8 +365,12 @@ export function describeFailure(info: AzureErrorInfo, ctx: FailureContext): stri
       return `The storage account "${ctx.account}" is disabled.`;
     case 'UnauthorizedBlobOverwrite':
       return 'The credentials may create blobs but not overwrite them; the SAS or role also needs write and delete.';
-    case 'InvalidHeaderValue':
-      return `The service rejected a request header${info.detail ? ` (${withoutMissingPhrases(info.detail)})` : ''}. If it names an API version, set "API version" in the provider settings.`;
+    case 'InvalidHeaderValue': {
+      const detail = info.detail ? ` (${withoutFinalStop(withoutMissingPhrases(info.detail))})` : '';
+      return ctx.apiVersion
+        ? `The service rejected a request header${detail}. If it names the API version, this service may not support ${ctx.apiVersion}: change or clear "API version" in the provider settings.`
+        : `The service rejected a request header${detail}. If it names an API version, set "API version" in the provider settings.`;
+    }
     case 'InvalidResourceName':
     case 'OutOfRangeInput':
       return `Azure rejected the container or blob name (${info.code}).`;
@@ -299,5 +388,5 @@ export function describeFailure(info: AzureErrorInfo, ctx: FailureContext): stri
       break;
   }
   const status = info.status ? `HTTP ${info.status}` : 'an unknown error';
-  return `Azure Blob Storage ${ctx.operation} failed with ${status}${info.code ? ` (${info.code})` : ''}${info.detail ? `: ${withoutMissingPhrases(info.detail)}` : ''}.`;
+  return `Azure Blob Storage ${ctx.operation} failed with ${status}${info.code ? ` (${info.code})` : ''}${info.detail ? `: ${withoutFinalStop(withoutMissingPhrases(info.detail))}` : ''}.`;
 }

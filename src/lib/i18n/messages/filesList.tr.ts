@@ -18,6 +18,7 @@ export const filesListTr: typeof filesListEn = {
     enable: 'Etkinleştir',
     disable: 'Devre dışı bırak',
     delete: 'Bucket’ı sil…',
+    deleteAgain: 'Yeniden sil…',
   },
   tiles: {
     buckets: 'Bucket',
@@ -27,7 +28,7 @@ export const filesListTr: typeof filesListEn = {
     filesSize: 'tüm bucket’larda {size}',
   },
   filters: {
-    search: 'Bucket’ları ad, anahtar veya açıklamaya göre ara…',
+    search: 'Ada, anahtara veya açıklamaya göre ara…',
     providerLabel: 'Sağlayıcıya göre filtrele',
     allProviders: 'Tüm sağlayıcılar',
     statusLabel: 'Duruma göre filtrele',

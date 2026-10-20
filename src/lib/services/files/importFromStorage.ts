@@ -19,9 +19,11 @@
  */
 
 import mime from 'mime-types';
-import { getDatabase, type DatabaseProvider, type IFileRecord } from '@/lib/database';
+import { getDatabase, type DatabaseProvider, type IFileBucketRecord, type IFileRecord } from '@/lib/database';
+import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { checkResourceQuota, resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
+import { bucketClosedError } from './bucketRules';
 import { mapLimit } from './concurrency';
 import { FileServiceError, storageLocationSharedError } from './errors';
 import { fileResilience, findBucketsSharingStorage, requireBucketContext, resolveBucketPrefix } from './fileService';
@@ -42,8 +44,26 @@ const CREATE_CONCURRENCY = 4;
 /** The longest key the Files routes accept. */
 const MAX_OBJECT_KEY_LENGTH = 1024;
 
+const logger = createLogger('files:import');
+
 /** Imports running in this process: a second one for the same bucket would register the same objects twice. */
 const running = new Set<string>();
+
+/** The types a store holds for an object it was given none for: they say nothing about what the file is. */
+const GENERIC_CONTENT_TYPES: ReadonlySet<string> = new Set(['application/octet-stream', 'binary/octet-stream']);
+
+/**
+ * The content type an imported record carries. A listing reports the type the store holds, and some stores hold a
+ * generic one for an object that was written without a type (Azure Blob reports `application/octet-stream`): the
+ * name is asked before such a type is believed, so a PDF imported from there previews like the same file imported
+ * from a store that reports nothing. The generic type is kept when the name does not say better.
+ */
+function importedContentType(listed: string | undefined, name: string): string | undefined {
+  const type = listed?.trim() || undefined;
+  const generic = type !== undefined && GENERIC_CONTENT_TYPES.has((type.split(';')[0] ?? '').trim().toLowerCase());
+  if (type && !generic) return type;
+  return mime.lookup(name) || type || undefined;
+}
 
 /**
  * Whether a key can be used as a record's key. Every later read, conversion and delete addresses the object through the
@@ -111,6 +131,37 @@ async function assertRoomFor(
   }
 }
 
+/**
+ * An import checks its bucket once, at the start, and then registers records for as long as a page takes. A bucket
+ * that began to be deleted (or was switched off) in between must keep none of them: the deletion lists the bucket's
+ * files once and would never see them, and nothing could list or remove them afterwards. Called once the records
+ * exist, this reads the bucket again and, when it no longer takes files, removes the records this call made and
+ * refuses the import as a write to that bucket would have been refused. An import never touches objects, so there
+ * are none to remove. A bucket that cannot be read again leaves the import as it is.
+ */
+async function withdrawIfBucketClosed(
+  db: DatabaseProvider,
+  bucket: Pick<IFileBucketRecord, 'tenantId' | 'key'>,
+  projectId: string,
+  createdIds: string[],
+): Promise<void> {
+  let current: IFileBucketRecord | null;
+  try {
+    current = await db.findFileBucketByKey(bucket.tenantId, bucket.key, projectId);
+  } catch (error) {
+    logger.warn('Could not check that a bucket still takes files after an import', {
+      bucketKey: bucket.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  const closed = bucketClosedError(current);
+  if (!closed) return;
+
+  await Promise.all(createdIds.map((id) => db.deleteFileRecord(id).catch(() => undefined)));
+  throw closed;
+}
+
 export async function importFromStorage(input: ImportFromStorageInput): Promise<ImportFromStorageResult> {
   const { tenantDbName, tenantId, projectId, bucketKey, importedBy } = input;
   const limit = Math.min(Math.max(Math.floor(input.limit ?? IMPORT_DEFAULT_LIMIT), 1), IMPORT_MAX_LIMIT);
@@ -169,11 +220,12 @@ export async function importFromStorage(input: ImportFromStorageInput): Promise<
         { files: fresh.length, bytes: fresh.reduce((sum, candidate) => sum + Math.max(candidate.handle.size ?? 0, 0), 0) },
       );
 
+      const createdIds: string[] = [];
       await mapLimit(fresh, CREATE_CONCURRENCY, async ({ key, name, handle }) => {
         // The lock above is this process's. Another node may have registered the object since the lookup, so the
         // key is asked once more right before the insert: the window is one insert, not the whole page.
         if (await db.findFileRecordByKey(bucket.providerKey, bucket.key, key, projectId)) return;
-        const contentType = handle.contentType || mime.lookup(name) || undefined;
+        const contentType = importedContentType(handle.contentType, name);
         const record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'> = {
           tenantId,
           projectId,
@@ -190,9 +242,12 @@ export async function importFromStorage(input: ImportFromStorageInput): Promise<
           uploadedBy: importedBy,
           createdBy: importedBy,
         };
-        await db.createFileRecord(record);
+        const stored = await db.createFileRecord(record);
+        if (stored._id) createdIds.push(String(stored._id));
         imported += 1;
       });
+
+      await withdrawIfBucketClosed(db, bucket, projectId, createdIds);
     }
 
     return {

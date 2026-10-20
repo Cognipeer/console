@@ -2,7 +2,9 @@
  * The client Files API (`plugins/client-files.ts`):
  *  - an upload's `keyHint` follows the Document Store's destination rules (no "." / ".." segments, no control
  *    characters, text of at most 512 characters) and an invalid one is a 400 before any quota is spent;
- *  - `X-File-Metadata` is ASCII-escaped JSON, so metadata in any language downloads instead of failing the response.
+ *  - `X-File-Metadata` is ASCII-escaped JSON, so metadata in any language downloads instead of failing the response;
+ *    it is the metadata the file was stored with (the record's), whatever spelling the store keeps on the object, and
+ *    a value too large for a response header is left out of it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -41,6 +43,7 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 vi.mock('@/lib/services/files', async () => {
   const actual = await vi.importActual<typeof import('@/lib/services/files/fileService')>('@/lib/services/files/fileService');
   return {
+    chooseRelativeFileKey: actual.chooseRelativeFileKey,
     composeUploadKeyHint: actual.composeUploadKeyHint,
     createFileProvider: vi.fn(),
     deleteFile: vi.fn(),
@@ -167,15 +170,16 @@ describe('upload keyHint', () => {
 });
 
 describe('X-File-Metadata on download', () => {
-  const download = (metadata: unknown) => {
-    mockFn(getFileRecord).mockResolvedValue({ id: 'f1', key: 'report.txt' });
+  /** `stored`: the metadata of the file's record; `fromStore`: what the driver read back from the object (its own spelling). */
+  const download = (stored: unknown, fromStore: unknown = stored) => {
+    mockFn(getFileRecord).mockResolvedValue({ id: 'f1', key: 'report.txt', metadata: stored });
     mockFn(downloadFile).mockResolvedValue({
       data: Buffer.from('hello'),
       contentType: 'text/plain',
       size: 5,
       fileName: 'şirket bütçesi.txt',
       etag: '"abc"',
-      metadata,
+      metadata: fromStore,
     });
     return app.inject({ method: 'GET', url: DOWNLOAD_URL });
   };
@@ -211,5 +215,40 @@ describe('X-File-Metadata on download', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-file-metadata']).toBeUndefined();
     expect(res.body).toBe('hello');
+  });
+
+  it('is the metadata the file was stored with, not the store\'s own spelling of it', async () => {
+    // S3 keeps names in lower case and re-encodes the values, and adds a checksum of its own to the object.
+    const stored = { Team: 'Finance', Owner: 'Çağrı Öğütçü', 'Cost Centre': '42' };
+    const spelledByTheStore = { team: 'Finance', owner: '=?UTF-8?B?w4dhxJ9ybMSx?=', 'cost-centre': '42', 'x-amz-checksum': 'abc' };
+    const res = await download(stored, spelledByTheStore);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.headers['x-file-metadata'] as string)).toEqual(stored);
+  });
+
+  it('is the same whether or not the driver reads metadata back from the object', async () => {
+    const stored = { team: 'finance' };
+    expect(JSON.parse((await download(stored, undefined)).headers['x-file-metadata'] as string)).toEqual(stored);
+    expect(JSON.parse((await download(stored, {})).headers['x-file-metadata'] as string)).toEqual(stored);
+  });
+
+  it('has no header for a file stored with no metadata, even when the driver read some back', async () => {
+    expect((await download(undefined, { team: 'finance' })).headers['x-file-metadata']).toBeUndefined();
+    expect((await download({}, { team: 'finance' })).headers['x-file-metadata']).toBeUndefined();
+  });
+
+  it('is left out, with the download unchanged, when it would be too large for a response header', async () => {
+    const small = { note: 'x'.repeat(8 * 1024 - 20) };
+    expect((await download(small)).headers['x-file-metadata']).toBeDefined();
+    const res = await download({ note: 'x'.repeat(8 * 1024) });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-file-metadata']).toBeUndefined();
+    expect(res.body).toBe('hello');
+  });
+
+  it('is measured as it travels: escapes for characters outside ASCII count', async () => {
+    // 1000 characters outside ASCII are 6000 characters of header (\uXXXX each); 1400 are 8400.
+    expect((await download({ note: 'ş'.repeat(1000) })).headers['x-file-metadata']).toBeDefined();
+    expect((await download({ note: 'ş'.repeat(1400) })).headers['x-file-metadata']).toBeUndefined();
   });
 });

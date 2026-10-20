@@ -15,7 +15,7 @@
 import { CircuitOpenError, RequestTimeoutError } from '@/lib/core/resilience';
 import { isAzureBlobError } from '@/lib/providers/contracts/azure/blobErrors';
 import { isS3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
-import { isStorageObjectTooLargeError } from '@/lib/providers/contracts/storageLimits';
+import { isStorageInvalidKeyError, isStorageObjectTooLargeError } from '@/lib/providers/contracts/storageLimits';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
@@ -83,7 +83,11 @@ export function bucketInactiveError(): FileServiceError {
   return new FileServiceError('bucket_inactive', 409, 'File bucket is not active.');
 }
 
-/** A change to a bucket whose files are being deleted: it only goes away, or is deleted again after a failure. */
+/**
+ * A change to a bucket whose files are being deleted: it only goes away, or is deleted again after a failure. A
+ * deletion the queue lost (a restart) never ends by itself: removing the bucket with `force` (its files stay) is the
+ * way out.
+ */
 export function bucketDeletingError(): FileServiceError {
   return new FileServiceError('bucket_deleting', 409, 'The bucket is being deleted.');
 }
@@ -151,6 +155,17 @@ export function isRequestTimeoutError(error: unknown): boolean {
 }
 
 /**
+ * The store refuses the key itself - it is empty, longer than the store allows, or text it cannot write - whichever
+ * driver says so: the typed refusal of S3 (`invalid_key`), of Azure (`InvalidFileKey`) and of the local-disk and
+ * GridFS drivers. It is the caller's key to change, not a failure of the store.
+ */
+export function isInvalidKeyError(error: unknown): error is Error {
+  if (isStorageInvalidKeyError(error)) return true;
+  const code = (error as { code?: unknown } | null)?.code;
+  return (isS3OperationError(error) && code === 'invalid_key') || (isAzureBlobError(error) && code === 'InvalidFileKey');
+}
+
+/**
  * A failure the S3, Azure, local-disk or GridFS driver has put into words for people, or a provider setting or
  * endpoint the console refuses: its message is written to be shown (no keys, no raw XML, no server paths).
  */
@@ -158,6 +173,7 @@ export function isCuratedStorageError(error: unknown): error is Error {
   return isS3OperationError(error)
     || isAzureBlobError(error)
     || isStorageObjectTooLargeError(error)
+    || isStorageInvalidKeyError(error)
     || error instanceof ProviderSettingsError
     || error instanceof ProviderEndpointError;
 }

@@ -15,16 +15,19 @@ export const PROVIDER_ENDPOINT_NOT_ALLOWED = 'provider_endpoint_not_allowed';
 /**
  * Thrown when a provider endpoint setting fails validation. Maps to HTTP 400. An endpoint the policy refuses stays
  * refused, so the error declares itself not retryable (`withResilience` and the file circuit breaker read `retryable`).
+ * The one exception is a name that could not be resolved (`options.retryable`): that says nothing about the address and
+ * may well succeed later, so the flag of the outbound error it comes from is kept.
  */
 export class ProviderEndpointError extends Error {
   readonly code = PROVIDER_ENDPOINT_NOT_ALLOWED;
   readonly field: string;
-  readonly retryable = false;
+  readonly retryable: boolean;
 
-  constructor(field: string, reason: string) {
+  constructor(field: string, reason: string, options?: { retryable?: boolean }) {
     super(`Provider endpoint "${field}" is not allowed: ${reason}`);
     this.name = 'ProviderEndpointError';
     this.field = field;
+    this.retryable = options?.retryable === true;
   }
 }
 
@@ -42,12 +45,13 @@ const PRIVATE_TARGET_REASON = 'private network addresses are reachable only thro
 
 /**
  * A refusal of the outbound guard as the error a person gets for a provider setting. A refused private address gets
- * the neutral reason above (the guard's own message is for logs); every other refusal keeps its message. An error that
- * is not a refusal comes back unchanged.
+ * the neutral reason above (the guard's own message is for logs); every other refusal keeps its message, and a name
+ * that did not resolve (a resolver outage) keeps the `retryable` flag of the error it comes from. An error that is
+ * not a refusal comes back unchanged.
  */
 export function toProviderEndpointError(field: string, error: unknown): unknown {
   if (error instanceof OutboundPrivateTargetError) return new ProviderEndpointError(field, PRIVATE_TARGET_REASON);
-  if (error instanceof OutboundNetworkError) return new ProviderEndpointError(field, error.message);
+  if (error instanceof OutboundNetworkError) return new ProviderEndpointError(field, error.message, { retryable: error.retryable });
   return error;
 }
 

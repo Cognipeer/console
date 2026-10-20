@@ -2,6 +2,64 @@
    API tab's code blocks. Colours come from the --ds tokens, so both colour schemes follow. Nothing here is wider
    than its container: rows stack on a narrow screen and code scrolls inside its own box. */
 
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+/* The shared detail header keeps back, icon, title and actions on one line. With three actions that leaves a
+   phone-wide title a few pixels, one letter per line: here the title keeps room to read and the actions drop to
+   their own line once they no longer fit beside it. */
+.page :global(.detail-header) {
+  flex-wrap: wrap;
+}
+
+.page :global(.detail-header) > :global(.detail-icon) + div {
+  flex: 1 1 180px;
+}
+
+.page :global(.detail-header) > :global(.ds-row) {
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .page :global(.detail-header) {
+    align-items: flex-start;
+  }
+}
+
+/* The facts under the title (key, provider, health, size) are told apart by a dot. The dot belongs to the fact after it
+   and sits in a strip on that fact's left, and the row is pulled left by the width of the strip inside a box that clips
+   whatever leaves it: a fact that starts a line has its dot clipped away, so a dot never ends a line or stands alone
+   at the start of one, whatever the width. */
+.facts {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.factsRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin-left: -20px;
+}
+
+.fact {
+  position: relative;
+  padding-left: 20px;
+}
+
+.fact::before {
+  content: '·';
+  position: absolute;
+  left: 8px;
+  color: var(--ds-text-faint);
+}
+
+/* The health chip is a pill of its own: no dot before it. */
+.factBare::before {
+  content: none;
+}
+
 /* ── Files tab ──────────────────────────────────────────────────────────── */
 
 .pathRow {

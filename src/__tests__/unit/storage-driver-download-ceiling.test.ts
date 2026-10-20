@@ -4,7 +4,8 @@
  * put in the folder by another tool can be of any size, and "Import from storage" registers it as it is.
  *
  * The ceiling is made small here (1 MiB). The S3 and Azure Blob drivers are held to the same ceiling in their own
- * tests (`s3-compatible-files-download-ceiling`, `azure-blob-support`).
+ * tests (`s3-compatible-files-download-ceiling`, `azure-blob-file-contract`). A caller that reads objects of its own
+ * can state a bound for one call (`downloadFile(key, { maxBytes })`), which replaces the ceiling for that call.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
@@ -27,10 +28,25 @@ vi.mock('@/lib/providers/contracts/storageLimits', () => {
       this.name = 'StorageObjectTooLargeError';
     }
   }
+  class StorageInvalidKeyError extends Error {
+    readonly code = 'invalid_key';
+
+    readonly statusCode = 400;
+
+    readonly retryable = false;
+
+    constructor(detail?: string) {
+      super(detail ? `Invalid file key provided: ${detail}` : 'Invalid file key provided.');
+      this.name = 'StorageInvalidKeyError';
+    }
+  }
   return {
     maxStorageDownloadBytes: () => 1024 * 1024,
     StorageObjectTooLargeError,
     isStorageObjectTooLargeError: (error: unknown) => error instanceof StorageObjectTooLargeError,
+    StorageInvalidKeyError,
+    isStorageInvalidKeyError: (error: unknown) => error instanceof StorageInvalidKeyError,
+    hasLoneSurrogate: (text: string) => /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text),
   };
 });
 
@@ -94,6 +110,50 @@ describe('the disk driver', () => {
     const error = await failureOf(() => runtime.downloadFile('docs/nowhere.bin'));
 
     expect(error).toMatchObject({ code: 'ENOENT' });
+  });
+
+  describe('a bound the caller states', () => {
+    it('replaces the ceiling: an object over it is read when the caller allows it', async () => {
+      const data = Buffer.alloc(2 * MIB, 'b');
+      put('docs/big.bin', data);
+
+      expect(await failureOf(() => runtime.downloadFile('docs/big.bin'))).toMatchObject({ code: 'object_too_large' });
+      const result = await runtime.downloadFile('docs/big.bin', { maxBytes: 4 * MIB });
+
+      expect(result.data.equals(data)).toBe(true);
+      expect(result.size).toBe(2 * MIB);
+    });
+
+    it('refuses an object over the bound, although the ceiling would let it through, without reading it', async () => {
+      put('docs/mid.bin', Buffer.alloc(MIB / 2, 'm'));
+      const read = vi.spyOn(fsPromises, 'readFile');
+
+      const error = await failureOf(() => runtime.downloadFile('docs/mid.bin', { maxBytes: MIB / 4 }));
+
+      expect(error).toMatchObject({ name: 'StorageObjectTooLargeError', code: 'object_too_large', retryable: false });
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('reads an object that is exactly the bound, and refuses one byte more', async () => {
+      put('docs/exact.bin', Buffer.alloc(1000, 'e'));
+      put('docs/over.bin', Buffer.alloc(1001, 'o'));
+
+      expect((await runtime.downloadFile('docs/exact.bin', { maxBytes: 1000 })).size).toBe(1000);
+      expect(await failureOf(() => runtime.downloadFile('docs/over.bin', { maxBytes: 1000 }))).toMatchObject({ code: 'object_too_large' });
+    });
+
+    it.each([
+      ['zero', 0],
+      ['a negative number', -5],
+      ['NaN', Number.NaN],
+      ['text', '4194304'],
+    ])('ignores a bound that is %s: the ceiling applies', async (_label, maxBytes) => {
+      put('docs/big.bin', Buffer.alloc(2 * MIB, 'b'));
+
+      const error = await failureOf(() => runtime.downloadFile('docs/big.bin', { maxBytes } as never));
+
+      expect(error).toMatchObject({ code: 'object_too_large', message: TOO_LARGE });
+    });
   });
 });
 
@@ -169,5 +229,47 @@ describe.runIf(MONGO_AVAILABLE)('the GridFS driver', () => {
     const error = await failureOf(() => runtime.downloadFile('nowhere.bin'));
 
     expect(error).toMatchObject({ statusCode: 404 });
+  });
+
+  describe('a bound the caller states', () => {
+    it('replaces the ceiling: an object over it is read when the caller allows it', async () => {
+      const data = Buffer.alloc(2 * MIB, 'b');
+      await runtime.uploadFile({ key: 'bound-big.bin', name: 'bound-big.bin', data });
+
+      expect(await failureOf(() => runtime.downloadFile('bound-big.bin'))).toMatchObject({ code: 'object_too_large' });
+      const result = await runtime.downloadFile('bound-big.bin', { maxBytes: 4 * MIB });
+
+      expect(result.data.equals(data)).toBe(true);
+      expect(result.size).toBe(2 * MIB);
+    });
+
+    it('refuses an object over the bound, although the ceiling would let it through', async () => {
+      await runtime.uploadFile({ key: 'bound-mid.bin', name: 'bound-mid.bin', data: Buffer.alloc(MIB / 2, 'm') });
+
+      const error = await failureOf(() => runtime.downloadFile('bound-mid.bin', { maxBytes: MIB / 4 }));
+
+      expect(error).toMatchObject({ name: 'StorageObjectTooLargeError', code: 'object_too_large', retryable: false });
+    });
+
+    it('reads an object that is exactly the bound, and refuses one byte more', async () => {
+      await runtime.uploadFile({ key: 'bound-exact.bin', name: 'bound-exact.bin', data: Buffer.alloc(1000, 'e') });
+      await runtime.uploadFile({ key: 'bound-over.bin', name: 'bound-over.bin', data: Buffer.alloc(1001, 'o') });
+
+      expect((await runtime.downloadFile('bound-exact.bin', { maxBytes: 1000 })).size).toBe(1000);
+      expect(await failureOf(() => runtime.downloadFile('bound-over.bin', { maxBytes: 1000 }))).toMatchObject({ code: 'object_too_large' });
+    });
+
+    it.each([
+      ['zero', 0],
+      ['a negative number', -5],
+      ['NaN', Number.NaN],
+      ['text', '4194304'],
+    ])('ignores a bound that is %s: the ceiling applies', async (_label, maxBytes) => {
+      await runtime.uploadFile({ key: 'bound-ignored.bin', name: 'bound-ignored.bin', data: Buffer.alloc(2 * MIB, 'b') });
+
+      const error = await failureOf(() => runtime.downloadFile('bound-ignored.bin', { maxBytes } as never));
+
+      expect(error).toMatchObject({ code: 'object_too_large', message: TOO_LARGE });
+    });
   });
 });

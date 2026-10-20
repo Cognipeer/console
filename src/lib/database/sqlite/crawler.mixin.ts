@@ -140,7 +140,7 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.projectId) { conds.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { conds.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        conds.push('(name LIKE @search OR key LIKE @search)');
+        conds.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       const rows = db.prepare(

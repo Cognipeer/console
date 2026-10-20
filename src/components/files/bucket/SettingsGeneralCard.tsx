@@ -11,6 +11,8 @@ import type { BucketDetail } from '../filesApi';
 import { useUpdateBucket } from '../useFilesQueries';
 import { bucketErrorMessage } from './bucketErrors';
 import {
+  DESCRIPTION_MAX_LENGTH,
+  descriptionProblem,
   isDirty,
   nameProblem,
   NAME_MAX_LENGTH,
@@ -58,8 +60,9 @@ export default function SettingsGeneralCard({ bucket, editable }: SettingsGenera
   }, [saved]);
 
   const problem = nameProblem(values.name);
+  const descriptionIssue = descriptionProblem(values.description);
   const dirty = isDirty(values, bucket);
-  const canSave = editable && dirty && !problem && !update.isPending;
+  const canSave = editable && dirty && !problem && !descriptionIssue && !update.isPending;
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -105,6 +108,7 @@ export default function SettingsGeneralCard({ bucket, editable }: SettingsGenera
               autosize
               value={values.description}
               disabled={!editable}
+              error={editable && descriptionIssue ? t('general.descriptionTooLong', { max: DESCRIPTION_MAX_LENGTH }) : undefined}
               onChange={(event) => {
                 const { value } = event.currentTarget;
                 setValues((current) => ({ ...current, description: value }));
@@ -139,7 +143,13 @@ export default function SettingsGeneralCard({ bucket, editable }: SettingsGenera
         ) : null}
         {editable ? (
           <div style={{ marginTop: 12 }}>
-            <Button type="submit" color="teal" size="xs" loading={update.isPending} disabled={!dirty || Boolean(problem)}>
+            <Button
+              type="submit"
+              color="teal"
+              size="xs"
+              loading={update.isPending}
+              disabled={!dirty || Boolean(problem) || Boolean(descriptionIssue)}
+            >
               {t('general.save')}
             </Button>
           </div>

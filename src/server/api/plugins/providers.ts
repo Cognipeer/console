@@ -44,9 +44,9 @@ const logger = createLogger('api:providers');
  */
 function sendProviderError(reply: FastifyReply, error: unknown) {
   if (isProviderConfigError(error)) {
-    // A refusal is the caller's to fix and is answered to the caller. Its text can quote what was typed into an
-    // endpoint or credential field, so the log keeps what and where, not the words.
-    logger.error('Provider request refused', { name: error.name, code: error.code, field: error.field });
+    // A refusal is the caller's to fix and is answered to the caller: a warning, not a failure of the server. Its text can
+    // quote what was typed into an endpoint or credential field, so the log keeps what and where, not the words.
+    logger.warn('Provider request refused', { name: error.name, code: error.code, field: error.field });
   } else {
     logger.error('Provider request failed', {
       error: error instanceof Error ? error.message : String(error),
@@ -300,6 +300,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           settings: body.settings as Record<string, unknown> | undefined,
           status: body.status as ProviderStatus | undefined,
           type: body.type as ProviderDomain,
+          // Owners and admins only reach this point (the gate above): they may name directories of this server.
+          allowHostPaths: true,
         });
 
         return reply.code(201).send({ provider });
@@ -319,6 +321,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
         type: body.type as ProviderDomain,
+        allowHostPaths: true,
       });
 
       return reply.code(201).send({ provider });
@@ -488,6 +491,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const payload = sanitizeUpdatePayload(body);
       payload.updatedBy = session.userId;
+      // Naming a directory of this server is for owners and admins, whichever scope the edit is in.
+      payload.allowHostPaths = isProviderAdmin(session.userRole);
 
       // Assignment edits (the Projects tab / assign step) may only name projects of the caller's tenant.
       if (payload.projectIds !== undefined) {

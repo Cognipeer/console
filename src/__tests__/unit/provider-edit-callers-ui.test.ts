@@ -3,13 +3,16 @@
  * The pages that open the provider edit form: they load the provider from the read that names its stored credential
  * fields, and they hand the server's refusal of a save - with the form field it names - back to the form, which marks
  * that field. Run on the tenant's provider list (the real page, the real form, a mocked API), plus a guard that the
- * other pages that edit a provider carry the refusal the same way.
+ * other pages that edit a provider carry the refusal the same way. The pages that add a provider do the same with the
+ * refusal of a new provider: the tenant's provider list, the Web Search list and the new-project form (each the real
+ * page and form against a mocked API).
  */
 import { createElement } from 'react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buttonByText,
   click,
   installApiMock,
   installDomStubs,
@@ -22,8 +25,11 @@ import {
   wait,
   type ApiMock,
   type Mounted,
+  type RouteHandler,
 } from '../helpers/iamCenterUi';
+import CreateProjectShell from '@/components/projects/CreateProjectShell';
 import TenantProviders from '@/components/settings/TenantProviders';
+import WebSearchListPage from '@/app/dashboard/websearch/page';
 import type { ProviderDescriptor, ProviderFormSchema } from '@/lib/providers';
 
 vi.mock('next/navigation', () => ({
@@ -170,6 +176,116 @@ describe('editing a provider from the tenant\'s provider list', () => {
     expect(api.to('PATCH', '/api/providers/prov-1')).toHaveLength(1);
     expect(qa('[aria-invalid="true"], [data-invalid="true"]', overlay())).toHaveLength(0);
     expect(q('.form-overlay')).not.toBeNull();
+  });
+});
+
+/* ── Adding a provider: the refusal of a new provider marks its field too ─── */
+
+describe('adding a provider', () => {
+  const ENDPOINT_SCHEMA: ProviderFormSchema = {
+    sections: [
+      { title: 'Endpoint', fields: [{ name: 'endpoint', label: 'Endpoint URL', type: 'text', scope: 'settings', required: true }] },
+    ],
+  };
+  const ENDPOINT_REFUSED = 'Enter the endpoint as a URL such as https://storage.example.com.';
+  const refuseEndpoint = () => jsonResponse({ error: ENDPOINT_REFUSED, code: 'provider_settings_invalid', field: 'endpoint' }, 400);
+
+  // The provider form is the full-screen form that is open (the new-project form steps aside while it is).
+  const formField = (label: string) => qa('.form-field', q('.form-overlay') ?? document.body).find((candidate) => labelOf(candidate) === label);
+  const formInput = (label: string) => formField(label)?.querySelector<HTMLInputElement>('input') ?? null;
+  const createButton = () => qa<HTMLButtonElement>('.form-overlay button').find((b) => b.textContent?.trim() === 'Create provider');
+
+  function installCreateApi(post: () => unknown, extra: Array<[string, string | RegExp, RouteHandler]> = []) {
+    api = installApiMock([
+      ['GET', '/api/providers', () => ({ providers: [] })],
+      ['GET', '/api/providers/drivers', () => ({ drivers: [DESCRIPTOR] })],
+      ['GET', /^\/api\/providers\/drivers\/[^/]+\/form$/, () => ({ schema: ENDPOINT_SCHEMA })],
+      ['POST', '/api/providers', post],
+      ...extra,
+    ]);
+  }
+
+  async function pickService(name: string) {
+    await click(qa('[role="button"]').find((card) => card.querySelector('.service-card-name')?.textContent === name));
+    await settle(120);
+  }
+
+  /** Fills in the endpoint, creates the provider, and looks at what the form did with the server's answer. */
+  async function createWithEndpoint() {
+    await setInput(formInput('Endpoint URL')!, 'storage');
+    await click(createButton());
+    await settle(60);
+
+    expect(api.to('POST', '/api/providers')).toHaveLength(1);
+    expect(formField('Endpoint URL')?.textContent).toContain(ENDPOINT_REFUSED);
+    const marked = formInput('Endpoint URL');
+    expect(marked?.getAttribute('data-invalid') === 'true' || marked?.getAttribute('aria-invalid') === 'true').toBe(true);
+    await vi.waitFor(() => expect(document.activeElement).toBe(marked), { timeout: 2000 });
+    // The form stays open for the person to correct it.
+    expect(createButton()).toBeTruthy();
+  }
+
+  it('marks the field the server refused on the tenant\'s provider list, and keeps the form open', async () => {
+    installCreateApi(refuseEndpoint);
+    mounted = await mount(createElement(TenantProviders));
+    await settle(120);
+    await click(buttonByText('Add provider'));
+    await settle(60);
+    await pickService('S3-compatible storage');
+
+    await createWithEndpoint();
+    expect(api.to('POST', '/api/providers')[0]!.body).toMatchObject({
+      type: 'file',
+      driver: 's3-compatible-files',
+      settings: { endpoint: 'storage' },
+    });
+  });
+
+  it('marks the field the server refused on the Web Search list, and keeps the form open', async () => {
+    installCreateApi(refuseEndpoint, [
+      ['GET', '/api/websearch/providers', () => ({ providers: [] })],
+      ['GET', '/api/websearch/providers/drivers', () => ({ drivers: [DESCRIPTOR] })],
+    ]);
+    mounted = await mount(createElement(WebSearchListPage));
+    await settle(120);
+    await click(buttonByText('Create instance'));
+    await settle(120);
+    await pickService('SearxNG');
+
+    await createWithEndpoint();
+    expect(api.to('POST', '/api/providers')[0]!.body).toMatchObject({ type: 'websearch', driver: 'searxng', settings: { endpoint: 'storage' } });
+  });
+
+  it('marks the field the server refused in the new-project form, and keeps the provider form open', async () => {
+    installCreateApi(refuseEndpoint, [
+      ['GET', '/api/users', () => ({ users: [] })],
+      ['GET', '/api/groups', () => ({ groups: [] })],
+    ]);
+    mounted = await mount(createElement(CreateProjectShell, { open: true, onClose: vi.fn(), onCreated: vi.fn() }));
+    await settle(120);
+    await click(buttonByText('Add a new provider'));
+    await settle(60);
+    await pickService('S3-compatible storage');
+
+    await createWithEndpoint();
+    expect(api.to('POST', '/api/providers')[0]!.body).toMatchObject({ type: 'file', driver: 's3-compatible-files' });
+  });
+
+  it('keeps a refusal that names no field of the form as the message alone', async () => {
+    installCreateApi(() => jsonResponse({ error: 'Provider creation failed.' }, 400));
+    mounted = await mount(createElement(TenantProviders));
+    await settle(120);
+    await click(buttonByText('Add provider'));
+    await settle(60);
+    await pickService('S3-compatible storage');
+
+    await setInput(formInput('Endpoint URL')!, 'storage');
+    await click(createButton());
+    await settle(60);
+
+    expect(api.to('POST', '/api/providers')).toHaveLength(1);
+    expect(qa('[aria-invalid="true"], [data-invalid="true"]', q('.form-overlay')!)).toHaveLength(0);
+    expect(createButton()).toBeTruthy();
   });
 });
 

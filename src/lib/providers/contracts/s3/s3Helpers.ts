@@ -29,7 +29,7 @@ export interface S3Settings {
   usePathStyleEndpoint?: boolean;
   /** PEM certificate(s) trusted in addition to the system roots. Only used with a custom endpoint. */
   caCertificate?: string;
-  /** Skip certificate verification. Self-hosted deployments only, and only used with a custom endpoint. */
+  /** Skip certificate verification. Only used with a custom endpoint. */
   allowInsecureTls?: boolean;
 }
 
@@ -134,6 +134,46 @@ export function sanitizeKey(rawKey: string): string {
   return trimmed;
 }
 
+/** A UTF-16 surrogate with no partner: text that has no UTF-8 form, which the URL encoder of the SDK refuses. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+export function hasLoneSurrogate(text: string): boolean {
+  return LONE_SURROGATE.test(text);
+}
+
+/**
+ * A key from a listing that the store URL-encoded because the request said `EncodingType=url`: `+` is a space and `%XX`
+ * a byte. Text that is not valid percent-encoding (a store that answers "url" and does not mean it) is returned as it is.
+ */
+export function decodeListedKey(key: string): string {
+  try {
+    return decodeURIComponent(key.replace(/\+/g, ' '));
+  } catch {
+    return key;
+  }
+}
+
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+const CONTROL_CHARACTER = /[\x00-\x1f\x7f]/;
+
+/**
+ * The `Content-Type` of an upload as a header can carry it. A header is bytes: the SDK signs the text of a value outside
+ * printable ASCII as UTF-8 while Node writes it as Latin-1, so the store computes another signature and answers with an
+ * error that reads like a wrong secret. A content type is a media type with parameters (`text/plain; charset=utf-8`),
+ * ASCII in practice, so a value that is not is reduced to its media type (`reduced`); one that cannot be a header value at
+ * all (a control character, a line break) is `invalid`. Blank means none.
+ */
+export function toHeaderContentType(raw: unknown): { value?: string; reduced?: true; invalid?: true } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'string') return { invalid: true };
+  const value = raw.trim();
+  if (value === '') return {};
+  if (CONTROL_CHARACTER.test(value)) return { invalid: true };
+  if (PRINTABLE_ASCII.test(value)) return { value };
+  const mediaType = value.split(';')[0].trim();
+  return mediaType !== '' && PRINTABLE_ASCII.test(mediaType) ? { value: mediaType, reduced: true } : { invalid: true };
+}
+
 export function generateKey(fileName?: string): string {
   if (!fileName) {
     return `${Date.now()}-${randomUUID()}`;
@@ -142,7 +182,9 @@ export function generateKey(fileName?: string): string {
   const extension = path.extname(fileName);
   const baseName = fileName.slice(0, fileName.length - extension.length);
   const slug = baseName.length > 0 ? baseName : 'file';
-  const normalized = slug.replace(/[^a-z0-9-_]+/gi, '-').toLowerCase();
+  // A dash left at either end of the stem (a name that starts or ends with a character outside a-z, 0-9, `-`, `_`) is dropped,
+  // as the other drivers do: `(final).pdf` is `final-<time>-<id>.pdf`, not `-final--<time>-<id>.pdf`.
+  const normalized = slug.replace(/[^a-z0-9-_]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '') || 'file';
   return `${normalized}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
 }
 

@@ -52,6 +52,11 @@ export const filesDetailEn = {
     loading: 'Loading the Markdown…',
     size: 'Markdown copy · {size}',
     pendingHint: 'The conversion runs in the background. This page updates by itself when it finishes.',
+    // Pending for so long that the background job was most likely lost (the server restarted): a new one can be started.
+    pendingStale:
+      'This conversion has not finished for a while. If the server was restarted since, the job may have been lost. Convert again to start it anew.',
+    keptCopy: 'The earlier Markdown copy is still here.',
+    convertAgain: 'Convert again',
     noneHint: 'This file has no Markdown copy.',
     retry: 'Retry conversion',
     convert: 'Convert to Markdown',

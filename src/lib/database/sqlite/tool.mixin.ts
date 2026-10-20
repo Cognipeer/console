@@ -123,8 +123,8 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       if (filters?.type) { clauses.push('type = ?'); params.push(filters.type); }
       if (filters?.status) { clauses.push('status = ?'); params.push(filters.status); }
       if (filters?.search) {
-        clauses.push('(name LIKE ? OR description LIKE ? OR key LIKE ?)');
-        const term = `%${filters.search}%`;
+        clauses.push(this.likeAny(['name', 'description', 'key'], '?'));
+        const term = this.likePattern(filters.search);
         params.push(term, term, term);
       }
 
@@ -231,8 +231,8 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       if (options?.keyword?.trim()) {
-        clauses.push('(actionName LIKE @keyword OR actionKey LIKE @keyword OR errorMessage LIKE @keyword)');
-        params.keyword = `%${options.keyword.trim()}%`;
+        clauses.push(this.likeAny(['actionName', 'actionKey', 'errorMessage'], '@keyword'));
+        params.keyword = this.likePattern(options.keyword.trim());
       }
 
       const where = `WHERE ${clauses.join(' AND ')}`;
@@ -256,8 +256,8 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       if (options?.keyword?.trim()) {
-        clauses.push('(actionName LIKE @keyword OR actionKey LIKE @keyword OR errorMessage LIKE @keyword)');
-        params.keyword = `%${options.keyword.trim()}%`;
+        clauses.push(this.likeAny(['actionName', 'actionKey', 'errorMessage'], '@keyword'));
+        params.keyword = this.likePattern(options.keyword.trim());
       }
 
       const where = `WHERE ${clauses.join(' AND ')}`;

@@ -52,10 +52,11 @@ export function hasUsableProvider(providers: ReadonlyArray<Pick<FileProviderList
 
 /**
  * Files on this server's own disk: the server has no address to show for them (`storageLocationBase` is `null`)
- * and they are not shared between replicas.
+ * and they are not shared between replicas. Decided by the driver, never by the base alone: a `null` base is also what
+ * an S3 or Azure provider answers while its settings name no bucket or container yet.
  */
-export function isLocalDiskProvider(provider: Pick<FileProviderListItem, 'driver' | 'storageLocationBase'>): boolean {
-  return provider.driver === 'local-filesystem' || provider.storageLocationBase === null;
+export function isLocalDiskProvider(provider: Pick<FileProviderListItem, 'driver' | 'driverCapabilities'>): boolean {
+  return provider.driver === 'local-filesystem' || provider.driverCapabilities?.builtin === true;
 }
 
 /**

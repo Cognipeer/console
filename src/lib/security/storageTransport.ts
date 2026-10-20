@@ -19,6 +19,7 @@ import {
   OutboundPrivateTargetError,
   privateNetworkBlockApplies,
   type OutboundGuardOptions,
+  type SafeFetchTls,
 } from '@/lib/security/outboundFetch';
 
 /* ------------------------------------------------------------------ */
@@ -118,19 +119,10 @@ function skipsVerification(allowInsecureTls: unknown): boolean {
   return allowInsecureTls === true;
 }
 
-function assertInsecureTlsAllowed(allowInsecureTls: unknown, isOnPrem: boolean): void {
-  if (skipsVerification(allowInsecureTls) && !isOnPrem) {
-    throw new ProviderSettingsError(
-      'allowInsecureTls',
-      "Skipping TLS verification is only available on self-hosted deployments; add the CA certificate that issued the storage service's certificate instead.",
-    );
-  }
-}
-
 /**
  * The save and "Test connection" check of the two TLS settings every storage provider has: a CA certificate
- * that parses, and certificate verification skipped only on a self-hosted deployment. Throws
- * `ProviderSettingsError` naming the field.
+ * that parses, and a verification switch that is a boolean. Skipping verification is the provider's own choice on
+ * every deployment; the network policy applies either way. Throws `ProviderSettingsError` naming the field.
  *
  * `allowInsecureTls` must be a boolean when it is given (`undefined` and `null` mean "not set"): a value of
  * any other type is refused here instead of being read as on or off. A runtime stays lenient about a stored
@@ -139,13 +131,11 @@ function assertInsecureTlsAllowed(allowInsecureTls: unknown, isOnPrem: boolean):
 export function validateStorageTlsSettings(input: {
   caCertificate?: string;
   allowInsecureTls?: unknown;
-  isOnPrem: boolean;
 }): void {
   const { allowInsecureTls } = input;
   if (allowInsecureTls !== undefined && allowInsecureTls !== null && typeof allowInsecureTls !== 'boolean') {
     throw new ProviderSettingsError('allowInsecureTls', 'Skip TLS verification must be true or false.');
   }
-  assertInsecureTlsAllowed(allowInsecureTls, input.isOnPrem);
   parseCaBundle(input.caCertificate);
 }
 
@@ -168,11 +158,10 @@ export interface StorageAgentsInput {
   /** PEM bundle trusted in addition to Node's default trust. */
   caCertificate?: string;
   /**
-   * Skip certificate verification. Self-hosted deployments only; a settings error anywhere else. Only `true`
-   * counts: a stored value of another type (a JSON `"false"`) leaves verification on.
+   * Skip certificate verification, on any deployment (the network policy still applies). Only `true` counts: a stored
+   * value of another type (a JSON `"false"`) leaves verification on.
    */
   allowInsecureTls?: boolean;
-  isOnPrem: boolean;
   /** Default `true`. */
   keepAlive?: boolean;
   /** Per host, default 50. */
@@ -187,6 +176,12 @@ export interface StorageAgentsInput {
 export interface StorageAgents {
   httpAgent: http.Agent;
   httpsAgent: https.Agent;
+  /**
+   * The TLS trust the https agent was built with (the provider's CA certificate, and the verification switch), in the
+   * shape `safeFetch` takes - for the other requests a runtime makes for the same provider, such as the token request
+   * of an identity provider, so they trust what the storage traffic trusts. `undefined` when the provider has neither.
+   */
+  tls: SafeFetchTls | undefined;
   /** Closes every socket both agents hold. Safe to call more than once. */
   destroy(): void;
 }
@@ -201,13 +196,11 @@ export interface StorageAgents {
  *   reaches `lookup` and is vetted here instead, by the same rule: a private address passes only inside the
  *   networks `guard.privateNetworks` has opened.
  * - A `caCertificate` becomes one secure context, built once (parsing the default trust again for every new
- *   connection would cost milliseconds each time).
- * - Throws `ProviderSettingsError` for a bad CA bundle, and for `allowInsecureTls` outside a self-hosted
- *   deployment; `OutboundPrivateTargetError` (an `OutboundNetworkError`) for a private literal-IP host the policy
- *   blocks.
+ *   connection would cost milliseconds each time); it is also handed back as `tls`, for the provider's other requests.
+ * - Throws `ProviderSettingsError` for a bad CA bundle, and `OutboundPrivateTargetError` (an `OutboundNetworkError`)
+ *   for a private literal-IP host the policy blocks.
  */
 export function createStorageAgents(input: StorageAgentsInput): StorageAgents {
-  assertInsecureTlsAllowed(input.allowInsecureTls, input.isOnPrem);
   const ca = buildTrustedCaList(input.caCertificate);
 
   const host = input.guardHost ?? '';
@@ -217,6 +210,16 @@ export function createStorageAgents(input: StorageAgentsInput): StorageAgents {
     throw new OutboundPrivateTargetError(host);
   }
 
+  // One context, shared by the agent and by whatever else the runtime fetches: parsing the default trust again for every
+  // connection (or every request) would cost milliseconds each time.
+  const skipVerification = skipsVerification(input.allowInsecureTls);
+  const trust: SafeFetchTls | undefined = ca || skipVerification
+    ? {
+      ...(ca ? { secureContext: tls.createSecureContext({ ca }) } : {}),
+      ...(skipVerification ? { rejectUnauthorized: false as const } : {}),
+    }
+    : undefined;
+
   const options = {
     keepAlive: input.keepAlive ?? true,
     maxSockets: input.maxSockets ?? DEFAULT_MAX_SOCKETS,
@@ -224,18 +227,20 @@ export function createStorageAgents(input: StorageAgentsInput): StorageAgents {
     ...(guarded ? { lookup: createGuardedLookup(input.guard) } : {}),
   };
   const httpAgent = new http.Agent(options);
-  const httpsAgent = new https.Agent({
-    ...options,
-    ...(ca ? { secureContext: tls.createSecureContext({ ca }) } : {}),
-    ...(skipsVerification(input.allowInsecureTls) ? { rejectUnauthorized: false } : {}),
-  });
+  const httpsAgent = new https.Agent({ ...options, ...trust });
 
   return {
     httpAgent,
     httpsAgent,
+    tls: trust,
     destroy() {
-      httpAgent.destroy();
-      httpsAgent.destroy();
+      // A destroyed agent still serves a request that reaches it after this (a call that took the client just before its
+      // runtime was replaced). With keep-alive on, that request's socket would go back to the agent's idle pool and stay open
+      // for the idle timeout; with it off, the socket closes when its response ends.
+      for (const agent of [httpAgent, httpsAgent]) {
+        (agent as unknown as { keepAlive: boolean }).keepAlive = false;
+        agent.destroy();
+      }
     },
   };
 }

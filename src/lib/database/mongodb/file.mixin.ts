@@ -11,6 +11,30 @@ import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
 import { FILE_KIND_RULES, type FileKindRule } from '../fileTypeFilter';
 
+const REGEX_SPECIALS = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * The pattern of a typed search for a file name, for a database that matches by pattern (MongoDB runs it with PCRE, so
+ * the letters below are written out, not as \u escapes). The words are looked for as typed (every special character is
+ * escaped), the four letters of the Turkish i family (I, İ, i, ı) meet at "i" and an "i" may carry its combining dot,
+ * and a letter that can also be spelled as a base letter plus a combining mark ("ü" and "u" + U+0308) matches either
+ * spelling - a name imported from a system that stores letters decomposed is found by the composed word, as it is on
+ * SQLite, whose function folds the stored name too.
+ */
+function fileNamePatternSource(text: string): string {
+  let source = '';
+  for (const letter of text.normalize('NFC')) {
+    if (/[İIıi]/.test(letter)) {
+      source += '[iİıI]\u0307?';
+      continue;
+    }
+    const composed = letter.replace(REGEX_SPECIALS, '\\$&');
+    const decomposed = letter.normalize('NFD');
+    source += decomposed === letter ? composed : `(?:${composed}|${decomposed.replace(REGEX_SPECIALS, '\\$&')})`;
+  }
+  return source;
+}
+
 export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
     /** Per-process memo: the file indexes are ensured on the first file written per tenant DB. */
@@ -230,8 +254,11 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       if (filters.type) conditions.push(this.fileTypeCondition(filters.type));
 
       if (filters.search) {
-        const regex = new RegExp(this.escapeRegex(filters.search), 'i');
-        conditions.push({ $or: [{ key: regex }, { name: regex }] });
+        // The name of the file, as typed (see `fileNamePatternSource`; the SQLite side folds the same way); a leading
+        // or trailing blank is not part of the name looked for. The key is not searched - it holds the folders above
+        // the file and a generated suffix, which a search by name must not match.
+        const regex = new RegExp(fileNamePatternSource(filters.search.trim()), 'i');
+        conditions.push({ name: regex });
       }
       if (conditions.length > 0) query.$and = conditions;
 

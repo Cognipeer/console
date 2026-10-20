@@ -243,8 +243,8 @@ describe('an Azure Blob connection string with a BlobEndpoint', () => {
 
     expectNeutralRefusal(await refusal(() => saveAzure(blobEndpoint, TENANT_B)), 'connectionString');
     expectNeutralRefusal(await refusal(() => saveAzure(blobEndpoint, undefined)), 'connectionString');
-    // the runtime keeps the guard's own message (the person never sees it; the log does)
-    await expect(createRuntime(blobEndpoint, TENANT_B)).rejects.toMatchObject({ name: 'OutboundNetworkError' });
+    // a stored provider is refused with the same neutral answer when its runtime is built, with the setting it came from
+    expectNeutralRefusal(await refusal(() => createRuntime(blobEndpoint, TENANT_B)), 'connectionString');
   });
 
   it('the refusal does not quote the connection string or its key', async () => {
@@ -258,7 +258,7 @@ describe('an Azure Blob connection string with a BlobEndpoint', () => {
     await expect(saveAzure(blobEndpoint, TENANT_A)).resolves.toBeUndefined();
     await expect(createRuntime(blobEndpoint, TENANT_A)).resolves.toBeDefined();
     expectNeutralRefusal(await refusal(() => saveAzure(blobEndpoint, TENANT_B)), 'connectionString');
-    await expect(createRuntime(blobEndpoint, TENANT_B)).rejects.toMatchObject({ name: 'OutboundNetworkError' });
+    expectNeutralRefusal(await refusal(() => createRuntime(blobEndpoint, TENANT_B)), 'connectionString');
     await expect(saveAzure(blobEndpoint, TENANT_A)).resolves.toBeUndefined();
   });
 
@@ -275,10 +275,11 @@ describe('an Azure Blob connection string with a BlobEndpoint', () => {
     expectNeutralRefusal(await refusal(() => saveEndpoint('https://10.50.1.5/acctname1', TENANT_B)), 'endpoint');
   });
 
-  it('plain http stays a self-hosted option, inside an opened network too', async () => {
-    const error = await refusal(() => save('file', 'azure-blob-files', { accountKey: KEY }, { accountName: 'acctname1', container: 'files', endpoint: 'http://10.50.1.5/acctname1' }, TENANT_A));
-    expect(error).toMatchObject({ field: 'endpoint' });
-    expect((error as Error).message).not.toContain(NEUTRAL);
+  it('takes plain http inside an opened network too, for that organization only', async () => {
+    const saveHttp = (tenantId: string) =>
+      save('file', 'azure-blob-files', { accountKey: KEY }, { accountName: 'acctname1', container: 'files', endpoint: 'http://10.50.1.5/acctname1' }, tenantId);
+    await expect(saveHttp(TENANT_A)).resolves.toBeUndefined();
+    expectNeutralRefusal(await refusal(() => saveHttp(TENANT_B)), 'endpoint');
   });
 });
 

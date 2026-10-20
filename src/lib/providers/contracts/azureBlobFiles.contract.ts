@@ -166,7 +166,7 @@ export const AzureBlobFileProviderContract: ProviderContract<
             type: 'text',
             placeholder: 'https://mystorageaccount.blob.core.windows.net',
             description:
-              'Leave empty for Azure public cloud. For a sovereign cloud, Azure Stack Hub, a private endpoint or Azurite (http://127.0.0.1:10000/devstoreaccount1); plain http is for self-hosted installations only.',
+              'Leave empty for Azure public cloud. For a sovereign cloud, Azure Stack Hub, a private endpoint or Azurite (http://127.0.0.1:10000/devstoreaccount1).',
             scope: 'settings',
           },
           {
@@ -194,7 +194,7 @@ export const AzureBlobFileProviderContract: ProviderContract<
             type: 'textarea',
             placeholder: '-----BEGIN CERTIFICATE-----',
             description:
-              "The certificate (or bundle) that issued the endpoint's certificate, for an internal CA. Trusted in addition to the system roots, for this provider only. Prefer this over skipping verification.",
+              "The certificate (or bundle) that issued the endpoint's certificate, for an internal CA. Trusted in addition to the system roots, for this provider only; the Microsoft Entra authority is checked against it too. Prefer this over skipping verification.",
             scope: 'settings',
           },
           {
@@ -203,22 +203,21 @@ export const AzureBlobFileProviderContract: ProviderContract<
             type: 'switch',
             defaultValue: false,
             description:
-              'Accept any certificate, including self-signed ones. Self-hosted installations only; use the CA certificate field instead whenever possible.',
+              'Accept any certificate, including self-signed ones, from the endpoint and from the Microsoft Entra authority. Use the CA certificate field instead whenever possible.',
             scope: 'settings',
           },
         ],
       },
     ],
   },
-  async validateSettings({ credentials, settings, isOnPrem, tenantId }) {
-    const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: isOnPrem });
+  async validateSettings({ credentials, settings, tenantId }) {
+    const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: true });
     if (settings?.createContainer !== undefined && settings.createContainer !== null && typeof settings.createContainer !== 'boolean') {
       throw new ProviderSettingsError('createContainer', 'Create container if missing must be true or false.');
     }
     validateStorageTlsSettings({
       caCertificate: settings?.caCertificate,
       allowInsecureTls: settings?.allowInsecureTls,
-      isOnPrem,
     });
     // The generic check of a file provider reads the `endpoint` and `authorityHost` fields; the endpoint a
     // connection string names and the authority an endpoint implies are vetted here, with the same rules.

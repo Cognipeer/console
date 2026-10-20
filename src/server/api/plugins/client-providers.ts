@@ -21,6 +21,7 @@ import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
+import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
 import type {
   CreateProviderConfigInput,
   ProviderStatus,
@@ -138,6 +139,8 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
         type: body.type as ProviderDomain,
+        // Naming a directory of this server is for owners and admins (the role of the person the call acts for).
+        allowHostPaths: isOwnerOrAdmin(auth.user?.role),
         ...(query.scope === 'tenant' ? {} : { projectId: auth.projectId }),
       });
       return reply.code(201).send({ provider });
@@ -179,6 +182,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { scope?: string };
       const payload = sanitizeUpdatePayload(readJsonBody<Record<string, unknown>>(request));
       payload.updatedBy = String(auth.tokenRecord.userId);
+      payload.allowHostPaths = isOwnerOrAdmin(auth.user?.role);
       const existing = await getProviderConfigById(auth.tenantDbName, id);
       const ok = existing
         && existing.tenantId === auth.tenantId

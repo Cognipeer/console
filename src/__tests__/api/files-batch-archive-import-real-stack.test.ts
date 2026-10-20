@@ -187,6 +187,62 @@ describe('POST /files/buckets/:bucketKey/objects/batch-delete', () => {
   });
 });
 
+/**
+ * Two projects can each have a bucket of the same key on one provider (in separate folders): a key the batch names
+ * is looked up in the caller's project only, so a file of the other project is "not found", never acted on.
+ */
+describe('the files of another project that has a bucket of the same key on the same provider', () => {
+  let theirs: string;
+
+  beforeEach(async () => {
+    theirs = String((await stack.db.createProject({ tenantId: stack.tenantId, key: 'second', name: 'Second', createdBy: 'x' }))._id);
+    await stack.db.createFileBucket({
+      tenantId: stack.tenantId, projectId: theirs, key: 'work', name: 'Their work', providerKey: 'local', prefix: 'second-work', status: 'active', createdBy: 'x',
+    } as never);
+    for (const key of ['both.txt', 'only-theirs.txt']) {
+      stack.putObject('second-work', key, `their ${key}`);
+      await stack.db.createFileRecord({
+        tenantId: stack.tenantId, projectId: theirs, providerKey: 'local', bucketKey: 'work', key, name: key, size: Buffer.byteLength(`their ${key}`),
+        contentType: 'text/plain', markdownStatus: 'skipped', createdBy: 'x',
+      });
+    }
+  });
+
+  it('are not found by a batch delete: only the caller\'s own file of that key goes', async () => {
+    await stack.putFile('work', 'both.txt', 'mine');
+
+    const res = await stack.request('POST', '/files/buckets/work/objects/batch-delete', { keys: ['both.txt', 'only-theirs.txt'] });
+
+    expect(res.statusCode).toBe(200);
+    expect(stack.json(res)).toEqual({ deleted: ['both.txt'], failed: [{ key: 'only-theirs.txt', error: 'File not found' }] });
+    expect(await stack.records('work')).toEqual([]);
+    for (const key of ['both.txt', 'only-theirs.txt']) {
+      expect(await stack.db.findFileRecordByKey('local', 'work', key, theirs), key).not.toBeNull();
+      expect(existsSync(stack.objectPath('second-work', key)), key).toBe(true);
+    }
+  });
+
+  it('are not found by an archive either: a 404 naming the key, and no ZIP', async () => {
+    await stack.putFile('work', 'mine.txt', 'mine');
+
+    const res = await stack.request('POST', '/files/buckets/work/objects/archive', { keys: ['mine.txt', 'only-theirs.txt'] });
+
+    expect(res.statusCode).toBe(404);
+    expect(stack.json(res)).toMatchObject({ code: 'file_not_found', keys: ['only-theirs.txt'] });
+    expect(res.rawPayload.subarray(0, 2).toString()).not.toBe('PK');
+  });
+
+  it('are not put in an archive in place of the caller\'s own file of the same key', async () => {
+    await stack.putFile('work', 'both.txt', 'mine, and only mine');
+
+    const res = await stack.request('POST', '/files/buckets/work/objects/archive', { keys: ['both.txt'] });
+
+    expect(res.statusCode).toBe(200);
+    const zip = await JSZip.loadAsync(res.rawPayload);
+    expect(await zip.file('both.txt')!.async('string')).toBe('mine, and only mine');
+  });
+});
+
 describe('POST /files/buckets/:bucketKey/objects/archive', () => {
   const archive = (keys: unknown, bucket = 'work') =>
     stack.request('POST', `/files/buckets/${bucket}/objects/archive`, typeof keys === 'object' && keys !== null && !Array.isArray(keys) ? keys : { keys });
@@ -520,6 +576,41 @@ describe('POST /files/buckets/:bucketKey/import', () => {
       expect(await keys()).toEqual([]);
     });
 
+    // Buckets stored before keys and folders were validated can spell a folder in a way the drivers read as another
+    // one (the disk driver drops `.` segments and doubled slashes, and reads a backslash as a slash).
+    it.each([
+      ['a key with a leading dot segment', './work', {}],
+      ['a key with a leading dot segment and a closing slash', './work/', {}],
+      ['a key with a backslash after a dot', '.\\work', {}],
+      ['a folder with a leading dot segment', 'legacy', { prefix: './work' }],
+      ['a folder of a run of dots', 'legacy', { prefix: '../work' }],
+      ['a folder inside it, spelled with a backslash', 'legacy', { prefix: 'work\\archive' }],
+      ['a folder inside it, with a dot segment in the middle', 'legacy', { prefix: 'work/./archive' }],
+    ])('is a 409 for a bucket of another project saved with %s: the drivers read it as this folder', async (_label, key, over) => {
+      stack.putObject('work', 'theirs.txt', 'CONTENT OF THE OTHER PROJECT');
+      await bucketOf(await secondProject(), key, over);
+
+      const res = await importFiles();
+
+      expect(res.statusCode).toBe(409);
+      expect(stack.json(res)).toEqual({ error: SHARED, code: 'storage_location_shared' });
+      expect(await keys()).toEqual([]);
+      expect(readFileSync(stack.objectPath('work', 'theirs.txt'), 'utf8')).toBe('CONTENT OF THE OTHER PROJECT');
+    });
+
+    it('does not take a bucket whose folder only looks alike for the same one: dots inside a name, and siblings', async () => {
+      stack.putObject('work', 'a.txt', 'alpha');
+      const second = await secondProject();
+      await bucketOf(second, 'work.old');
+      await bucketOf(second, 'legacy-1', { prefix: './work-archive' });
+      await bucketOf(second, 'legacy-2', { prefix: 'other\\work' });
+
+      const res = await importFiles();
+
+      expect(res.statusCode).toBe(200);
+      expect(stack.json(res)).toEqual({ scanned: 1, imported: 1, skipped: 0 });
+    });
+
     it('is a 409 for a bucket of the same project whose folder is inside this one', async () => {
       stack.putObject('work', 'a.txt', 'alpha');
       await stack.createBucket('inner', { prefix: 'work/inner' });
@@ -601,6 +692,67 @@ describe('POST /files/buckets/:bucketKey/import', () => {
       expect(res.statusCode).toBe(200);
       expect(stack.json(res)).toEqual({ scanned: 1, imported: 1, skipped: 0 });
       expect(await keys()).toEqual(['a.txt']);
+    });
+  });
+
+  describe('a bucket that stops taking files while the import runs', () => {
+    /** Runs `change` right after the first record of the import is saved: the bucket is closed in the middle of the run. */
+    function closeAfterFirstRecord(change: () => Promise<unknown>) {
+      const real = stack.db.createFileRecord.bind(stack.db);
+      let closed = false;
+      vi.spyOn(stack.db, 'createFileRecord').mockImplementation(async (record) => {
+        const created = await real(record);
+        if (!closed) {
+          closed = true;
+          await change();
+        }
+        return created;
+      });
+    }
+    const bucketId = async () => String((await stack.bucket('work'))!._id);
+
+    it.each([
+      ['switched off', 'bucket_inactive', async () => stack.db.updateFileBucket(await bucketId(), { status: 'disabled' })],
+      ['being deleted with its files', 'bucket_deleting', async () => stack.db.updateFileBucket(await bucketId(), { status: 'disabled', metadata: { deleting: true } })],
+      ['deleted', 'bucket_deleting', async () => stack.db.deleteFileBucket(await bucketId())],
+    ])('keeps no record of the run when the bucket is %s: the import is refused like a write to it', async (_label, code, change) => {
+      stack.putObject('work', 'a.txt', 'alpha');
+      stack.putObject('work', 'docs/b.txt', 'beta');
+      stack.putObject('work', 'docs/c.txt', 'gamma');
+      closeAfterFirstRecord(change);
+
+      const res = await importFiles();
+
+      expect(res.statusCode).toBe(409);
+      expect(stack.json(res)).toMatchObject({ code });
+      // Nothing is left that nobody could list or remove, and nothing counts against the project's limits.
+      expect(await keys()).toEqual([]);
+      expect(await stack.db.countFileRecords({ projectId: stack.projectId })).toBe(0);
+      // An import never touches the provider.
+      for (const name of ['a.txt', 'docs/b.txt', 'docs/c.txt']) expect(existsSync(stack.objectPath('work', name)), name).toBe(true);
+    });
+
+    it('leaves the records of an earlier run, and of the files that were already registered, alone', async () => {
+      await stack.putFile('work', 'known.txt', 'registered before');
+      stack.putObject('work', 'new.txt', 'fresh');
+      closeAfterFirstRecord(async () => stack.db.updateFileBucket(await bucketId(), { status: 'disabled' }));
+
+      const res = await importFiles();
+
+      expect(res.statusCode).toBe(409);
+      expect(await keys()).toEqual(['known.txt']);
+    });
+
+    it('is not in the way of an import into a bucket that stays open', async () => {
+      stack.putObject('work', 'a.txt', 'alpha');
+      stack.putObject('work', 'b.txt', 'beta');
+      closeAfterFirstRecord(async () => undefined);
+
+      const res = await importFiles();
+
+      expect(res.statusCode).toBe(200);
+      expect(stack.json(res)).toEqual({ scanned: 2, imported: 2, skipped: 0 });
+      expect(await keys()).toEqual(['a.txt', 'b.txt']);
     });
   });
 

@@ -75,7 +75,7 @@ export function VectorMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (filters?.providerKey) { clauses.push('providerKey = @providerKey'); params.providerKey = filters.providerKey; }
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search.trim());
       }
 

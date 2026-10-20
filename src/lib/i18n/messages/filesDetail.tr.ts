@@ -48,6 +48,11 @@ export const filesDetailTr: typeof filesDetailEn = {
     loading: 'Markdown yükleniyor…',
     size: 'Markdown kopyası · {size}',
     pendingHint: 'Dönüştürme arka planda çalışır. Bittiğinde bu sayfa kendiliğinden güncellenir.',
+    // O kadar uzun süredir bekliyor ki arka plan işi büyük olasılıkla kayboldu (sunucu yeniden başladı): yenisi başlatılabilir.
+    pendingStale:
+      'Bu dönüştürme bir süredir tamamlanmadı. Bu sırada sunucu yeniden başlatıldıysa iş kaybolmuş olabilir. Yeniden başlatmak için tekrar dönüştürün.',
+    keptCopy: 'Önceki Markdown kopyası hâlâ duruyor.',
+    convertAgain: 'Yeniden dönüştür',
     noneHint: 'Bu dosyanın Markdown kopyası yok.',
     retry: 'Dönüştürmeyi yeniden dene',
     convert: 'Markdown’a dönüştür',

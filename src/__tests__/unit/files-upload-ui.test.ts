@@ -403,12 +403,12 @@ describe('destination', () => {
 
     expect(text()).toContain('Marketing assets');
     expect(text()).toContain('›');
-    expect(rowText('Şirket Raporu Q3.pdf')).toContain('Saved as reports/irket-raporu-q3-….pdf');
+    expect(rowText('Şirket Raporu Q3.pdf')).toContain('Saved as reports/sirket-raporu-q3-….pdf');
 
     const folder = qa<HTMLInputElement>('input').find((input) => input.placeholder === 'Bucket root')!;
     expect(folder.value).toBe('reports/');
     await setInput(folder, 'reports/2026');
-    expect(rowText('Şirket Raporu Q3.pdf')).toContain('Saved as reports/2026/irket-raporu-q3-….pdf');
+    expect(rowText('Şirket Raporu Q3.pdf')).toContain('Saved as reports/2026/sirket-raporu-q3-….pdf');
 
     await setInput(rowInput('Şirket Raporu Q3.pdf')!, 'Q3.PDF');
     expect(rowText('Q3.PDF')).toContain('Saved as reports/2026/q3-….PDF');
@@ -441,6 +441,31 @@ describe('destination', () => {
     expect(summary).toContain('Markdown copyOn');
     expect(summary).toContain('Files selected');
     expect(summary).toContain('Every file is within the size limit');
+  });
+
+  it('keeps describing the whole run while the files are on their way and once they are stored, not only what is still to send', async () => {
+    await open({ limits: { maxFileBytes: 1000 } });
+    await pick([
+      makeFile('a.txt', { size: 100 }),
+      makeFile('b.txt', { size: 200, lastModified: 2 }),
+      makeFile('c.txt', { size: 300, lastModified: 3 }),
+      makeFile('big.txt', { size: 5000, lastModified: 4 }),
+    ]);
+    const summary = () => q('.form-summary')!.textContent ?? '';
+    // Before anything is sent: four rows, three of them fit to go.
+    expect(summary()).toContain('Files4 (3 can upload)');
+    expect(summary()).toContain(`Total size${formatBytes(600)}`);
+
+    // Two at a time: a and b are on their way, c waits. Nothing is left "to send", yet the run is still the same run.
+    await startUploads(3);
+    expect(summary()).toContain('Files4 (3 can upload)');
+    expect(summary()).toContain(`Total size${formatBytes(600)}`);
+
+    await answer(FakeXhr.instances[0]!, 201, created('a.txt'));
+    expect(text()).toContain('1 of 4 uploaded');
+    expect(summary()).toContain('Files4 (3 can upload)');
+    expect(summary()).toContain(`Total size${formatBytes(600)}`);
+    expect(summary()).not.toContain('Total size0 B');
   });
 
   it('warns, without blocking, when the files would not fit in the storage that is left', async () => {
@@ -535,6 +560,75 @@ describe('closing', () => {
     await mounted!.unmount();
     mounted = null;
     expect(FakeXhr.instances[0]!.aborted).toBe(true);
+  });
+
+  describe('when the uploads are stopped', () => {
+    // The footer button reads Cancel until a file is stored, Close after.
+    const stopUploads = async (button: 'Cancel' | 'Close') => {
+      await clickButton(button);
+      await until(() => text().includes('Stop uploading?'), 'the question');
+      await clickButton('Cancel uploads and close');
+      await until(() => onClose.mock.calls.length === 1, 'the close');
+    };
+    const names = (call: unknown[]) => (call[0] as Array<{ name: string }>).map((record) => record.name);
+
+    it('reports the files that were already stored, and reads the bucket again, so they are not missing from the list', async () => {
+      await open();
+      await pick([makeFile('a.txt'), makeFile('b.txt', { lastModified: 2 }), makeFile('c.txt', { lastModified: 3 })]);
+      await startUploads(3);
+      await answer(FakeXhr.instances[0]!, 201, created('a.txt'));
+      await until(() => FakeXhr.instances.length === 3, 'the third upload');
+      const limitsBefore = api.to('GET', '/api/files/limits').length;
+
+      await stopUploads('Close');
+
+      expect(FakeXhr.instances[1]!.aborted).toBe(true);
+      expect(FakeXhr.instances[2]!.aborted).toBe(true);
+      expect(onUploaded).toHaveBeenCalledTimes(1);
+      expect(names(onUploaded.mock.calls[0]!)).toEqual(['a.txt']);
+      // The bucket's content and the quota are read again, as after a run that ended by itself.
+      await until(() => api.to('GET', '/api/files/limits').length > limitsBefore, 'the limits read again');
+    });
+
+    it('reads the bucket again even when nothing is known to be stored: a request that was cut off may have got through', async () => {
+      await open();
+      await pick([makeFile('a.txt')]);
+      await startUploads(1);
+      const limitsBefore = api.to('GET', '/api/files/limits').length;
+
+      await stopUploads('Cancel');
+
+      expect(FakeXhr.instances[0]!.aborted).toBe(true);
+      // Nothing was answered, so nothing is reported as uploaded.
+      expect(onUploaded).not.toHaveBeenCalled();
+      await until(() => api.to('GET', '/api/files/limits').length > limitsBefore, 'the limits read again');
+    });
+
+    it('reports the files that were stored when the screen goes away with the rest still going out', async () => {
+      await open();
+      await pick([makeFile('a.txt'), makeFile('b.txt', { lastModified: 2 })]);
+      await startUploads(2);
+      await answer(FakeXhr.instances[0]!, 201, created('a.txt'));
+
+      await mounted!.unmount();
+      mounted = null;
+
+      expect(FakeXhr.instances[1]!.aborted).toBe(true);
+      expect(onUploaded).toHaveBeenCalledTimes(1);
+      expect(names(onUploaded.mock.calls[0]!)).toEqual(['a.txt']);
+    });
+
+    it('reads nothing again when the screen goes away with no upload started', async () => {
+      await open();
+      await pick([makeFile('a.txt')]);
+      const limitsBefore = api.to('GET', '/api/files/limits').length;
+
+      await mounted!.unmount();
+      mounted = null;
+
+      expect(onUploaded).not.toHaveBeenCalled();
+      expect(api.to('GET', '/api/files/limits')).toHaveLength(limitsBefore);
+    });
   });
 
   it('starts empty each time it opens', async () => {

@@ -15,6 +15,11 @@
  * the page it was on, leaves the bucket (switched off, `deleting` cleared) with `metadata.deleteError` saying why,
  * and the person deletes it again once the cause is fixed. What the job deleted stays deleted: a record is only
  * removed after its objects are.
+ *
+ * The bucket is looked at again before every page of records. A bucket removed with `force` (the way out of a
+ * deletion that seems stuck, which keeps the files), removed and made again under the same key, or given up on by
+ * another run of the same deletion is no longer this job's: it ends before it removes another file, so what the
+ * person asked to keep is kept. A page already in hand is finished.
  */
 
 import { getDatabase, type DatabaseProvider, type IFileBucketRecord } from '@/lib/database';
@@ -42,6 +47,9 @@ const DELETE_CONCURRENCY = 4;
  * switched off can still add a file after a pass has listed the bucket; the job lists it again until it is empty.
  */
 const MAX_PASSES = 5;
+
+/** Logged when a run finds the bucket removed, replaced or given up on by another run: it removes nothing more. */
+const BUCKET_NO_LONGER_DELETED = 'Bucket deletion ended: the bucket was removed or changed while the job ran';
 
 async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   const db = await getDatabase();
@@ -114,19 +122,45 @@ async function leaveBucketBecause(
   });
 }
 
+/**
+ * Whether the bucket the run began with is still the one being deleted: it is there, it is the same bucket (one
+ * removed and made again under the same key is another), and no other run of the deletion has given up on it. Asked
+ * before every page of records.
+ */
+async function isStillBeingDeleted(
+  db: DatabaseProvider,
+  payload: DeleteBucketJobPayload,
+  bucketId: string,
+): Promise<boolean> {
+  const current = await db.findFileBucketByKey(payload.tenantId, payload.bucketKey, payload.projectId);
+  return current !== null && current._id?.toString() === bucketId && isBucketDeleting(current);
+}
+
+/** What one pass over the bucket's records came to. */
+interface PassResult {
+  failed: number;
+  firstReason?: string;
+  /** The bucket is no longer this run's to delete (see `isStillBeingDeleted`): nothing more is to be done to it. */
+  ended: boolean;
+}
+
 /** One pass over the bucket's records: every file's objects, then its record. */
 async function removeRecordsOnce(
   db: DatabaseProvider,
   bucket: IFileBucketRecord,
+  bucketId: string,
   payload: DeleteBucketJobPayload,
   filesOnce: () => Promise<FileProviderRuntime>,
-): Promise<{ failed: number; firstReason?: string }> {
+): Promise<PassResult> {
   const { projectId, bucketKey } = payload;
   let cursor: string | undefined;
   let failed = 0;
   let firstReason: string | undefined;
 
   do {
+    // The pass can take long: a bucket removed (with `force`) or taken over since the last page keeps its files.
+    if (!(await isStillBeingDeleted(db, payload, bucketId))) return { failed, ended: true };
+
     const page = await db.listFileRecords({
       providerKey: bucket.providerKey,
       bucketKey: bucket.key,
@@ -137,15 +171,19 @@ async function removeRecordsOnce(
 
     if (page.items.length > 0) {
       const files = await filesOnce();
-      const reasons = await mapLimit(page.items, DELETE_CONCURRENCY, async (record): Promise<string | null> => {
+      const reasons = await mapLimit(page.items, DELETE_CONCURRENCY, async (listed): Promise<string | null> => {
         try {
+          // The page was read a while ago: a Markdown conversion that has finished since has put its copy on the
+          // record, and a copy the job does not know about stays in the provider when the record is gone.
+          const record = await db.findFileRecordById(String(listed._id));
+          if (!record) return null;
           await removeStoredObjects(files, bucket, record, { markdownCopy: 'strict' });
           await db.deleteFileRecord(String(record._id));
           return null;
         } catch (error) {
           logger.warn('A file could not be deleted with its bucket', {
             bucketKey,
-            key: record.key,
+            key: listed.key,
             error: error instanceof Error ? error.message : String(error),
           });
           return describeFailure(error);
@@ -161,7 +199,7 @@ async function removeRecordsOnce(
     cursor = page.nextCursor;
   } while (cursor);
 
-  return { failed, ...(firstReason !== undefined ? { firstReason } : {}) };
+  return { failed, ended: false, ...(firstReason !== undefined ? { firstReason } : {}) };
 }
 
 /**
@@ -219,7 +257,11 @@ export async function runBucketDeletionJob(payload: DeleteBucketJobPayload): Pro
         return;
       }
 
-      const { failed, firstReason } = await removeRecordsOnce(db, bucket, payload, filesOnce);
+      const { failed, firstReason, ended } = await removeRecordsOnce(db, bucket, bucketId, payload, filesOnce);
+      if (ended) {
+        logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
+        return;
+      }
       if (failed > 0) {
         await leaveBecause(filesFailedMessage(failed, firstReason));
         return;
@@ -233,8 +275,9 @@ export async function runBucketDeletionJob(payload: DeleteBucketJobPayload): Pro
       }
     }
 
-    await db.deleteFileBucket(bucketId);
-    logger.info('Bucket deleted with its files', { bucketKey });
+    // `false`: the bucket was removed (with `force`) after the last page was read, which is where this run was going.
+    if (await db.deleteFileBucket(bucketId)) logger.info('Bucket deleted with its files', { bucketKey });
+    else logger.info(BUCKET_NO_LONGER_DELETED, { bucketKey });
   } catch (error) {
     logger.warn('Deleting a bucket with its files stopped', {
       bucketKey,

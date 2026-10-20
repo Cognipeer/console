@@ -247,6 +247,59 @@ describe('safeFetch', () => {
     expect((fetchMock.mock.calls[0] as unknown as [URL, FetchInit?])[1]?.dispatcher).toBeUndefined();
   });
 
+  describe('for a target with a TLS trust of its own', () => {
+    const tls = { rejectUnauthorized: false } as const;
+    const dispatcherOf = (fetchMock: ReturnType<typeof vi.fn>, call: number) =>
+      (fetchMock.mock.calls[call] as unknown as [URL, FetchInit?])[1]?.dispatcher;
+
+    it('hands fetch a dispatcher of its own even where nothing would be pinned: a literal address, an allow-listed host', async () => {
+      const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await safeFetch('https://93.184.216.34/api', undefined, { tls });
+      await safeFetch('https://internal.corp.example/api', undefined, { allowPrivate: true, tls });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(dispatcherOf(fetchMock, 0)).toBeDefined();
+      expect(dispatcherOf(fetchMock, 1)).toBeDefined();
+    });
+
+    it('keeps the trust on every hop of a redirect, with a dispatcher for each hop', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: 'https://93.184.216.34/moved' } }))
+        .mockResolvedValueOnce(new Response('moved-ok', { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const res = await safeFetch('https://public.example.com/old', undefined, { tls });
+
+      expect(await res.text()).toBe('moved-ok');
+      // The second hop is a literal address: only the trust gives it a dispatcher.
+      expect(dispatcherOf(fetchMock, 0)).toBeDefined();
+      expect(dispatcherOf(fetchMock, 1)).toBeDefined();
+      expect(dispatcherOf(fetchMock, 1)).not.toBe(dispatcherOf(fetchMock, 0));
+    });
+
+    it('does not open the network: a private target is refused before any call, trust or not', async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(safeFetch('http://169.254.169.254/latest/meta-data/', undefined, { tls })).rejects.toThrow(OutboundNetworkError);
+      await expect(safeFetch('https://internal.corp.example/api', undefined, { tls })).rejects.toThrow(OutboundNetworkError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('leaves a request without it exactly as it was', async () => {
+      const fetchMock = vi.fn(() => new Response('ok', { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await safeFetch('https://93.184.216.34/api', undefined, {});
+      await safeFetch('https://93.184.216.34/api', undefined, { tls: undefined });
+
+      expect(dispatcherOf(fetchMock, 0)).toBeUndefined();
+      expect(dispatcherOf(fetchMock, 1)).toBeUndefined();
+    });
+  });
+
   it('re-validates redirect hops and blocks redirects into private space', async () => {
     const fetchMock = vi.fn(async () => new Response(null, {
       status: 302,

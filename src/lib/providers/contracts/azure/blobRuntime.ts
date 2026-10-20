@@ -8,20 +8,20 @@
  *
  * Network rules (the same ones the model providers follow, see `providerEndpointGuard`):
  *  - the endpoint is vetted when the runtime is built, and again when a socket connects (the agent's lookup),
- *  - a CA certificate or "skip TLS verification" (self-hosted only) is applied through the same agent,
+ *  - a CA certificate or "skip TLS verification" is applied through the same agent,
  *  - without any of those the SDK keeps its own agent, which honours HTTP(S)_PROXY.
  */
 
 import { randomUUID } from 'node:crypto';
 import type { AnonymousCredential, ContainerClient, StorageSharedKeyCredential } from '@azure/storage-blob';
 import { getConfig } from '@/lib/core/config';
-import type { FileConnectionCheck, FileObjectHandle, FileProviderRuntime, ListFilesOptions, ListFilesResult, UploadFileInput } from '@/lib/providers/domains/file';
+import type { DownloadFileOptions, FileConnectionCheck, FileObjectHandle, FileProviderRuntime, ListFilesOptions, ListFilesResult, UploadFileInput } from '@/lib/providers/domains/file';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import type { ProviderContext } from '@/lib/providers/types';
-import { assertPublicUrl, privateNetworkBlockApplies, safeFetch } from '@/lib/security/outboundFetch';
+import { privateNetworkBlockApplies, safeFetch } from '@/lib/security/outboundFetch';
 import { createStorageAgents, type StorageAgents } from '@/lib/security/storageTransport';
 import { assertProviderUrlAllowed, endpointGuardOptions } from '@/lib/services/providers/providerEndpointGuard';
-import { maxStorageDownloadBytes } from '../storageLimits';
+import { resolveDownloadCeiling } from '../downloadCeiling';
 import {
   resolveAzureBlobConfig,
   secretValues,
@@ -36,6 +36,7 @@ import {
   isAzureBlobError,
   isContainerMissing,
   isHopelessFailure,
+  isInterruptedRead,
   redactSecrets,
 } from './blobErrors';
 import {
@@ -55,6 +56,7 @@ import { buildPipeline, loadAzureBlobSdk } from './blobTransport';
 const MAX_EMPTY_PAGES = 8;
 const MAX_PAGE_SIZE = 5000;
 const LIST_TIMEOUT_MS = 30_000;
+/** How many times a download whose connection dropped asks for the rest of the object. */
 const DOWNLOAD_RETRIES = 2;
 /** The last attempt to remove the test object after the check's own time limit has passed. */
 const CLEANUP_TIMEOUT_MS = 5_000;
@@ -86,26 +88,32 @@ function tooLarge(ceiling: number): AzureBlobError {
   );
 }
 
-/** The body as one Buffer, stopping (and closing the stream) once it passes `ceiling`. */
-async function readBody(stream: NodeJS.ReadableStream | undefined, ceiling: number): Promise<Buffer> {
-  if (!stream) return Buffer.alloc(0);
-  const chunks: Buffer[] = [];
-  let total = 0;
+/** What a download has read so far: it outlives one response, because a body that was cut off is continued, not restarted. */
+interface BodySink {
+  chunks: Buffer[];
+  total: number;
+}
+
+/** Adds the body to `sink`, stopping (and closing the stream) once the whole passes `ceiling`. */
+async function readBody(stream: NodeJS.ReadableStream | undefined, ceiling: number, sink: BodySink): Promise<void> {
+  if (!stream) return;
   for await (const chunk of stream) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buffer.length;
-    if (total > ceiling) {
+    if (sink.total + buffer.length > ceiling) {
       (stream as { destroy?: () => void }).destroy?.();
       throw tooLarge(ceiling);
     }
-    chunks.push(buffer);
+    sink.total += buffer.length;
+    sink.chunks.push(buffer);
   }
-  return Buffer.concat(chunks, total);
 }
 
-/** The text of an error a person will read: our own sentences as they are, anything else scrubbed and cut to one line. */
+/**
+ * The text of an error a person will read: our own sentences (scrubbed again, since a service or a token server may
+ * have echoed a credential into one), anything else scrubbed and cut to one line.
+ */
 function failureText(error: unknown, secrets: readonly string[]): string {
-  if (isAzureBlobError(error) || error instanceof ProviderSettingsError) return error.message;
+  if (isAzureBlobError(error) || error instanceof ProviderSettingsError) return redactSecrets(error.message, secrets);
   const line = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
   return redactSecrets(line, secrets).slice(0, 300) || 'The connection check failed.';
 }
@@ -114,13 +122,15 @@ export async function createAzureBlobRuntime(
   context: ProviderContext<AzureBlobCredentials, AzureBlobSettings>,
 ): Promise<AzureBlobRuntime> {
   const { tenantId, providerKey, credentials, settings, logger } = context;
-  const isOnPrem = getConfig().deployment.isOnPrem;
-
-  const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: isOnPrem });
+  // Plain http and skipped verification are the provider's own choice on every deployment; the network policy applies
+  // either way, and Microsoft Entra sign-in still needs https (`resolveAzureBlobConfig`).
+  const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: true });
   const guard = endpointGuardOptions(tenantId);
   // Rows stored before the endpoint policy, and a name that now answers differently, are not covered by the
-  // save-time check: the policy is applied again here, before any socket exists.
-  await assertPublicUrl(config.endpoint.serviceUrl, guard);
+  // save-time check: the policy is applied again here, before any socket exists. A refusal is a `ProviderEndpointError`
+  // for the setting the endpoint was read from, as it is when the provider is saved (a name that does not resolve is
+  // one that is `retryable`).
+  await assertProviderUrlAllowed(config.endpointField, config.endpoint.serviceUrl, { tenantId });
   if (config.auth.method === 'entra') await assertProviderUrlAllowed('authorityHost', config.auth.authority, { tenantId });
 
   const basePrefix = buildBasePrefix([config.prefix, tenantId, providerKey]);
@@ -130,7 +140,9 @@ export async function createAzureBlobRuntime(
     container: containerName,
     host: endpoint.host,
     authMethod: config.authMethod,
-    onPrem: isOnPrem,
+    apiVersion: config.apiVersion,
+    // a SAS that expires while the runtime is cached is refused by the service; the sentence can say so
+    ...(config.auth.method === 'sas' ? { sas: { expiresAt: config.auth.sas.expiresAt, startsAt: config.auth.sas.startsAt } } : {}),
   };
   const secrets = secretValues(credentials, config);
 
@@ -145,7 +157,6 @@ export async function createAzureBlobRuntime(
       guardHost: endpoint.host,
       caCertificate: config.caCertificate,
       allowInsecureTls: config.allowInsecureTls,
-      isOnPrem,
       maxSockets: 32,
     })
     : undefined;
@@ -169,13 +180,16 @@ export async function createAzureBlobRuntime(
           tenantId: config.auth.tenantId,
           clientId: config.auth.clientId,
           clientSecret: config.auth.clientSecret,
-          // Pins DNS, refuses private targets under the same rules as the endpoint, never follows redirects. The
-          // credential's own deadline (`init.signal`) covers the answer body too, so it stays linked after the headers.
+          // Refuses private targets under the same rules as the endpoint and never follows redirects (`safeFetch` also pins
+          // DNS to the vetted addresses). A provider with a CA certificate (or skipped verification) trusts it for its token
+          // server too: the agents hold the trust they were built with. The credential's own deadline (`init.signal`) covers
+          // the answer body too, so it stays linked after the headers.
           fetchImpl: (url, init) => safeFetch(url, init, {
             ...endpointGuardOptions(tenantId),
             timeoutMs: ENTRA_TIMEOUT_MS,
             followRedirects: false,
             keepAbortLinked: true,
+            ...(agents?.tls ? { tls: agents.tls } : {}),
           }),
         });
         break;
@@ -192,10 +206,22 @@ export async function createAzureBlobRuntime(
     return { relativeKey, blobName: assertBlobNameLimits(`${basePrefix}${relativeKey}`) };
   }
 
-  function toAzureBlobError(error: unknown, operation: string): Error {
-    if (isAzureBlobError(error) || error instanceof ProviderSettingsError) return error;
+  /** The error with the credentials in play taken out of its text; the same error when there were none. */
+  function scrubbed(error: AzureBlobError): AzureBlobError {
+    const message = redactSecrets(error.message, secrets);
+    return message === error.message
+      ? error
+      : new AzureBlobError(message, { statusCode: error.statusCode, code: error.code, requestId: error.requestId, retryable: error.retryable });
+  }
+
+  function toAzureBlobError(error: unknown, operation: string, clocks?: { deadline: AbortSignal; caller?: AbortSignal }): Error {
+    if (isAzureBlobError(error)) return scrubbed(error);
+    if (error instanceof ProviderSettingsError) return error;
     const info = describeAzureError(error);
-    return new AzureBlobError(redactSecrets(describeFailure(info, { ...failureContext, operation }), secrets), {
+    // An abort that neither the deadline nor the caller raised came from the connection (the SDK reports a body cut off
+    // mid-stream as one), and "did not answer in time" would be the wrong thing to tell.
+    const interrupted = info.aborted && clocks !== undefined && !clocks.deadline.aborted && clocks.caller?.aborted !== true;
+    return new AzureBlobError(redactSecrets(describeFailure(info, { ...failureContext, operation, interrupted }), secrets), {
       statusCode: info.status,
       code: info.code ?? info.systemCode,
       requestId: info.requestId,
@@ -213,7 +239,8 @@ export async function createAzureBlobRuntime(
     try {
       return await run(options.signal ? AbortSignal.any([deadline, options.signal]) : deadline);
     } catch (error) {
-      throw toAzureBlobError(error, operation);
+      // Creating the container runs on a clock of its own (shared by the callers that wait for it): not judged against ours.
+      throw toAzureBlobError(error, operation, operation === 'create the container' ? undefined : { deadline, caller: options.signal });
     }
   }
 
@@ -314,29 +341,59 @@ export async function createAzureBlobRuntime(
     };
   }
 
-  async function download(key: string, signal?: AbortSignal) {
+  async function download(key: string, signal?: AbortSignal, options?: DownloadFileOptions) {
     const { relativeKey, blobName } = toStorageName(key);
     try {
       return await call('download', async (deadline) => {
-        const response = await container.getBlobClient(blobName).download(0, undefined, {
-          abortSignal: deadline,
-          maxRetryRequests: DOWNLOAD_RETRIES,
-        });
-        const ceiling = maxStorageDownloadBytes();
-        if (response.contentLength !== undefined && response.contentLength > ceiling) {
-          (response.readableStreamBody as { destroy?: () => void } | undefined)?.destroy?.();
+        const blob = container.getBlobClient(blobName);
+        // The SDK would continue a body that was cut off by itself, but it does not when the connection drops (it ends the
+        // stream with an AbortError, which it cannot tell from a cancelled request), so its retry is off and the
+        // continuation below does that job.
+        const first = await blob.download(0, undefined, { abortSignal: deadline, maxRetryRequests: 0 });
+        const ceiling = resolveDownloadCeiling(options);
+        const size = first.contentLength;
+        if (size !== undefined && size > ceiling) {
+          (first.readableStreamBody as { destroy?: () => void } | undefined)?.destroy?.();
           throw tooLarge(ceiling);
         }
-        const data = await readBody(response.readableStreamBody, ceiling);
-        if (response.contentLength !== undefined && data.length !== response.contentLength) {
-          throw new Error(`Incomplete download: got ${data.length} of ${response.contentLength} bytes`);
+        const body: BodySink = { chunks: [], total: 0 };
+        let response = first;
+        for (let resumes = 0; ; resumes += 1) {
+          try {
+            await readBody(response.readableStreamBody, ceiling, body);
+            break;
+          } catch (error) {
+            // Only a connection that went away is continued. The deadline (the caller's signal included) and every other
+            // failure end the download.
+            if (!isInterruptedRead(error) || deadline.aborted) throw error;
+            // Every byte arrived and only the close of the connection was reported: nothing is missing.
+            if (size !== undefined && body.total === size) break;
+            // The rest is asked for under the version the download started with, so it needs a size and a version to ask under.
+            if (size === undefined || first.etag === undefined || body.total > size || resumes >= DOWNLOAD_RETRIES) throw error;
+            try {
+              response = await blob.download(body.total, size - body.total, {
+                abortSignal: deadline,
+                maxRetryRequests: 0,
+                conditions: { ifMatch: first.etag },
+              });
+            } catch (resumeError) {
+              if (describeAzureError(resumeError).status === 412) {
+                throw new AzureBlobError('The file changed while it was being downloaded; try again.', { code: 'BlobChangedDuringDownload', retryable: true });
+              }
+              throw resumeError;
+            }
+          }
+        }
+        const data = Buffer.concat(body.chunks, body.total);
+        if (size !== undefined && data.length !== size) {
+          throw new Error(`Incomplete download: got ${data.length} of ${size} bytes`);
         }
         return {
           data,
-          size: response.contentLength ?? data.length,
-          contentType: response.contentType,
-          metadata: decodeBlobMetadata(response.metadata).custom,
-          etag: quoteEtag(response.etag),
+          size: size ?? data.length,
+          contentType: first.contentType,
+          metadata: decodeBlobMetadata(first.metadata).custom,
+          etag: quoteEtag(first.etag),
         };
       }, { signal });
     } catch (error) {
@@ -448,7 +505,9 @@ export async function createAzureBlobRuntime(
         steps.push({ step: name, ok: true, ...(message ? { message } : {}) });
         return { ok: true };
       } catch (error) {
-        steps.push({ step: name, ok: false, message: failureText(error, secrets) });
+        // A delete that the time limit cut short is cleaned up afterwards; any other failure leaves the test file.
+        const stays = name === 'delete' && signal?.aborted !== true ? ` The test file "${testKey}" stays in the container.` : '';
+        steps.push({ step: name, ok: false, message: `${failureText(error, secrets)}${stays}` });
         return { ok: false, error };
       }
     }
@@ -520,11 +579,15 @@ export async function createAzureBlobRuntime(
     }
 
     const failed = steps.filter((entry) => !entry.ok);
-    if (failed.length === 0) {
+    // Only the removal of the test file failed: the connection works, so the check passes, and the step and the message
+    // say what is missing and which file stays (the same as for the other file providers). A delete that the time
+    // limit cut short is not that.
+    const onlyDelete = failed.length === 1 && failed[0].step === 'delete' && signal?.aborted !== true;
+    if (failed.length === 0 || onlyDelete) {
       const message = containerMissing && !write
         ? `Connected to storage account "${failureContext.account}"; the container "${containerName}" is created on the first upload.`
         : `Connected to container "${containerName}"${write ? '' : ' (listing only)'}.`;
-      return { ok: true, message, steps };
+      return { ok: true, message: onlyDelete ? `${message} Removing the test file failed.${failed[0].message ? ` ${failed[0].message}` : ''}` : message, steps };
     }
     const first = failed[0];
     const writeSide = steps.filter((entry) => entry.step !== 'list');
@@ -536,7 +599,7 @@ export async function createAzureBlobRuntime(
 
   const runtime: AzureBlobRuntime = {
     uploadFile: (input) => upload(input),
-    downloadFile: (key) => download(key),
+    downloadFile: (key, options) => download(key, undefined, options),
     deleteFile: (key) => remove(key),
     listFiles: (options) => list(options),
     getFileMetadata: (key) => head(key),

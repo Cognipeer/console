@@ -38,6 +38,8 @@ export interface FakeS3Options {
   intercept?: (request: RecordedRequest) => FakeS3Response | undefined;
   /** Send object bodies without a Content-Length (chunked), like a streaming gateway. */
   noContentLength?: boolean;
+  /** A store that ignores `encoding-type=url` on a listing and answers with plain keys (and no `EncodingType` element). */
+  ignoreEncodingType?: boolean;
 }
 
 export interface FakeS3Response {
@@ -176,7 +178,7 @@ export async function startFakeS3(options: FakeS3Options = {}): Promise<FakeS3> 
         const prefix = url.searchParams.get('prefix') ?? '';
         const max = Number(url.searchParams.get('max-keys') ?? 1000);
         const token = Number(url.searchParams.get('continuation-token') ?? 0) || 0;
-        const encode = url.searchParams.get('encoding-type') === 'url';
+        const encode = !options.ignoreEncodingType && url.searchParams.get('encoding-type') === 'url';
         const all = [...objects.entries()]
           .filter(([storageKey]) => storageKey.startsWith(`${bucket}/`) && storageKey.slice(bucket.length + 1).startsWith(prefix))
           .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));

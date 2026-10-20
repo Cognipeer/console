@@ -25,6 +25,34 @@ All application configuration is managed through the central `getConfig()` funct
 | `MONGODB_CONNECT_TIMEOUT_MS` | Connection timeout | `10000` |
 | `MONGODB_SOCKET_TIMEOUT_MS` | Socket timeout | `45000` |
 | `MONGODB_SERVER_SELECTION_TIMEOUT_MS` | Server selection timeout | `30000` |
+| `MONGODB_SINGLE_DATABASE` | Keep tenant collections in `MAIN_DB_NAME` instead of a separate `tenant_<slug>` database per tenant. A second tenant is refused in this mode. | `true` when [`DEPLOYMENT_MODE`](#deployment-mode) is `onprem` and `DB_PROVIDER=mongodb`, otherwise `false` |
+
+### Deployment mode
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DEPLOYMENT_MODE` | `saas` for the hosted multi-tenant service, `onprem` for an installation you run yourself. | `onprem` when `DB_PROVIDER=sqlite`, otherwise `saas` |
+
+Only the exact values `saas` and `onprem` are read; anything else is ignored and the default applies. The default follows the database because SQLite is the self-hosted choice, so **an installation that uses MongoDB starts in `saas` mode unless you set `DEPLOYMENT_MODE=onprem`**. The Docker Compose file in the repository sets it to `onprem`.
+
+What the mode changes:
+
+| Area | `saas` | `onprem` |
+|------|--------|----------|
+| Endpoints of providers (model, embedding, image, speech, moderation, decision and file providers, the hosts of a GridFS connection string included) | A private, loopback or link-local endpoint is refused. The one exception is a private network the operator has opened for the organization with [`PROVIDER_PRIVATE_NETWORKS`](#provider-private-networks); neither `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` nor `OUTBOUND_HTTP_ALLOWED_HOSTS` changes anything here. | Private and loopback endpoints are allowed, unless `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` is set to `true` explicitly. The `saas` rule then applies, with `PROVIDER_PRIVATE_NETWORKS` to open networks and `OUTBOUND_HTTP_ALLOWED_HOSTS` to list the hosts that stay allowed. |
+| Options of a MongoDB GridFS connection string | Certificate files (`tlsCAFile`, `tlsCertificateKeyFile`, `tlsCRLFile`) are refused, and so are the sign-in methods that use the identity of the server. | Available (the sign-in methods unless private networks are blocked explicitly). |
+| `MONGODB_SINGLE_DATABASE` | Defaults to `false`: one database per tenant. | Defaults to `true` with MongoDB: one database for the whole installation. |
+| Modules for self-hosted installations (for example LDAP) | Not available (`404`). | Available; they still need the enterprise license. |
+| IAM engine statistics | This tenant's own counters. | Also the process-wide figures of the engine. |
+| Support entry points | Shown only when the Support hand-off is fully configured (`SUPPORT_BASE_URL`, `SUPPORT_CRM_API_URL` and `SUPPORT_HANDOFF_SECRET`). | Also shown when only `SUPPORT_BASE_URL` is set; the link then opens the Support login. |
+
+**Skip TLS verification** and plain `http://` endpoints of storage providers (S3-compatible storage, Amazon S3 with a custom endpoint, Azure Blob) do not depend on the mode: both are the provider's own choice on every deployment, and the address rules above still apply to them.
+
+On an installation you run yourself, set `DEPLOYMENT_MODE=onprem` to use storage on your internal network (a MinIO on a private address, Azurite). On a hosted deployment the operator opens that network for your organization instead, as described under [Provider private networks](#provider-private-networks). See [Files](/guide/files#which-endpoints-a-provider-may-use) for the rules per provider.
+
+::: warning Changing the mode of an existing MongoDB installation
+`DEPLOYMENT_MODE=onprem` also changes the default of `MONGODB_SINGLE_DATABASE` to `true`. An installation that has run in `saas` mode keeps tenant data in per-tenant databases (`tenant_<slug>`); after the switch the console would look for that data in the main database. Set `MONGODB_SINGLE_DATABASE=false` together with `DEPLOYMENT_MODE=onprem` to keep the data where it is.
+:::
 
 ### Authentication
 
@@ -115,59 +143,73 @@ redirect hop.
 | `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` | Block outbound requests to private/loopback address space from tenant-configured integrations. | `true` |
 | `OUTBOUND_HTTP_ALLOWED_HOSTS` | Comma-separated hostnames exempt from the block. Use a leading dot to match subdomains (e.g. `.svc.cluster.local`). | *(empty)* |
 | `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` | Default timeout for guarded outbound requests. | `30000` |
-| `PROVIDER_PRIVATE_NETWORKS` | Private networks that provider endpoints may reach, per organization. See [Provider private networks](#provider-private-networks). | *(empty)* |
-| `PROVIDER_PRIVATE_NETWORKS_DENY` | Comma-separated CIDR ranges that stay refused even inside an opened network. | *(empty)* |
+| `PROVIDER_PRIVATE_NETWORKS` | Private ranges that provider endpoints may reach, per organization. Entries are separated by `;`; each is `<tenantId>=<cidr>[,<cidr>...]`, and `*` in place of a tenant ID opens the ranges for every organization. IPv4 and IPv6 CIDRs are accepted (a bare address means one host); host names are not. Whitespace is ignored and two entries for one organization merge. An entry or range that cannot be read opens nothing and is logged as an error at startup. Example: `"64f0c0ffee1234567890abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"`. See [Provider private networks](#provider-private-networks). | *(empty: nothing is opened)* |
+| `PROVIDER_PRIVATE_NETWORKS_DENY` | Comma-separated CIDRs that stay refused even inside an opened range. Set it to the cluster's pod and service ranges and to any other internal range. An entry that cannot be read closes every opened network until it is fixed. | *(empty)* |
 
 Self-hosted deployments that legitimately call in-network services (e.g. a
 vLLM server on a private IP) should list those hosts in
 `OUTBOUND_HTTP_ALLOWED_HOSTS` rather than disabling the guard globally.
 
+Endpoints that a person types into a provider (model, embedding, image,
+speech, moderation, decision and file providers) follow the
+[deployment mode](#deployment-mode) instead of that global default. In `saas`
+mode the block is always on and the allow-list does not apply; networks opened
+with [`PROVIDER_PRIVATE_NETWORKS`](#provider-private-networks) are the
+exception. In `onprem` mode private addresses are allowed unless
+`OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` is set to `true` explicitly; only then do
+`OUTBOUND_HTTP_ALLOWED_HOSTS` entries matter for providers. For file providers
+the check runs when the provider is saved or tested and each time its storage
+client is built, and the client's connections are checked when they are opened.
+See [Files](/guide/files#which-endpoints-a-provider-may-use).
+
 #### Provider private networks
 
-Provider endpoints (model servers, S3-compatible and Azure Blob stores, MongoDB
-GridFS) are checked against private, loopback and link-local addresses. On SaaS
-the check is always on; on a self-hosted install it applies only when
-`OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK=true`, and otherwise private endpoints are
-allowed as before. A customer's own store usually sits on a private address of
-the customer's network, which the operator has connected to the deployment (a
-VPN or a peering). `PROVIDER_PRIVATE_NETWORKS` lists those networks per
-organization:
+Provider endpoints (model, embedding, image, speech, moderation, decision and
+file providers) are checked by a guard of their own. On SaaS it always refuses
+private, loopback and link-local addresses; on a self-hosted installation it does
+so only when `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` is explicitly `true`. A
+customer's own store or model server often sits on a private address of the
+customer's network, which the operator has connected to the deployment with a VPN
+or a peering. `PROVIDER_PRIVATE_NETWORKS` opens those networks for chosen
+organizations, and `PROVIDER_PRIVATE_NETWORKS_DENY` keeps ranges closed inside
+them:
 
 ```bash
-PROVIDER_PRIVATE_NETWORKS="64f0c0ffee0000000000abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"
+PROVIDER_PRIVATE_NETWORKS="64f0c0ffee1234567890abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"
 PROVIDER_PRIVATE_NETWORKS_DENY="10.244.0.0/16,10.96.0.0/12"
 ```
 
-- Entries are separated by `;`. Each is `<organization id>=<cidr>[,<cidr>...]`; `*` in
-  place of the id opens the ranges for every organization. Two entries for one
-  organization merge, and whitespace is ignored.
-- IPv4 and IPv6 ranges are accepted; a bare address is one host. Host names are not
-  accepted: only the addresses a name resolves to are checked.
 - A private address is allowed for an organization only when it lies inside one of
-  its ranges (or a `*` range). A name is resolved and every address it answers with
-  has to pass. Public addresses are decided as before.
-- An entry that cannot be read opens nothing and is logged at startup. A deny list
-  that cannot be read opens nothing for anyone. The settings are read at startup.
-- `PROVIDER_PRIVATE_NETWORKS_DENY` lists ranges that stay refused inside an opened
-  network, such as this cluster's pod and service ranges.
-- Never opened, whatever the entries say: `0.0.0.0/8`, loopback, link-local
-  (`169.254.0.0/16`, which holds the cloud metadata services), `168.63.129.16`,
-  `100.100.100.200`, `192.0.0.0/24`, multicast and reserved ranges, `::`, `::1`,
-  `fe80::/10`, `ff00::/8`, `fd00:ec2::254`, the IPv6 forms that carry an IPv4
-  address (IPv4-compatible and -translated, NAT64, 6to4, Teredo), every address of
-  the server's own network interfaces and `KUBERNETES_SERVICE_HOST` when it is an
-  address. An IPv4-mapped IPv6 address is matched as the IPv4 address it carries.
-- Names that always mean the server itself (`localhost`, `*.localhost`) stay refused.
-  `*.local` and `*.internal` names are refused too, unless the organization has
-  opened ranges: they are then resolved and decided by their addresses.
-- `mongodb+srv://` connection strings are accepted for GridFS: the SRV record is
-  resolved when the provider is saved or tested and every host in it is checked the
-  same way. Unix sockets and certificate files named in a MongoDB URI stay refused
-  on SaaS, as do `allowInsecureTls` and `http://` Azure Blob endpoints.
+  its ranges (or a `*` range) and is not one of the addresses that are never
+  opened. A name is resolved and every address it answers with has to pass.
+  Public addresses are decided as before. For a file provider the rule applies
+  again each time its storage client is built and a connection is opened.
+- An entry or a range that cannot be read opens nothing and is logged as an error
+  at startup; the readable ranges of the same entry still apply. A deny list with
+  an entry that cannot be read opens nothing for anyone until it is fixed, because
+  what it was meant to keep out is unknown.
+- Both settings are read once, when Console starts, on every Console process (a
+  `worker` node included, see [Cluster](/guide/cluster)): restart every replica
+  after changing them. The startup log has one line with the counts
+  (organizations with ranges of their own, opened ranges, ranges opened for every
+  organization, deny ranges), an error line that lists the entries that cannot be
+  read, and a warning for an opened range that overlaps an address that is never
+  opened.
+- They apply wherever the provider guard blocks private targets: always on SaaS
+  and, on a self-hosted installation, only with
+  `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK=true` (hosts in
+  `OUTBOUND_HTTP_ALLOWED_HOSTS` keep passing there). Webhooks, tools, MCP servers,
+  alert channels, browser sessions, the crawler, OCR webhooks and imports are not
+  covered: they follow the `OUTBOUND_HTTP_*` settings above.
+- Never opened, whatever the entries say: loopback, link-local (which holds the
+  cloud metadata services), multicast and reserved addresses, the IPv6 forms that
+  carry an IPv4 address, Console's own addresses and the ranges in
+  `PROVIDER_PRIVATE_NETWORKS_DENY`. The names `localhost` and `*.localhost` stay
+  refused as well.
 
-The setting applies to provider endpoints only. Webhooks, tools, MCP servers,
-alert channels, the browser, the crawler and imports keep using the
-`OUTBOUND_HTTP_*` settings above.
+[Private networks on SaaS](/guide/providers#private-networks-on-saas) describes the
+procedure, the complete list of addresses that are never opened, how to find a
+tenant ID, and how `mongodb+srv://` connection strings are checked.
 
 ### MCP Gateway
 
@@ -347,7 +389,17 @@ OTLP sessions are closed earlier than the stale window: one that has been quiet 
 | `SHUTDOWN_TIMEOUT_MS` | Graceful shutdown timeout | `15000` |
 | `TRACING_MAX_BODY_SIZE_MB` | Max tracing payload size | `10` |
 | `HEALTH_ENDPOINT_ENABLED` | Enable health endpoints | `true` |
-| `PROVIDER_RUNTIME_CACHE_TTL_SECONDS` | Runtime pool entry TTL | `300` |
+| `PROVIDER_RUNTIME_CACHE_TTL_SECONDS` | Runtime pool entry TTL. `0` turns expiry off (entries are still replaced when a provider's configuration changes). | `300` |
+| `PROVIDER_RUNTIME_DISPOSE_GRACE_SECONDS` | How long an evicted runtime keeps its connections open before they are closed, so a request that still holds it can finish. `0` closes immediately. See [Runtime Pool](/guide/core-runtime-pool). | `300` |
+
+### Files
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FILE_UPLOAD_MAX_MB` | Largest single file an upload may carry, in MB. An upload request body may be that size as base64 plus 64 KiB. Stored files are read back (download, preview, zip) up to the larger of twice this value and 100 MB. | `50` |
+| `FILE_UPLOAD_ALLOWED_MIME_TYPES` | Comma-separated allow-list of content types; `image/*` style wildcards work. An upload of another type is refused with `415`. Empty allows any type. | *(empty)* |
+
+See [Files](/guide/files#limits) for the other limits of the Document Store.
 
 ## Config Source Abstraction
 

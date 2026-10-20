@@ -34,6 +34,8 @@ let nextCursor: string | undefined;
 let known: KnownRecord[];
 /** Keys another node registers between the lookup of a page and the insert of its records. */
 let racing: Set<string>;
+/** The bucket as the database holds it after the records were saved; `null` = gone. */
+let bucketNow: Record<string, unknown> | null;
 let used: number;
 let usedBytes: number;
 let driver: string;
@@ -44,6 +46,8 @@ let db: {
   listFileRecordsByKeys: ReturnType<typeof vi.fn>;
   findFileRecordByKey: ReturnType<typeof vi.fn>;
   createFileRecord: ReturnType<typeof vi.fn>;
+  deleteFileRecord: ReturnType<typeof vi.fn>;
+  findFileBucketByKey: ReturnType<typeof vi.fn>;
   countFileRecords: ReturnType<typeof vi.fn>;
   sumFileRecordBytes: ReturnType<typeof vi.fn>;
 };
@@ -58,6 +62,7 @@ beforeEach(() => {
   nextCursor = undefined;
   known = [];
   racing = new Set();
+  bucketNow = { key: 'docs', providerKey: 'disk', tenantId: 't1', status: 'active' };
   used = 0;
   usedBytes = 0;
   driver = 'aws-s3';
@@ -70,6 +75,8 @@ beforeEach(() => {
       known.filter((record) => keys.includes((field === 'markdownKey' ? record.markdownKey : record.key) ?? '\u0000'))),
     findFileRecordByKey: vi.fn(async (_provider: string, _bucket: string, key: string) => (racing.has(key) ? { _id: `other-${key}`, key } : null)),
     createFileRecord: vi.fn(async (record: Record<string, unknown>) => ({ _id: `id-${String(record.key)}`, ...record })),
+    deleteFileRecord: vi.fn(async () => true),
+    findFileBucketByKey: vi.fn(async () => bucketNow),
     countFileRecords: vi.fn(async () => used),
     sumFileRecordBytes: vi.fn(async () => usedBytes),
   };
@@ -242,6 +249,40 @@ describe('which objects become files', () => {
   });
 });
 
+describe('the content type of an imported file', () => {
+  const typeOf = async (key: string, listed?: string) => {
+    db.createFileRecord.mockClear();
+    handles = [{ key: `docs/${key}`, size: 1, ...(listed === undefined ? {} : { contentType: listed }) }];
+    await importFromStorage(INPUT);
+    return created()[0]!.contentType;
+  };
+
+  it('is the one the listing reports when it says something specific', async () => {
+    expect(await typeOf('photo.png', 'image/png')).toBe('image/png');
+    // The store knows better than the name does.
+    expect(await typeOf('dump.bin', 'application/pdf')).toBe('application/pdf');
+    expect(await typeOf('page.txt', 'text/plain; charset=utf-8')).toBe('text/plain; charset=utf-8');
+  });
+
+  it.each([
+    'application/octet-stream',
+    'Application/Octet-Stream',
+    'application/octet-stream; charset=binary',
+    ' application/octet-stream ',
+    'binary/octet-stream',
+  ])('is asked of the name when the listing reports the generic type %j: a blob written without a type holds that one', async (generic) => {
+    expect(await typeOf('report.pdf', generic)).toBe('application/pdf');
+    expect(await typeOf('photo.png', generic)).toBe('image/png');
+  });
+
+  it('keeps the generic type when the name says nothing better, and invents none when nothing is listed or named', async () => {
+    expect(await typeOf('noextension', 'application/octet-stream')).toBe('application/octet-stream');
+    expect(await typeOf('data.unknownext', 'binary/octet-stream')).toBe('binary/octet-stream');
+    expect(await typeOf('noextension')).toBeUndefined();
+    expect(await typeOf('noextension', '')).toBeUndefined();
+  });
+});
+
 describe('keys the drivers would rewrite', () => {
   it.each([
     ['report.final.txt', true],
@@ -332,6 +373,107 @@ describe('an object another node registered meanwhile', () => {
     expect(createdKeys()).toEqual(['a.txt', 'c.txt']);
     expect(result).toEqual({ scanned: 3, imported: 2, skipped: 1 });
     expect(db.findFileRecordByKey).toHaveBeenCalledWith('disk', 'docs', 'b.txt', 'p1');
+  });
+});
+
+describe('a bucket that stops taking files while the import runs', () => {
+  const threeFiles = () => [{ key: 'docs/a.txt', size: 1 }, { key: 'docs/b.txt', size: 1 }, { key: 'docs/c.txt', size: 1 }];
+  const takenBack = () => db.deleteFileRecord.mock.calls.map(([id]) => String(id)).sort();
+
+  it.each([
+    ['gone', null, 'bucket_deleting'],
+    ['switched off', { key: 'docs', providerKey: 'disk', tenantId: 't1', status: 'disabled' }, 'bucket_inactive'],
+    ['being deleted', { key: 'docs', providerKey: 'disk', tenantId: 't1', status: 'disabled', metadata: { deleting: true } }, 'bucket_deleting'],
+    ['being deleted and still switched on', { key: 'docs', providerKey: 'disk', tenantId: 't1', status: 'active', metadata: { deleting: true } }, 'bucket_deleting'],
+  ])('takes back every record of the run and refuses the import when the bucket is %s', async (_label, closed, code) => {
+    handles = threeFiles();
+    bucketNow = closed;
+
+    await expect(importFromStorage(INPUT)).rejects.toMatchObject({ code, status: 409 });
+
+    expect(takenBack()).toEqual(['id-a.txt', 'id-b.txt', 'id-c.txt']);
+    expect(db.findFileBucketByKey).toHaveBeenCalledWith('t1', 'docs', 'p1');
+  });
+
+  it('asks again only after the records are saved, and does not touch the provider', async () => {
+    handles = threeFiles();
+    const order: string[] = [];
+    db.createFileRecord.mockImplementation(async (record: Record<string, unknown>) => {
+      order.push(`create ${String(record.key)}`);
+      return { _id: `id-${String(record.key)}`, ...record };
+    });
+    db.findFileBucketByKey.mockImplementation(async () => {
+      order.push('bucket');
+      return bucketNow;
+    });
+
+    await importFromStorage(INPUT);
+
+    expect(order.indexOf('bucket')).toBe(3);
+    expect(order.filter((entry) => entry === 'bucket')).toHaveLength(1);
+    expect(db.deleteFileRecord).not.toHaveBeenCalled();
+  });
+
+  it('takes back only the records this run made: the ones that were already there stay', async () => {
+    known = [{ key: 'a.txt' }];
+    handles = threeFiles();
+    bucketNow = null;
+
+    await expect(importFromStorage(INPUT)).rejects.toMatchObject({ code: 'bucket_deleting' });
+
+    expect(takenBack()).toEqual(['id-b.txt', 'id-c.txt']);
+  });
+
+  it('does not take back a record another node registered meanwhile: it is not this run\'s', async () => {
+    handles = threeFiles();
+    racing = new Set(['b.txt']);
+    bucketNow = null;
+
+    await expect(importFromStorage(INPUT)).rejects.toMatchObject({ code: 'bucket_deleting' });
+
+    expect(takenBack()).toEqual(['id-a.txt', 'id-c.txt']);
+  });
+
+  it('is still refused when some of the records cannot be taken back: the refusal is the answer, and the rest are taken back', async () => {
+    handles = threeFiles();
+    bucketNow = null;
+    db.deleteFileRecord.mockImplementation(async (id: string) => {
+      if (id === 'id-a.txt') throw new Error('SQLITE_BUSY: database is locked');
+      return true;
+    });
+
+    await expect(importFromStorage(INPUT)).rejects.toMatchObject({ code: 'bucket_deleting' });
+
+    expect(takenBack()).toEqual(['id-a.txt', 'id-b.txt', 'id-c.txt']);
+  });
+
+  it('leaves the import as it is when the bucket cannot be read again', async () => {
+    handles = threeFiles();
+    db.findFileBucketByKey.mockRejectedValue(new Error('SQLITE_BUSY: database is locked'));
+
+    expect(await importFromStorage(INPUT)).toEqual({ scanned: 3, imported: 3, skipped: 0 });
+
+    expect(db.deleteFileRecord).not.toHaveBeenCalled();
+  });
+
+  it('asks nothing of the bucket when there was nothing to register', async () => {
+    known = [{ key: 'a.txt' }];
+    handles = [{ key: 'docs/a.txt', size: 1 }];
+    bucketNow = null;
+
+    expect(await importFromStorage(INPUT)).toEqual({ scanned: 1, imported: 0, skipped: 1 });
+
+    expect(db.findFileBucketByKey).not.toHaveBeenCalled();
+  });
+
+  it('lets the next import run once this one has been refused', async () => {
+    handles = threeFiles();
+    bucketNow = null;
+    await expect(importFromStorage(INPUT)).rejects.toMatchObject({ code: 'bucket_deleting' });
+
+    bucketNow = { key: 'docs', providerKey: 'disk', tenantId: 't1', status: 'active' };
+    db.createFileRecord.mockClear();
+    expect(await importFromStorage(INPUT)).toEqual({ scanned: 3, imported: 3, skipped: 0 });
   });
 });
 

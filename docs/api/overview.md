@@ -87,7 +87,7 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Vector Indexes](./vector) | `/vector/providers/:key/indexes` | GET, POST, PATCH, DELETE |
 | [Tracing (Custom)](./tracing) | `/tracing/sessions` | POST |
 | [Tracing (OTLP)](./tracing) | `/traces` | POST |
-| [Files](./files) | `/files/buckets` | GET, POST |
+| [Files](./files) | `/files/providers`, `/files/buckets`, `/files/buckets/:bucketKey/objects`, `/files/buckets/:bucketKey/objects/:objectKey` (and `/download`) | GET, POST, DELETE |
 | [Guardrails](./guardrails) | `/guardrails/evaluate` | POST |
 | [Prompts](./prompts) | `/prompts` | GET, POST |
 | [Knowledge Engine](./rag) | `/rag/modules` | GET, POST, DELETE |

@@ -33,7 +33,10 @@ export interface UploadFilesFormProps {
   bucket: FileBucketView;
   /** The folder to upload into: `''` is the bucket root, otherwise no leading slash and one trailing slash. */
   folder: string;
-  /** The records the server created, once the queue has finished (some files may have failed: only the stored ones are listed). */
+  /**
+   * The records the server created, once the queue has finished or the uploads were stopped (some files may have
+   * failed: only the stored ones are listed). Not called when nothing was stored.
+   */
   onUploaded: (records: FileRecordView[]) => void;
 }
 
@@ -88,10 +91,12 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
       }
       return filesErrorMessage(error, tc);
     },
-    onSettled: ({ records }) => {
-      if (records.length === 0) return;
+    onSettled: ({ records, aborted }) => {
+      // A run that stored nothing leaves the bucket as it was, unless requests were cut off (stopping the uploads, taking
+      // a row off the list): the server may have kept those, so the list, the numbers and the quota are read again.
+      if (records.length === 0 && aborted === 0) return;
       void invalidation.bucketContent(bucket.key);
-      onUploaded(records);
+      if (records.length > 0) onUploaded(records);
     },
   });
 
@@ -228,13 +233,14 @@ function UploadFilesFormBody({ onClose, bucket, folder: initialFolder, onUploade
     ...(summary.nameProblems > 0 ? [{ id: 'names', label: t('checks.namesOver', { count: summary.nameProblems }), done: false }] : []),
   ];
 
-  const filesValue = readyCount === summary.total ? String(summary.total) : t('summary.filesSome', { total: summary.total, ready: readyCount });
+  // The summary describes the run: it keeps counting the files that are on their way or stored, not only those still to send.
+  const filesValue = summary.sendable === summary.total ? String(summary.total) : t('summary.filesSome', { total: summary.total, ready: summary.sendable });
 
   const summaryPanel = (
     <>
       <SummaryGroup title={t('summary.upload')}>
         <SummaryKV label={t('summary.files')} value={summary.total > 0 ? filesValue : <span className="ds-faint">—</span>} />
-        <SummaryKV label={t('summary.totalSize')} value={formatBytes(summary.readyBytes)} />
+        <SummaryKV label={t('summary.totalSize')} value={formatBytes(summary.sendableBytes)} />
         <SummaryKV label={t('summary.destination')} value={parsed.folder || t('destination.root')} mono />
         <SummaryKV label={t('summary.markdown')} value={convert ? t('summary.on') : t('summary.off')} />
       </SummaryGroup>

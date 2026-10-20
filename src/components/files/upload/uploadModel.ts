@@ -9,7 +9,7 @@
 
 import { isMimeAllowed } from '@/lib/services/agents/sessionFilesConfig';
 import type { FileRecordView } from '@/lib/services/files';
-import type { FilesLimits } from '../filesApi';
+import type { FileLimits } from '../filesApi';
 
 /** How many files are sent at the same time. */
 export const UPLOAD_CONCURRENCY = 2;
@@ -95,11 +95,51 @@ function extension(name: string): string {
   return dot <= 0 ? '' : name.slice(dot);
 }
 
+/** The longest name (the last segment) of a key the server generates, in UTF-8 bytes: `MAX_GENERATED_NAME_BYTES` there. */
+const KEY_NAME_MAX_BYTES = 200;
+/** The unique part of a key, `-<time in milliseconds: 13 digits>-<8 hex digits>`, in bytes. */
+const KEY_UNIQUE_BYTES = 23;
+/** The most of a file's extension a key keeps, in UTF-8 bytes: `MAX_KEY_EXTENSION_BYTES` there. */
+const KEY_EXTENSION_MAX_BYTES = 32;
+
+const encoder = new TextEncoder();
+
+function utf8Length(text: string): number {
+  return encoder.encode(text).length;
+}
+
+/** The extension a key keeps: no character without a UTF-8 form (a surrogate with no partner), cut between characters after 32 bytes. */
+function keptExtension(text: string): string {
+  let bytes = 0;
+  let kept = '';
+  for (const character of text) {
+    if (character.length === 1 && character >= '\uD800' && character <= '\uDFFF') continue;
+    const size = utf8Length(character);
+    if (bytes + size > KEY_EXTENSION_MAX_BYTES) break;
+    kept += character;
+    bytes += size;
+  }
+  return kept;
+}
+
+/** Letters that do not decompose into a base letter and marks, spelled the way a reader would type them in ASCII. */
+const ASCII_SPELLING: Record<string, string> = { ı: 'i', ß: 'ss', æ: 'ae', œ: 'oe', ø: 'o', ł: 'l', đ: 'd', ð: 'd', þ: 'th' };
+
+/** Lower-case text with its accents dropped (`Şirket Özeti` -> `sirket ozeti`), as the server does for a key. */
+function foldToAscii(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/[ıßæœøłđðþ]/g, (char) => ASCII_SPELLING[char] ?? char);
+}
+
 /**
  * What the server makes of a file name when it builds the object key (`generateFileRelativeKey`): the path is
- * dropped, control characters and leading dots go, the rest is lower-cased and everything outside `a-z 0-9 - _`
- * becomes a dash. The key then carries a unique suffix (`-<time>-<id>`) between the two parts. A test compares
- * this with the server's own function, so a change there cannot slip by unnoticed.
+ * dropped, control characters and leading dots go, the rest is lower-cased with its accents dropped (`ş` becomes
+ * `s`, `ı` becomes `i`) and everything outside `a-z 0-9 - _` becomes a dash. The key then carries a unique suffix (`-<time>-<id>`) between the two parts. The name of the key
+ * is kept within what a store takes (200 bytes): the extension is cut after 32 bytes and the stem gives way, never
+ * the unique part. A test compares this with the server's own function, so a change there cannot slip by unnoticed.
  */
 export function keyStem(fileName: string): { stem: string; extension: string } {
   const stripped = Array.from(baseName(fileName.trim()))
@@ -113,12 +153,15 @@ export function keyStem(fileName: string): { stem: string; extension: string } {
   if (!stripped) return { stem: 'uploaded-file', extension: '' };
   const ext = extension(stripped);
   const base = stripped.slice(0, stripped.length - ext.length) || 'file';
-  const stem =
-    base
-      .toLowerCase()
+  const fullStem =
+    foldToAscii(base)
       .replace(/[^a-z0-9-_]+/g, '-')
       .replace(/^-+|-+$/g, '') || 'file';
-  return { stem, extension: ext };
+  const kept = keptExtension(ext);
+  // The stem is ASCII, so a character is a byte.
+  const room = KEY_NAME_MAX_BYTES - KEY_UNIQUE_BYTES - utf8Length(kept);
+  const stem = fullStem.slice(0, room).replace(/-+$/, '') || 'file';
+  return { stem, extension: kept };
 }
 
 /** The key a file will be stored under, with the unique suffix shown as an ellipsis: `reports/2026/q3-report-….pdf`. */
@@ -149,7 +192,7 @@ export function isValidContentType(value: string): boolean {
  */
 export function fileIssue(
   item: Pick<QueueItem, 'file' | 'name' | 'contentType' | 'status'>,
-  limits: FilesLimits | null | undefined,
+  limits: FileLimits | null | undefined,
 ): FileIssue | null {
   if (item.status !== 'queued' && item.status !== 'failed') return null;
   if (limits && item.file.size > limits.maxFileBytes) return { kind: 'too_large', limit: limits.maxFileBytes };
@@ -175,13 +218,19 @@ export interface QueueSummary {
   /** What the primary action sends: queued or failed rows with no issue that are not scheduled yet. */
   readyIds: string[];
   readyBytes: number;
+  /**
+   * Every row that is fit to go, whatever has become of it since (waiting, uploading, stored, failed or not sent yet):
+   * the run the person set up, which is what the summary describes. `readyIds` shrinks while a run is under way.
+   */
+  sendable: number;
+  sendableBytes: number;
   tooLarge: number;
   typeNotAllowed: number;
   /** Rows whose name or content type is not usable. */
   nameProblems: number;
 }
 
-export function summarizeQueue(items: readonly QueueItem[], limits: FilesLimits | null | undefined): QueueSummary {
+export function summarizeQueue(items: readonly QueueItem[], limits: FileLimits | null | undefined): QueueSummary {
   const summary: QueueSummary = {
     total: items.length,
     uploading: 0,
@@ -190,6 +239,8 @@ export function summarizeQueue(items: readonly QueueItem[], limits: FilesLimits 
     waiting: 0,
     readyIds: [],
     readyBytes: 0,
+    sendable: 0,
+    sendableBytes: 0,
     tooLarge: 0,
     typeNotAllowed: 0,
     nameProblems: 0,
@@ -200,10 +251,14 @@ export function summarizeQueue(items: readonly QueueItem[], limits: FilesLimits 
     if (item.status === 'failed') summary.failed += 1;
     if (item.waiting) {
       summary.waiting += 1;
+      summary.sendable += 1;
+      summary.sendableBytes += item.file.size;
       continue;
     }
     const issue = fileIssue(item, limits);
     if (!issue) {
+      summary.sendable += 1;
+      summary.sendableBytes += item.file.size;
       if (item.status === 'queued' || item.status === 'failed') {
         summary.readyIds.push(item.id);
         summary.readyBytes += item.file.size;
@@ -218,7 +273,7 @@ export function summarizeQueue(items: readonly QueueItem[], limits: FilesLimits 
 }
 
 /** Bytes still free in the project's storage; null when it is unlimited or unknown. */
-export function storageLeft(limits: FilesLimits | null | undefined): number | null {
+export function storageLeft(limits: FileLimits | null | undefined): number | null {
   if (!limits) return null;
   const { limitBytes, usedBytes } = limits.quota;
   return limitBytes === null ? null : Math.max(0, limitBytes - usedBytes);
@@ -231,7 +286,7 @@ export type QuotaWarning = { kind: 'storage'; left: number } | { kind: 'files'; 
  * server counts the quota itself and refuses the file that does not fit.
  */
 export function quotaWarning(
-  limits: FilesLimits | null | undefined,
+  limits: FileLimits | null | undefined,
   bytes: number,
   count: number,
 ): QuotaWarning | null {

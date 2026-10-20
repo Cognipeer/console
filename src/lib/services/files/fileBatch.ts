@@ -5,7 +5,7 @@
  * lookup hands back the records and the delete works on the ones the route let through.
  */
 
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { getDatabase, type DatabaseProvider, type IFileRecord } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { mapLimit } from './concurrency';
 import { describeFailure } from './errors';
@@ -29,6 +29,11 @@ async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
 /**
  * The records of these keys in one read, in the order the keys were named (a key named twice counts once), and the
  * keys that have none. Reads the database only: a switched-off bucket and a provider that is down do not matter.
+ *
+ * Nothing stops two records from carrying one key (rows written before an upload replaced the record of its key,
+ * or two nodes uploading a new key at the same moment): the first one stands for the key in `found`, and the rest are
+ * in `duplicates`. They describe the same object, so a check on who may act on the file (a session's files are its
+ * session's) has to cover them too: the one `found` holds is not always the one that says it is a session's.
  */
 export async function findFileRecordsByKeys(
   tenantDbName: string,
@@ -36,7 +41,7 @@ export async function findFileRecordsByKeys(
   projectId: string,
   bucketKey: string,
   keys: readonly string[],
-): Promise<{ found: FileRecordView[]; missing: string[] }> {
+): Promise<{ found: FileRecordView[]; missing: string[]; duplicates: FileRecordView[] }> {
   const bucket = await requireBucketRecord(tenantDbName, tenantId, projectId, bucketKey);
   const wanted = [...new Set(keys)];
   const db = await tenantDb(tenantDbName);
@@ -47,7 +52,12 @@ export async function findFileRecordsByKeys(
     keys: wanted,
   });
 
-  const byKey = new Map(records.map((record) => [record.key, record]));
+  const byKey = new Map<string, IFileRecord>();
+  const duplicates: FileRecordView[] = [];
+  for (const record of records) {
+    if (byKey.has(record.key)) duplicates.push(serializeFileRecord(record));
+    else byKey.set(record.key, record);
+  }
   const found: FileRecordView[] = [];
   const missing: string[] = [];
   for (const key of wanted) {
@@ -55,7 +65,7 @@ export async function findFileRecordsByKeys(
     if (record) found.push(serializeFileRecord(record));
     else missing.push(key);
   }
-  return { found, missing };
+  return { found, missing, duplicates };
 }
 
 /**

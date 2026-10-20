@@ -24,9 +24,12 @@ import {
   StorageLocation,
   markdownFileName,
   saveBlob,
+  useNow,
 } from '@/components/files/shared';
+import { locationPathOf } from '@/components/files/shared/StorageLocation';
 import { useFilesAccess } from '@/components/files/useFilesAccess';
 import {
+  DELETE_POLL_MAX_MS,
   MARKDOWN_POLL_MAX_MS,
   filesKeys,
   flattenObjectPages,
@@ -210,6 +213,20 @@ describe.each(['en', 'tr'] as const)('shared components (%s)', (locale) => {
     expect(nothing.textContent).toBe('—');
   });
 
+  it('adds the reason a conversion was skipped to the dash, to the eye and to a screen reader', async () => {
+    const reason = 'The file is larger than the 20 MB conversion limit';
+    const skipped = await showSubject(h(MarkdownStatusBadge, { status: 'skipped', error: reason }), locale);
+    expect(skipped.querySelector('span[title]')?.getAttribute('title')).toBe(`${words.markdown.skipped}: ${reason}`);
+    expect(skipped.textContent).toContain(`${words.markdown.skipped}: ${reason}`);
+    // no reason recorded: the dash says only that nothing was converted
+    const plain = await showSubject(h(MarkdownStatusBadge, { status: 'skipped', error: '   ' }), locale);
+    expect(plain.querySelector('span[title]')?.getAttribute('title')).toBe(words.markdown.skipped);
+    // a reason with no skipped status is not shown: it belongs to a status that has a place for it
+    const stray = await showSubject(h(MarkdownStatusBadge, { status: undefined, error: reason }), locale);
+    expect(stray.textContent).toBe('—');
+    expect(stray.querySelector('[title]')).toBeNull();
+  });
+
   it('shows a connected provider with when it was tested', async () => {
     const health: ProviderHealth = { state: 'ok', testedAt: hoursAgo(2) };
     await show(h(ProviderHealthChip, { health, href: '/dashboard/providers/p1' }), locale);
@@ -266,10 +283,64 @@ describe.each(['en', 'tr'] as const)('shared components (%s)', (locale) => {
     expect(unknown.textContent).toBe('—');
   });
 
+  it('does not call a missing address the local disk when the provider keeps its files elsewhere', async () => {
+    // an S3 or Azure provider whose settings name no bucket or container yet, or a provider that is gone
+    const notKnown = await showSubject(h(StorageLocation, { location: null, localDisk: false }), locale);
+    expect(notKnown.textContent).toContain(words.storage.unknown);
+    expect(notKnown.textContent).toContain(words.storage.unknownHint);
+    expect(notKnown.textContent).not.toContain(words.storage.thisServerDisk);
+    expect(notKnown.querySelector('button')).toBeNull();
+
+    // `localDisk` only decides what a missing address means; an address is printed as it is
+    const printed = await showSubject(h(StorageLocation, { location: 's3://docs/team/', localDisk: false }), locale);
+    expect(printed.textContent).toContain('s3://docs/team/');
+    expect(printed.textContent).not.toContain(words.storage.unknown);
+  });
+
+  it('copies the path of a location, without the server named after it', async () => {
+    const withHost = 's3://docs/team/ \u00b7 minio.local:9000';
+    expect(locationPathOf(withHost)).toBe('s3://docs/team/');
+    expect(locationPathOf('s3://docs/team/')).toBe('s3://docs/team/');
+    expect(locationPathOf('azure://account/container/team/')).toBe('azure://account/container/team/');
+    // only a trailing " · host" is the server; a dot in a folder name is part of the path
+    expect(locationPathOf('s3://docs/a \u00b7 b/c/')).toBe('s3://docs/a \u00b7 b/c/');
+
+    const shown = await showSubject(h(StorageLocation, { location: withHost }), locale);
+    // the whole location is printed, so two servers with one bucket name can be told apart
+    expect(shown.textContent).toContain(withHost);
+    expect(shown.querySelector('button[aria-label]')).not.toBeNull();
+  });
+
   it('words the status of a bucket', async () => {
     expect((await showSubject(h(BucketStatusBadge, { status: 'active' }), locale)).textContent).toContain(words.bucketStatus.active);
     expect((await showSubject(h(BucketStatusBadge, { status: 'disabled' }), locale)).textContent).toContain(words.bucketStatus.disabled);
     expect((await showSubject(h(BucketStatusBadge, { status: 'active', deleting: true }), locale)).textContent).toContain(words.bucketStatus.deleting);
+  });
+
+  it('says that the deletion of a bucket failed, with the reason one hover or focus away', async () => {
+    const reason = 'The storage provider refused the request';
+    const failed = await showSubject(h(BucketStatusBadge, { status: 'disabled', deleteError: reason }), locale);
+    expect(failed.textContent).toContain(words.bucketStatus.deleteFailed);
+    expect(failed.textContent).not.toContain(words.bucketStatus.disabled);
+    expect(failed.querySelector('.ds-badge-err')).not.toBeNull();
+    expect(failed.querySelector('button[aria-label]')?.getAttribute('aria-label')).toBe(`${words.bucketStatus.deleteFailed}: ${reason}`);
+
+    // the failure outranks the status, also when the queue was unavailable and the bucket stayed active
+    const stillActive = await showSubject(h(BucketStatusBadge, { status: 'active', deleteError: reason }), locale);
+    expect(stillActive.textContent).toContain(words.bucketStatus.deleteFailed);
+    expect(stillActive.textContent).not.toContain(words.bucketStatus.active);
+  });
+
+  it('shows a deletion that is running over the failure of the run before it', async () => {
+    const running = await showSubject(h(BucketStatusBadge, { status: 'disabled', deleting: true, deleteError: 'An earlier run stopped' }), locale);
+    expect(running.textContent).toContain(words.bucketStatus.deleting);
+    expect(running.textContent).not.toContain(words.bucketStatus.deleteFailed);
+    expect(running.querySelector('button')).toBeNull();
+    // an empty note is no failure
+    const blank = await showSubject(h(BucketStatusBadge, { status: 'active', deleteError: '' }), locale);
+    expect(blank.textContent).toContain(words.bucketStatus.active);
+    const none = await showSubject(h(BucketStatusBadge, { status: 'active', deleteError: null }), locale);
+    expect(none.textContent).toContain(words.bucketStatus.active);
   });
 
   it('names the class of a file, with PDF as it is', async () => {
@@ -394,6 +465,54 @@ describe('uploadFile', () => {
 });
 
 /* ── hooks ───────────────────────────────────────────────────────────────── */
+
+describe('useNow', () => {
+  const START = Date.parse('2026-03-01T10:00:00.000Z');
+
+  it('renews the time on its interval, renews it at once when switched on, and stands still while off', async () => {
+    useFakeClock();
+    vi.setSystemTime(START);
+    const probe = await renderHookIn(newClient(), () => useNow(30_000, true));
+    expect(probe.result.current).toBe(START);
+
+    await advance(29_000);
+    expect(probe.result.current).toBe(START);
+    await advance(1_000);
+    expect(probe.result.current).toBe(START + 30_000);
+    await advance(30_000);
+    expect(probe.result.current).toBe(START + 60_000);
+
+    const timersWhileOn = vi.getTimerCount();
+    await probe.rerender(() => useNow(30_000, false));
+    expect(vi.getTimerCount()).toBe(timersWhileOn - 1);
+    const stoppedAt = probe.result.current;
+    await advance(5 * 60_000);
+    expect(probe.result.current).toBe(stoppedAt);
+
+    // switched on again: the value is the present at once, not the present one interval from now
+    await probe.rerender(() => useNow(30_000, true));
+    expect(probe.result.current).toBe(Date.now());
+    expect(probe.result.current).toBeGreaterThan(stoppedAt);
+    expect(vi.getTimerCount()).toBe(timersWhileOn);
+  });
+
+  it('runs on the interval it was given, and is on unless told otherwise', async () => {
+    useFakeClock();
+    vi.setSystemTime(START);
+    const probe = await renderHookIn(newClient(), () => useNow(1_000));
+    await advance(3_000);
+    expect(probe.result.current).toBe(START + 3_000);
+
+    // another interval replaces the timer: the next renewal comes that long after the change
+    await probe.rerender(() => useNow(10_000));
+    const changedAt = Date.now();
+    expect(probe.result.current).toBe(changedAt);
+    await advance(9_000);
+    expect(probe.result.current).toBe(changedAt);
+    await advance(1_000);
+    expect(probe.result.current).toBe(changedAt + 10_000);
+  });
+});
 
 describe('useFilesProject', () => {
   it('changes when the app switches project, and drops what the old project cached', async () => {
@@ -685,6 +804,56 @@ describe('mutations refresh what they change', () => {
     expect(count(api, 'GET', '/api/files/buckets/docs')).toBe(2);
   });
 
+  it('deletes the bucket alone, or asks again for the files to go too, by what is passed', async () => {
+    const api = installApiMock([
+      ...readRoutes(),
+      ['DELETE', '/api/files/buckets/docs', (call) => (call.query.deleteFiles ? jsonResponse({ ok: true }, 202) : { success: true })],
+    ]);
+    const { probe } = await mountBucketPage(api);
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await probe.result.current.deleteBucket.mutateAsync({ bucketKey: 'docs', force: true });
+    });
+    expect(outcome).toEqual({ status: 'deleted' });
+    expect(api.to('DELETE', '/api/files/buckets/docs')[0]!.query).toEqual({ force: 'true' });
+
+    // both given: the files go (the server lets that win), and only that is asked for
+    await act(async () => {
+      outcome = await probe.result.current.deleteBucket.mutateAsync({ bucketKey: 'docs', deleteFiles: true, force: false });
+    });
+    expect(outcome).toEqual({ status: 'deleting' });
+    expect(api.to('DELETE', '/api/files/buckets/docs')[1]!.query).toEqual({ deleteFiles: 'true' });
+  });
+
+  it('reads the bucket and the list again when a delete is refused, because the refusal can mean they changed', async () => {
+    const refusals = [
+      { status: 409, body: { error: 'The bucket is being deleted', code: 'bucket_deleting' } },
+      { status: 409, body: { error: 'Another bucket keeps files here', code: 'storage_location_shared' } },
+      { status: 503, body: { error: 'The queue is not available', code: 'queue_unavailable' } },
+    ];
+    let asked = 0;
+    const api = installApiMock([
+      ...readRoutes(),
+      ['DELETE', '/api/files/buckets/docs', () => jsonResponse(refusals[asked]!.body, refusals[asked++]!.status)],
+    ]);
+    const { probe } = await mountBucketPage(api);
+
+    for (const [index, refusal] of refusals.entries()) {
+      await act(async () => {
+        await expect(probe.result.current.deleteBucket.mutateAsync({ bucketKey: 'docs', deleteFiles: true })).rejects.toMatchObject({
+          name: 'FilesApiError',
+          status: refusal.status,
+          code: refusal.body.code,
+        });
+      });
+      expect(count(api, 'GET', '/api/files/buckets/docs')).toBe(index + 2);
+      expect(count(api, 'GET', '/api/files/buckets')).toBe(index + 2);
+    }
+    // what is in the bucket did not change, so its files are not listed again
+    expect(count(api, 'GET', '/api/files/buckets/docs/objects')).toBe(1);
+  });
+
   it('starting a conversion shows the pending record at once and re-reads it', async () => {
     const api = installApiMock([
       ...readRoutes(),
@@ -948,6 +1117,92 @@ describe('polling', () => {
     expect(reads(calls, '/api/files/buckets')).toBe(3);
     await advance(10 * 60_000);
     expect(reads(calls, '/api/files/buckets')).toBe(3);
+  });
+
+  it('starts the clock again when a conversion that looked lost is asked for again', async () => {
+    useFakeClock();
+    vi.setSystemTime(Date.parse('2026-03-01T10:00:00.000Z'));
+    let askedAt = new Date().toISOString();
+    const calls = installFastFetch(() => ({ body: { record: record('a.pdf', { markdownStatus: 'pending', updatedAt: askedAt }) } }));
+    const client = newClient();
+    await renderHookIn(client, () => useObject('docs', 'a.pdf'));
+    await advance(0);
+    await advance(MARKDOWN_POLL_MAX_MS + 30_000);
+    const stopped = reads(calls, OBJECT);
+    await advance(5 * 60_000);
+    expect(reads(calls, OBJECT)).toBe(stopped);
+
+    // "Convert again": the same file, pending again, asked for now
+    askedAt = new Date().toISOString();
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: filesKeys.object(getFilesProjectScope(), 'docs', 'a.pdf') });
+    });
+    expect(reads(calls, OBJECT)).toBe(stopped + 1);
+    await advance(2_000);
+    expect(reads(calls, OBJECT)).toBe(stopped + 2);
+    await advance(2_000);
+    expect(reads(calls, OBJECT)).toBe(stopped + 3);
+  });
+
+  it('starts the clock again when the deletion of a bucket that looked lost is asked for again', async () => {
+    useFakeClock();
+    vi.setSystemTime(Date.parse('2026-03-01T10:00:00.000Z'));
+    let askedAt = new Date().toISOString();
+    const calls = installFastFetch(() => ({ body: { bucket: bucketDetail('docs', { deleting: true, status: 'disabled', updatedAt: askedAt }) } }));
+    const client = newClient();
+    await renderHookIn(client, () => useBucket('docs'));
+    await advance(0);
+    await advance(DELETE_POLL_MAX_MS + 60_000);
+    const stopped = reads(calls, '/api/files/buckets/docs');
+    await advance(10 * 60_000);
+    expect(reads(calls, '/api/files/buckets/docs')).toBe(stopped);
+
+    // "Delete again": the bucket is marked as deleting once more, which moves its update time
+    askedAt = new Date().toISOString();
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: filesKeys.bucket(getFilesProjectScope(), 'docs') });
+    });
+    expect(reads(calls, '/api/files/buckets/docs')).toBe(stopped + 1);
+    await advance(2_000);
+    expect(reads(calls, '/api/files/buckets/docs')).toBe(stopped + 2);
+    await advance(2_000);
+    expect(reads(calls, '/api/files/buckets/docs')).toBe(stopped + 3);
+  });
+
+  it('starts the clock of the list again when any of its buckets is asked to be deleted again', async () => {
+    useFakeClock();
+    vi.setSystemTime(Date.parse('2026-03-01T10:00:00.000Z'));
+    let askedAt = new Date().toISOString();
+    const calls = installFastFetch(() => ({ body: { buckets: [bucketView('docs', { deleting: true, updatedAt: askedAt }), bucketView('other')] } }));
+    const client = newClient();
+    await renderHookIn(client, () => useBuckets());
+    await advance(0);
+    await advance(DELETE_POLL_MAX_MS + 60_000);
+    const stopped = reads(calls, '/api/files/buckets');
+    await advance(10 * 60_000);
+    expect(reads(calls, '/api/files/buckets')).toBe(stopped);
+
+    askedAt = new Date().toISOString();
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: filesKeys.buckets(getFilesProjectScope()) });
+    });
+    expect(reads(calls, '/api/files/buckets')).toBe(stopped + 1);
+    await advance(2_000);
+    expect(reads(calls, '/api/files/buckets')).toBe(stopped + 2);
+  });
+
+  it('does not poll a bucket whose deletion failed, nor a list with no deletion running', async () => {
+    useFakeClock();
+    const calls = installFastFetch((call) =>
+      call.path === '/api/files/buckets'
+        ? { body: { buckets: [bucketView('docs', { deleting: false, status: 'disabled', deleteError: 'The provider refused' })] } }
+        : { body: { bucket: bucketDetail('docs', { deleting: false, status: 'disabled', deleteError: 'The provider refused' }) } },
+    );
+    await renderHookIn(newClient(), () => ({ list: useBuckets(), bucket: useBucket('docs') }));
+    await advance(0);
+    await advance(10 * 60_000);
+    expect(reads(calls, '/api/files/buckets')).toBe(1);
+    expect(reads(calls, '/api/files/buckets/docs')).toBe(1);
   });
 
   it('does not poll files whose conversions have all settled', async () => {

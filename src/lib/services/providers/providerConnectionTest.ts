@@ -14,6 +14,18 @@ import { validateProviderSettings } from './providerSettingsValidation';
 /** A "Test connection" never waits longer than this. */
 export const PROVIDER_TEST_TIMEOUT_MS = 10_000;
 
+/**
+ * After the time limit has stopped a probe, how long it is given to hand in what it has: a driver's check answers with the
+ * steps that passed and the one that was stopped, which says more than the limit alone. A probe that is not done by then
+ * is left to finish on its own.
+ */
+export const PROVIDER_TEST_GRACE_MS = 500;
+
+/** The grace for a time limit: `PROVIDER_TEST_GRACE_MS`, and never more than a quarter of a shorter limit. */
+export function graceForLimit(timeoutMs: number): number {
+  return Math.min(PROVIDER_TEST_GRACE_MS, Math.floor(timeoutMs / 4));
+}
+
 /** Names listed in a result are capped: the answer is a hint, not an inventory. */
 const MAX_LISTED = 50;
 
@@ -45,6 +57,8 @@ export interface ProviderTestDeps {
   fetchImpl?: typeof safeFetch;
   createRuntime?: <T>(driver: string, context: ProviderContext) => Promise<T>;
   timeoutMs?: number;
+  /** How long a probe that the time limit stopped may take to hand in its answer (default: 500 ms, at most a quarter of the limit). */
+  graceMs?: number;
 }
 
 type HttpProbe = {
@@ -192,16 +206,40 @@ export function scrubMessage(raw: string, secrets: readonly string[]): string {
   return message.length > 300 ? `${message.slice(0, 297)}...` : message;
 }
 
-/** Rejects after `ms`. `onTimeout` runs first, so the work can be told to stop. */
-function withTimeout<T>(work: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
+/** What a person is told when the service did not answer within the limit. */
+function timeoutMessage(ms: number): string {
+  return `Timed out after ${Math.round(ms / 1000)} s. The service did not answer: check its address and port, and any firewall or proxy in between.`;
+}
+
+/**
+ * Runs `work` for at most `ms`. When the limit passes, `onTimeout` runs first (so the work can be told to stop) and the work
+ * gets `graceMs` to hand in what it has: an answer it resolves with in that time is returned with `timedOut: true`; a
+ * rejection (an abort is one) or no answer at all is the timeout error.
+ */
+async function withTimeout<T>(
+  work: Promise<T>,
+  ms: number,
+  graceMs: number,
+  onTimeout?: () => void,
+): Promise<{ value: T; timedOut: boolean }> {
+  const expired = Symbol('expired');
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      onTimeout?.();
-      reject(new Error(`Timed out after ${Math.round(ms / 1000)} s`));
-    }, ms);
+  const sleep = (delay: number) => new Promise<typeof expired>((resolve) => {
+    timer = setTimeout(() => resolve(expired), delay);
   });
-  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+  try {
+    const first = await Promise.race([work, sleep(ms)]);
+    if (first !== expired) return { value: first as T, timedOut: false };
+
+    onTimeout?.();
+    // Whatever the work does from here is not an error of anybody's: it was told to stop.
+    const rest = work.then((value) => ({ value }), () => undefined);
+    const answer = graceMs > 0 ? await Promise.race([rest, sleep(graceMs).then(() => undefined)]) : undefined;
+    if (answer) return { value: answer.value, timedOut: true };
+    throw new Error(timeoutMessage(ms));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function runHttpProbe(
@@ -362,7 +400,7 @@ export async function testProviderConnection(
   // Aborted when the time limit passes, so a probe that is still running stops instead of holding a connection.
   const abort = new AbortController();
   try {
-    const result = await withTimeout(
+    const { value: result, timedOut } = await withTimeout(
       httpProbe
         ? runHttpProbe(httpProbe, deps.fetchImpl ?? safeFetch, timeoutMs, input.tenantId)
         : runtimeProbe(
@@ -372,9 +410,12 @@ export async function testProviderConnection(
           secrets,
         ),
       timeoutMs,
+      deps.graceMs ?? graceForLimit(timeoutMs),
       () => abort.abort(),
     );
-    return done(result);
+    // A check that was stopped by the limit says so in its own words ("stopped before it finished"); the person is told
+    // the limit passed, and what to look at. The steps it ran stay: they show how far it got.
+    return done(timedOut && result.ok === false ? { ...result, message: timeoutMessage(timeoutMs) } : result);
   } catch (error) {
     const raw = error instanceof Error ? error.message : 'The connection failed.';
     return done({ ok: false, message: scrubMessage(raw, secrets) || 'The connection failed.' });

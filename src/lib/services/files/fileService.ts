@@ -8,11 +8,12 @@ import { runtimePool, hashRuntimeConfig } from '@/lib/core/runtimePool';
 import { errorStatusCodes, isRetryable, withResilience, type ResilienceOptions } from '@/lib/core/resilience';
 import {
     providerRegistry,
+    type FileDownloadResult,
     type FileProviderRuntime,
     type FileObjectHandle,
     type ProviderCapabilityFlags,
 } from '@/lib/providers';
-import { maxStorageDownloadBytes } from '@/lib/providers/contracts/storageLimits';
+import { hasLoneSurrogate, maxStorageDownloadBytes } from '@/lib/providers/contracts/storageLimits';
 import {
     createProviderConfig,
     getProviderConfigByKey,
@@ -24,8 +25,10 @@ import {
 import {
     BUCKET_DELETE_ERROR_KEY,
     isBucketDeleting,
+    bucketClosedError,
     bucketDeleteError,
     parseBucketDescription,
+    parseBucketKey,
     parseBucketMetadata,
     parseBucketName,
     parseBucketPatch,
@@ -39,6 +42,8 @@ import { bucketDeletingError, bucketInactiveError, describeFailure, FileServiceE
 import { convertDocumentToMarkdown, DocumentConversionRefused } from './documentConversion';
 import { publishConvertMarkdownJob, type ConvertMarkdownJobPayload } from './jobs/filesQueue';
 import { isMarkdownConvertible } from './markdownSupport';
+import { base64TextOf } from './payloadSize';
+import { storedObjectReads } from './readBudget';
 import type {
     FileBucketView,
     DownloadFileOptions,
@@ -56,6 +61,9 @@ import type {
 
 const FALLBACK_FILENAME = 'uploaded-file';
 
+/** What the file service's runtimes are pooled under, in front of `<tenantId>:<providerKey>`. */
+export const FILE_RUNTIME_POOL_PREFIX = 'file-runtime:';
+
 interface CreateFileBucketInput {
     key: string;
     name: string;
@@ -68,6 +76,10 @@ interface CreateFileBucketInput {
 }
 
 interface DeleteFileBucketOptions {
+    /**
+     * Remove the bucket although it holds files, or although it is marked as being deleted with its files. Only the
+     * bucket goes: the files and their records stay where they are.
+     */
     force?: boolean;
 }
 
@@ -109,7 +121,8 @@ export function serializeFileBucket(bucket: IFileBucketRecord): FileBucketView {
 }
 
 function normalizePrefix(input?: string | null): string | undefined {
-    if (input === undefined || input === null) {
+    // A bucket stored before its prefix was validated may hold something else than text: it has no folder of its own.
+    if (typeof input !== 'string') {
         return undefined;
     }
 
@@ -129,16 +142,36 @@ export function resolveBucketPrefix(bucket: Pick<IFileBucketRecord, 'key' | 'pre
         return normalized;
     }
 
-    return bucket.key;
+    // Read as it is stored: a key written before keys were validated need not be text either.
+    const key: unknown = bucket.key;
+    return typeof key === 'string' ? key : String(key ?? '');
+}
+
+/**
+ * A folder the way the storage drivers read it, so that two spellings of one place compare as one: a backslash is a
+ * slash, a run of dots is one dot (what the disk driver does to a key), and an empty or `.` segment is nothing
+ * (`./docs`, `docs//archive`). It is coarser than any one driver on purpose: a bucket created before folders were
+ * validated can carry such a spelling, and a wrong "shared" costs an import where a miss costs another bucket's files.
+ */
+function canonicalStorageFolder(folder: string): string {
+    return folder
+        .replace(/\\/g, '/')
+        .replace(/\.{2,}/g, '.')
+        .split('/')
+        .filter((segment) => segment !== '' && segment !== '.')
+        .join('/');
 }
 
 /**
  * Whether two folders of one provider overlap: they are the same folder, one of them is the provider's root (`''`),
- * or one lies inside the other. The folders are those of `resolveBucketPrefix`.
+ * or one lies inside the other. The folders are those of `resolveBucketPrefix`, compared as the drivers read them
+ * (see `canonicalStorageFolder`), not as they are spelled.
  */
 export function storageFoldersOverlap(a: string, b: string): boolean {
-    if (a === b || a === '' || b === '') return true;
-    return a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    const first = canonicalStorageFolder(a);
+    const second = canonicalStorageFolder(b);
+    if (first === second || first === '' || second === '') return true;
+    return first.startsWith(`${second}/`) || second.startsWith(`${first}/`);
 }
 
 /**
@@ -322,6 +355,22 @@ export function fileResilience(operation: FileOperation, tenantId: string, provi
 }
 
 /**
+ * Reads one stored object into memory: as a download (its own circuit and retries), and as one of the reads this
+ * process runs together (`storedObjectReads`, which keeps a burst of large downloads from adding up to more memory
+ * than the process has). `size` is what the record says the object weighs.
+ */
+export function readStoredObject(
+    runtime: FileProviderRuntime,
+    objectKey: string,
+    source: { tenantId: string; providerKey: string; size?: number | null },
+): Promise<FileDownloadResult> {
+    return storedObjectReads.run(source.size, () => withResilience(
+        () => runtime.downloadFile(objectKey),
+        fileResilience('download', source.tenantId, source.providerKey),
+    ));
+}
+
+/**
  * The provider service answers a bucket whose provider is gone, or was never given to this project, with a plain
  * error. Both are the bucket's configuration to fix, not a failure of the storage: they are told apart here.
  */
@@ -355,7 +404,10 @@ async function buildRuntimeContext(
 
     ensureFileProvider(record);
 
-    const cacheKey = `file:${tenantId}:${record.key}`;
+    // The file service's own pool namespace: another caller that pools a runtime of the same provider (the sandbox
+    // volumes do, under `file:<tenant>:<key>`) hashes it differently, and two callers that share a pool key but not
+    // a hash evict each other's runtime on every alternation.
+    const cacheKey = `${FILE_RUNTIME_POOL_PREFIX}${tenantId}:${record.key}`;
     // The settings (bucket, endpoint, auth method, ...) shape the runtime as much as the credentials do: without
     // them an edited setting would go unseen until the pooled runtime expired.
     const configHash = hashRuntimeConfig({ driver: record.driver, credentials, settings: record.settings ?? {} });
@@ -465,16 +517,82 @@ function assertUploadAllowed(request: UploadFileRequest, fileBuffer: Buffer): vo
     }
 }
 
-/** A unique object key (relative to the bucket) for a file name: `<slug>-<timestamp>-<id>.<ext>`. */
+/**
+ * The longest name (the last path segment) a key the console generates may have, in UTF-8 bytes. A store such as MinIO
+ * takes 255 bytes in a segment and so does the file system under the local-disk driver, which writes a sidecar
+ * (`<name>.meta.json`) beside each file: 200 leaves room for it. (The whole key has a limit of its own, which depends on
+ * the store, and a key a caller names is the caller's to keep within it.) The Upload screen holds the same numbers
+ * (`keyStem`), and a test holds the two together.
+ */
+const MAX_GENERATED_NAME_BYTES = 200;
+
+/** The most of a file's extension a generated key keeps: the name is stem + unique part + extension. */
+const MAX_KEY_EXTENSION_BYTES = 32;
+
+/** A UTF-16 surrogate with no partner (text that has no UTF-8 form). */
+const LONE_SURROGATES = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** The first characters of `text` that fit in `maxBytes` of UTF-8, cut between characters. */
+function truncateUtf8(text: string, maxBytes: number): string {
+    let bytes = 0;
+    let kept = '';
+    for (const character of text) {
+        const size = Buffer.byteLength(character);
+        if (bytes + size > maxBytes) break;
+        kept += character;
+        bytes += size;
+    }
+    return kept;
+}
+
+/** Letters that do not decompose into a base letter and marks, spelled the way a reader would type them in ASCII. */
+const ASCII_SPELLING: Record<string, string> = { ı: 'i', ß: 'ss', æ: 'ae', œ: 'oe', ø: 'o', ł: 'l', đ: 'd', ð: 'd', þ: 'th' };
+
+/** Lower-case text with its accents dropped (`Şirket Özeti` -> `sirket ozeti`), so a generated key stays readable. */
+function foldToAscii(text: string): string {
+    return text
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/\p{M}+/gu, '')
+        .replace(/[ıßæœøłđðþ]/g, (char) => ASCII_SPELLING[char] ?? char);
+}
+
+/**
+ * A unique object key (relative to the bucket) for a file name: `<slug>-<timestamp>-<id>.<ext>`.
+ *
+ * The name (the last path segment) is kept within what a store takes (`MAX_GENERATED_NAME_BYTES`): the stem is
+ * shortened - the unique part, which keeps two uploads apart, never is - and the extension is cut after 32 bytes and
+ * has no character without a UTF-8 form, so a file with a very long name is stored under a shorter one instead of
+ * being refused by the store. The Upload screen shows this key (`keyStem` mirrors this function, and a test holds the
+ * two together).
+ */
 export function generateFileRelativeKey(fileName: string): string {
     const normalized = normalizeFileName(fileName);
-    const extension = path.extname(normalized);
-    const baseName = normalized.slice(0, normalized.length - extension.length) || 'file';
-    const safeBase = baseName
-        .toLowerCase()
+    const fullExtension = path.extname(normalized);
+    const baseName = normalized.slice(0, normalized.length - fullExtension.length) || 'file';
+    const stem = foldToAscii(baseName)
         .replace(/[^a-z0-9-_]+/g, '-')
         .replace(/^-+|-+$/g, '') || 'file';
-    return `${safeBase}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
+    const unique = `-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const extension = truncateUtf8(fullExtension.replace(LONE_SURROGATES, ''), MAX_KEY_EXTENSION_BYTES);
+    const room = MAX_GENERATED_NAME_BYTES - Buffer.byteLength(unique) - Buffer.byteLength(extension);
+    // The stem is ASCII (see above), so a character is a byte.
+    const kept = stem.slice(0, room).replace(/-+$/g, '') || 'file';
+    return `${kept}${unique}${extension}`;
+}
+
+/** A `keyHint` the way an upload reads it: without surrounding space and without a leading `/`. */
+function readKeyHint(keyHint: string | undefined): string {
+    return keyHint?.trim().replace(/^\/+/, '') ?? '';
+}
+
+/**
+ * Whether a hint is the whole key of the file (an address of its own), as opposed to no hint or a folder (which get a
+ * generated name). Only an upload to a whole key can meet a file that already has that key.
+ */
+export function namesWholeKey(keyHint: string | undefined): boolean {
+    const hint = readKeyHint(keyHint);
+    return hint !== '' && !hint.endsWith('/');
 }
 
 /**
@@ -484,7 +602,7 @@ export function generateFileRelativeKey(fileName: string): string {
  * folder this way). Any other hint is the whole key.
  */
 export function chooseRelativeFileKey(keyHint: string | undefined, fileName: string): string {
-    const hint = keyHint?.trim().replace(/^\/+/, '');
+    const hint = readKeyHint(keyHint);
     if (!hint) return generateFileRelativeKey(fileName);
     if (!hint.endsWith('/')) return hint;
     return `${hint.replace(/\/{2,}/g, '/')}${generateFileRelativeKey(fileName)}`;
@@ -507,7 +625,8 @@ export function composeUploadKeyHint(input: { folder?: unknown; keyHint?: unknow
         if (slashed.split('/').some((segment) => segment === '..' || segment === '.')) {
             return { error: `${field} cannot contain "." or ".." segments.` };
         }
-        if (/[\u0000-\u001f]/.test(slashed)) return { error: `${field} cannot contain control characters.` };
+        if (/[\u0000-\u001f\u007f]/.test(slashed)) return { error: `${field} cannot contain control characters.` };
+        if (hasLoneSurrogate(slashed)) return { error: `${field} cannot contain unpaired surrogate characters.` };
         return { value: slashed };
     };
     const hasFolder = input.folder !== undefined && input.folder !== null && input.folder !== '';
@@ -531,18 +650,14 @@ function decodeData(payload: Buffer | string): Buffer {
         return payload;
     }
 
-    const trimmed = payload.trim();
-
-    const dataUrlMatch = trimmed.match(/^data:.*?;base64,(.*)$/);
-    if (dataUrlMatch) {
-        return Buffer.from(dataUrlMatch[1], 'base64');
-    }
+    // The text the quotas were asked about (`decodedByteLength`): a data URL's payload, else everything.
+    const text = base64TextOf(payload);
 
     try {
-        return Buffer.from(trimmed, 'base64');
+        return Buffer.from(text, 'base64');
     } catch (error) {
         logger.warn('Failed to decode base64 payload, falling back to utf-8 buffer', { error });
-        return Buffer.from(trimmed, 'utf8');
+        return Buffer.from(text, 'utf8');
     }
 }
 
@@ -654,17 +769,18 @@ export async function createFileBucket(
     payload: CreateFileBucketInput,
 ): Promise<FileBucketView> {
     // The same rules as an update (bucketRules), checked before anything is read.
+    const key = parseBucketKey(payload.key);
     const name = parseBucketName(payload.name);
     const description = payload.description == null ? undefined : parseBucketDescription(payload.description);
     const status = payload.status == null ? 'active' : parseBucketStatus(payload.status);
-    const prefix = payload.prefix == null ? payload.key : parseBucketPrefix(payload.prefix);
+    const prefix = payload.prefix == null ? key : parseBucketPrefix(payload.prefix);
     const metadata = payload.metadata == null ? undefined : parseBucketMetadata(payload.metadata);
 
     const db = await withTenantDb(tenantDbName);
 
-    const existing = await db.findFileBucketByKey(tenantId, payload.key, projectId);
+    const existing = await db.findFileBucketByKey(tenantId, key, projectId);
     if (existing) {
-        throw new FileServiceError('duplicate_key', 409, `Bucket with key "${payload.key}" already exists.`);
+        throw new FileServiceError('duplicate_key', 409, `Bucket with key "${key}" already exists.`);
     }
 
     const provider = await getProviderConfigByKey(
@@ -685,7 +801,7 @@ export async function createFileBucket(
     const record = await db.createFileBucket({
         tenantId,
         projectId,
-        key: payload.key,
+        key,
         name,
         providerKey: payload.providerKey,
         description,
@@ -734,7 +850,10 @@ export async function deleteFileBucket(
         return false;
     }
 
-    if (isBucketDeleting(record)) {
+    // The job that deletes the bucket with its files owns the bucket until it ends. Only `force` goes past it: a job the
+    // queue lost (a restart) leaves the bucket marked for good, and when its storage location is shared the deletion
+    // cannot be asked for again - removing the bucket record, with the files left where they are, is the way out.
+    if (isBucketDeleting(record) && !options?.force) {
         throw bucketDeletingError();
     }
 
@@ -917,6 +1036,58 @@ async function persistRecord(
     return serializeFileRecord(created);
 }
 
+/**
+ * The record of an upload that came to a key a file already has: that file is replaced - the same record (and id), now
+ * describing the new bytes, its metadata the new upload's. The Markdown copy belongs to the old bytes: the record lets
+ * go of it and its object is removed, so a conversion of the new bytes takes the name again. What the record says about
+ * its place in the bucket (who first uploaded it, the session it belongs to, when it expires) is left as it is.
+ *
+ * `null` when the record is gone by now (deleted between the lookup and this write): the caller creates one instead.
+ */
+async function replaceRecord(
+    db: DatabaseProvider,
+    runtime: FileProviderRuntime,
+    bucket: IFileBucketRecord,
+    existing: IFileRecord,
+    handle: FileObjectHandle,
+    request: UploadFileRequest,
+    fileSize: number,
+    markdownStatus: FileMarkdownStatus,
+): Promise<FileRecordView | null> {
+    const id = idOfRecord(existing);
+    if (!id) return null;
+    const updated = await db.updateFileRecord(id, {
+        name: handle.name ?? normalizeFileName(request.fileName),
+        size: handle.size ?? fileSize,
+        contentType: handle.contentType ?? request.contentType ?? null,
+        checksum: handle.checksum ?? null,
+        etag: handle.etag ?? null,
+        metadata: handle.metadata ?? request.metadata ?? {},
+        markdownStatus,
+        markdownKey: null,
+        markdownSize: null,
+        markdownContentType: null,
+        markdownError: null,
+        updatedBy: request.createdBy,
+    });
+    if (!updated) return null;
+
+    if (existing.markdownKey) {
+        try {
+            await runtime.deleteFile(composeProviderObjectKey(bucket, existing.markdownKey));
+        } catch (error) {
+            if (!hasObjectMissingCode(error)) {
+                logger.warn('Could not remove the Markdown copy of the bytes an upload replaced', {
+                    bucketKey: bucket.key,
+                    key: existing.markdownKey,
+                    error: describeFailure(error),
+                });
+            }
+        }
+    }
+    return serializeFileRecord(updated);
+}
+
 /** The file a Markdown copy is made for, as the conversion needs to know it: a stored record or the view of one. */
 interface ConvertedFile {
     key: string;
@@ -971,7 +1142,7 @@ async function markdownKeyIsTaken(
  */
 const lanes = new Map<string, Promise<void>>();
 
-async function oneAtATime<T>(lane: string, work: () => Promise<T>): Promise<T> {
+export async function oneAtATime<T>(lane: string, work: () => Promise<T>): Promise<T> {
     const turn = (lanes.get(lane) ?? Promise.resolve()).then(work);
     const done = turn.then(() => undefined, () => undefined);
     lanes.set(lane, done);
@@ -1135,6 +1306,8 @@ async function withdrawIfBucketClosed(
     bucket: IFileBucketRecord,
     projectId: string,
     record: FileRecordView,
+    /** The upload replaced a file that was there before: its record is that file's, and stays (it describes the object). */
+    replaced = false,
 ): Promise<void> {
     let current: IFileBucketRecord | null;
     try {
@@ -1143,11 +1316,14 @@ async function withdrawIfBucketClosed(
         logger.warn('Could not check that a bucket still takes files after an upload', { bucketKey: bucket.key, error });
         return;
     }
-    if (current && current.status === 'active' && !isBucketDeleting(current)) return;
+    const closed = bucketClosedError(current);
+    if (!closed) return;
 
-    await db.deleteFileRecord(record.id).catch(() => undefined);
-    await discardUploadedObject(db, runtime, bucket, projectId, record.key);
-    throw current && !isBucketDeleting(current) ? bucketInactiveError() : bucketDeletingError();
+    if (!replaced) {
+        await db.deleteFileRecord(record.id).catch(() => undefined);
+        await discardUploadedObject(db, runtime, bucket, projectId, record.key);
+    }
+    throw closed;
 }
 
 /** The Markdown copy of a file that was deleted while it was converted has no record to carry it. */
@@ -1213,56 +1389,72 @@ export async function uploadFile(
         chosenRelativeKey,
     );
 
-    const upload = await withResilience(
-        () => runtime.uploadFile({
-            key: providerObjectKey,
-            name: fileName,
-            contentType: request.contentType,
-            data: fileBuffer,
-            metadata: request.metadata,
-        }),
-        fileResilience('upload', tenantId, bucket.providerKey),
-    );
-
-    const storedRelativeKey = stripBucketPrefix(
-        bucket,
-        upload.handle.key ?? providerObjectKey,
-    );
-
-    const adjustedHandle: FileObjectHandle = {
-        ...upload.handle,
-        key: storedRelativeKey,
-        name: upload.handle.name ?? fileName,
-        contentType: upload.handle.contentType ?? request.contentType,
-    };
-
     const conversionRequested = request.convertToMarkdown ?? true;
     // `queued`: a background job makes the copy, and only for the formats it can read (markdownSupport): a file of
     // any other kind has nothing to wait for. The default (`sync`) converts before the call returns.
     const convertLater = conversionRequested && request.markdown === 'queued' && isMarkdownConvertible(fileName);
     const convertNow = conversionRequested && request.markdown !== 'queued';
     const initialStatus: FileMarkdownStatus = convertNow || convertLater ? 'pending' : 'skipped';
+    const wholeKey = namesWholeKey(request.keyHint);
 
-    let record: FileRecordView;
-    try {
-        record = await persistRecord(
-            db,
-            tenantId,
-            projectId,
-            bucket.providerKey,
-            bucket.key,
-            storedRelativeKey,
-            adjustedHandle,
-            request,
-            fileBuffer.length,
-            initialStatus,
+    // The object, then the record that carries it. An upload to a whole key writes over the file that has that key,
+    // when there is one, so the two steps are one for the uploads to that key (see `oneAtATime`): two that wrote
+    // their bytes and then looked for the record would each find none, and the one object would have two records.
+    const store = async (): Promise<{ record: FileRecordView; replaced: boolean; storedRelativeKey: string }> => {
+        const upload = await withResilience(
+            () => runtime.uploadFile({
+                key: providerObjectKey,
+                name: fileName,
+                contentType: request.contentType,
+                data: fileBuffer,
+                metadata: request.metadata,
+            }),
+            fileResilience('upload', tenantId, bucket.providerKey),
         );
-    } catch (error) {
-        await discardUploadedObject(db, runtime, bucket, projectId, storedRelativeKey);
-        throw error;
-    }
 
-    await withdrawIfBucketClosed(db, runtime, bucket, projectId, record);
+        const storedRelativeKey = stripBucketPrefix(
+            bucket,
+            upload.handle.key ?? providerObjectKey,
+        );
+
+        const adjustedHandle: FileObjectHandle = {
+            ...upload.handle,
+            key: storedRelativeKey,
+            name: upload.handle.name ?? fileName,
+            contentType: upload.handle.contentType ?? request.contentType,
+        };
+
+        try {
+            const existing = wholeKey
+                ? await db.findFileRecordByKey(bucket.providerKey, bucket.key, storedRelativeKey, projectId)
+                : null;
+            const replacement = existing
+                ? await replaceRecord(db, runtime, bucket, existing, adjustedHandle, request, fileBuffer.length, initialStatus)
+                : null;
+            if (replacement) return { record: replacement, replaced: true, storedRelativeKey };
+            const created = await persistRecord(
+                db,
+                tenantId,
+                projectId,
+                bucket.providerKey,
+                bucket.key,
+                storedRelativeKey,
+                adjustedHandle,
+                request,
+                fileBuffer.length,
+                initialStatus,
+            );
+            return { record: created, replaced: false, storedRelativeKey };
+        } catch (error) {
+            await discardUploadedObject(db, runtime, bucket, projectId, storedRelativeKey);
+            throw error;
+        }
+    };
+    const { record, replaced, storedRelativeKey } = wholeKey
+        ? await oneAtATime(`upload:${tenantId}:${bucket.providerKey}:${bucket.key}:${chosenRelativeKey}`, store)
+        : await store();
+
+    await withdrawIfBucketClosed(db, runtime, bucket, projectId, record, replaced);
 
     if (convertLater) {
         return {
@@ -1471,10 +1663,11 @@ export async function downloadFile(
         })()
         : composeProviderObjectKey(bucket, record.key);
 
-    const result = await withResilience(
-        () => runtime.downloadFile(providerObjectKey),
-        fileResilience('download', tenantId, bucket.providerKey),
-    );
+    const result = await readStoredObject(runtime, providerObjectKey, {
+        tenantId,
+        providerKey: bucket.providerKey,
+        size: variant === 'markdown' ? record.markdownSize : record.size,
+    });
     const fileName = variant === 'markdown'
         ? deriveMarkdownKey(record.name)
         : record.name;

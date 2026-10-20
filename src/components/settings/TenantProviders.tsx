@@ -2,12 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Text } from '@mantine/core';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { notifications } from '@mantine/notifications';
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
-import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import ProviderConfigModal, { CREATE_DOMAINS } from '@/components/providers/ProviderConfigModal';
 import { providerRequestError } from '@/components/providers/providerFormModel';
 import { AssignProviderShell } from '@/components/providers/ProviderAssignStep';
 import {
@@ -15,6 +15,7 @@ import {
   isProviderUnassigned,
 } from '@/components/providers/providerAccessModel';
 import { useTranslations } from '@/lib/i18n';
+import { DOMAIN_LABELS } from '@/lib/services/serviceCatalog';
 import {
   IconEdit,
   IconFolderPlus,
@@ -62,6 +63,12 @@ function statusVariant(status: string) {
   }
 }
 
+/** The domain an address names (`?domain=file`) when it is one the console knows; any other name is no domain. */
+function knownDomain(value: string | null | undefined): ProviderDomain | null {
+  const name = value?.trim() ?? '';
+  return Object.prototype.hasOwnProperty.call(DOMAIN_LABELS, name) ? (name as ProviderDomain) : null;
+}
+
 export default function TenantProviders() {
   const router = useRouter();
   const t = useTranslations('providerAccess.list');
@@ -76,8 +83,14 @@ export default function TenantProviders() {
   const [driversLoading, setDriversLoading] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderConfigView | null>(null);
 
+  // `?domain=file` (the Document Store's "Add a file provider" link) opens the list narrowed to that domain, and the
+  // Add form on that domain's services. A name the console does not know is no domain.
+  const addressDomain = knownDomain(useSearchParams()?.get('domain'));
   const [query, setQuery] = useState('');
-  const [domainFilter, setDomainFilter] = useState<string>('all');
+  const [domainFilter, setDomainFilter] = useState<string>(addressDomain ?? 'all');
+  useEffect(() => {
+    setDomainFilter(addressDomain ?? 'all');
+  }, [addressDomain]);
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
   const fetchProviders = async () => {
@@ -158,6 +171,16 @@ export default function TenantProviders() {
         error instanceof Error ? error.message : 'Failed to open provider editor';
       notifications.show({ title: 'Providers', message, color: 'red' });
     }
+  };
+
+  // Add provider: the form opens on the services of the domain the address names, when its service filter offers it.
+  const openCreate = () => {
+    const domain = addressDomain !== null && (CREATE_DOMAINS as readonly string[]).includes(addressDomain) ? addressDomain : null;
+    setEditingProvider(null);
+    setSelectedDomain(domain);
+    setDrivers([]);
+    setConfigOpen(true);
+    if (domain) void loadDrivers(domain);
   };
 
   const filtered = useMemo(() => {
@@ -249,11 +272,13 @@ export default function TenantProviders() {
 
   const domainOptions = useMemo(() => {
     const unique = Array.from(new Set(providers.map((p) => p.type))).filter(Boolean);
+    // A domain the address names stays selectable even when no provider is of that domain yet.
+    if (domainFilter !== 'all' && !unique.includes(domainFilter)) unique.push(domainFilter);
     return [
       { value: 'all', label: 'All domains' },
       ...unique.map((d) => ({ value: d, label: DOMAIN_LABEL[d] ?? d })),
     ];
-  }, [providers]);
+  }, [providers, domainFilter]);
 
   const statusOptions = useMemo(() => {
     const unique = Array.from(new Set(providers.map((p) => p.status))).filter(Boolean);
@@ -320,12 +345,7 @@ export default function TenantProviders() {
             color="teal"
             size="xs"
             leftSection={<IconPlus size={13} stroke={1.7} />}
-            onClick={() => {
-              setEditingProvider(null);
-              setSelectedDomain(null);
-              setDrivers([]);
-              setConfigOpen(true);
-            }}
+            onClick={openCreate}
           >
             Add provider
           </Button>
@@ -338,12 +358,7 @@ export default function TenantProviders() {
           primaryAction: {
             label: 'Add provider',
             icon: <IconPlus size={14} stroke={1.7} />,
-            onClick: () => {
-              setEditingProvider(null);
-              setSelectedDomain(null);
-              setDrivers([]);
-              setConfigOpen(true);
-            },
+            onClick: openCreate,
           },
         }}
         footerLeft={`Showing ${filtered.length} of ${providers.length} providers`}
@@ -453,7 +468,8 @@ export default function TenantProviders() {
 
             const body = await res.json().catch(() => null);
             if (!res.ok) {
-              throw new Error(body?.error || 'Failed to create provider');
+              // The refusal names the form field it is about: the form marks it, as it does for an edit.
+              throw providerRequestError(body, 'Failed to create provider');
             }
 
             notifications.show({

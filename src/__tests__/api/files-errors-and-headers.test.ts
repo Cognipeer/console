@@ -20,6 +20,9 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     ...actual,
     requireProjectContextForRequest: vi.fn(),
     sendProjectContextError: vi.fn().mockReturnValue(null),
+    // What the caller may do with agents is the IAM engine's question (api/files-reads-real-stack.test.ts has the real
+    // one behind it); here it is an answer the test chooses, and the default caller may use them.
+    serviceLevelForRequest: vi.fn(async () => 'write'),
   };
 });
 // Who may see which session file is the session access module's question (api/agent-session-access-routes.test.ts has
@@ -75,7 +78,7 @@ vi.mock('@/lib/services/users/userDisplayNames', () => ({
   withUploaderNames: async (_tenantDbName: string, rows: unknown[]) => rows,
 }));
 
-import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
+import { requireProjectContextForRequest, serviceLevelForRequest } from '@/server/api/fastify-utils';
 import { refuseSessionLinked } from '@/server/api/plugins/agent-session-access';
 import { getDatabase } from '@/lib/database';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
@@ -83,6 +86,7 @@ import { CircuitOpenError, RequestTimeoutError } from '@/lib/core/resilience';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import { AzureBlobError } from '@/lib/providers/contracts/azure/blobErrors';
 import { S3OperationError } from '@/lib/providers/contracts/s3/s3Errors';
+import { StorageInvalidKeyError } from '@/lib/providers/contracts/storageLimits';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import {
   createFileBucket,
@@ -124,6 +128,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   configure();
   mockFn(requireProjectContextForRequest).mockResolvedValue(CTX);
+  mockFn(serviceLevelForRequest).mockResolvedValue('write');
   mockFn(getDatabase).mockResolvedValue(createMockDb({
     switchToTenant: vi.fn(),
     countFileRecords: vi.fn(async () => 0),
@@ -164,6 +169,9 @@ describe('an upload that cannot be done answers with a status, a code and a safe
     ['a storage call that timed out: 504', () => mockFn(uploadFile).mockRejectedValue(new RequestTimeoutError('file-upload:tenant-1:s3-main', 30_000)), 504, { error: 'The storage provider did not answer in time. Try again in a moment.', code: 'storage_timeout' }],
     ['a failure the S3 driver put into words: 502 with its message', () => mockFn(uploadFile).mockRejectedValue(new S3OperationError({ code: 'access_denied', message: 'The access key is not allowed to write to bucket "files".', statusCode: 403, retryable: false })), 502, { error: 'The access key is not allowed to write to bucket "files".', code: 'storage_failure' }],
     ['a failure the Azure driver put into words: 502 with its message', () => mockFn(uploadFile).mockRejectedValue(new AzureBlobError('The storage account key is not accepted. Check the account name and key.', { statusCode: 403, code: 'AuthenticationFailed' })), 502, { error: 'The storage account key is not accepted. Check the account name and key.', code: 'storage_failure' }],
+    ['a key the S3 store refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new S3OperationError({ code: 'invalid_key', message: 'Invalid file key provided: it is longer than the store allows (Amazon S3: 1024 bytes in UTF-8, the provider prefix included).', statusCode: 400, retryable: false })), 400, { error: 'Invalid file key provided: it is longer than the store allows (Amazon S3: 1024 bytes in UTF-8, the provider prefix included).', code: 'invalid_request' }],
+    ['a key the Azure driver refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new AzureBlobError('Invalid file key provided: the blob name would exceed 1024 characters or 254 path segments.', { statusCode: 400, code: 'InvalidFileKey', retryable: false })), 400, { error: 'Invalid file key provided: the blob name would exceed 1024 characters or 254 path segments.', code: 'invalid_request' }],
+    ['a key the disk or GridFS driver refuses: 400 invalid_request with its message', () => mockFn(uploadFile).mockRejectedValue(new StorageInvalidKeyError('it holds a character that has no UTF-8 form (a lone surrogate).')), 400, { error: 'Invalid file key provided: it holds a character that has no UTF-8 form (a lone surrogate).', code: 'invalid_request' }],
     ['a setting the console refuses: 502 with its message and field', () => mockFn(uploadFile).mockRejectedValue(new ProviderSettingsError('endpoint', 'Endpoint must start with http:// or https://.')), 502, { error: 'Endpoint must start with http:// or https://.', code: 'storage_failure', field: 'endpoint' }],
     ['anything else from the provider: a generic 502', () => mockFn(uploadFile).mockRejectedValue(sdkFailure), 502, { error: 'The storage provider request failed.', code: 'storage_failure' }],
   ])('%s', async (_name, arrange, status, body) => {
@@ -203,6 +211,25 @@ describe('an upload that cannot be done answers with a status, a code and a safe
     expect(noData.statusCode).toBe(400);
     expect(json(noData)).toEqual({ error: 'data is required' });
     expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses metadata that is not an object as 400, before the bucket is read or any quota is spent', async () => {
+    for (const metadata of ['abc', ['a', 'b'], 5, true]) {
+      const res = await upload({ metadata });
+      expect(res.statusCode, JSON.stringify(metadata)).toBe(400);
+      expect(json(res), JSON.stringify(metadata)).toEqual({ error: 'metadata must be an object' });
+    }
+    expect(getFileBucket).not.toHaveBeenCalled();
+    expect(checkPerRequestLimits).not.toHaveBeenCalled();
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('hands metadata that is an object to the service, and null as none', async () => {
+    expect((await upload({ metadata: { team: 'finance', nested: { a: 1 } } })).statusCode).toBe(201);
+    expect(mockFn(uploadFile).mock.calls[0]![3]).toMatchObject({ metadata: { team: 'finance', nested: { a: 1 } } });
+    mockFn(uploadFile).mockClear();
+    expect((await upload({ metadata: null })).statusCode).toBe(201);
+    expect(mockFn(uploadFile).mock.calls[0]![3].metadata).toBeUndefined();
   });
 
   it('answers 429 for a quota the guard refuses, as before', async () => {
@@ -245,6 +272,18 @@ describe('the quotas of an upload are those of the bucket\'s provider', () => {
     const data = Buffer.alloc(3000, 1).toString('base64');
     await upload({ data });
     expect(mockFn(checkPerRequestLimits).mock.calls[0]![1]).toEqual({ fileSize: 3000, filesPerRequest: 1 });
+  });
+
+  it('measures a data URL by its payload', async () => {
+    await upload({ data: `data:application/octet-stream;base64,${Buffer.alloc(300, 1).toString('base64')}` });
+    expect(mockFn(checkPerRequestLimits).mock.calls[0]![1]).toEqual({ fileSize: 300, filesPerRequest: 1 });
+  });
+
+  it('measures what the service will decode, not what the text claims: a tail that looks like a data URL head hides nothing', async () => {
+    // `Buffer.from(text, 'base64')` skips the comma and reads on: 2001 bytes, then the six that "base64" and "AA" make.
+    await upload({ data: `${Buffer.alloc(2001, 9).toString('base64')}base64,AA` });
+    expect(mockFn(checkPerRequestLimits).mock.calls[0]![1]).toEqual({ fileSize: 2007, filesPerRequest: 1 });
+    expect(mockFn(checkRateLimit).mock.calls[0]![1]).toMatchObject({ storageBytes: 2007 });
   });
 });
 
@@ -368,6 +407,17 @@ describe('a download', () => {
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-length']).toBe('5');
     expect(res.rawPayload.toString()).toBe('%PDF-');
+  });
+
+  it('is not kept by a shared cache or a proxy: private, no-store, like a preview and an archive', async () => {
+    const original = await download();
+    expect(original.statusCode).toBe(200);
+    expect(original.headers['cache-control']).toBe('private, no-store');
+
+    mockFn(downloadFile).mockResolvedValue({ fileName: 'a.md', data: Buffer.from('# a'), contentType: 'text/markdown' });
+    const copy = await download('download=markdown');
+    expect(copy.statusCode).toBe(200);
+    expect(copy.headers['cache-control']).toBe('private, no-store');
   });
 
   it('serves a file of unknown type as opaque bytes', async () => {
@@ -698,6 +748,44 @@ describe('bucket and provider reads', () => {
     expect(res.statusCode).toBe(200);
     expect(json(res)).toEqual({ bucket });
     expect(getFileBucketDetail).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'docs');
+  });
+
+  it('GET /files/buckets/:bucketKey names the agents only to a caller who may read agents: the others are told how many', async () => {
+    const bucket = {
+      id: 'b1', key: 'docs', storageLocation: 's3://files/t1/s3-main/docs/',
+      usedBy: [{ agentId: 'a1', agentKey: 'support', name: 'Support' }, { agentId: 'a2', agentKey: 'sales', name: 'Sales' }], usedByCount: 2,
+    };
+    mockFn(getFileBucketDetail).mockResolvedValue(bucket);
+    mockFn(serviceLevelForRequest).mockResolvedValue('none');
+
+    const res = await app.inject({ method: 'GET', url: '/api/files/buckets/docs', headers });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res)).toEqual({ bucket: { ...bucket, usedBy: [] } });
+    expect(res.body).not.toMatch(/support|sales|Support|Sales/);
+    expect(serviceLevelForRequest).toHaveBeenCalledTimes(1);
+    expect(serviceLevelForRequest).toHaveBeenCalledWith(expect.anything(), 'agents', { projectId: 'proj-1' });
+  });
+
+  it.each(['read', 'write', 'admin'] as const)('GET /files/buckets/:bucketKey names the agents to a caller who holds agents %s', async (level) => {
+    const bucket = { id: 'b1', key: 'docs', usedBy: [{ agentId: 'a1', agentKey: 'support', name: 'Support' }], usedByCount: 1 };
+    mockFn(getFileBucketDetail).mockResolvedValue(bucket);
+    mockFn(serviceLevelForRequest).mockResolvedValue(level);
+
+    const res = await app.inject({ method: 'GET', url: '/api/files/buckets/docs', headers });
+
+    expect(json(res)).toEqual({ bucket });
+  });
+
+  it('GET /files/buckets/:bucketKey asks nothing about agents when none uses the bucket', async () => {
+    const bucket = { id: 'b1', key: 'docs', usedBy: [], usedByCount: 0 };
+    mockFn(getFileBucketDetail).mockResolvedValue(bucket);
+    mockFn(serviceLevelForRequest).mockResolvedValue('none');
+
+    const res = await app.inject({ method: 'GET', url: '/api/files/buckets/docs', headers });
+
+    expect(json(res)).toEqual({ bucket });
+    expect(serviceLevelForRequest).not.toHaveBeenCalled();
   });
 
   it('GET /files/buckets/:bucketKey is a 404 for a bucket that does not exist', async () => {
