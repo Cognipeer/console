@@ -208,11 +208,12 @@ async function runHttpProbe(
   probe: HttpProbe,
   fetchImpl: typeof safeFetch,
   timeoutMs: number,
+  tenantId: string,
 ): Promise<Omit<ProviderTestResult, 'latencyMs'>> {
   const response = await fetchImpl(
     probe.url,
     { method: 'GET', headers: { Accept: 'application/json', ...probe.headers } },
-    { ...endpointGuardOptions(), timeoutMs, followRedirects: false },
+    { ...endpointGuardOptions(tenantId), timeoutMs, followRedirects: false },
   );
   const status = response.status;
   if (status >= 200 && status < 300) {
@@ -236,7 +237,7 @@ async function runHttpProbe(
     return { ok: false, message: `The provider rejected the credentials (HTTP ${status}).` };
   }
   if (status === 404 && probe.fallback) {
-    return runHttpProbe(probe.fallback, fetchImpl, timeoutMs);
+    return runHttpProbe(probe.fallback, fetchImpl, timeoutMs, tenantId);
   }
   if ((status === 404 || status === 405 || status === 501) && probe.optionalRoute) {
     return { ok: null, message: 'The server is reachable but has no model list to check the credentials against.' };
@@ -345,8 +346,9 @@ export async function testProviderConnection(
 
   // The driver's own checks first (as when the provider is saved), then every outbound target goes through the guard
   // before anything is dialled.
-  await validateProviderSettings(input.driver, input.credentials, settings);
-  await assertProviderTestEndpointsAllowed(input.type, input.credentials, settings);
+  const scope = { tenantId: input.tenantId };
+  await validateProviderSettings(input.driver, input.credentials, settings, scope);
+  await assertProviderTestEndpointsAllowed(input.type, scope, input.credentials, settings);
   if (hasUnvettableEndpoint(input.credentials, settings)) {
     return done({ ok: null, message: 'A connection string of this form cannot be checked, so it is not tested from here.' });
   }
@@ -362,7 +364,7 @@ export async function testProviderConnection(
   try {
     const result = await withTimeout(
       httpProbe
-        ? runHttpProbe(httpProbe, deps.fetchImpl ?? safeFetch, timeoutMs)
+        ? runHttpProbe(httpProbe, deps.fetchImpl ?? safeFetch, timeoutMs, input.tenantId)
         : runtimeProbe(
           input,
           deps.createRuntime ?? ((driver, context) => providerRegistry.createRuntime(driver, context)),

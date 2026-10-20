@@ -1,10 +1,13 @@
+import { resolveSrv } from 'node:dns/promises';
 import { getConfig, getConfigSource } from '@/lib/core/config';
 import {
   assertPublicUrl,
   OutboundNetworkError,
+  OutboundPrivateTargetError,
   privateNetworkBlockApplies,
   type OutboundGuardOptions,
 } from '@/lib/security/outboundFetch';
+import { getProviderPrivateNetworks } from '@/lib/security/providerPrivateNetworks';
 import type { ProviderDomain } from '@/lib/database';
 
 export const PROVIDER_ENDPOINT_NOT_ALLOWED = 'provider_endpoint_not_allowed';
@@ -23,6 +26,29 @@ export class ProviderEndpointError extends Error {
     this.name = 'ProviderEndpointError';
     this.field = field;
   }
+}
+
+/**
+ * Whose provider is being checked. The private networks an operator has opened (`PROVIDER_PRIVATE_NETWORKS`) belong
+ * to an organization, so every check that can dial a private address needs the organization; `undefined` is allowed
+ * and means none are opened (the check fails closed).
+ */
+export interface ProviderEndpointScope {
+  readonly tenantId: string | undefined;
+}
+
+/** What a person is told when a private address is refused: neutral, and it names no URL, credential or range. */
+const PRIVATE_TARGET_REASON = 'private network addresses are reachable only through networks the operator has opened for this organization';
+
+/**
+ * A refusal of the outbound guard as the error a person gets for a provider setting. A refused private address gets
+ * the neutral reason above (the guard's own message is for logs); every other refusal keeps its message. An error that
+ * is not a refusal comes back unchanged.
+ */
+export function toProviderEndpointError(field: string, error: unknown): unknown {
+  if (error instanceof OutboundPrivateTargetError) return new ProviderEndpointError(field, PRIVATE_TARGET_REASON);
+  if (error instanceof OutboundNetworkError) return new ProviderEndpointError(field, error.message);
+  return error;
 }
 
 /** Provider domains whose endpoints are user-supplied: the inference services and the file stores (S3-compatible, Azure Blob). */
@@ -48,16 +74,29 @@ const AZURE_RESOURCE_LABEL = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/i;
  * is vetted as it is, too.
  *
  * A file store can also hold a connection string (`mongodb://...`) in any credential or setting: the hosts it names
- * are dialled, so they are vetted like an endpoint, and a form whose hosts cannot be read here (a `+srv` record, a
- * local socket) is refused while private targets are blocked, since it could name one.
+ * are dialled, so they are vetted like an endpoint. A `mongodb+srv://` string names them in a DNS record, which is
+ * resolved here and every host in it vetted the same way; a form whose hosts cannot be read at all (a local socket)
+ * is refused while private targets are blocked, since it could name one.
+ *
+ * Where private targets are blocked, a private address is still reachable when the operator has opened a network
+ * that holds it for this organization (`scope.tenantId`, `PROVIDER_PRIVATE_NETWORKS`); see `endpointGuardOptions`.
  */
 export async function assertProviderEndpointsAllowed(
   type: ProviderDomain | string | undefined,
+  scope: ProviderEndpointScope,
   ...sources: Array<Record<string, unknown> | undefined>
 ): Promise<void> {
   if (!type || !GUARDED_DOMAINS.has(type)) return;
-  const guardOptions = endpointGuardOptions();
+  await assertEndpointFields(type, endpointGuardOptions(scope.tenantId), sources, new Map());
+}
 
+/** The vetting of `assertProviderEndpointsAllowed`, for a domain that is already known to be guarded. */
+async function assertEndpointFields(
+  type: ProviderDomain | string,
+  guardOptions: OutboundGuardOptions | undefined,
+  sources: ReadonlyArray<Record<string, unknown> | undefined>,
+  srvVetted: SrvVetted,
+): Promise<void> {
   for (const source of sources) {
     if (!source) continue;
     for (const [field, value] of Object.entries(source)) {
@@ -68,7 +107,7 @@ export async function assertProviderEndpointsAllowed(
         }
         continue;
       }
-      if (type === 'file') await assertConnectionStringTargets(field, value, guardOptions);
+      if (type === 'file') await assertConnectionStringTargets(field, value, guardOptions, srvVetted);
       if (!URL_FIELDS.has(field)) continue;
       const candidate = value.trim();
       if (type === 'file' && !HAS_SCHEME.test(candidate)) {
@@ -96,22 +135,24 @@ async function assertConnectionStringTargets(
   field: string,
   value: string,
   guardOptions: OutboundGuardOptions | undefined,
+  srvVetted: SrvVetted,
 ): Promise<void> {
   const scan = scanConnectionString(value);
   if (!scan?.known) return;
   for (const host of scan.hosts) await assertEndpoint(field, `https://${host}`, guardOptions);
+  if (scan.srv) await assertSrvTargets(field, scan.srv, guardOptions, srvVetted);
   if (scan.unvettable && privateNetworkBlockApplies('', guardOptions)) {
-    throw new ProviderEndpointError(field, 'the connection string must list the hosts it connects to (a +srv record or a local socket cannot be checked)');
+    throw new ProviderEndpointError(field, 'the connection string must list the hosts it connects to (a local socket, or a form this check cannot read, cannot be checked)');
   }
 }
 
 /**
  * True when private targets are blocked for a host nothing names: the deployment refuses what it cannot check (a
- * `+srv` record, a local socket) instead of letting it through. SaaS always; on-prem only when it blocks private
- * networks, and then no allow-list entry can apply, since the host is not known.
+ * local socket, a connection string whose hosts cannot be read) instead of letting it through. SaaS always; on-prem
+ * only when it blocks private networks, and then no allow-list entry can apply, since the host is not known.
  */
-export function refusesUnvettableEndpoints(): boolean {
-  return privateNetworkBlockApplies('', endpointGuardOptions());
+export function refusesUnvettableEndpoints(scope: ProviderEndpointScope): boolean {
+  return privateNetworkBlockApplies('', endpointGuardOptions(scope.tenantId));
 }
 
 /**
@@ -119,29 +160,131 @@ export function refusesUnvettableEndpoints(): boolean {
  * credential (an Azure connection string's `BlobEndpoint`, a Microsoft Entra authority). Same deployment
  * rules as `assertProviderEndpointsAllowed`; throws `ProviderEndpointError` naming `field`.
  */
-export async function assertProviderUrlAllowed(field: string, url: string): Promise<void> {
-  await assertEndpoint(field, url.trim(), endpointGuardOptions());
+export async function assertProviderUrlAllowed(field: string, url: string, scope: ProviderEndpointScope): Promise<void> {
+  await assertEndpoint(field, url.trim(), endpointGuardOptions(scope.tenantId));
 }
 
-/** The outbound-guard mode of the deployment (see `assertProviderEndpointsAllowed`). */
-export function endpointGuardOptions(): OutboundGuardOptions | undefined {
+/**
+ * The outbound-guard mode of the deployment for one organization (see `assertProviderEndpointsAllowed`).
+ *
+ * - SaaS: private targets are always blocked.
+ * - Self-hosted: allowed by default (`{ allowPrivate: true }`); blocked, with the allow-list still exempting listed
+ *   hosts, when `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` is true.
+ *
+ * Wherever they are blocked, the options carry the private networks the operator has opened for `tenantId`
+ * (`PROVIDER_PRIVATE_NETWORKS`), when it has any. With no organization, or none opened, the options are what they
+ * were before that setting existed.
+ */
+export function endpointGuardOptions(tenantId: string | undefined): OutboundGuardOptions | undefined {
   const enforce = !getConfig().deployment.isOnPrem;
   const rawBlock = String(getConfigSource().get('OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK') ?? '').trim().toLowerCase();
   const onPremBlocks = rawBlock === 'true' || rawBlock === '1';
-  return enforce
-    ? { forceBlock: true }
-    : onPremBlocks ? undefined : { allowPrivate: true };
+  if (!enforce && !onPremBlocks) return { allowPrivate: true };
+  const privateNetworks = getProviderPrivateNetworks().forTenant(tenantId);
+  if (enforce) return privateNetworks ? { forceBlock: true, privateNetworks } : { forceBlock: true };
+  return privateNetworks ? { privateNetworks } : undefined;
 }
 
 async function assertEndpoint(field: string, url: string, guardOptions: OutboundGuardOptions | undefined): Promise<void> {
   try {
     await assertPublicUrl(url, guardOptions);
   } catch (error) {
-    if (error instanceof OutboundNetworkError) {
-      throw new ProviderEndpointError(field, error.message);
-    }
-    throw error;
+    throw toProviderEndpointError(field, error);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  mongodb+srv                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A host name as a DNS name: letters, digits, `-`, `_` and dots, with no port, list, bracket or percent-encoding.
+ * DNS allows more in a label; a name outside this is refused rather than parsed.
+ */
+const DNS_NAME = /^[a-z0-9_]([a-z0-9_.-]{0,251}[a-z0-9_])?$/i;
+const SRV_SERVICE_NAME = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/i;
+const DEFAULT_SRV_SERVICE = 'mongodb';
+const SRV_LOOKUP_TIMEOUT_MS = 5000;
+/** A record that names more hosts than this is refused instead of being checked in part. */
+const MAX_SRV_TARGETS = 64;
+
+/** The SRV lookups of one validation, so a host named in two places is looked up once. */
+type SrvVetted = Map<string, Promise<void>>;
+
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out')), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Resolves the SRV record `_<service>._tcp.<host>` of a `mongodb+srv` connection string and vets every host it names
+ * like an endpoint, under the same rule as every other target. No answer, a DNS failure, a host that cannot be read
+ * or more hosts than `MAX_SRV_TARGETS` refuse the string (the check fails closed); the connection string itself is
+ * never part of the message. Does nothing where private targets are not blocked for `host`.
+ */
+async function assertSrvTargets(
+  field: string,
+  srv: { host: string; serviceName: string },
+  guardOptions: OutboundGuardOptions | undefined,
+  vetted?: SrvVetted,
+): Promise<void> {
+  if (!privateNetworkBlockApplies(srv.host, guardOptions)) return;
+  const key = `${field}\n${srv.serviceName}\n${srv.host}`;
+  let pending = vetted?.get(key);
+  if (!pending) {
+    pending = vetSrvTargets(field, srv, guardOptions);
+    vetted?.set(key, pending);
+  }
+  await pending;
+}
+
+async function vetSrvTargets(
+  field: string,
+  srv: { host: string; serviceName: string },
+  guardOptions: OutboundGuardOptions | undefined,
+): Promise<void> {
+  let records: Array<{ name: string }>;
+  try {
+    records = await withDeadline(resolveSrv(`_${srv.serviceName}._tcp.${srv.host}`), SRV_LOOKUP_TIMEOUT_MS);
+  } catch {
+    records = [];
+  }
+  const targets = [...new Set(records.map((record) => String(record.name).replace(/\.$/, '').toLowerCase()))];
+  if (targets.length === 0) {
+    throw new ProviderEndpointError(field, 'the connection string uses an SRV record that could not be resolved, so the hosts it names cannot be checked');
+  }
+  if (targets.length > MAX_SRV_TARGETS) {
+    throw new ProviderEndpointError(field, 'the SRV record of the connection string names too many hosts to check');
+  }
+  for (const target of targets) {
+    if (!DNS_NAME.test(target)) {
+      throw new ProviderEndpointError(field, 'the SRV record of the connection string names a host that cannot be checked');
+    }
+    await assertEndpoint(field, `https://${target}`, guardOptions);
+  }
+}
+
+/**
+ * Vets the hosts a `mongodb+srv` connection string reaches, from its SRV host (as the MongoDB driver parsed it) and
+ * service name (`srvServiceName`, default `mongodb`): see `assertSrvTargets`. For a driver that already parsed the
+ * string, so what is vetted is the record the driver will resolve.
+ */
+export async function assertSrvTargetsAllowed(
+  field: string,
+  srvHost: string,
+  scope: ProviderEndpointScope,
+  serviceName: string = DEFAULT_SRV_SERVICE,
+): Promise<void> {
+  const guardOptions = endpointGuardOptions(scope.tenantId);
+  const host = srvHost.trim().toLowerCase();
+  if (!privateNetworkBlockApplies(host, guardOptions)) return;
+  if (!DNS_NAME.test(host) || !SRV_SERVICE_NAME.test(serviceName)) {
+    throw new ProviderEndpointError(field, 'the connection string uses an SRV record that cannot be read, so the hosts it names cannot be checked');
+  }
+  await assertSrvTargets(field, { host, serviceName }, guardOptions);
 }
 
 /** Fields that name a server without a scheme. */
@@ -167,18 +310,28 @@ function bareHost(entry: string): string {
   return host.replace(/:\d+$/, '');
 }
 
+interface ConnectionScan {
+  hosts: string[];
+  unvettable: boolean;
+  known: boolean;
+  /** A `mongodb+srv:` string: the host whose SRV record lists the servers, and the service name it is looked up under. */
+  srv?: { host: string; serviceName: string };
+}
+
 /**
  * What a `scheme://` connection string names: the hosts to vet, whether that list is complete, and whether the
  * scheme is one of the connection-string schemes this guard reads (`mongodb+srv:` is: the same kind of string,
- * with its hosts behind a DNS record). `null` for any other value (http(s) URLs are vetted as URLs).
+ * with its hosts behind a DNS record, which `srv` names so it can be resolved and vetted). `null` for any other
+ * value (http(s) URLs are vetted as URLs).
  */
-function scanConnectionString(value: string): { hosts: string[]; unvettable: boolean; known: boolean } | null {
+function scanConnectionString(value: string): ConnectionScan | null {
   const trimmed = value.trim();
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
   if (!scheme) return null;
   const protocol = `${scheme[1].toLowerCase()}:`;
   if (protocol === 'http:' || protocol === 'https:') return null;
-  // `+srv` names a DNS service record, and other schemes are not read here: neither can be vetted
+  if (protocol === 'mongodb+srv:') return scanSrvConnectionString(trimmed.slice(scheme[0].length));
+  // other schemes are not read here: they cannot be vetted
   if (!CONNECTION_SCHEMES.has(protocol)) {
     return { hosts: [], unvettable: true, known: CONNECTION_SCHEMES.has(protocol.replace(/\+srv:$/, ':')) };
   }
@@ -202,8 +355,33 @@ function scanConnectionString(value: string): { hosts: string[]; unvettable: boo
 }
 
 /**
- * True when a connection string cannot be vetted: a `+srv` record, a scheme this guard does not
- * read, no host (the driver's default) or a local socket.
+ * A `mongodb+srv:` string (the part after `://`): exactly one plain host name and an optional `srvServiceName`.
+ * Anything else the driver would read differently (a port, a list, a bracket, percent-encoding, a service name given
+ * twice or with odd characters) is `unvettable`, so it is refused where private targets are blocked.
+ */
+function scanSrvConnectionString(rest: string): ConnectionScan {
+  const unreadable: ConnectionScan = { hosts: [], unvettable: true, known: true };
+  let authority = rest.split(/[/?#]/, 1)[0];
+  authority = authority.slice(authority.lastIndexOf('@') + 1);
+  if (!DNS_NAME.test(authority)) return unreadable;
+
+  const serviceNames: string[] = [];
+  const query = /\?([^#]*)/.exec(rest)?.[1] ?? '';
+  for (const pair of query.split('&')) {
+    const at = pair.indexOf('=');
+    if (at === -1 || decodeSafe(pair.slice(0, at)).trim().toLowerCase() !== 'srvservicename') continue;
+    serviceNames.push(decodeSafe(pair.slice(at + 1)).trim());
+  }
+  if (serviceNames.length > 1) return unreadable;
+  const serviceName = serviceNames[0] ?? DEFAULT_SRV_SERVICE;
+  if (!SRV_SERVICE_NAME.test(serviceName)) return unreadable;
+  return { hosts: [], unvettable: false, known: true, srv: { host: authority.toLowerCase(), serviceName } };
+}
+
+/**
+ * True when a connection string cannot be vetted: a scheme this guard does not read, no host (the driver's
+ * default), a local socket, or a `mongodb+srv` string whose SRV host cannot be read. A readable `mongodb+srv`
+ * string can be vetted: its record is resolved by the assertions above.
  */
 export function hasUnvettableEndpoint(...sources: Array<Record<string, unknown> | undefined>): boolean {
   return sources.some((source) =>
@@ -218,11 +396,13 @@ export function hasUnvettableEndpoint(...sources: Array<Record<string, unknown> 
  */
 export async function assertProviderTestEndpointsAllowed(
   type: ProviderDomain | string | undefined,
+  scope: ProviderEndpointScope,
   ...sources: Array<Record<string, unknown> | undefined>
 ): Promise<void> {
-  const guardOptions = endpointGuardOptions();
+  const guardOptions = endpointGuardOptions(scope.tenantId);
+  const srvVetted: SrvVetted = new Map();
   // The inference domains keep their own, stricter field rules (instance names, URL fields).
-  await assertProviderEndpointsAllowed(type, ...sources);
+  if (type && GUARDED_DOMAINS.has(type)) await assertEndpointFields(type, guardOptions, sources, srvVetted);
   for (const source of sources) {
     if (!source) continue;
     for (const [field, value] of Object.entries(source)) {
@@ -241,9 +421,11 @@ export async function assertProviderTestEndpointsAllowed(
         }
         continue;
       }
-      for (const host of scanConnectionString(trimmed)?.hosts ?? []) {
+      const scan = scanConnectionString(trimmed);
+      for (const host of scan?.hosts ?? []) {
         await assertEndpoint(field, `https://${host}`, guardOptions);
       }
+      if (scan?.srv) await assertSrvTargets(field, scan.srv, guardOptions, srvVetted);
     }
   }
 }

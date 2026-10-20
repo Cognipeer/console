@@ -97,6 +97,11 @@ export interface ProviderContract<TRuntime = unknown, TCredentials = Record<stri
     settings: TSettings;
     /** `getConfig().deployment.isOnPrem`: some options are self-hosted only. */
     isOnPrem: boolean;
+    /**
+     * The organization the provider belongs to. A driver that vets the endpoints in its settings reads the private
+     * networks opened for this organization; without it none are opened.
+     */
+    tenantId?: string;
   }): void | Promise<void>;
   /**
    * File providers only: where this provider's objects live, for display (for example

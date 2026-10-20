@@ -210,7 +210,7 @@ export const AzureBlobFileProviderContract: ProviderContract<
       },
     ],
   },
-  async validateSettings({ credentials, settings, isOnPrem }) {
+  async validateSettings({ credentials, settings, isOnPrem, tenantId }) {
     const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: isOnPrem });
     if (settings?.createContainer !== undefined && settings.createContainer !== null && typeof settings.createContainer !== 'boolean') {
       throw new ProviderSettingsError('createContainer', 'Create container if missing must be true or false.');
@@ -222,8 +222,8 @@ export const AzureBlobFileProviderContract: ProviderContract<
     });
     // The generic check of a file provider reads the `endpoint` and `authorityHost` fields; the endpoint a
     // connection string names and the authority an endpoint implies are vetted here, with the same rules.
-    await assertProviderUrlAllowed(config.endpointField, config.endpoint.serviceUrl);
-    if (config.auth.method === 'entra') await assertProviderUrlAllowed('authorityHost', config.auth.authority);
+    await assertProviderUrlAllowed(config.endpointField, config.endpoint.serviceUrl, { tenantId });
+    if (config.auth.method === 'entra') await assertProviderUrlAllowed('authorityHost', config.auth.authority, { tenantId });
   },
   describeStorageLocation({ settings, tenantId, providerKey }) {
     return describeAzureBlobLocation(settings, tenantId, providerKey);

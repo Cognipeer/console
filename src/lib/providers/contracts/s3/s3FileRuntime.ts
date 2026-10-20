@@ -16,11 +16,10 @@ import { ProviderSettingsError } from '@/lib/providers/errors';
 import {
   assertPublicUrl,
   OutboundDnsError,
-  OutboundNetworkError,
   type OutboundGuardOptions,
 } from '@/lib/security/outboundFetch';
 import { createStorageAgents, type StorageAgents } from '@/lib/security/storageTransport';
-import { endpointGuardOptions, ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+import { endpointGuardOptions, toProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 import type { ProviderContext } from '../../types';
 import type {
   FileConnectionCheck,
@@ -99,8 +98,7 @@ async function assertEndpointAllowed(endpoint: string, guard: OutboundGuardOptio
     await assertPublicUrl(endpoint, guard);
   } catch (error) {
     if (error instanceof OutboundDnsError) throw error;
-    if (error instanceof OutboundNetworkError) throw new ProviderEndpointError('endpoint', error.message);
-    throw error;
+    throw toProviderEndpointError('endpoint', error);
   }
 }
 
@@ -110,12 +108,13 @@ async function assertEndpointAllowed(endpoint: string, guard: OutboundGuardOptio
  *
  * Throws `ProviderSettingsError` for a setting that cannot work (no bucket, no keys, a CA bundle that does not parse,
  * skipped TLS verification outside a self-hosted deployment) and `ProviderEndpointError` for an endpoint the
- * deployment's network policy refuses, before any socket is opened.
+ * deployment's network policy refuses, before any socket is opened. A private endpoint passes only inside a network
+ * the operator has opened for `options.tenantId` (none is opened without it).
  */
 export async function createS3Client(
   credentials: S3Credentials,
   settings: S3CompatibleSettings,
-  options: { requireEndpoint: boolean },
+  options: { requireEndpoint: boolean; tenantId?: string },
 ): Promise<S3ClientBundle> {
   const endpointText = settingText(settings.endpoint);
   const endpoint = endpointText ? normalizeS3Endpoint(endpointText) : undefined;
@@ -137,7 +136,7 @@ export async function createS3Client(
     return { client: new S3Client({ region, credentials: sdkCredentials, forcePathStyle }), region, bucket, secrets };
   }
 
-  const guard = endpointGuardOptions();
+  const guard = endpointGuardOptions(options.tenantId);
   await assertEndpointAllowed(endpoint, guard);
   const agents = createStorageAgents({
     guard,
@@ -250,6 +249,7 @@ export interface S3FileRuntimeArgs {
 export async function createS3FileRuntime(args: S3FileRuntimeArgs): Promise<S3FileRuntime> {
   const { client, agents, endpoint, bucket, secrets } = await createS3Client(args.credentials, args.settings, {
     requireEndpoint: args.requireEndpoint,
+    tenantId: args.tenantId,
   });
   const log: Pick<RuntimeLogger, 'info' | 'warn'> = args.logger ?? moduleLogger;
   const createBucketOnUpload = args.createBucketIfMissing === true;

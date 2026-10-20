@@ -314,6 +314,16 @@ export interface AppConfig {
      * `.suffix` entries matching any subdomain (e.g. `.internal.example.com`).
      */
     allowedHosts: string[];
+    /**
+     * Private networks a provider endpoint may reach even though private targets are blocked, per organization.
+     * Raw `PROVIDER_PRIVATE_NETWORKS` entries (`<tenantId or *>=<cidr>[,<cidr>...]`, separated by `;`). Read and
+     * checked by `lib/security/providerPrivateNetworks`; nothing is opened unless an entry is valid.
+     */
+    providerPrivateNetworks: string[];
+    /**
+     * CIDR ranges (`PROVIDER_PRIVATE_NETWORKS_DENY`) that stay refused even inside an opened network.
+     */
+    providerPrivateNetworksDeny: string[];
     /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
   };
@@ -610,6 +620,13 @@ function list(source: ConfigSource, key: string, fallback: string[]): string[] {
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** Like `list`, split on `;` (for entries whose own value is a comma-separated list). */
+function semicolonList(source: ConfigSource, key: string, fallback: string[]): string[] {
+  const raw = source.get(key);
+  if (!raw || raw.trim() === '') return fallback;
+  return raw.split(';').map((s) => s.trim()).filter(Boolean);
+}
+
 function oneOf<T extends string>(
   source: ConfigSource,
   key: string,
@@ -856,6 +873,8 @@ function buildConfig(source: ConfigSource): AppConfig {
     outboundHttp: {
       blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
       allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
+      providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
     },
 

@@ -115,10 +115,59 @@ redirect hop.
 | `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK` | Block outbound requests to private/loopback address space from tenant-configured integrations. | `true` |
 | `OUTBOUND_HTTP_ALLOWED_HOSTS` | Comma-separated hostnames exempt from the block. Use a leading dot to match subdomains (e.g. `.svc.cluster.local`). | *(empty)* |
 | `OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS` | Default timeout for guarded outbound requests. | `30000` |
+| `PROVIDER_PRIVATE_NETWORKS` | Private networks that provider endpoints may reach, per organization. See [Provider private networks](#provider-private-networks). | *(empty)* |
+| `PROVIDER_PRIVATE_NETWORKS_DENY` | Comma-separated CIDR ranges that stay refused even inside an opened network. | *(empty)* |
 
 Self-hosted deployments that legitimately call in-network services (e.g. a
 vLLM server on a private IP) should list those hosts in
 `OUTBOUND_HTTP_ALLOWED_HOSTS` rather than disabling the guard globally.
+
+#### Provider private networks
+
+Provider endpoints (model servers, S3-compatible and Azure Blob stores, MongoDB
+GridFS) are checked against private, loopback and link-local addresses. On SaaS
+the check is always on; on a self-hosted install it applies only when
+`OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK=true`, and otherwise private endpoints are
+allowed as before. A customer's own store usually sits on a private address of
+the customer's network, which the operator has connected to the deployment (a
+VPN or a peering). `PROVIDER_PRIVATE_NETWORKS` lists those networks per
+organization:
+
+```bash
+PROVIDER_PRIVATE_NETWORKS="64f0c0ffee0000000000abcd=10.50.0.0/16,fd12:3456::/48;*=100.64.10.0/24"
+PROVIDER_PRIVATE_NETWORKS_DENY="10.244.0.0/16,10.96.0.0/12"
+```
+
+- Entries are separated by `;`. Each is `<organization id>=<cidr>[,<cidr>...]`; `*` in
+  place of the id opens the ranges for every organization. Two entries for one
+  organization merge, and whitespace is ignored.
+- IPv4 and IPv6 ranges are accepted; a bare address is one host. Host names are not
+  accepted: only the addresses a name resolves to are checked.
+- A private address is allowed for an organization only when it lies inside one of
+  its ranges (or a `*` range). A name is resolved and every address it answers with
+  has to pass. Public addresses are decided as before.
+- An entry that cannot be read opens nothing and is logged at startup. A deny list
+  that cannot be read opens nothing for anyone. The settings are read at startup.
+- `PROVIDER_PRIVATE_NETWORKS_DENY` lists ranges that stay refused inside an opened
+  network, such as this cluster's pod and service ranges.
+- Never opened, whatever the entries say: `0.0.0.0/8`, loopback, link-local
+  (`169.254.0.0/16`, which holds the cloud metadata services), `168.63.129.16`,
+  `100.100.100.200`, `192.0.0.0/24`, multicast and reserved ranges, `::`, `::1`,
+  `fe80::/10`, `ff00::/8`, `fd00:ec2::254`, the IPv6 forms that carry an IPv4
+  address (IPv4-compatible and -translated, NAT64, 6to4, Teredo), every address of
+  the server's own network interfaces and `KUBERNETES_SERVICE_HOST` when it is an
+  address. An IPv4-mapped IPv6 address is matched as the IPv4 address it carries.
+- Names that always mean the server itself (`localhost`, `*.localhost`) stay refused.
+  `*.local` and `*.internal` names are refused too, unless the organization has
+  opened ranges: they are then resolved and decided by their addresses.
+- `mongodb+srv://` connection strings are accepted for GridFS: the SRV record is
+  resolved when the provider is saved or tested and every host in it is checked the
+  same way. Unix sockets and certificate files named in a MongoDB URI stay refused
+  on SaaS, as do `allowInsecureTls` and `http://` Azure Blob endpoints.
+
+The setting applies to provider endpoints only. Webhooks, tools, MCP servers,
+alert channels, the browser, the crawler and imports keep using the
+`OUTBOUND_HTTP_*` settings above.
 
 ### MCP Gateway
 

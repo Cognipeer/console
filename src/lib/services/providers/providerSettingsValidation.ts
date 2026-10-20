@@ -1,5 +1,6 @@
 import { getConfig } from '@/lib/core/config';
 import { providerRegistry } from '@/lib/providers';
+import type { ProviderEndpointScope } from './providerEndpointGuard';
 
 /** A driver's save-time check (`ProviderContract.validateSettings`), bound to its contract. */
 export type ProviderSettingsValidator = (
@@ -17,9 +18,13 @@ function contractOf(driver: string) {
 
 /**
  * The `validateSettings` hook of a driver, or `undefined` when it has none. A driver the registry does not know (a
- * removed plug-in, a test double) has no hook either: its runtime reports that when it is used.
+ * removed plug-in, a test double) has no hook either: its runtime reports that when it is used. `scope` names the
+ * organization the provider belongs to; a driver that vets its endpoints reads the private networks opened for it.
  */
-export function settingsValidatorOf(driver: string | undefined): ProviderSettingsValidator | undefined {
+export function settingsValidatorOf(
+  driver: string | undefined,
+  scope: ProviderEndpointScope,
+): ProviderSettingsValidator | undefined {
   const contract = driver ? contractOf(driver) : undefined;
   if (typeof contract?.validateSettings !== 'function') return undefined;
   return async (credentials, settings) => {
@@ -27,6 +32,7 @@ export function settingsValidatorOf(driver: string | undefined): ProviderSetting
       credentials,
       settings: settings ?? {},
       isOnPrem: getConfig().deployment.isOnPrem,
+      ...(scope.tenantId !== undefined ? { tenantId: scope.tenantId } : {}),
     });
   };
 }
@@ -40,6 +46,7 @@ export async function validateProviderSettings(
   driver: string | undefined,
   credentials: Record<string, unknown>,
   settings: Record<string, unknown> | undefined,
+  scope: ProviderEndpointScope,
 ): Promise<void> {
-  await settingsValidatorOf(driver)?.(credentials, settings);
+  await settingsValidatorOf(driver, scope)?.(credentials, settings);
 }

@@ -6,15 +6,17 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
   createGuardedLookup,
-  isPrivateIpAddress,
+  guardRefusesAddress,
   privateNetworkBlockApplies,
   type OutboundGuardOptions,
 } from '@/lib/security/outboundFetch';
 import {
   assertProviderUrlAllowed,
+  assertSrvTargetsAllowed,
   endpointGuardOptions,
   ProviderEndpointError,
   refusesUnvettableEndpoints,
+  type ProviderEndpointScope,
 } from '@/lib/services/providers/providerEndpointGuard';
 import { ProviderSettingsError } from '../errors';
 import type { ProviderContract } from '../types';
@@ -54,24 +56,26 @@ function gridFsBucketName(settings: GridFsSettings | undefined): string {
 const logger = createLogger('mongodb-gridfs-files');
 
 // One MongoClient per URI for the process: createRuntime runs per request, and
-// an unclosed client per call would leak connections.
+// an unclosed client per call would leak connections. A guarded client is also per organization: its lookup carries
+// the private networks opened for that organization, so two organizations never share one.
 const clients = new Map<string, Promise<MongoClient>>();
 
 /** True for a literal address the policy refuses to dial; a name is left to the guarded lookup. `address` is `host:port` or `[v6]:port`. */
 function refusesLiteralMember(address: string, guard: OutboundGuardOptions | undefined): boolean {
   const host = address.startsWith('[') ? address.slice(1, address.indexOf(']')) : address.replace(/:\d+$/, '');
-  return isIP(host) !== 0 && privateNetworkBlockApplies(host, guard) && isPrivateIpAddress(host);
+  return isIP(host) !== 0 && privateNetworkBlockApplies(host, guard) && guardRefusesAddress(host, guard);
 }
 
 /**
  * `guarded`: the URI was typed into the provider form, so the client's connections follow the deployment's
- * network policy (see `assertUriAllowed`). The app's own connection is not subject to it.
+ * network policy (see `assertUriAllowed`), with the private networks opened for `tenantId`. The app's own
+ * connection is not subject to it.
  */
-function getClient(uri: string, guarded: boolean): Promise<MongoClient> {
-  const key = `${guarded ? 'guarded' : 'app'}:${uri}`;
+function getClient(uri: string, tenantId: string | undefined, guarded: boolean): Promise<MongoClient> {
+  const key = guarded ? `guarded:${JSON.stringify([tenantId ?? null, uri])}` : `app:${uri}`;
   let pending = clients.get(key);
   if (!pending) {
-    const guard = endpointGuardOptions();
+    const guard = endpointGuardOptions(tenantId);
     // A guarded lookup refuses a name that answers with a private address when the socket connects (a seed host, a
     // member the servers announce, an SRV target), which a check made when the URI was saved cannot see.
     const client = new MongoClient(uri, guarded ? { lookup: createGuardedLookup(guard) } : undefined);
@@ -110,23 +114,25 @@ function getClient(uri: string, guarded: boolean): Promise<MongoClient> {
 /** A host the driver dials is a plain name or address: nothing a URL parser would read differently. */
 const PLAIN_HOST = /^[a-z0-9._:-]+$/i;
 
-async function assertHostAllowed(host: string): Promise<void> {
+async function assertHostAllowed(host: string, scope: ProviderEndpointScope): Promise<void> {
   if (!PLAIN_HOST.test(host)) {
     throw new ProviderEndpointError('uri', 'a host in the connection URI is not a plain host name or address');
   }
-  await assertProviderUrlAllowed('uri', `https://${host.includes(':') ? `[${host}]` : host}`);
+  await assertProviderUrlAllowed('uri', `https://${host.includes(':') ? `[${host}]` : host}`, scope);
 }
 
 /**
  * A connection URI someone typed in is held to the same network policy as a storage endpoint: every host the
- * driver would dial (the seed list, a proxy) is vetted, and a form the policy cannot check - a `+srv` record, a
- * local socket - is refused while private targets are blocked. The driver's own parser reads the URI, so the hosts
- * vetted are the hosts dialled; creating a client connects to nothing.
+ * driver would dial (the seed list, a proxy) is vetted, and a form the policy cannot check - a local socket - is
+ * refused while private targets are blocked. A `mongodb+srv` URI is vetted through its SRV record: the record the
+ * driver will resolve (its parsed host and service name) is resolved here and every host in it is vetted. The
+ * driver's own parser reads the URI, so the hosts vetted are the hosts dialled; creating a client connects to
+ * nothing. A private host passes only inside a network opened for `tenantId`.
  *
  * Certificate files named in the URI are read from the server's disk, which only a self-hosted install offers.
  * An error from the driver's parser is not passed on: it can quote part of the URI, and the URI holds a password.
  */
-async function assertUriAllowed(uri: string, isOnPrem: boolean): Promise<void> {
+async function assertUriAllowed(uri: string, isOnPrem: boolean, tenantId: string | undefined): Promise<void> {
   let options: MongoClient['options'];
   try {
     options = new MongoClient(uri).options;
@@ -137,18 +143,17 @@ async function assertUriAllowed(uri: string, isOnPrem: boolean): Promise<void> {
   if (!isOnPrem && (options.tlsCAFile || options.tlsCertificateKeyFile)) {
     throw new ProviderSettingsError('uri', 'Certificate files in the connection URI are only available on self-hosted deployments.');
   }
-  const refuseUnvettable = refusesUnvettableEndpoints();
-  if (options.srvHost && refuseUnvettable) {
-    throw new ProviderEndpointError('uri', 'a mongodb+srv connection string cannot be checked; list the hosts in a mongodb:// connection string');
-  }
+  const scope = { tenantId };
+  const refuseUnvettable = refusesUnvettableEndpoints(scope);
+  if (options.srvHost) await assertSrvTargetsAllowed('uri', options.srvHost, scope, options.srvServiceName);
   for (const address of options.hosts) {
     if (address.socketPath) {
       if (refuseUnvettable) throw new ProviderEndpointError('uri', 'a local socket is not available on this deployment');
       continue;
     }
-    await assertHostAllowed(address.host ?? '');
+    await assertHostAllowed(address.host ?? '', scope);
   }
-  if (options.proxyHost) await assertHostAllowed(options.proxyHost);
+  if (options.proxyHost) await assertHostAllowed(options.proxyHost, scope);
 }
 
 function resolveUri(credentials: GridFsCredentials): string {
@@ -278,12 +283,12 @@ export const MongoGridFsFileProviderContract: ProviderContract<
     ],
   },
 
-  async validateSettings({ credentials, isOnPrem }) {
+  async validateSettings({ credentials, isOnPrem, tenantId }) {
     const raw: unknown = credentials?.uri;
     if (raw !== undefined && raw !== null && typeof raw !== 'string') {
       throw new ProviderSettingsError('uri', 'Connection URI must be text.');
     }
-    if (raw?.trim()) await assertUriAllowed(raw.trim(), isOnPrem);
+    if (raw?.trim()) await assertUriAllowed(raw.trim(), isOnPrem, tenantId);
   },
 
   describeStorageLocation({ settings, tenantId, providerKey }) {
@@ -296,7 +301,7 @@ export const MongoGridFsFileProviderContract: ProviderContract<
     const uri = resolveUri(credentials);
     const usingAppConnection = !credentials?.uri?.trim();
     // Rows saved before the URI was checked, and a name that now answers differently, are not covered by the save-time check
-    if (!usingAppConnection) await assertUriAllowed(uri, getConfig().deployment.isOnPrem);
+    if (!usingAppConnection) await assertUriAllowed(uri, getConfig().deployment.isOnPrem, tenantId);
     const cfg = getConfig();
     const defaultDbName =
       usingAppConnection && cfg.database.provider === 'mongodb' && cfg.database.singleDatabase
@@ -308,7 +313,7 @@ export const MongoGridFsFileProviderContract: ProviderContract<
     const chunk = Number(settings.chunkSizeBytes);
     const chunkSizeBytes = Number.isFinite(chunk) && chunk > 0 ? Math.floor(chunk) : undefined;
 
-    const client = await getClient(uri, !usingAppConnection && refusesUnvettableEndpoints());
+    const client = await getClient(uri, tenantId, !usingAppConnection && refusesUnvettableEndpoints({ tenantId }));
     const db = client.db(dbName);
     const bucket = new GridFSBucket(db, {
       bucketName,

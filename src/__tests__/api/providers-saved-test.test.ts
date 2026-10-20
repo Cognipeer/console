@@ -240,6 +240,7 @@ describe('POST /api/providers/:id/test with the form\'s unsaved values', () => {
       credentials: { accessKeyId: 'AKIA-TYPED-0003', secretAccessKey: STORED_CREDENTIALS.secretAccessKey },
       settings: { ...STORED_SETTINGS, bucket: 'renamed' },
       isOnPrem: false,
+      tenantId: 'tenant-1',
     });
   });
 

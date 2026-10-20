@@ -13,8 +13,27 @@ import {
 } from '@/lib/services/providers/providerConnectionTest';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
+// Names resolve without the network: `srv` holds the targets of an SRV record, `hosts` the addresses of a name.
+const dns = vi.hoisted(() => ({ srv: new Map<string, string[]>(), hosts: new Map<string, string[]>() }));
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (host: string) => {
+    const addresses = dns.hosts.get(host);
+    if (!addresses) throw Object.assign(new Error(`ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
+    return addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+  }),
+  resolveSrv: vi.fn(async (name: string) => {
+    const targets = dns.srv.get(name);
+    if (!targets) throw Object.assign(new Error(`querySrv ENODATA ${name}`), { code: 'ENODATA' });
+    return targets.map((target) => ({ name: target, port: 27017, priority: 0, weight: 0 }));
+  }),
+}));
+
 const original = getConfigSource();
-beforeEach(() => setConfigSource({ get: (k: string) => ({ DEPLOYMENT_MODE: 'saas' } as Record<string, string>)[k] ?? process.env[k] } as ConfigSource));
+beforeEach(() => {
+  dns.srv.clear();
+  dns.hosts.clear();
+  setConfigSource({ get: (k: string) => ({ DEPLOYMENT_MODE: 'saas' } as Record<string, string>)[k] ?? process.env[k] } as ConfigSource);
+});
 afterEach(() => setConfigSource(original));
 
 const json = (status: number, body: unknown) => ({ status, json: async () => body }) as unknown as Response;
@@ -151,14 +170,31 @@ describe('unsupported and local drivers', () => {
     expect(createRuntime).not.toHaveBeenCalled();
   });
 
-  it('SRV connection strings are not dialled', async () => {
+  it('a connection string whose hosts cannot be read at all is not dialled (ok:null)', async () => {
     const createRuntime = vi.fn();
+    for (const uri of ['mongodb+srv://h1.example.net,h2.example.net/db', 'mongodb+srv://h1.example.net:27017/db', 'mongodb://', 'mongodb://%2Ftmp%2Fmongodb-27017.sock/db']) {
+      const result = await testProviderConnection(
+        base({ type: 'vector', driver: 'mongodb', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      );
+      expect(result.ok, uri).toBeNull();
+      expect(result.message, uri).toMatch(/cannot be checked/);
+    }
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('an SRV connection string is checked through its record and then dialled', async () => {
+    dns.srv.set('_mongodb._tcp.cluster0.example.net', ['shard-00.cluster0.example.net.', 'shard-01.cluster0.example.net.']);
+    dns.hosts.set('shard-00.cluster0.example.net', ['93.184.216.34']);
+    dns.hosts.set('shard-01.cluster0.example.net', ['93.184.216.35']);
+    const close = vi.fn();
+    const createRuntime = vi.fn(async () => ({ listIndexes: async () => [{ name: 'docs' }], close }));
     const result = await testProviderConnection(
       base({ type: 'vector', driver: 'mongodb', credentials: { uri: 'mongodb+srv://u:p@cluster0.example.net/db' } }),
       { createRuntime: createRuntime as never },
     );
-    expect(result.ok).toBeNull();
-    expect(createRuntime).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -271,9 +307,16 @@ describe('the outbound guard', () => {
     expect(createRuntime).not.toHaveBeenCalled();
   });
 
-  it('a MongoDB GridFS connection URI is held to it too: a private host, and a +srv record it cannot check, are refused on SaaS', async () => {
+  it('a MongoDB GridFS connection URI is held to it too: a private host, and a +srv record that names one or none, are refused on SaaS', async () => {
+    dns.srv.set('_mongodb._tcp.inside.example.net', ['db-0.inside.example.net']);
+    dns.hosts.set('db-0.inside.example.net', ['10.0.0.5']);
     const createRuntime = vi.fn();
-    for (const uri of ['mongodb://127.0.0.1:27017', 'mongodb://u:p@10.0.0.5:27017/files', 'mongodb+srv://u:p@cluster0.example.net/files']) {
+    for (const uri of [
+      'mongodb://127.0.0.1:27017',
+      'mongodb://u:p@10.0.0.5:27017/files',
+      'mongodb+srv://u:p@inside.example.net/files',
+      'mongodb+srv://u:p@nothing.example.net/files',
+    ]) {
       await expect(testProviderConnection(
         base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
         { createRuntime: createRuntime as never },

@@ -117,11 +117,11 @@ export async function createAzureBlobRuntime(
   const isOnPrem = getConfig().deployment.isOnPrem;
 
   const config = resolveAzureBlobConfig(credentials, settings, { allowHttp: isOnPrem });
-  const guard = endpointGuardOptions();
+  const guard = endpointGuardOptions(tenantId);
   // Rows stored before the endpoint policy, and a name that now answers differently, are not covered by the
   // save-time check: the policy is applied again here, before any socket exists.
   await assertPublicUrl(config.endpoint.serviceUrl, guard);
-  if (config.auth.method === 'entra') await assertProviderUrlAllowed('authorityHost', config.auth.authority);
+  if (config.auth.method === 'entra') await assertProviderUrlAllowed('authorityHost', config.auth.authority, { tenantId });
 
   const basePrefix = buildBasePrefix([config.prefix, tenantId, providerKey]);
   const { endpoint, container: containerName } = config;
@@ -172,7 +172,7 @@ export async function createAzureBlobRuntime(
           // Pins DNS, refuses private targets under the same rules as the endpoint, never follows redirects. The
           // credential's own deadline (`init.signal`) covers the answer body too, so it stays linked after the headers.
           fetchImpl: (url, init) => safeFetch(url, init, {
-            ...endpointGuardOptions(),
+            ...endpointGuardOptions(tenantId),
             timeoutMs: ENTRA_TIMEOUT_MS,
             followRedirects: false,
             keepAbortLinked: true,

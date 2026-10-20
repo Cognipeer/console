@@ -14,14 +14,26 @@ import { MongoGridFsFileProviderContract as contract } from '@/lib/providers/con
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
-// A name's answers, in order; the last one repeats. Anything not listed does not resolve.
-const dns = vi.hoisted(() => ({ answers: new Map<string, string[]>() }));
+// A name's answers, in order; the last one repeats. Anything not listed does not resolve. `srv` holds the targets of
+// an SRV record (an Error is a resolver failure); `srvCalls` the names that were asked for.
+const dns = vi.hoisted(() => ({
+  answers: new Map<string, string[]>(),
+  srv: new Map<string, string[] | Error>(),
+  srvCalls: [] as string[],
+}));
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async (host: string) => {
     const queue = dns.answers.get(host);
     if (!queue) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
     const address = queue.length > 1 ? queue.shift()! : queue[0];
     return [{ address, family: address.includes(':') ? 6 : 4 }];
+  }),
+  resolveSrv: vi.fn(async (name: string) => {
+    dns.srvCalls.push(name);
+    const answer = dns.srv.get(name);
+    if (answer === undefined) throw Object.assign(new Error(`querySrv ENODATA ${name}`), { code: 'ENODATA' });
+    if (answer instanceof Error) throw answer;
+    return answer.map((target) => ({ name: target, port: 27017, priority: 0, weight: 0 }));
   }),
 }));
 
@@ -56,6 +68,8 @@ afterAll(async () => {
 beforeEach(() => {
   connections = 0;
   dns.answers.clear();
+  dns.srv.clear();
+  dns.srvCalls.length = 0;
   dns.answers.set('mongo.example.com', [PUBLIC]);
   dns.answers.set('db.corp.example', ['10.1.2.3']);
 });
@@ -161,11 +175,9 @@ describe('save and test: SaaS', () => {
     await expect(validate('mongodb://127.0.0.1:27017')).rejects.toBeInstanceOf(ProviderEndpointError);
   });
 
-  it('refuses a form it cannot check: a +srv record, a local socket', async () => {
+  it('refuses a form it cannot check: a local socket', async () => {
     use(saas);
-    for (const uri of ['mongodb+srv://cluster0.example.com/files', 'mongodb://%2Ftmp%2Fmongodb-27017.sock']) {
-      await expect(validate(uri), uri).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
-    }
+    await expect(validate('mongodb://%2Ftmp%2Fmongodb-27017.sock')).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
   });
 
   it('refuses certificate files, which the driver would read from the server', async () => {
@@ -225,6 +237,53 @@ describe('save and test: SaaS', () => {
   });
 });
 
+describe('save and test: SaaS, mongodb+srv', () => {
+  const record = '_mongodb._tcp.cluster0.example.com';
+
+  it('resolves the record and accepts it when every host in it is public', async () => {
+    use(saas);
+    dns.srv.set(record, ['mongo.example.com.', 'mongo.example.com']);
+    await expect(validate('mongodb+srv://app:pw@cluster0.example.com/files?retryWrites=true')).resolves.toBeUndefined();
+    expect(dns.srvCalls).toEqual([record]);
+  });
+
+  it('refuses it when any host of the record is private, loopback or metadata', async () => {
+    use(saas);
+    for (const target of ['db.corp.example', 'localhost', '169.254.169.254', 'x.localhost']) {
+      dns.srv.set(record, ['mongo.example.com', target]);
+      await expect(validate('mongodb+srv://cluster0.example.com/files'), target).rejects.toMatchObject({
+        name: 'ProviderEndpointError',
+        code: 'provider_endpoint_not_allowed',
+        field: 'uri',
+      });
+    }
+  });
+
+  it('refuses it when the record has no answer or the resolver fails, and does not quote the URI', async () => {
+    use(saas);
+    const uri = 'mongodb+srv://app:topsecret-pw@cluster0.example.com/files';
+    const missing = await validate(uri).catch((e: unknown) => e);
+    expect(missing).toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+    dns.srv.set(record, new Error('queryTxt ESERVFAIL'));
+    const failed = await validate(uri).catch((e: unknown) => e);
+    expect(failed).toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+    for (const error of [missing, failed]) expect((error as Error).message).not.toMatch(/topsecret|cluster0|queryTxt/);
+  });
+
+  it('looks the record up under the srvServiceName the driver parsed', async () => {
+    use(saas);
+    dns.srv.set('_custom._tcp.cluster0.example.com', ['mongo.example.com']);
+    await expect(validate('mongodb+srv://cluster0.example.com/files?srvServiceName=custom')).resolves.toBeUndefined();
+    expect(dns.srvCalls).toEqual(['_custom._tcp.cluster0.example.com']);
+  });
+
+  it('does not resolve anything on a self-hosted install that does not block private networks', async () => {
+    use(onprem);
+    await expect(validate('mongodb+srv://cluster0.corp.example/files', true)).resolves.toBeUndefined();
+    expect(dns.srvCalls).toEqual([]);
+  });
+});
+
 describe('save and test: on-prem', () => {
   it('lets in-network targets through by default: a local mongod, a socket, a SRV record, certificate files', async () => {
     use(onprem);
@@ -256,6 +315,8 @@ describe('save and test: on-prem', () => {
       'mongodb+srv://cluster0.corp.example/files',
       'mongodb://%2Ftmp%2Fmongodb-27017.sock',
     ]) {
+      // the record's host is private
+      dns.srv.set('_mongodb._tcp.cluster0.corp.example', ['db.corp.example']);
       await expect(validate(uri, true), uri).rejects.toBeInstanceOf(ProviderEndpointError);
     }
     await expect(validate('mongodb://mongo.example.com:27017', true)).resolves.toBeUndefined();
@@ -278,6 +339,7 @@ describe('creating the runtime', () => {
     });
     await expect(create(`mongodb://mongo.example.com:27017,127.0.0.1:${port}/${quickly}`)).rejects.toBeInstanceOf(ProviderEndpointError);
     await expect(create(`mongodb://mongo.example.com/${quickly}&proxyHost=127.0.0.1&proxyPort=${port}`)).rejects.toBeInstanceOf(ProviderEndpointError);
+    dns.srv.set('_mongodb._tcp.cluster0.example.com', ['db.corp.example']);
     await expect(create('mongodb+srv://cluster0.example.com/files')).rejects.toBeInstanceOf(ProviderEndpointError);
     await expect(create('mongodb://mongo.example.com/?tls=true&tlsCAFile=/etc/hosts')).rejects.toBeInstanceOf(ProviderSettingsError);
     await expect(create('not a uri')).rejects.toBeInstanceOf(ProviderSettingsError);

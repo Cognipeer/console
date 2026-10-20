@@ -165,8 +165,8 @@ export async function createProviderConfig(
 ): Promise<ProviderConfigView> {
   // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
   // would say about the same value.
-  await validateProviderSettings(payload.driver, payload.credentials, payload.settings);
-  await assertProviderEndpointsAllowed(payload.type, payload.credentials, payload.settings);
+  await validateProviderSettings(payload.driver, payload.credentials, payload.settings, { tenantId });
+  await assertProviderEndpointsAllowed(payload.type, { tenantId }, payload.credentials, payload.settings);
   const settings = payload.type === 'websearch'
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
     : payload.settings;
@@ -324,7 +324,7 @@ async function validateUpdatedProvider(
   payload: UpdateProviderConfigInput,
   mergedCredentials: Record<string, unknown> | undefined,
 ): Promise<void> {
-  const validate = settingsValidatorOf(target?.driver);
+  const validate = settingsValidatorOf(target?.driver, { tenantId: target?.tenantId });
   if (!target || !validate) return;
   const credentials = mergedCredentials ?? readStoredCredentials(target, false);
   // Credentials that cannot be opened say nothing about the settings: such a record still saves a settings-only edit,
@@ -356,7 +356,7 @@ export async function updateProviderConfig(
       credentialMerge = mergeCredentials(target, payload.credentials);
     }
     await validateUpdatedProvider(target, payload, credentialMerge?.merged);
-    await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
+    await assertProviderEndpointsAllowed(target?.type, { tenantId: target?.tenantId }, payload.credentials, payload.settings);
     if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
       connectionChanged = true;
     }

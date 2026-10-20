@@ -1,6 +1,7 @@
 import { getConfig, validateConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { configureOutboundProxy } from '@/lib/core/outboundProxyBootstrap';
+import { logProviderPrivateNetworks } from '@/lib/security/providerPrivateNetworks';
 import { initLifecycle, registerShutdownHandler } from '@/lib/core/lifecycle';
 import { getCache, destroyCache } from '@/lib/core/cache';
 import { runtimePool } from '@/lib/core/runtimePool';
@@ -177,6 +178,9 @@ async function runBootstrap(): Promise<void> {
       `${errors.length} config validation error(s). Some features may not work.`,
     );
   }
+
+  // The private networks the operator opened for provider endpoints: one line of counts, and what opens nothing.
+  await bestEffort(() => logProviderPrivateNetworks(logger), 'Provider private networks could not be read during startup');
 
   await verifyAuthorizationEngine();
 

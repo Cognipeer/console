@@ -107,7 +107,12 @@ describe('createProviderConfig', () => {
     const input = createInput();
     await createProviderConfig('tenant_acme', 'tenant-1', input);
     expect(validateSettings).toHaveBeenCalledTimes(1);
-    expect(validateSettings).toHaveBeenCalledWith({ credentials: input.credentials, settings: input.settings, isOnPrem: false });
+    expect(validateSettings).toHaveBeenCalledWith({
+      credentials: input.credentials,
+      settings: input.settings,
+      isOnPrem: false,
+      tenantId: 'tenant-1',
+    });
     expect(hoisted.db.createProvider).toHaveBeenCalledTimes(1);
 
     deployment('onprem');
@@ -118,6 +123,13 @@ describe('createProviderConfig', () => {
   it('settings that were left out are an empty object', async () => {
     await createProviderConfig('tenant_acme', 'tenant-1', createInput({ settings: undefined }));
     expect(validateSettings).toHaveBeenCalledWith(expect.objectContaining({ settings: {} }));
+  });
+
+  it('names the organization to the driver and to the endpoint guard, so the networks opened for it apply', async () => {
+    const input = createInput();
+    await createProviderConfig('tenant_acme', 'tenant-b', input);
+    expect(validateSettings).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-b' }));
+    expect(hoisted.endpointGuard).toHaveBeenCalledWith('file', { tenantId: 'tenant-b' }, input.credentials, input.settings);
   });
 
   it('checks before the endpoint guard (a better message wins) and refuses before anything is read or written', async () => {
@@ -162,6 +174,7 @@ describe('updateProviderConfig', () => {
       credentials: { accessKeyId: 'AKIA-ROTATED', secretAccessKey: 'stored-secret-value' },
       settings: STORED_SETTINGS,
       isOnPrem: false,
+      tenantId: 'tenant-1',
     });
     // ...and the set that is stored is the one that was checked
     expect(encryptObject).toHaveBeenCalledWith({ accessKeyId: 'AKIA-ROTATED', secretAccessKey: 'stored-secret-value' });
@@ -173,6 +186,7 @@ describe('updateProviderConfig', () => {
       credentials: STORED_CREDENTIALS,
       settings: { endpoint: 'https://other.example.com', bucket: 'other' },
       isOnPrem: false,
+      tenantId: 'tenant-1',
     });
     expect(hoisted.db.updateProvider.mock.calls[0]![1]).toMatchObject({ settings: { endpoint: 'https://other.example.com', bucket: 'other' } });
     // a settings-only edit does not touch the stored credentials
@@ -188,6 +202,7 @@ describe('updateProviderConfig', () => {
       credentials: { accessKeyId: 'AKIA-STORED', secretAccessKey: 'brand-new-secret' },
       settings: { endpoint: 'minio.internal:9000' },
       isOnPrem: false,
+      tenantId: 'tenant-1',
     });
   });
 
@@ -200,6 +215,13 @@ describe('updateProviderConfig', () => {
     deployment('onprem');
     await updateProviderConfig('tenant_acme', 'prov-1', { settings: { endpoint: 'http://minio:9000' } });
     expect(validateSettings).toHaveBeenCalledWith(expect.objectContaining({ isOnPrem: true }));
+  });
+
+  it('takes the organization from the stored provider, for the driver and for the endpoint guard', async () => {
+    hoisted.db.findProviderById.mockResolvedValue(storedRecord({ tenantId: 'tenant-b' }));
+    await updateProviderConfig('tenant_acme', 'prov-1', { settings: { endpoint: 'https://other.example.com', bucket: 'other' } });
+    expect(validateSettings).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-b' }));
+    expect(hoisted.endpointGuard).toHaveBeenCalledWith('file', { tenantId: 'tenant-b' }, undefined, { endpoint: 'https://other.example.com', bucket: 'other' });
   });
 
   it('a refusal reaches the caller unchanged, before the endpoint guard, and nothing is written or sealed', async () => {
@@ -244,6 +266,7 @@ describe('updateProviderConfig', () => {
       credentials: { accessKeyId: 'AKIA-NEW', secretAccessKey: 'new-secret-value' },
       settings: STORED_SETTINGS,
       isOnPrem: false,
+      tenantId: 'tenant-1',
     });
     expect(encryptObject).toHaveBeenCalledWith({ accessKeyId: 'AKIA-NEW', secretAccessKey: 'new-secret-value' });
     expect(hoisted.db.updateProvider).toHaveBeenCalledTimes(1);

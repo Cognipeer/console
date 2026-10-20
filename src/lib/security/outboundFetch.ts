@@ -23,6 +23,11 @@
  * Clients that connect through their own http(s) agent (the storage SDKs) cannot use `safeFetch`: they
  * run `assertPublicUrl` on their endpoint and give the agent `createGuardedLookup`, which applies the same
  * policy to the address the socket is about to dial (`privateNetworkBlockApplies` says whether it does).
+ *
+ * A caller may carry `privateNetworks` in its options: the private networks opened for one organization (see
+ * `providerPrivateNetworks`). A private address inside them passes the check; nothing else changes. Every
+ * decision is made per call from the addresses a name resolves to, and only the addresses are cached, so a
+ * verdict made for one organization is never served to another.
  */
 
 import { isIP, type LookupFunction } from 'node:net';
@@ -39,7 +44,8 @@ interface ResolvedAddress {
   family: 4 | 6;
 }
 
-const hostPrivacyCache = new Map<string, { privateNetwork: boolean; addresses: ResolvedAddress[]; expiresAt: number }>();
+/** What a name resolved to. The verdict is not kept: it depends on the networks the caller has opened. */
+const hostAddressCache = new Map<string, { addresses: ResolvedAddress[]; expiresAt: number }>();
 
 /**
  * A target the guard refuses (a private address, a protocol other than http(s), a URL that does not parse). The
@@ -65,6 +71,17 @@ export class OutboundNetworkError extends Error {
 export class OutboundDnsError extends OutboundNetworkError {
   readonly code = 'dns_lookup_failed';
   readonly retryable = true;
+}
+
+/**
+ * A target refused because its address is private, loopback or link-local, or because its name always means this
+ * machine. A subclass so a caller that answers a person (the provider endpoint guard) can tell it from the other
+ * refusals; the message and `name` are the ones every refusal of this kind has always had.
+ */
+export class OutboundPrivateTargetError extends OutboundNetworkError {
+  constructor(host: string) {
+    super(`Refusing outbound request to private/loopback host: ${host}`);
+  }
 }
 
 export function isPrivateIpAddress(ip: string): boolean {
@@ -170,14 +187,33 @@ function expandIpv6(ip: string): number[] | null {
   return groups;
 }
 
-function isLocalHostname(host: string): boolean {
-  return (
-    host === 'localhost'
-    || host.endsWith('.localhost')
-    || host === 'localhost.localdomain'
-    || host.endsWith('.local')
-    || host.endsWith('.internal')
-  );
+/** Names that always mean this machine. */
+function isLoopbackName(host: string): boolean {
+  return host === 'localhost' || host.endsWith('.localhost') || host === 'localhost.localdomain';
+}
+
+/** Names under the suffixes reserved for private use: mDNS (`.local`) and `.internal`. */
+function isPrivateUseName(host: string): boolean {
+  return host.endsWith('.local') || host.endsWith('.internal');
+}
+
+/**
+ * Names refused without asking DNS wherever the private-network block applies: the ones that always mean this
+ * machine, and the private-use suffixes. A caller that has opened networks gets the private-use names resolved
+ * instead, and decided by the addresses they answer with, since customers name hosts of their own networks that way.
+ */
+function isRefusedName(host: string, options: OutboundGuardOptions | undefined): boolean {
+  if (isLoopbackName(host)) return true;
+  return isPrivateUseName(host) && options?.privateNetworks?.hasRanges !== true;
+}
+
+/**
+ * Whether the block refuses `address` (an IP literal) for this caller: a private address is refused unless the
+ * networks the caller has opened permit it. A public address is not this guard's concern.
+ */
+export function guardRefusesAddress(address: string, options?: OutboundGuardOptions): boolean {
+  if (!isPrivateIpAddress(address)) return false;
+  return options?.privateNetworks?.permits(address) !== true;
 }
 
 /**
@@ -196,46 +232,47 @@ export function isAllowlistedHost(host: string, allowedHosts: string[]): boolean
 }
 
 /**
- * Resolves a hostname and reports both the private/public verdict and the
- * addresses that verdict was based on. Cached per the guard's existing TTL —
- * the addresses are cached alongside the verdict, not re-resolved
- * separately, but `assertPublicUrl` always does its own connection-time
- * `dns.lookup()` for the pin (see `resolvePinnedAddresses`) rather than trust
- * this cache for that: a stale-but-still-public cache entry is fine for the
- * policy question "is this host allowed at all", but pinning specifically
- * exists to close the gap between "resolved" and "connected", which a cache
- * up to 30s old would reopen.
+ * Resolves a hostname and reports the verdict for this caller together with the addresses it was based on.
+ * The addresses are cached for the guard's usual TTL; the verdict is not, because it depends on the networks the
+ * caller has opened (`options.privateNetworks`) and a cached verdict could be served to a different caller.
+ * `assertPublicUrl` always does its own connection-time `dns.lookup()` for the pin (see `resolvePinnedAddresses`)
+ * rather than trust this cache for that: a stale-but-still-public cache entry is fine for the policy question "is
+ * this host allowed at all", but pinning specifically exists to close the gap between "resolved" and "connected",
+ * which a cache up to 30s old would reopen.
  */
-async function resolvesToPrivateNetwork(
+async function resolveForGuard(
   host: string,
-): Promise<{ privateNetwork: boolean; addresses: ResolvedAddress[]; lookupFailed?: boolean }> {
+  options: OutboundGuardOptions | undefined,
+): Promise<{ refused: boolean; addresses: ResolvedAddress[]; lookupFailed?: boolean }> {
   const bare = host.replace(/^\[|\]$/g, '');
-  if (isLocalHostname(bare)) return { privateNetwork: true, addresses: [] };
-  if (isIP(bare)) {
-    const family = isIP(bare) as 4 | 6;
-    return { privateNetwork: isPrivateIpAddress(bare), addresses: [{ address: bare, family }] };
+  if (isRefusedName(bare, options)) return { refused: true, addresses: [] };
+  const literalFamily = isIP(bare);
+  if (literalFamily) {
+    return {
+      refused: guardRefusesAddress(bare, options),
+      addresses: [{ address: bare, family: literalFamily as 4 | 6 }],
+    };
   }
 
-  const cached = hostPrivacyCache.get(bare);
+  let addresses: ResolvedAddress[];
+  const cached = hostAddressCache.get(bare);
   if (cached && cached.expiresAt > Date.now()) {
-    return { privateNetwork: cached.privateNetwork, addresses: cached.addresses };
+    addresses = cached.addresses;
+  } else {
+    try {
+      const records = await lookup(bare, { all: true, verbatim: true });
+      addresses = records.map((r) => ({ address: r.address, family: r.family as 4 | 6 }));
+    } catch {
+      // No answer to remember: a failed lookup is not evidence of a private address, so it is neither cached nor
+      // reported as one.
+      return { refused: true, addresses: [], lookupFailed: true };
+    }
+    hostAddressCache.set(bare, { addresses, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
   }
-
-  let privateNetwork = true;
-  let addresses: ResolvedAddress[] = [];
-  try {
-    const records = await lookup(bare, { all: true, verbatim: true });
-    addresses = records.map((r) => ({ address: r.address, family: r.family as 4 | 6 }));
-    privateNetwork = records.length === 0
-      || records.some((record) => isPrivateIpAddress(record.address));
-  } catch {
-    // No verdict to remember: a failed lookup is not evidence of a private
-    // address, so it is neither cached nor reported as one.
-    return { privateNetwork: true, addresses: [], lookupFailed: true };
-  }
-
-  hostPrivacyCache.set(bare, { privateNetwork, addresses, expiresAt: Date.now() + HOST_CACHE_TTL_MS });
-  return { privateNetwork, addresses };
+  return {
+    refused: addresses.length === 0 || addresses.some((record) => guardRefusesAddress(record.address, options)),
+    addresses,
+  };
 }
 
 /**
@@ -318,6 +355,20 @@ export interface OutboundGuardOptions {
    * this; transport calls do not.
    */
   forceBlock?: boolean;
+  /**
+   * The private networks opened for the caller (an organization's own, see `providerPrivateNetworks`). A private
+   * address inside them passes the check; absent, every private address is refused as before. It never turns the
+   * check off: public targets are decided as always, and the addresses the allowance refuses stay refused.
+   */
+  privateNetworks?: PrivateNetworkAllowance;
+}
+
+/** What the networks opened for one caller permit; built by `providerPrivateNetworks`. */
+export interface PrivateNetworkAllowance {
+  /** At least one range is open. Names under `.local` and `.internal` are then resolved instead of refused. */
+  readonly hasRanges: boolean;
+  /** Whether the private address `address` (an IP literal) lies inside an opened network and is not one that is never opened. */
+  permits(address: string): boolean;
 }
 
 /**
@@ -367,13 +418,9 @@ async function checkPublicUrl(
 
   if (!privateNetworkBlockApplies(url.hostname, options)) return { url, pinned: [] };
 
-  const { privateNetwork, lookupFailed } = await resolvesToPrivateNetwork(url.hostname);
+  const { refused, lookupFailed } = await resolveForGuard(url.hostname, options);
   if (lookupFailed) throw new OutboundDnsError(`Could not resolve host: ${url.hostname}`);
-  if (privateNetwork) {
-    throw new OutboundNetworkError(
-      `Refusing outbound request to private/loopback host: ${url.hostname}`,
-    );
-  }
+  if (refused) throw new OutboundPrivateTargetError(url.hostname);
 
   // Fresh, connection-time resolution for the pin (see resolvePinnedAddresses)
   // -- re-checked for privacy in case DNS answers differently on this second
@@ -382,10 +429,8 @@ async function checkPublicUrl(
   // the first was checked would let a second, private record be the one it
   // actually connects to.
   const pinned = await resolvePinnedAddresses(url.hostname);
-  if (pinned.some((record) => isPrivateIpAddress(record.address))) {
-    throw new OutboundNetworkError(
-      `Refusing outbound request to private/loopback host: ${url.hostname}`,
-    );
+  if (pinned.some((record) => guardRefusesAddress(record.address, options))) {
+    throw new OutboundPrivateTargetError(url.hostname);
   }
   return { url, pinned };
 }
@@ -397,7 +442,8 @@ async function checkPublicUrl(
  * the addresses it returns are the ones the socket dials. That closes the gap an `assertPublicUrl` call
  * leaves between "validated" and "connected": a name that answered with a public address a moment ago
  * and answers with a loopback one now still cannot get through. The same local-name rule as
- * `assertPublicUrl` (`localhost`, `*.local`, `*.internal`, ...) is applied without asking DNS.
+ * `assertPublicUrl` (`localhost`, `*.local`, `*.internal`, ...) is applied without asking DNS. A private address
+ * passes only where the caller's opened networks (`options.privateNetworks`) permit it.
  *
  * Node calls `lookup` for host NAMES only: a literal IP in the URL is connected to directly. A caller
  * that builds an agent for an endpoint therefore also runs `assertPublicUrl` on that endpoint.
@@ -409,11 +455,8 @@ async function checkPublicUrl(
 export function createGuardedLookup(options?: OutboundGuardOptions): LookupFunction {
   return (hostname, lookupOptions, callback) => {
     const blocking = privateNetworkBlockApplies(hostname, options);
-    const refuse = (): void => callback(
-      new OutboundNetworkError(`Refusing outbound request to private/loopback host: ${hostname}`),
-      [],
-    );
-    if (blocking && isLocalHostname(hostname.toLowerCase())) {
+    const refuse = (): void => callback(new OutboundPrivateTargetError(hostname), []);
+    if (blocking && isRefusedName(hostname.toLowerCase(), options)) {
       // Like every other answer, never inside the call that asked.
       process.nextTick(refuse);
       return;
@@ -426,7 +469,7 @@ export function createGuardedLookup(options?: OutboundGuardOptions): LookupFunct
             Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname }),
             [],
           );
-        } else if (blocking && records.some((record) => isPrivateIpAddress(record.address))) {
+        } else if (blocking && records.some((record) => guardRefusesAddress(record.address, options))) {
           refuse();
         } else if (lookupOptions.all) {
           callback(null, records);

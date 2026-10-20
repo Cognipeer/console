@@ -9,6 +9,17 @@ const db = {
   updateProvider: vi.fn(),
 };
 vi.mock('@/lib/database', () => ({ getDatabase: async () => db }));
+// No name resolves except the one host of the SRV record below, which answers with a private address.
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (host: string) => {
+    if (host === 'db-0.cluster0.example.com') return [{ address: '10.0.0.5', family: 4 }];
+    throw Object.assign(new Error(`ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
+  }),
+  resolveSrv: vi.fn(async (name: string) => {
+    if (name === '_mongodb._tcp.cluster0.example.com') return [{ name: 'db-0.cluster0.example.com', port: 27017, priority: 0, weight: 0 }];
+    throw Object.assign(new Error(`querySrv ENODATA ${name}`), { code: 'ENODATA' });
+  }),
+}));
 
 import { createProviderConfig, updateProviderConfig } from '@/lib/services/providers/providerService';
 import { encryptObject } from '@/lib/utils/crypto';
@@ -117,7 +128,9 @@ describe('provider service endpoint validation for a MongoDB GridFS store', () =
       'mongodb://169.254.169.254:27017',
       'mongodb://[::1]:27017',
       'mongodb://93.184.216.34:27017,10.0.0.5:27017/?replicaSet=rs0',
+      // an SRV record that names a private host, and one that names nothing
       'mongodb+srv://cluster0.example.com/files',
+      'mongodb+srv://nothing.example.com/files',
     ]) {
       await expect(create({ uri }), uri).rejects.toMatchObject({ code: 'provider_endpoint_not_allowed', field: 'uri' });
     }

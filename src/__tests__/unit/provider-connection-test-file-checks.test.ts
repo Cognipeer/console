@@ -269,7 +269,7 @@ describe("the driver's validateSettings", () => {
     const result = await testProviderConnection(probe, { createRuntime: createRuntime as never });
     expect(result.ok).toBe(true);
     expect(validateSettings).toHaveBeenCalledTimes(1);
-    expect(validateSettings).toHaveBeenCalledWith({ credentials: probe.credentials, settings: probe.settings, isOnPrem: false });
+    expect(validateSettings).toHaveBeenCalledWith({ credentials: probe.credentials, settings: probe.settings, isOnPrem: false, tenantId: 'tenant-1' });
     expect(validateSettings.mock.invocationCallOrder[0]).toBeLessThan(createRuntime.mock.invocationCallOrder[0]!);
   });
 

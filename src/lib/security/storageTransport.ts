@@ -15,8 +15,8 @@ import tls from 'node:tls';
 import { ProviderSettingsError } from '@/lib/providers/errors';
 import {
   createGuardedLookup,
-  isPrivateIpAddress,
-  OutboundNetworkError,
+  guardRefusesAddress,
+  OutboundPrivateTargetError,
   privateNetworkBlockApplies,
   type OutboundGuardOptions,
 } from '@/lib/security/outboundFetch';
@@ -158,7 +158,7 @@ const DEFAULT_MAX_SOCKETS = 50;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
 export interface StorageAgentsInput {
-  /** Outbound policy of the deployment for this endpoint (`endpointGuardOptions()`). */
+  /** Outbound policy of the deployment for this endpoint and organization (`endpointGuardOptions(tenantId)`). */
   guard?: OutboundGuardOptions;
   /**
    * The endpoint's host as `URL.hostname` spells it. It decides whether the guarded lookup is installed
@@ -198,11 +198,13 @@ export interface StorageAgents {
  *
  * - Where the outbound policy blocks private targets for `guardHost`, both agents resolve names through
  *   `createGuardedLookup`, so the address a socket dials is checked when it connects. A literal IP never
- *   reaches `lookup` and is vetted here instead.
+ *   reaches `lookup` and is vetted here instead, by the same rule: a private address passes only inside the
+ *   networks `guard.privateNetworks` has opened.
  * - A `caCertificate` becomes one secure context, built once (parsing the default trust again for every new
  *   connection would cost milliseconds each time).
  * - Throws `ProviderSettingsError` for a bad CA bundle, and for `allowInsecureTls` outside a self-hosted
- *   deployment; `OutboundNetworkError` for a private literal-IP host the policy blocks.
+ *   deployment; `OutboundPrivateTargetError` (an `OutboundNetworkError`) for a private literal-IP host the policy
+ *   blocks.
  */
 export function createStorageAgents(input: StorageAgentsInput): StorageAgents {
   assertInsecureTlsAllowed(input.allowInsecureTls, input.isOnPrem);
@@ -211,8 +213,8 @@ export function createStorageAgents(input: StorageAgentsInput): StorageAgents {
   const host = input.guardHost ?? '';
   const guarded = privateNetworkBlockApplies(host, input.guard);
   const literal = host.replace(/^\[|\]$/g, '');
-  if (guarded && isIP(literal) && isPrivateIpAddress(literal)) {
-    throw new OutboundNetworkError(`Refusing outbound request to private/loopback host: ${host}`);
+  if (guarded && isIP(literal) && guardRefusesAddress(literal, input.guard)) {
+    throw new OutboundPrivateTargetError(host);
   }
 
   const options = {

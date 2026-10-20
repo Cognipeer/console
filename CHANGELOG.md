@@ -209,6 +209,13 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - `openapi.yaml` in the repository root is the one canonical OpenAPI description of the client API (the copy under
   `docs/public` is gone; the docs build publishes the root file), and CI (`npm run test:openapi`) checks that its
   paths and the registered routes agree.
+- `PROVIDER_PRIVATE_NETWORKS` and `PROVIDER_PRIVATE_NETWORKS_DENY` let an operator open private networks (a VPN or peering
+  into a customer network) to the provider endpoints of chosen organizations where private targets are otherwise
+  refused: SaaS, and a self-hosted install with `OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK=true`. S3-compatible stores,
+  Azure Blob, MongoDB GridFS and the model providers can then use private addresses; `mongodb+srv://` GridFS
+  connection strings are accepted, their SRV hosts checked the same way. Loopback, link-local, cloud metadata and the
+  server's own addresses are never opened. See [Provider private
+  networks](docs/guide/configuration.md#provider-private-networks).
 
 ### Authorization
 
