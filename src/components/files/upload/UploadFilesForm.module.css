@@ -1,0 +1,207 @@
+/* The "Upload files" screen: drop zone, queue rows, destination line. Colours come from the --ds tokens, so both
+   colour schemes follow. Nothing here is wider than its container: rows wrap on a narrow screen. */
+
+.banner {
+  margin-bottom: 14px;
+}
+
+.drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 20px;
+  text-align: center;
+  border: 1.5px dashed var(--ds-border-strong);
+  border-radius: var(--ds-r-lg);
+  background: var(--ds-surface-1);
+  transition: border-color var(--ds-m-fast), background-color var(--ds-m-fast);
+}
+
+.dropActive {
+  border-color: var(--ds-accent);
+  background: var(--ds-accent-soft);
+}
+
+.dropDisabled {
+  opacity: 0.6;
+}
+
+.dropIcon {
+  color: var(--ds-text-muted);
+}
+
+.dropTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ds-text);
+}
+
+.dropOr {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ds-text-soft);
+}
+
+.hint {
+  max-width: 560px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ds-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--ds-warn-text);
+}
+
+/* ── Queue ─────────────────────────────────────────────────────────────── */
+
+.list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-raised);
+  overflow: hidden;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px minmax(150px, 230px) 88px;
+  grid-template-areas: 'name size status actions';
+  gap: 6px 14px;
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.name {
+  grid-area: name;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nameStatic {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--ds-text);
+  overflow-wrap: anywhere;
+}
+
+.savedAs {
+  font-size: 12px;
+  color: var(--ds-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.size {
+  grid-area: size;
+  padding-top: 6px;
+  font-size: 12.5px;
+  color: var(--ds-text-soft);
+  white-space: nowrap;
+}
+
+.status {
+  grid-area: status;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 5px;
+  font-size: 12.5px;
+  color: var(--ds-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.statusError {
+  color: var(--ds-err-text);
+}
+
+.statusDone {
+  color: var(--ds-ok);
+}
+
+.actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 30px;
+}
+
+@media (max-width: 720px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name actions'
+      'size status';
+  }
+
+  .size {
+    padding-top: 0;
+  }
+
+  .status {
+    padding-top: 0;
+  }
+}
+
+/* ── Destination ───────────────────────────────────────────────────────── */
+
+.destination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-raised);
+  font-size: 13.5px;
+  color: var(--ds-text);
+  overflow-wrap: anywhere;
+}
+
+.destinationSep {
+  color: var(--ds-text-faint);
+}
+
+.note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ds-text-muted);
+}
+
+/* ── Processing ────────────────────────────────────────────────────────── */
+
+.advanced {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--ds-text-soft);
+}
+
+.advanced summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.advancedBody {
+  margin-top: 8px;
+  max-width: 360px;
+}

@@ -1,0 +1,128 @@
+/**
+ * Document Store "Dosya yükle" ekranı: bırakma alanı, kuyruk, hedef, Markdown seçeneği, özet.
+ * `tr.ts` içinde `files.upload` olarak kayıtlıdır; ortak metinler (dosya türleri, sağlık,
+ * API hataları, kopyalama) `filesCommon.tr.ts` içindedir.
+ */
+import type { filesUploadEn } from './filesUpload.en';
+
+export const filesUploadTr: typeof filesUploadEn = {
+  title: 'Dosya yükle',
+  sections: {
+    files: 'Dosyalar',
+    filesHelp: 'Yüklenecek dosyaları ekleyin. Bir dosyayı gönderilmeden önce yeniden adlandırabilirsiniz.',
+    destination: 'Hedef',
+    destinationHelp: 'Dosyaların bucket içinde nerede saklanacağı.',
+    processing: 'İşleme',
+    processingHelp: 'Dosyalar saklandıktan sonra ne olacağı.',
+  },
+  drop: {
+    title: 'Dosyaları buraya bırakın',
+    release: 'Dosyaları eklemek için bırakın',
+    or: 'veya',
+    browse: 'Dosya seç',
+    inputLabel: 'Yüklenecek dosyaları seçin',
+    limitSize: 'Dosya başına en fazla {size}',
+    limitCount: 'tek seferde en fazla {count} dosya',
+    anyType: 'her dosya türü',
+    allowedTypes: 'izin verilen türler: {types}',
+    moreTypes: '+{count} tür daha',
+    storageLeft: '{size} depolama alanı kaldı',
+    checking: 'Yükleme sınırları kontrol ediliyor…',
+    limitsFailed: 'Yükleme sınırları alınamadı. Sunucu her dosyayı geldiğinde kontrol eder.',
+  },
+  notices: {
+    overflow: 'Eklenmeyen: {count}. Tek seferde en fazla {max} dosya kuyruğa alınabilir.',
+    folders: 'Atlanan klasör: {count}. Klasörler yüklenemez; bunun yerine içindeki dosyaları ekleyin.',
+    duplicates: 'Listede zaten olan: {count}.',
+  },
+  blocked: {
+    disabled: 'Bu bucket devre dışı olduğu için dosya yüklenemez. Önce bucket’ı etkinleştirin.',
+  },
+  queue: {
+    label: 'Yüklenecek dosyalar',
+    empty: 'Henüz dosya eklenmedi.',
+    nameLabel: '{file} dosyasının adı',
+    remove: '{file} dosyasını listeden çıkar',
+    retry: 'Yeniden dene',
+    retryFile: '{file} yüklemesini yeniden dene',
+    progressLabel: '{file} yükleme ilerlemesi',
+    savedAs: 'Kaydedilecek anahtar: {key}',
+    storedAs: 'Kaydedilen anahtar: {key}',
+  },
+  status: {
+    ready: 'Hazır',
+    waiting: 'Sırada…',
+    uploading: 'Yükleniyor · %{percent}',
+    saving: 'Kaydediliyor…',
+    done: 'Yüklendi',
+    failed: 'Başarısız: {message}',
+    tooLarge: 'Çok büyük (sınır {limit})',
+    typeNotAllowed: 'Tür izinli değil ({type})',
+    nameRequired: 'Bir dosya adı girin',
+    nameSlash: 'Ad “/” içeremez; klasörler için klasör alanını kullanın',
+    contentTypeInvalid: 'Geçerli bir içerik türü değil',
+  },
+  destination: {
+    folderLabel: 'Klasör',
+    folderPlaceholder: 'Bucket kökü',
+    folderHint: 'Bucket köküne yüklemek için boş bırakın. Klasörleri iç içe yazmak için / kullanın, örneğin raporlar/2026.',
+    root: 'bucket kökü',
+    unique: 'Hiçbir dosyanın üzerine yazılmaması için her dosyaya benzersiz bir sonek eklenir. Verdiğiniz ad görüntüleme ve indirme için korunur.',
+    errors: {
+      dotSegments: 'Klasör adı “.” veya “..” içeremez.',
+      controlChars: 'Klasör denetim karakterleri içeremez.',
+      tooLong: 'Klasör yolu çok uzun (en fazla {max} karakter).',
+    },
+  },
+  processing: {
+    convert: 'Markdown’a dönüştür',
+    convertHint:
+      'PDF, Word, PowerPoint, Excel, HTML, metin ve görsellerde çalışır. Her dosyanın yanına bir Markdown kopyası kaydedilir; orijinal dosya hiç değişmez.',
+    background:
+      'Dönüştürme yüklemeden sonra arka planda çalışır. Durumu dosya listesinde ve dosya ayrıntılarında görünür; başarısız bir dönüştürme oradan yeniden denenebilir.',
+    advanced: 'Gelişmiş',
+    contentType: 'İçerik türü',
+    contentTypeHint: 'Yalnızca tek dosya için. Tarayıcının algıladığı türü kullanmak için boş bırakın.',
+  },
+  summary: {
+    upload: 'Yükleme',
+    files: 'Dosyalar',
+    filesSome: '{total} ({ready} tanesi yüklenebilir)',
+    totalSize: 'Toplam boyut',
+    destination: 'Hedef',
+    markdown: 'Markdown kopyası',
+    on: 'Açık',
+    off: 'Kapalı',
+    preflight: 'Ön kontrol',
+    storageWarning: 'Yüklenecek {size} var, ancak projede {left} depolama alanı kaldı. Sığmayanı sunucu reddeder.',
+    filesWarning: 'Yüklenecek {count} dosya var, ancak projenin dosya sınırında {left} dosyalık yer kaldı. Sığmayanı sunucu reddeder.',
+  },
+  checks: {
+    selected: 'Dosyalar seçildi',
+    folder: 'Hedef klasör geçerli',
+    sizeOk: 'Her dosya boyut sınırı içinde',
+    sizeOver: 'Boyut sınırını aşan: {count}',
+    typesOk: 'Her dosyanın türü izinli',
+    typesOver: 'Türü izinli olmayan: {count}',
+    namesOver: 'Düzeltilecek ad veya içerik türü: {count}',
+  },
+  footer: {
+    ready: '{ready} / {total} hazır',
+    uploaded: '{done} / {total} yüklendi',
+  },
+  actions: {
+    upload: 'Yükle',
+    uploadOne: '1 dosya yükle',
+    uploadMany: '{count} dosya yükle',
+    uploading: 'Yükleniyor…',
+    done: 'Bitti',
+    cancel: 'Vazgeç',
+    close: 'Kapat',
+  },
+  confirm: {
+    title: 'Yükleme durdurulsun mu?',
+    message: 'Bazı dosyalar hâlâ yükleniyor. Şimdi kapatırsanız bu yüklemeler iptal edilir. Tamamlanmış dosyalar bucket’ta kalır.',
+    stop: 'Yüklemeleri iptal et ve kapat',
+    keep: 'Yüklemeye devam et',
+  },
+};

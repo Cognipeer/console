@@ -1,0 +1,244 @@
+/* The file drawer. Colours come from the --ds tokens, so both colour schemes follow. Nothing is wider than the
+   drawer: long names, keys and checksums wrap, and the drawer itself is never wider than the screen. */
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.titleText {
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ds-text);
+  overflow-wrap: anywhere;
+}
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 13px;
+  color: var(--ds-text-soft);
+}
+
+.sep {
+  color: var(--ds-text-faint);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.block {
+  margin-top: 12px;
+}
+
+.tabs {
+  margin-top: 16px;
+}
+
+.panel {
+  min-width: 0;
+  margin-top: 16px;
+}
+
+/* ── Preview ───────────────────────────────────────────────────────────── */
+
+.previewBox {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-1);
+  overflow: hidden;
+}
+
+.previewImage {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  object-fit: contain;
+}
+
+.previewFrame {
+  display: block;
+  width: 100%;
+  height: min(70vh, 640px);
+  border: 0;
+}
+
+.previewText {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 60vh;
+  overflow: auto;
+  font: 12.5px/1.6 var(--font-mono);
+  color: var(--ds-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.previewNote {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--ds-text-muted);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--ds-text-muted);
+}
+
+.emptyIcon {
+  color: var(--ds-text-faint);
+}
+
+.emptyTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ds-text);
+}
+
+.emptyHint {
+  max-width: 360px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Markdown ──────────────────────────────────────────────────────────── */
+
+.statusRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.statusText {
+  font-size: 13px;
+  color: var(--ds-text-soft);
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ds-text-muted);
+}
+
+.reason {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.copyRow {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+/* ── Details ───────────────────────────────────────────────────────────── */
+
+.kv {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  margin: 0;
+}
+
+.kv dt,
+.kv dd {
+  margin: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.kv dt {
+  font-size: 13px;
+  color: var(--ds-text-muted);
+}
+
+.kv dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 4px 8px;
+  min-width: 0;
+  font-size: 13.5px;
+  color: var(--ds-text);
+  overflow-wrap: anywhere;
+}
+
+.valueText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.expired {
+  color: var(--ds-err-text);
+}
+
+@media (max-width: 520px) {
+  .kv {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .kv dt {
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+}
+
+/* ── API ───────────────────────────────────────────────────────────────── */
+
+.api {
+  margin-top: 24px;
+}
+
+.apiTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ds-text);
+}
+
+.apiHint {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ds-text-muted);
+}
+
+.snippet {
+  margin-top: 12px;
+}
+
+.snippetHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ds-text-soft);
+}
+
+.code {
+  margin: 0;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

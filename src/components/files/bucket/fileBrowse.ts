@@ -7,6 +7,8 @@
  * only because keys say so. The server lists one folder at a time (`prefix`)
  * and names its sub-folders; keys that arrive nested anyway are folded into
  * folders here, so the view is right whichever way a page came back.
+ *
+ * The listing URL itself is `filesRoutes.objects(bucketKey, query)` in `filesApi.ts`.
  */
 
 import type { FileRecordView } from '@/lib/services/files';
@@ -101,20 +103,6 @@ export function applySessionFilter<T extends Pick<FileRecordView, 'purpose'>>(it
 /** The `purpose` the listing takes for a filter; `all` sends none. */
 export function purposeParam(filter: SessionFileFilter): 'conversation' | 'other' | undefined {
     return filter === 'session' ? 'conversation' : filter === 'other' ? 'other' : undefined;
-}
-
-/** The listing URL for a folder. `prefix` is always sent, so the server lists the folder and not the whole bucket. */
-export function objectsUrl(
-    bucketKey: string,
-    options: { prefix: string; filter: SessionFileFilter; cursor?: string; limit?: number },
-): string {
-    const params = new URLSearchParams();
-    params.set('limit', String(options.limit ?? 50));
-    params.set('prefix', options.prefix);
-    const purpose = purposeParam(options.filter);
-    if (purpose) params.set('purpose', purpose);
-    if (options.cursor) params.set('cursor', options.cursor);
-    return `/api/files/buckets/${encodeURIComponent(bucketKey)}/objects?${params.toString()}`;
 }
 
 export interface ExpiryLabel {
