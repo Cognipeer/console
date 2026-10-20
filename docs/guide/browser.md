@@ -270,7 +270,7 @@ The live screenshot endpoint (`GET …/screenshot/live`) returns an inline PNG/J
 
 ## Browser over MCP
 
-A browser is published over MCP from the MCP module: **MCP Servers → New MCP server → Internal service → Browser**, then pick the browser. The server gets the MCP module's endpoints, access mode, tool toggles and renames, guardrail binding, logs and hubs, like any other MCP server. (Browsers no longer expose an MCP endpoint of their own; the former `/api/client/v1/browser/:browserKey/mcp/*` routes have been removed.)
+A browser is published over MCP from the MCP module: **MCP Servers → New MCP server → Internal service → Browser**, then pick the browser. The server gets the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs, like any other MCP server. It has no public URL: a browser server, and a composite server with a browser member, is always called with an API token. (Browsers no longer expose an MCP endpoint of their own; the former `/api/client/v1/browser/:browserKey/mcp/*` routes have been removed.)
 
 The toolset mirrors the action API and is derived from the same tool definitions the `Browser Use` system tool binds, so the two surfaces cannot drift apart:
 

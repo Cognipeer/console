@@ -367,6 +367,17 @@ describe('the dashboard and the token API give the same answer for the same pers
       await deletePolicy(env.tenantDbName, 'no-mcp-admin-both');
     }
   });
+
+  it('a configuration the MCP service refuses is a 400 with its reason on the dashboard too', async () => {
+    const { McpServerConfigError } = await import('@/lib/services/mcp');
+    hoisted.createMcpServer.mockRejectedValueOnce(new McpServerConfigError('A browser server is available with an API token only'));
+    const dashboard = await sessionPost(users.owner, createBody({
+      sourceType: 'internal',
+      internalConfig: { provider: 'browser', instanceKey: 'back-office' },
+      exposure: { protocols: ['streamable-http'], accessMode: 'public' },
+    }));
+    expect(dashboard).toEqual({ status: 400, body: { error: 'A browser server is available with an API token only' } });
+  });
 });
 
 describe('upstreamAuth default', () => {

@@ -329,6 +329,8 @@ Two maintenance jobs are visible on **Automations** (`/dashboard/automations`) u
 
 **Allow and block lists are evaluated per request, not just per navigation.** They are applied to every resource the page loads. Order is: block list first (a match denies), then the allow list (if non-empty, a non-match denies), then the private-network guard. A pattern matches exactly, or as a suffix — `example.com` also matches `www.example.com`, while `*.example.com` matches subdomains only and not the apex. `*` allows everything.
 
+**Redirects and WebSockets are checked too.** Every hop of a redirect is evaluated: when a hop leads to a refused host, the session is closed and the action fails with the reason in `errorMessage` (open a new session to continue). A WebSocket to a refused host is closed with code `1008` before it connects.
+
 **Sessions live in one process's memory.** They are not shared between nodes and do not survive a restart; a restarted runtime marks them `expired`. In an Enterprise [Cluster](../guide/cluster.md) deployment only `POST /actions` is routed to the node that owns the profile — extract, snapshot, screenshot, PDF and close execute on whichever node receives the request, so pin your traffic or keep the whole run on one node. Assigning a profile to a different node affects future sessions only.
 
 **Ids and keys are not interchangeable.** `browserId` on session creation must be the profile's `id`; a Browser MCP server's `instanceKey` is the key; driving endpoints take the `sessionKey`; reading a session, its events and deleting its record take the session `id`.

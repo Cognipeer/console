@@ -29,6 +29,8 @@ export {
   parseOpenApiSpec,
   resolveExposure,
   resolveSourceType,
+  isBrowserServer,
+  reachesBrowser,
   DEFAULT_MCP_EXPOSURE,
 } from './mcpService';
 

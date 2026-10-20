@@ -533,6 +533,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         server: serializeMcpServer(server),
       });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Create MCP server error', { error });
       return sendProjectContextError(reply, error)
         ?? sendEndpointSlugError(reply, error)

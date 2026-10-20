@@ -116,6 +116,8 @@ interface McpMemberOption {
   key: string;
   name: string;
   sourceType: SourceType;
+  /** The internal provider of an internal-service server. */
+  provider?: string;
   status: string;
   toolCount: number;
 }
@@ -383,11 +385,15 @@ export default function CreateMcpModal({
         setMemberOptions(
           list
             .filter((s: { sourceType?: string }) => s.sourceType !== 'composite')
-            .map((s: { id: string; key: string; name: string; sourceType?: string; status: string; tools?: unknown[] }) => ({
+            .map((s: {
+              id: string; key: string; name: string; sourceType?: string; status: string; tools?: unknown[];
+              metadata?: { internal?: { provider?: string } };
+            }) => ({
               id: s.id,
               key: s.key,
               name: s.name,
               sourceType: (s.sourceType ?? 'openapi') as SourceType,
+              provider: s.metadata?.internal?.provider,
               status: s.status,
               toolCount: s.tools?.length ?? 0,
             })),
@@ -421,6 +427,17 @@ export default function CreateMcpModal({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.values.sourceType, form.values.internalProvider]);
+
+  // A browser reaches whatever address the console can: its server, and a
+  // composite that includes it, take an API token only (the server refuses
+  // a public one).
+  const browserTokenOnly = (form.values.sourceType === 'internal' && form.values.internalProvider === 'browser')
+    || (form.values.sourceType === 'composite'
+      && form.values.compositeMembers.some((id) => memberOptions.find((m) => m.id === id)?.provider === 'browser'));
+  useEffect(() => {
+    if (browserTokenOnly && form.values.accessMode === 'public') form.setFieldValue('accessMode', 'token');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [browserTokenOnly, form.values.accessMode]);
 
   const v = form.values;
 
@@ -1187,15 +1204,19 @@ export default function CreateMcpModal({
         ) : null}
         <FormField
           label="Access mode"
-          hint={v.accessMode === 'public'
-            ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
-            : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
+          hint={browserTokenOnly
+            ? 'A browser can reach any address the console can, so this server takes an API token only. Callers send a Cognipeer API token (PAT) in the Authorization header.'
+            : v.accessMode === 'public'
+              ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
+              : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
         >
           <ChipPicker<AccessMode>
-            options={[
-              { value: 'token', label: 'API token required' },
-              { value: 'public', label: 'Public URL (no auth)' },
-            ]}
+            options={browserTokenOnly
+              ? [{ value: 'token', label: 'API token required' }]
+              : [
+                { value: 'token', label: 'API token required' },
+                { value: 'public', label: 'Public URL (no auth)' },
+              ]}
             value={v.accessMode}
             onChange={(val) => form.setFieldValue('accessMode', val as AccessMode)}
           />

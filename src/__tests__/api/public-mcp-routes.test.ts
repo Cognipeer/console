@@ -593,4 +593,45 @@ describe('public MCP routes', () => {
       expect(body.result?.content).toEqual([{ type: 'text', text: '{"echoed":true}' }]);
     });
   });
+
+  describe('a browser behind the endpoint', () => {
+    const browserMember = server({
+      _id: 'srv-browser',
+      sourceType: 'internal',
+      endpointSlug: undefined,
+      exposure: { protocols: ['streamable-http'], accessMode: 'token' },
+      metadata: { internal: { provider: 'browser', instanceKey: 'back-office', config: {} } },
+    });
+    const composite = (memberId: string) => server({
+      sourceType: 'composite',
+      metadata: { composite: { members: [{ serverId: memberId }] } },
+    });
+
+    it('is not served, even when the stored server says public', async () => {
+      current = server({ sourceType: 'internal', metadata: browserMember.metadata });
+      await start();
+      for (const body of [rpc('tools/list'), callTool()]) {
+        expect((await post(body)).statusCode).toBe(404);
+      }
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+
+    it('is not served through a public composite', async () => {
+      db.findMcpServerById.mockImplementation(async (id: string) => (id === 'srv-browser' ? browserMember : null) as never);
+      current = composite('srv-browser');
+      await start();
+      expect((await post(callTool())).statusCode).toBe(404);
+      expect(executeMcpTool).not.toHaveBeenCalled();
+    });
+
+    it('leaves a public composite without a browser served', async () => {
+      db.findMcpServerById.mockImplementation(async (id: string) => (id === 'srv-other'
+        ? server({ _id: 'srv-other', sourceType: 'internal', metadata: { internal: { provider: 'agent-observability' } } })
+        : null) as never);
+      current = composite('srv-other');
+      await start();
+      expect((await post(callTool())).statusCode).toBe(200);
+      expect(executeMcpTool).toHaveBeenCalledTimes(1);
+    });
+  });
 });

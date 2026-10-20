@@ -107,8 +107,38 @@ export const DEFAULT_MCP_EXPOSURE: IMcpExposureConfig = {
   accessMode: 'token',
 };
 
-export function resolveSourceType(server: IMcpServer): McpSourceType {
+export function resolveSourceType(server: Pick<IMcpServer, 'sourceType'>): McpSourceType {
   return server.sourceType ?? 'openapi';
+}
+
+/**
+ * A browser reaches whatever address the console can, so a server that drives
+ * one is called with a token only: neither the browser server itself nor a
+ * composite that includes it can be public.
+ */
+const BROWSER_PROVIDER_ID = 'browser';
+const BROWSER_TOKEN_ONLY_MESSAGE =
+  'A browser server is available with an API token only: it cannot be public, and neither can a composite server that includes it.';
+
+/** An internal-source server built on the browser provider. */
+export function isBrowserServer(server: Pick<IMcpServer, 'sourceType' | 'metadata'>): boolean {
+  if (resolveSourceType(server) !== 'internal') return false;
+  const internal = (server.metadata as Record<string, unknown> | undefined)?.internal as { provider?: unknown } | undefined;
+  return internal?.provider === BROWSER_PROVIDER_ID;
+}
+
+/** A browser server, or a composite with a browser member (members are read from the current tenant database). */
+export async function reachesBrowser(
+  db: DatabaseProvider,
+  server: Pick<IMcpServer, 'sourceType' | 'metadata'>,
+): Promise<boolean> {
+  if (isBrowserServer(server)) return true;
+  if (resolveSourceType(server) !== 'composite') return false;
+  for (const member of getCompositeConfig(server).members) {
+    const record = await db.findMcpServerById(member.serverId);
+    if (record && isBrowserServer(record)) return true;
+  }
+  return false;
 }
 
 export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
@@ -807,6 +837,7 @@ interface BuiltCompositeTools {
   members: IMcpCompositeMemberConfig[];
   memberSummaries: IMcpCompositeMemberSummary[];
   hasInternalMember: boolean;
+  hasBrowserMember: boolean;
 }
 
 async function buildCompositeTools(
@@ -824,6 +855,7 @@ async function buildCompositeTools(
   const members: IMcpCompositeMemberConfig[] = [];
   const memberSummaries: IMcpCompositeMemberSummary[] = [];
   let hasInternalMember = false;
+  let hasBrowserMember = false;
 
   for (const cfg of memberConfigs) {
     const member = await db.findMcpServerById(cfg.serverId);
@@ -831,6 +863,7 @@ async function buildCompositeTools(
     const m = member!;
     const memberSourceType = resolveSourceType(m);
     if (memberSourceType === 'internal') hasInternalMember = true;
+    if (isBrowserServer(m)) hasBrowserMember = true;
 
     members.push({
       serverId: cfg.serverId,
@@ -883,7 +916,7 @@ async function buildCompositeTools(
     origin: { serverId: entries[i].serverId, serverKey: entries[i].serverKey, realName: entries[i].realName },
   }));
 
-  return { tools, members, memberSummaries, hasInternalMember };
+  return { tools, members, memberSummaries, hasInternalMember, hasBrowserMember };
 }
 
 /** Rebuild + persist one composite's snapshot from its stored member config. */
@@ -1022,6 +1055,9 @@ export async function createMcpServer(
   if (sourceType === 'internal') {
     const ctx = { tenantDbName, tenantId, projectId };
     const provider = requireInternalMcpProvider(input.internalConfig!.provider);
+    if (provider.id === BROWSER_PROVIDER_ID && normalizeExposure(input.exposure).accessMode === 'public') {
+      throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+    }
     const instanceKey = input.internalConfig!.instanceKey;
     const config = input.internalConfig!.config ?? {};
     await provider.validateInstance(ctx, instanceKey, config);
@@ -1037,6 +1073,9 @@ export async function createMcpServer(
       alwaysPrefix: m.alwaysPrefix,
     }));
     const built = await buildCompositeTools(db, { tenantId, projectId }, memberConfigs);
+    if (built.hasBrowserMember && normalizeExposure(input.exposure).accessMode === 'public') {
+      throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+    }
     tools = built.tools;
     compositeMetadata = metadataWithComposite(
       undefined,
@@ -1165,6 +1204,38 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
     }
   }
   return changes;
+}
+
+/**
+ * What an update leaves behind must keep a browser off public URLs: the
+ * server itself, a composite through its members, and a server that becomes a
+ * browser server while a public composite includes it.
+ */
+async function assertBrowserStaysTokenOnly(
+  db: DatabaseProvider,
+  existing: IMcpServer,
+  sourceType: McpSourceType,
+  updateData: Record<string, unknown>,
+): Promise<void> {
+  const after = {
+    sourceType,
+    metadata: (updateData.metadata as IMcpServer['metadata'] | undefined) ?? existing.metadata,
+  };
+  const exposure = (updateData.exposure as IMcpExposureConfig | undefined) ?? resolveExposure(existing);
+  if (exposure.accessMode === 'public' && await reachesBrowser(db, after)) {
+    throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+  }
+  if (isBrowserServer(after) && !isBrowserServer(existing)) {
+    const id = String(existing._id);
+    const publicComposite = (await db.listMcpServers({})).find((server) => resolveSourceType(server) === 'composite'
+      && resolveExposure(server).accessMode === 'public'
+      && getCompositeConfig(server).members.some((member) => member.serverId === id));
+    if (publicComposite) {
+      throw new McpServerConfigError(
+        `${BROWSER_TOKEN_ONLY_MESSAGE} This server is a member of the public composite server "${publicComposite.name}".`,
+      );
+    }
+  }
 }
 
 export async function updateMcpServer(
@@ -1315,6 +1386,8 @@ export async function updateMcpServer(
       built.memberSummaries,
     );
   }
+
+  await assertBrowserStaysTokenOnly(db, existing, sourceType, updateData);
 
   // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
   // the incoming names are validated against the tool list being persisted.
