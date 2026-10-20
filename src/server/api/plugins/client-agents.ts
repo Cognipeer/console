@@ -38,6 +38,7 @@ import {
 import { authz } from '@/lib/iam/routeAuthz';
 import {
   connectedConfigForUpdate,
+  prepareConnectedAgentIdentity,
   invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
@@ -612,6 +613,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             return reply.code(400).send({ error: bindings.error });
           }
           if (bindings.patch) Object.assign(externalConfig, bindings.patch);
+          await prepareConnectedAgentIdentity(externalConfig, ctx.tenantDbName);
           body.config = externalConfig;
         } else if (existing.config?.kind === 'external') {
           // Guard: never let a native-shaped config silently clobber a stored

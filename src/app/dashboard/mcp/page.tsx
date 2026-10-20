@@ -27,6 +27,7 @@ const AUTH_LABELS: Record<string, string> = {
   token: 'Bearer',
   header: 'Header',
   basic: 'Basic',
+  console_identity: 'Console identity',
 };
 
 const SOURCE_LABELS: Record<string, string> = {

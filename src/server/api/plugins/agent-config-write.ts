@@ -43,6 +43,7 @@ import {
 } from '@/lib/services/config/configRefs';
 import { readJsonBody } from '../fastify-utils';
 import { configReadRequiredBody } from './config-permission';
+import { CONSOLE_IDENTITY_AUTH_TYPE, ensureConsoleIdentityKey } from '@/lib/iam/consoleIdentity';
 import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { FILES_WRITE_REQUIRED_MESSAGE } from './files-permission';
 
@@ -334,6 +335,15 @@ async function configReferenceRefusal(
 }
 
 /**
+ * A connected agent set up for Console identity: make sure the workspace's signing key exists, so
+ * its key set is published before the first call (that call creates it otherwise).
+ */
+export async function prepareConnectedAgentIdentity(config: IAgentConfig, tenantDbName: string): Promise<void> {
+  if (config.kind !== 'external' || config.connection?.authType !== CONSOLE_IDENTITY_AUTH_TYPE) return;
+  await ensureConsoleIdentityKey(tenantDbName).catch(() => undefined);
+}
+
+/**
  * A new agent's config, as both create routes store it: normalized, guardrail
  * bindings validated, then the whole config validated.
  */
@@ -354,6 +364,7 @@ export async function prepareNewAgentConfig(
   if (bindingError) return { badRequest: { error: bindingError } };
   const refsError = await normalizeSandboxConfigRefs(config, undefined, scope);
   if (refsError) return refsError;
+  await prepareConnectedAgentIdentity(config, scope.tenantDbName);
 
   const validation = await validateAgentConfig({
     tenantDbName: scope.tenantDbName,

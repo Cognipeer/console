@@ -21,6 +21,7 @@ import type {
     UserQuestionItem,
 } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
+import type { ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 import type {
     AgentResponseFormat,
     DatabaseProvider,
@@ -142,6 +143,8 @@ export interface PausedTurnOptions {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that still fill the system prompt. */
     literalVariables?: string[];
+    /** Who the turn is for: MCP servers and connected agents set up for Console identity get tokens for this person, not the approver. */
+    identity?: ConsoleIdentityPerson;
 }
 
 interface PausedEnvelope {
@@ -197,7 +200,7 @@ export function serializePausedState(
     }
     stored.ctx = resumeCtx;
 
-    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false));
+    const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false || turn.identity));
     const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
     return text.length <= maxBytes ? text : null;
 }

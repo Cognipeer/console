@@ -52,6 +52,7 @@ import { clientAutomationsApiPlugin } from './plugins/client-automations';
 import { clientMcpApiPlugin } from './plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from './plugins/client-mcp-console';
 import { publicA2aApiPlugin } from './plugins/public-a2a';
+import { publicIdentityApiPlugin } from './plugins/public-identity';
 import { publicHooksApiPlugin } from './plugins/public-hooks';
 import { publicMcpApiPlugin } from './plugins/public-mcp';
 import { clientPiiApiPlugin } from './plugins/client-pii';
@@ -143,6 +144,8 @@ const PUBLIC_API_PREFIXES = [
   '/api/public/a2a/',
   // Incoming trigger webhooks (random hook id; every delivery proves the trigger secret).
   '/api/public/hooks/',
+  // Public signing keys of each workspace's Console identity issuer (public data only).
+  '/api/public/identity/',
   ...enterprisePublicApiPrefixes,
 ];
 
@@ -564,6 +567,8 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(publicMcpApiPlugin);
   // Unauthenticated A2A endpoints for agents with accessMode 'public'.
   await app.register(publicA2aApiPlugin);
+  // Public key sets of each workspace's Console identity issuer.
+  await app.register(publicIdentityApiPlugin);
   // Incoming trigger webhooks: own body parsers and error handler (encapsulated, not fastify-plugin).
   await app.register(publicHooksApiPlugin);
   await app.register(clientPiiApiPlugin);

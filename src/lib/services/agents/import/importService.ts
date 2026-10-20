@@ -36,6 +36,7 @@ import { assertMayNameBucket, type CanNameBucket } from '../attachmentsBucketAcc
 import {
     remapSpecResourceKeys,
     type ManifestAuthShape,
+    type ManifestMcpAuthShape,
     type ManifestResourceType,
     type ManifestResources,
 } from '../manifestResources';
@@ -145,7 +146,7 @@ export interface EmbeddedResourceRow {
     detail?: string;
     existing?: { key: string; name: string };
     /** Credential the importer has to supply when creating (secrets are never exported). */
-    auth?: ManifestAuthShape;
+    auth?: ManifestAuthShape | ManifestMcpAuthShape;
     /** stdio MCP: env var names whose values have to be supplied. */
     envKeys?: string[];
 }
@@ -184,7 +185,8 @@ async function embeddedResourceRows(ctx: ImportContext, resources: ManifestResou
                 name: server.name,
                 detail: server.remoteConfig?.url ?? (server.stdioConfig ? `${server.stdioConfig.runtime} ${server.stdioConfig.packageName}` : server.upstreamBaseUrl ?? server.sourceType),
                 ...(found ? { existing: { key: found.key, name: found.name } } : {}),
-                ...(server.auth.type !== 'none' ? { auth: server.auth } : {}),
+                // Console identity asks for no credential: the importing workspace signs its own tokens.
+                ...(server.auth.type !== 'none' && server.auth.type !== 'console_identity' ? { auth: server.auth } : {}),
                 ...(server.stdioConfig?.envKeys?.length ? { envKeys: server.stdioConfig.envKeys } : {}),
             });
         }
@@ -662,7 +664,10 @@ export async function applyAgentDocumentImport(
 
 // ── Cognipeer manifest (with optional embedded definitions) ─────────────
 
-function mergeAuth(shape: ManifestAuthShape, secret: Extract<ResourceImportChoice, { action: 'create' }>['auth']) {
+function mergeAuth<T extends ManifestMcpAuthShape['type']>(
+    shape: { type: T; headerName?: string; username?: string },
+    secret: Extract<ResourceImportChoice, { action: 'create' }>['auth'],
+) {
     return {
         type: shape.type,
         ...(shape.type === 'token' && secret?.token ? { token: secret.token } : {}),

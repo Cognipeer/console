@@ -12,12 +12,18 @@ import type {
 import type { SpecFormatHint } from '@/lib/services/specImport';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
+import {
+  CONSOLE_IDENTITY_AUTH_TYPE,
+  consoleIdentityCallerOf,
+  isConsoleIdentityRefusal,
+} from '@/lib/iam/consoleIdentity';
 import { maskSecretValues } from '@/lib/services/logRedaction';
 import {
   createMcpServer,
   deleteMcpServer,
   executeMcpTool,
   getMcpServerByKey,
+  isMcpServerConfigError,
   isMcpToolInputError,
   listEnabledMcpTools,
   listMcpToolDescriptors,
@@ -57,7 +63,7 @@ import {
 
 const logger = createLogger('api:client-mcp');
 
-const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic'];
+const VALID_AUTH_TYPES: McpAuthType[] = ['none', 'token', 'header', 'basic', CONSOLE_IDENTITY_AUTH_TYPE];
 const VALID_SOURCE_TYPES = ['openapi', 'remote', 'stdio'] as const;
 
 // Local parse helpers replicated from the dashboard `mcp.ts` plugin (they are
@@ -246,8 +252,11 @@ async function runToolCall(
   },
 ): Promise<
   | { ok: true; result: unknown; latencyMs: number }
-  /** `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing. */
-  | { ok: false; error: string; inputError: boolean }
+  /**
+   * `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing.
+   * `refused`: the server takes Console identity and there was no person to mint a token for.
+   */
+  | { ok: false; error: string; inputError: boolean; refused: boolean }
 > {
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
@@ -256,7 +265,13 @@ async function runToolCall(
   // from an echoed response before it is persisted.
   const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
   try {
-    const { latencyMs, result } = await executeMcpTool(server, toolName, args, runtimeHeaders);
+    const { latencyMs, result } = await executeMcpTool(
+      server,
+      toolName,
+      args,
+      runtimeHeaders,
+      consoleIdentityCallerOf(log.runtimeContext, { projectId: log.projectId ?? server.projectId }),
+    );
     void logMcpRequest(log.tenantDbName, {
       tenantId: log.tenantId,
       projectId: log.projectId,
@@ -310,6 +325,7 @@ async function runToolCall(
       // the way out, for errors that did not come through them.
       error: maskSecretValues(errorMessage, secretValues, { maxChars: getConfig().mcp.errorMessageMaxChars }),
       inputError: isMcpToolInputError(error),
+      refused: isConsoleIdentityRefusal(error),
     };
   }
 }
@@ -531,7 +547,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       if (!outcome.ok) {
-        return reply.code(outcome.inputError ? 400 : 502).send({ error: outcome.error });
+        return reply.code(outcome.refused ? 403 : outcome.inputError ? 400 : 502).send({ error: outcome.error });
       }
 
       return reply.code(200).send({
@@ -696,8 +712,11 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
       const authType = (body.upstreamAuth as { type?: unknown }).type;
       if (!VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
+      }
+      if (authType === CONSOLE_IDENTITY_AUTH_TYPE && sourceType !== 'remote' && sourceType !== 'openapi') {
+        return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
       }
 
       const server = await createMcpServer(
@@ -749,7 +768,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         : undefined;
       if (authType !== undefined && !VALID_AUTH_TYPES.includes(authType as McpAuthType)) {
         return reply.code(400).send({
-          error: 'upstreamAuth.type must be "none", "token", "header", or "basic"',
+          error: 'upstreamAuth.type must be "none", "token", "header", "basic", or "console_identity"',
         });
       }
 
@@ -817,6 +836,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ server: serializeMcpServer(updated) });
     } catch (error) {
+      if (isMcpServerConfigError(error)) return reply.code(400).send({ error: error.message });
       logger.error('Update client MCP server error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal error',

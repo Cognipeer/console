@@ -11,6 +11,7 @@ import { filesDetailEn } from './filesDetail.en';
 import { filesListEn } from './filesList.en';
 import { filesUploadEn } from './filesUpload.en';
 import { healthDigestEn } from './healthDigest.en';
+import { consoleIdentityEn } from './consoleIdentity.en';
 import { iamDirectoryEn } from './iamDirectory.en';
 import { projectTabsEn } from './projectTabs.en';
 import { portalsNowEn } from './portalsNow.en';
@@ -3978,6 +3979,7 @@ export const en = {
   entityHealth: entityHealthEn,
   agentTemplates: agentTemplatesEn,
   healthDigest: healthDigestEn,
+  consoleIdentity: consoleIdentityEn,
   analyticsDashboards: analyticsDashboardsEn,
   memory: {
     title: 'Agent Memory',
@@ -4322,6 +4324,8 @@ export const en = {
       connectionDesc: 'Choose the protocol and endpoint of the external agent.',
       authSection: 'Authentication',
       authDesc: 'Optional credentials sent with every request. Inline key takes precedence over a provider reference.',
+      authMode: 'Method',
+      authModeKey: 'API key or provider',
       advancedSection: 'Advanced',
       advancedDesc: 'Optional headers and a response path for non-standard endpoints.',
       name: 'Name',

@@ -10,6 +10,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentConversationActivityRow, IAgentConversationMessageTally, IAgentRun, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { consoleIdentityIssuerInfo } from '@/lib/iam/consoleIdentity';
 import {
   createAgentRecord,
   createConversation,
@@ -139,6 +140,7 @@ import {
   applyConfigGuardrailBindings,
   bucketNamingForbiddenBody,
   connectedConfigForUpdate,
+  prepareConnectedAgentIdentity,
   invalidAgentStatusBody,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
@@ -917,6 +919,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           if (bindingError) {
             return reply.code(400).send({ error: bindingError });
           }
+          await prepareConnectedAgentIdentity(externalConfig, session.tenantDbName);
           body.config = externalConfig;
         } else if (existing.config?.kind === 'external') {
           // Guard: never let a native-shaped config silently clobber a stored
@@ -1337,6 +1340,17 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ available: true, templates });
     } catch (error) {
       return sendRouteError(reply, error, 'Agent sandbox capabilities error', 'Failed to read sandbox capabilities');
+    }
+  }));
+
+  // What a connected agent set up for Console identity verifies its tokens
+  // against (shown on the connect and settings screens).
+  app.get('/agents/console-identity', withApiRequestContext(async (request, reply) => {
+    try {
+      const { session } = await requireProjectContextForRequest(request);
+      return reply.code(200).send(consoleIdentityIssuerInfo(session.tenantId));
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent Console identity error', 'Failed to read Console identity details');
     }
   }));
 

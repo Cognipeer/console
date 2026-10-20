@@ -23,6 +23,7 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
+import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView } from '@/lib/services/mcp';
 
 interface CreateMcpModalProps {
@@ -31,7 +32,7 @@ interface CreateMcpModalProps {
   onCreated: (server: McpServerView) => void;
 }
 
-type AuthType = 'none' | 'token' | 'header' | 'basic';
+type AuthType = 'none' | 'token' | 'header' | 'basic' | 'console_identity';
 type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
@@ -77,6 +78,8 @@ interface McpCapabilities {
    */
   aegis?: { hookAvailable: boolean };
   mcpHub?: { available: boolean; enterpriseBuild: boolean; licenseEnterprise?: boolean };
+  /** Issuer details shown under the Console identity auth option (absent on an older API). */
+  consoleIdentity?: ConsoleIdentityIssuerInfo;
   internalProviders?: InternalProviderInfo[];
 }
 
@@ -615,6 +618,7 @@ export default function CreateMcpModal({
     token: 'Bearer token',
     header: 'Custom header',
     basic: 'Basic auth',
+    console_identity: 'Console identity',
   };
 
   const sourceLabel: Record<SourceType, string> = {
@@ -1090,6 +1094,7 @@ export default function CreateMcpModal({
                 { value: 'token', label: 'Bearer token' },
                 { value: 'header', label: 'Custom header' },
                 { value: 'basic', label: 'Basic auth' },
+                { value: 'console_identity', label: 'Console identity' },
               ]}
               value={v.authType}
               onChange={(val) => form.setFieldValue('authType', val as AuthType)}
@@ -1139,6 +1144,10 @@ export default function CreateMcpModal({
                 />
               </FormField>
             </FormRow>
+          ) : null}
+
+          {v.authType === 'console_identity' ? (
+            <ConsoleIdentityNote info={capabilities?.consoleIdentity} />
           ) : null}
         </FormSection>
       ) : null}
