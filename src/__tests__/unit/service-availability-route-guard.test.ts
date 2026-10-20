@@ -22,6 +22,8 @@ const PUBLIC_ROUTE_SERVICES: Record<string, string> = {
   '/api/public/a2a/:tenantId/:endpointSlug': 'agents',
   '/api/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json': 'agents',
   '/api/public/hooks/:tenantId/:hookId': 'agents',
+  '/api/public/identity/:tenantId/.well-known/jwks.json': 'exempt: public signing keys only; tokens already issued must stay verifiable',
+  '/api/public/identity/:tenantId/.well-known/openid-configuration': 'exempt: public signing keys only; tokens already issued must stay verifiable',
   '/api/auth/login': 'exempt: sign-in is administration, never switched off',
   '/api/auth/register': 'exempt: sign-up is administration, never switched off',
   '/api/auth/register/options': 'exempt: sign-up is administration, never switched off',
