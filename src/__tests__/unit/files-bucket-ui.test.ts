@@ -1030,7 +1030,10 @@ describe('the menu of a file', () => {
     await waitFor(() => saved.saveBlob.mock.calls.length === 1, 'the download');
     const download = server.api.calls.find((call) => call.path === '/api/files/buckets/docs/objects/reports/summary.pdf')!;
     expect(download.query).toMatchObject({ download: 'original', variant: 'original' });
-    expect(saved.saveBlob.mock.calls[0]![0]).toBeInstanceOf(Blob);
+    // Depending on the Node version the Blob is Node's (from fetch) or jsdom's, so check its tag and size, not its class.
+    const blob = saved.saveBlob.mock.calls[0]![0] as Blob;
+    expect(Object.prototype.toString.call(blob)).toBe('[object Blob]');
+    expect(blob.size).toBe('file-bytes'.length);
     expect(saved.saveBlob.mock.calls[0]![1]).toBe('summary.pdf');
 
     await click(menuButton('summary.pdf'));
