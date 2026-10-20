@@ -87,7 +87,6 @@
     "GET /client/v1/batches/:batchId",
     "GET /client/v1/batches/:batchId/items",
     "GET /client/v1/batches/:batchId/results",
-    "GET /client/v1/browser/:browserKey/mcp/sse",
     "GET /client/v1/browser/browsers",
     "GET /client/v1/browser/browsers/:idOrKey",
     "GET /client/v1/browser/flow-runs",

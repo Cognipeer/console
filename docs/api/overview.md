@@ -78,8 +78,6 @@ For the relationship between the two, see [Using the SDK](/guide/sdk-integration
 | [Browser Session Events](./browser) | `/browser/sessions/:sessionId/events` | GET |
 | [Browser Actions](./browser) | `/browser/sessions/:sessionKey/actions` | POST |
 | [Browser Snapshot / Extract / Artifacts](./browser) | `/browser/sessions/:sessionKey/{snapshot,extract,screenshot,pdf}` | GET, POST |
-| [Browser MCP SSE](./browser) | `/browser/:browserKey/mcp/sse` | GET |
-| [Browser MCP Message](./browser) | `/browser/:browserKey/mcp/message` | POST |
 | [MCP Execute](./mcp) | `/mcp/:serverKey/execute` | GET, POST |
 | [MCP SSE](./mcp) | `/mcp/:serverKey/sse` | GET |
 | [MCP Message](./mcp) | `/mcp/:serverKey/message` | POST |

@@ -2,7 +2,7 @@
 
 Console runs Chromium through Playwright on the server and puts a small, auditable API in front of it. You create a **browser profile** once, open a **session** against it, and drive that session with discrete actions — navigate, click, type, extract, screenshot, PDF. Every operation is logged against the session, and screenshots and PDFs land in a Document Store bucket.
 
-This page takes you from an empty tenant to a completed run, first through the dashboard and then over the API, and finishes by handing the same browser to an agent over MCP.
+This page takes you from an empty tenant to a completed run, first through the dashboard and then over the API, and finishes by handing the same browser to an agent or, through the MCP module, to any MCP client.
 
 Browsers are a community feature. Only the multi-node routing note at the end depends on the Enterprise Cluster module.
 
@@ -11,7 +11,7 @@ Browsers are a community feature. Only the multi-node routing note at the end de
 - A browser profile visible under **Operate → Browsers**, with a stable `key` and `id`.
 - A live session that you can watch in the dashboard while it works.
 - A page snapshot you can feed to a model, and a screenshot plus a PDF stored as files with download URLs.
-- An MCP endpoint for that profile that any MCP-aware client — including a Console agent — can connect to.
+- An MCP server, created in the MCP module, that publishes the profile to any MCP-aware client.
 
 ## What the service does
 
@@ -65,7 +65,7 @@ If you skip the bucket, everything works until the first `POST …/screenshot`, 
 
 ![Browsers](/screenshots/how-to/browser/01-browser.png)
 
-The row now shows the profile's **Key**, **Default model**, session counters and **Status**. Open it to reach the detail page, which has **Overview**, **Playground** and **Usage** tabs, plus **Refresh**, **Sessions**, **Edit** and a **Get MCP URL** action.
+The row now shows the profile's **Key**, **Default model**, session counters and **Status**. Open it to reach the detail page, which has **Overview**, **Playground** and **Usage** tabs, plus **Refresh**, **Sessions** and **Edit** actions.
 
 The modal deliberately exposes only four fields. Viewport, timeouts, user agent, locale and the allow/block list live in `defaultSessionConfig`, which is set over the API — see [Defaults and limits](#defaults-and-limits).
 
@@ -107,7 +107,7 @@ capi -X POST "$CONSOLE_HOST/api/client/v1/browser/browsers" -d '{
 }'
 ```
 
-`201` with `{ "browser": { "id": "…", "key": "research-browser", … } }`. Keep both: sessions need the **id**, the MCP endpoint uses the **key**.
+`201` with `{ "browser": { "id": "…", "key": "research-browser", … } }`. Keep both: sessions need the **id**, a Browser MCP server is configured with the **key**.
 
 **2. Open a session.**
 
@@ -245,41 +245,31 @@ await client.browserSessions.close(session.sessionKey);
 
 ## Give an agent the browser
 
-Two routes lead to the same eleven tools.
+Two routes lead to the same tool set.
 
 **In Console.** Open the agent's **Playground** tab; the **Configuration** panel on the left has a **Tools** section. Select **Add Tools** (**Edit Tools** once the agent already has some). The **Select Tools** dialog lists **Browser Use** as a System source with a **Browser** picker: "Selecting a browser adds the Browser Use system tool to this agent." Choose the profile and select **Save Configuration**. At run time the agent opens its own session against that profile and closes it when the run ends. The agent workflow itself is covered in [Build and publish an agent](./build-and-publish-an-agent.md).
 
-**Over MCP.** Every profile exposes its own MCP server. Use **Get MCP URL** on the profile — from the header menu or the Overview card — to copy both URLs, or build them yourself:
+**Over MCP.** Publish the profile from the MCP module: **MCP Servers → New server**, source **Internal service**, service **Browser**, then choose the profile. Over the API that is `POST /api/mcp` with `sourceType: "internal"` and `internalConfig: { "provider": "browser", "instanceKey": "<browserKey>" }`. The server is reached on the MCP module's own endpoints (`/api/client/v1/mcp/:serverKey/…`, streamable HTTP or SSE) with a project API token, and gets the MCP module's tool toggles, renames, guardrail binding, logs and hubs.
 
-```http
-GET  /api/client/v1/browser/:browserKey/mcp/sse
-POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=<sessionId>
-```
-
-Authenticate both with `Authorization: Bearer cpeer_…`. The SSE response carries an `X-Mcp-Session-Id` header and an `endpoint` event containing the message URL with the session id already filled in. The message endpoint speaks JSON-RPC and handles `initialize`, `notifications/initialized`, `ping`, `tools/list` and `tools/call`.
-
-Tools exposed:
+The tools are the **Browser Use** set plus `browser_open_session`:
 
 | Tool | Notes |
 |---|---|
-| `browser_navigate` | `url`, optional `waitUntil` |
-| `browser_click` | `ref` and/or `selector`, optional `timeout` |
-| `browser_hover` | `ref` and/or `selector` |
-| `browser_type` | `text`, optional `clear` |
-| `browser_press` | `key`, e.g. `Enter` |
-| `browser_wait` | `ms` (1–60000) or `selector` plus `state` |
-| `browser_snapshot` | Aria snapshot with refs |
-| `browser_extract` | `text` / `html` / `attr`, optional `multiple` |
-| `browser_screenshot` | Persists to the bucket, returns a download URL |
-| `browser_pdf` | Persists to the bucket; headless only |
-| `browser_close` | Ends the session |
+| `browser_open_session` | Opens a session on the profile; returns its `sessionKey` |
+| `browser_navigate` | `sessionKey`, `url`, optional `waitUntil` |
+| `browser_click` / `browser_hover` / `browser_type` / … | `sessionKey` plus the element target (`ref`, `role` + `name`, `testId`, …) |
+| `browser_snapshot` | `sessionKey`; Aria snapshot with refs |
+| `browser_screenshot` | `sessionKey`; captures the page (options in the tool's input schema) |
+| `browser_pdf` | `sessionKey`; persists to the bucket, returns a download URL |
+| `browser_list_flows` / `browser_run_flow` | No `sessionKey`: a flow runs in its own session |
+| `browser_close` | `sessionKey`; ends the session |
 
 Lifecycle details that matter when you wire this up:
 
-- The first `tools/call` on an MCP session **creates** a browser session behind it; that one session serves the whole MCP session. `initialize` and `tools/list` work without a `sessionId`, but `tools/call` without one returns `Missing sessionId; open SSE first`.
-- Dropping the SSE stream closes the backing browser session.
-- A disabled profile returns `-32002 Browser is disabled` on the message endpoint and `403` on the SSE endpoint.
-- Tool failures come back as a normal JSON-RPC result with `isError: true` and the message as text, not as a JSON-RPC error.
+- Sessions are explicit: call `browser_open_session` once and pass its `sessionKey` to every page tool. A missing key, or a key that this MCP server did not open on this profile, comes back as an invalid-params error.
+- Call `browser_close` when done. A session left open is closed by the profile's idle timeout (5 minutes by default) and then answers "has ended — open a new one".
+- A disabled profile fails every tool call.
+- Tool failures inside the browser (a missing element, a navigation timeout) come back as a normal result with `ok: false` and the error text.
 
 ## Defaults and limits
 
@@ -341,7 +331,7 @@ Two maintenance jobs are visible on **Automations** (`/dashboard/automations`) u
 
 **Sessions live in one process's memory.** They are not shared between nodes and do not survive a restart; a restarted runtime marks them `expired`. In an Enterprise [Cluster](../guide/cluster.md) deployment only `POST /actions` is routed to the node that owns the profile — extract, snapshot, screenshot, PDF and close execute on whichever node receives the request, so pin your traffic or keep the whole run on one node. Assigning a profile to a different node affects future sessions only.
 
-**Ids and keys are not interchangeable.** `browserId` on session creation must be the profile's `id`; the MCP path accepts either the id or the key; driving endpoints take the `sessionKey`; reading a session, its events and deleting its record take the session `id`.
+**Ids and keys are not interchangeable.** `browserId` on session creation must be the profile's `id`; a Browser MCP server's `instanceKey` is the key; driving endpoints take the `sessionKey`; reading a session, its events and deleting its record take the session `id`.
 
 **The bucket must exist before the first capture.** A missing bucket surfaces as `404 File bucket not found.` from the screenshot and PDF endpoints only — session creation and every action succeed without one.
 

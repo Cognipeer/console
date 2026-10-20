@@ -86,6 +86,7 @@ const INTERNAL_PROVIDER_LINKS: Record<string, (instanceKey: string) => { href: s
     label: 'Knowledge Engine',
   }),
   'agent-observability': () => ({ href: '/dashboard/tracing', label: 'Agent Observability' }),
+  browser: () => ({ href: '/dashboard/browser', label: 'Browser' }),
 };
 
 function getInternalServiceLink(server: McpServerView): { href: string; label: string } | null {

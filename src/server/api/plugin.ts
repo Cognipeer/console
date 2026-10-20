@@ -63,7 +63,6 @@ import { clientTracingApiPlugin } from './plugins/client-tracing';
 import { clientVectorApiPlugin } from './plugins/client-vector';
 import { clientWebSearchApiPlugin } from './plugins/client-websearch';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
-import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { auditApiPlugin } from './plugins/audit';
 import { webhooksApiPlugin } from './plugins/webhooks';
 import { automationsApiPlugin } from './plugins/automations';
@@ -579,7 +578,6 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientVectorApiPlugin);
   await app.register(clientWebSearchApiPlugin);
   await app.register(clientBrowserApiPlugin);
-  await app.register(clientBrowserMcpApiPlugin);
   await app.register(automationsApiPlugin);
   await app.register(browserApiPlugin);
   await app.register(crawlerApiPlugin);

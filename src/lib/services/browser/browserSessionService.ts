@@ -316,6 +316,16 @@ export async function getBrowserSession(
   return serializeSession(record);
 }
 
+export async function getBrowserSessionByKey(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<BrowserSessionView | null> {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
+  if (!canAccessSession(ctx, record)) return null;
+  return serializeSession(record);
+}
+
 async function loadSessionForKey(
   ctx: SessionContext,
   sessionKey: string,

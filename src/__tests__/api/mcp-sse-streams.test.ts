@@ -1,5 +1,5 @@
 /**
- * The SSE transport of the four MCP plugins (public, client, console, browser),
+ * The SSE transport of the three MCP plugins (public, client, console),
  * over real sockets: how a stream is advertised, that a session never outlives
  * its stream (HEAD included), that a message can only be delivered into a
  * session its own caller opened, and the limits on open streams.
@@ -33,23 +33,12 @@ vi.mock('@/lib/services/mcp', async (importActual) => ({
   logMcpRequest: vi.fn(),
 }));
 
-vi.mock('@/lib/services/browser', () => ({
-  buildBrowserAgentTools: vi.fn(() => [
-    { name: 'browser_navigate', description: 'Navigate', schema: undefined, func: vi.fn(async () => 'navigated') },
-  ]),
-  closeBrowserSession: vi.fn(async () => undefined),
-  createBrowserSession: vi.fn(async () => ({ sessionKey: 'bs-1' })),
-  resolveBrowser: vi.fn(async () => ({ _id: 'b1', status: 'active' })),
-}));
-
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase, type IMcpServer } from '@/lib/database';
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { getMcpServerByKey } from '@/lib/services/mcp';
-import { closeBrowserSession, createBrowserSession } from '@/lib/services/browser';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 import { removeSseSession, sseSessionCount, sweepSseSessions } from '@/lib/services/mcp/sseSessionManager';
-import { clientBrowserMcpApiPlugin } from '@/server/api/plugins/client-browser-mcp';
 import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from '@/server/api/plugins/client-mcp-console';
 import { publicMcpApiPlugin } from '@/server/api/plugins/public-mcp';
@@ -72,7 +61,6 @@ const PUBLIC_B = `/api/public/mcp/tenant-1/${SLUG_B}`;
 const CLIENT_A = '/api/client/v1/mcp/srv-a';
 const CLIENT_B = '/api/client/v1/mcp/srv-b';
 const CONSOLE = '/api/client/v1/mcp/console';
-const BROWSER = '/api/client/v1/browser/b1/mcp';
 
 function mcpServer(key: string, slug?: string): IMcpServer {
   return {
@@ -114,7 +102,6 @@ const allPlugins: FastifyPluginAsync = async (app) => {
   await app.register(clientMcpConsoleApiPlugin);
   await app.register(clientMcpApiPlugin);
   await app.register(publicMcpApiPlugin);
-  await app.register(clientBrowserMcpApiPlugin);
 };
 
 function setTestConfig(values: Record<string, string | undefined> = {}) {
@@ -194,13 +181,12 @@ describe('MCP SSE transport', () => {
       'x-forwarded-host': 'other-host.example.test',
     };
 
-    /** The four surfaces, each with the message path it must advertise. */
+    /** The three surfaces, each with the message path it must advertise. */
     async function openAllSurfaces(headers: Record<string, string>) {
       return {
         public: await session(`${PUBLIC_A}/sse`, headers),
         client: await session(`${CLIENT_A}/sse`, { ...auth('tok-a'), ...headers }),
         console: await session(`${CONSOLE}/sse`, { ...auth('tok-a'), ...headers }),
-        browser: await session(`${BROWSER}/sse`, { ...auth('tok-a'), ...headers }),
       };
     }
 
@@ -208,7 +194,6 @@ describe('MCP SSE transport', () => {
       expect(streams.public.endpoint).toMatch(new RegExp(`^${PUBLIC_A}/message\\?sessionId=[0-9a-f-]{36}$`));
       expect(streams.client.endpoint).toMatch(/^\/api\/client\/v1\/mcp\/srv-a\/message\?sessionId=[0-9a-f-]{36}$/);
       expect(streams.console.endpoint).toMatch(/^\/api\/client\/v1\/mcp\/console\/message\?sessionId=[0-9a-f-]{36}$/);
-      expect(streams.browser.endpoint).toMatch(/^\/api\/client\/v1\/browser\/b1\/mcp\/message\?sessionId=[0-9a-f-]{36}$/);
     }
 
     it('is just a path, whatever the Host and X-Forwarded-* headers say', async () => {
@@ -251,7 +236,6 @@ describe('MCP SSE transport', () => {
       ['public', `${PUBLIC_A}/sse`, {}],
       ['client', `${CLIENT_A}/sse`, auth('tok-a')],
       ['console', `${CONSOLE}/sse`, auth('tok-a')],
-      ['browser', `${BROWSER}/sse`, auth('tok-a')],
     ];
 
     it.each(streams)('is removed when the %s client hangs up', async (_name, path, headers) => {
@@ -402,70 +386,6 @@ describe('MCP SSE transport', () => {
     });
   });
 
-  describe('the browser server', () => {
-    it('does not open a backing browser session for a message that names no live session of the caller', async () => {
-      await start();
-      const call = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: {} } };
-
-      const unknown = await post(withSession(BROWSER, '00000000-0000-4000-8000-000000000042'), call, auth('tok-a'));
-      expect(unknown.status).toBe(404);
-
-      const { path } = await session(`${BROWSER}/sse`, auth('tok-a'));
-      const foreign = await post(withSession(BROWSER, sessionIdOf(path)), call, auth('tok-b'));
-      expect(foreign.status).toBe(404);
-      expect(createBrowserSession).not.toHaveBeenCalled();
-
-      const stateless = await post(`${BROWSER}/message`, call, auth('tok-a'));
-      expect(JSON.parse(stateless.body).error.code).toBe(-32600);
-      expect(createBrowserSession).not.toHaveBeenCalled();
-    });
-
-    it('opens one backing session for a live session and closes it when the stream ends, whichever way', async () => {
-      await start();
-      const call = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: {} } };
-      const { connection, path } = await session(`${BROWSER}/sse`, auth('tok-a'));
-      expect((await post(path, call, auth('tok-a'))).status).toBe(202);
-      await connection.waitForEvent((e) => e.event === 'message');
-      expect(createBrowserSession).toHaveBeenCalledTimes(1);
-      expect(closeBrowserSession).not.toHaveBeenCalled();
-
-      // Ended by the gateway (idle), not by the client.
-      sweepSseSessions(Date.now() + 31 * 60 * 1000);
-      await connection.ended;
-      await eventually(() => vi.mocked(closeBrowserSession).mock.calls.length === 1, 'the backing session is closed');
-      expect(vi.mocked(closeBrowserSession).mock.calls[0][1]).toBe('bs-1');
-    });
-
-    it('closes the backing session when the client hangs up', async () => {
-      await start();
-      const call = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: {} } };
-      const { connection, path } = await session(`${BROWSER}/sse`, auth('tok-a'));
-      await post(path, call, auth('tok-a'));
-      await connection.waitForEvent((e) => e.event === 'message');
-      connection.close();
-      await eventually(() => vi.mocked(closeBrowserSession).mock.calls.length === 1, 'the backing session is closed');
-    });
-
-    it('closes a backing session that was still being opened when its stream ended', async () => {
-      await start();
-      const call = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'browser_navigate', arguments: {} } };
-      const { connection, path } = await session(`${BROWSER}/sse`, auth('tok-a'));
-      let finishOpening: (value: { sessionKey: string }) => void = () => undefined;
-      vi.mocked(createBrowserSession).mockImplementationOnce(() => new Promise((resolve) => { finishOpening = resolve as never; }) as never);
-
-      const pending = post(path, call, auth('tok-a'));
-      await eventually(() => vi.mocked(createBrowserSession).mock.calls.length === 1, 'the backing session is being opened');
-      connection.close();
-      await eventually(() => sseSessionCount() === 0, 'the session is gone');
-      finishOpening({ sessionKey: 'orphan-1' });
-      expect((await pending).status).toBe(404);
-      await eventually(
-        () => vi.mocked(closeBrowserSession).mock.calls.some((args) => args[1] === 'orphan-1'),
-        'the orphaned browser session is closed',
-      );
-    });
-  });
-
   describe('limits on open streams', () => {
     it('refuses a public stream over the per-address cap with 429, a Retry-After and a JSON body', async () => {
       await start({ MCP_SSE_MAX_SESSIONS_PER_IP: '2' });
@@ -501,7 +421,7 @@ describe('MCP SSE transport', () => {
       await session(`${CLIENT_A}/sse`, auth('tok-a'));
       await session(`${CLIENT_B}/sse`, auth('tok-a'));
 
-      for (const [path, headers] of [[`${CLIENT_A}/sse`, auth('tok-b')], [`${CONSOLE}/sse`, auth('tok-a')], [`${BROWSER}/sse`, auth('tok-a')]] as const) {
+      for (const [path, headers] of [[`${CLIENT_A}/sse`, auth('tok-b')], [`${CONSOLE}/sse`, auth('tok-a')]] as const) {
         const refused = await stream(path, headers);
         expect(refused.status, path).toBe(503);
         expect(Number(refused.headers['retry-after'])).toBeGreaterThanOrEqual(1);
