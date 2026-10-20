@@ -158,14 +158,32 @@ export function maskAgentSandboxSecrets<T extends { config?: IAgentConfig }>(age
 }
 
 /**
+ * The forms a value can take in output: as it is, as a shell single-quoted
+ * string stores it (a sandbox env file holds `'it'\''s'` for `it's`), and,
+ * for a value of several lines, each line on its own.
+ */
+function outputForms(value: string): string[] {
+    const forms = [value];
+    if (value.includes("'")) forms.push(value.replace(/'/g, `'\\''`));
+    if (/[\r\n]/.test(value)) forms.push(...value.split(/\r?\n/).map((line) => line.trim()));
+    return forms;
+}
+
+/**
  * Replaces every secret value in `text` with a mask, so a command that echoes
  * `$API_KEY` does not hand the key to the model (and from there to the
- * transcript and traces). Values shorter than `MIN_SCRUBBED_SECRET_LENGTH`
- * are left alone. Longest first, so a value that contains another is masked whole.
+ * transcript and traces). `extraValues` are masked the same way: values the
+ * agent did not pass itself, such as the ones its sandbox's launch carries.
+ * A value is also masked as a shell-quoted string and line by line (see
+ * `outputForms`). Values shorter than `MIN_SCRUBBED_SECRET_LENGTH` are left
+ * alone. Longest first, so a value that contains another is masked whole.
  */
-export function scrubSecretValues(text: string, secrets: Record<string, string>): string {
+export function scrubSecretValues(text: string, secrets: Record<string, string>, extraValues: readonly string[] = []): string {
     let out = text;
-    const values = Object.values(secrets).filter((value) => value && value.length >= MIN_SCRUBBED_SECRET_LENGTH);
-    for (const value of values.sort((a, b) => b.length - a.length)) out = out.split(value).join(AGENT_SANDBOX_SECRET_MASK);
+    const values = [...Object.values(secrets), ...extraValues]
+        .filter(Boolean)
+        .flatMap(outputForms)
+        .filter((value) => value.length >= MIN_SCRUBBED_SECRET_LENGTH);
+    for (const value of [...new Set(values)].sort((a, b) => b.length - a.length)) out = out.split(value).join(AGENT_SANDBOX_SECRET_MASK);
     return out;
 }

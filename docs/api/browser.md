@@ -3,7 +3,7 @@
 Cognipeer Console exposes two browser-oriented surfaces under the client API:
 
 - browser profiles and browser sessions for direct Playwright-backed automation,
-- per-browser MCP endpoints that expose the same Browser Use toolset through the Model Context Protocol.
+- the same Browser Use toolset over the Model Context Protocol, published through the MCP module as the **Browser** internal service.
 
 ## Browser Profiles
 
@@ -107,6 +107,8 @@ GET /api/client/v1/browser/sessions/:sessionKey/snapshot
 - `POST /api/client/v1/browser/sessions/:sessionKey/screenshot`
 - `POST /api/client/v1/browser/sessions/:sessionKey/pdf`
 
+The screenshot `POST` saves to the session's artifact bucket and returns `{ artifact, eventId }`. Pass `"inline": true` to also get the image back as a base64 `content` block (plus a `structured` summary with `url`, `width`, `height`), and `"persist": false` to skip saving it (`persist: false` requires `inline: true`). The `browser_screenshot` agent tool shows the image to the model directly; its `persist: true` option also saves it.
+
 ### Find Text / Diagnostics / Export Profile
 
 - `GET /api/client/v1/browser/sessions/:sessionKey/find?text=…&limit=…` — locate visible text and get a **durable target** for each hit, cheaper than a full snapshot.
@@ -163,46 +165,19 @@ A step's action uses the same schema as a live action, with one added rule: **a 
 
 A failed run still returns `200` with `run.status: "failed"` — the request succeeded and the caller gets a complete, inspectable answer including `failedStepIndex` and per-step results.
 
-## Per-Browser MCP
+## Browser over MCP
 
-Every browser profile exposes its own MCP server.
+A browser is published over MCP from the MCP module, not from the browser itself: create an MCP server with source type **Internal service**, provider **Browser** and the browser to publish (`internalConfig: { provider: "browser", instanceKey: "<browserKey>" }`). The server is then reached on the usual MCP endpoints (`/api/client/v1/mcp/:serverKey/…`), with the MCP module's access mode, tool toggles, renames, guardrail binding, logs and hubs. The former per-browser endpoints (`/api/client/v1/browser/:browserKey/mcp/sse` and `/mcp/message`) have been removed.
 
-### Open SSE Stream
+Sessions are explicit, so they work over streamable HTTP and SSE alike, from a composite server and from an agent binding:
 
-```http
-GET /api/client/v1/browser/:browserKey/mcp/sse
-```
-
-The stream returns:
-
-- `X-Mcp-Session-Id` response header
-- an `endpoint` SSE event containing the browser-scoped message path (a path, not an absolute URL: clients resolve it against the URL the stream was opened on)
-
-A stream belongs to the token that opened it. The browser session it drives is opened by the first
-`tools/call` and closed when the stream ends (the client hangs up, or the gateway closes an idle
-stream — 30 minutes without a message by default) or when `browser_close` runs. A gateway at its
-limit of open streams answers `429` or `503` with a `Retry-After` header.
-
-### Send JSON-RPC Message
-
-```http
-POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=<id>
-```
-
-`sessionId` must be one issued to the same token for the same browser; any other value is answered
-`404` (JSON-RPC error `-32001`, `Session not found`). `tools/call` requires it.
-
-Supported methods:
-
-- `initialize`
-- `notifications/initialized`
-- `ping`
-- `tools/list`
-- `tools/call`
+1. `browser_open_session` opens a session on the published browser and returns its `sessionKey`.
+2. Every page tool takes that `sessionKey` as a required argument. A key opened through another MCP server, on another browser, or outside MCP (the dashboard, an agent run) is answered as not found.
+3. `browser_close` closes the session. A session left open is closed by the browser's idle timeout.
 
 ### Browser MCP Toolset
 
-The browser MCP server exposes the Browser Use-compatible tools:
+Besides `browser_open_session`, the server exposes the Browser Use-compatible tools:
 
 - `browser_navigate`, `browser_history` (back / forward / reload)
 - `browser_click`, `browser_hover`, `browser_type`, `browser_press`
@@ -211,7 +186,7 @@ The browser MCP server exposes the Browser Use-compatible tools:
 - `browser_snapshot` (accessibility tree with `[ref=…]` markers), `browser_find`, `browser_extract`
 - `browser_diagnostics` (console, failed requests, last dialog)
 - `browser_screenshot`, `browser_pdf`
-- `browser_list_flows`, `browser_run_flow`
+- `browser_list_flows`, `browser_run_flow` (no `sessionKey`: a flow runs in a session of its own)
 - `browser_close`
 
 The list is derived from the same definitions the `Browser Use` system tool binds, so the MCP and agent surfaces cannot drift apart.
@@ -226,4 +201,4 @@ Standalone browser agent management has been removed. If you want a Console-mana
 
 The agent addresses elements by the `ref` values in `browser_snapshot`'s output. Those are valid only until the next snapshot — every action result also returns `resolvedTarget`, the durable `role`/`name` form, which is what a flow step stores. Where a flow already exists for the task, `browser_run_flow` replays it without a model in the loop.
 
-For external runtimes or custom orchestrators, use the browser session API directly or connect through the per-browser MCP endpoint.
+For external runtimes or custom orchestrators, use the browser session API directly or publish the browser as a **Browser** internal-service MCP server.

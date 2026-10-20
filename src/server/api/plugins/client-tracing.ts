@@ -191,7 +191,46 @@ function eventErrorMessage(event: Pick<IAgentTracingEvent, 'error' | 'label'>): 
   return typeof event.label === 'string' ? event.label : 'Event error';
 }
 
+/**
+ * Events that wrap other events. The SDK widens an iteration or an agent span to cover its children (the
+ * wall-clock extent of the run), so adding their duration to the children's would count the same time twice.
+ * (A sub-agent's own work is the other double count: see `delegatedEvents`.)
+ */
+const CONTAINER_EVENT_TYPES = new Set(['agent_iteration', 'span']);
+
+/**
+ * Delegated work: the delegation tool call (its duration is the child's whole run) and everything that runs
+ * under a sub-agent span. A sub-agent span is the SDK's `span` event that hangs off a tool call; a `span` any
+ * other client sends as a plain wrapper is not delegation. The run's duration is the parent's own model and
+ * tool time, like the SDK's summary, so none of it adds to the total.
+ */
+function delegatedEvents(events: readonly IAgentTracingEvent[]): Set<IAgentTracingEvent> {
+  const byId = new Map<string, IAgentTracingEvent>();
+  for (const event of events) if (event.spanId) byId.set(event.spanId, event);
+  const parentOf = (event: IAgentTracingEvent) => (event.parentSpanId ? byId.get(event.parentSpanId) : undefined);
+  const delegated = new Set<IAgentTracingEvent>();
+  const subagentSpans = new Set<IAgentTracingEvent>();
+  for (const event of events) {
+    if (event.type !== 'span') continue;
+    const delegation = parentOf(event);
+    if (delegation?.type !== 'tool_call') continue;
+    subagentSpans.add(event);
+    delegated.add(delegation);
+  }
+  if (subagentSpans.size === 0) return delegated;
+  for (const event of events) {
+    // Walk up the owner chain; the hop limit guards against a cycle in malformed input.
+    let parent = parentOf(event);
+    for (let hops = 0; parent && hops < 64; hops += 1) {
+      if (subagentSpans.has(parent)) { delegated.add(event); break; }
+      parent = parentOf(parent);
+    }
+  }
+  return delegated;
+}
+
 function aggregateEvents(events: IAgentTracingEvent[]) {
+  const delegated = delegatedEvents(events);
   const eventCounts: Record<string, number> = {};
   const modelsUsed = new Set<string>();
   const toolsUsed = new Set<string>();
@@ -224,7 +263,9 @@ function aggregateEvents(events: IAgentTracingEvent[]) {
     totalCachedInputTokens += typeof event.cachedInputTokens === 'number' ? event.cachedInputTokens : 0;
     totalBytesIn += typeof event.requestBytes === 'number' ? event.requestBytes : 0;
     totalBytesOut += typeof event.responseBytes === 'number' ? event.responseBytes : 0;
-    totalDurationMs += typeof event.durationMs === 'number' ? event.durationMs : 0;
+    if (typeof event.durationMs === 'number' && !CONTAINER_EVENT_TYPES.has(String(event.type)) && !delegated.has(event)) {
+      totalDurationMs += event.durationMs;
+    }
     totalReasoningTokens += typeof event.reasoningTokens === 'number' ? event.reasoningTokens : 0;
     if (isTruncatedFinishReason(event.finishReason)) truncatedEvents += 1;
 
@@ -713,6 +754,12 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             }),
           ));
 
+          // Spans without `cognipeer.event.sequence` (gen_ai-only exports) are numbered by position in their request,
+          // which restarts at 1 in the next one: continue after what the session already holds.
+          const sequenceBase = existingEvents.reduce(
+            (max, event) => (typeof event.sequence === 'number' && Number.isFinite(event.sequence) ? Math.max(max, event.sequence) : max),
+            0,
+          );
           const insertedEvents: typeof incomingEvents = [];
           for (const event of incomingEvents) {
             const fingerprint = buildEventFingerprint({
@@ -729,6 +776,7 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             }
 
             seen.add(fingerprint);
+            if (mapped.positionalSequence.has(event) && typeof event.sequence === 'number') event.sequence += sequenceBase;
             await backgroundDb.createAgentTracingEvent(event);
             insertedEvents.push(event);
           }
@@ -791,7 +839,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
             eventCounts: stats.eventCounts,
             modelsUsed: stats.modelsUsed,
             aiErrors: stats.aiErrors,
-            rootSpanId: existing?.rootSpanId || session.rootSpanId,
+            // A paused run's first leg has no root, so the mapper falls back to a child span; the real root arrives
+            // with the batch that ends the session and must replace it.
+            rootSpanId: rootEnded ? (session.rootSpanId || existing?.rootSpanId) : (existing?.rootSpanId || session.rootSpanId),
             source: existing?.source || session.source || 'otlp',
             startedAt: nextStartedAt,
             status,

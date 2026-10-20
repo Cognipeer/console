@@ -8,6 +8,7 @@
  * and fires a per-file callback.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 import type { IOcrJob, IOcrJobItem, IOcrJobItemResult } from '@/lib/database';
@@ -25,6 +26,9 @@ import type { OcrJobContext } from './types';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
 
 const logger = createLogger('ocr-job:runner');
+
+/** Set on a pending item whose queue message arrived while its job was paused. */
+export const OCR_ITEM_HELD_WHILE_PAUSED = 'Waiting: the job was paused';
 
 async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   const db = await getDatabase();
@@ -130,10 +134,22 @@ export async function processOcrItem(ctx: OcrJobContext, itemId: string): Promis
     return null;
   }
 
+  // A paused job keeps its queued items pending rather than failing them. The
+  // marker tells the resume which items lost their queue message here, so it
+  // re-enqueues exactly those (items still waiting in the queue are left alone).
+  if (job.status === 'paused') {
+    logger.info('OCR job is paused, leaving item pending', { itemId, jobId: item.jobId });
+    return db.updateOcrJobItem(itemId, { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
+  }
+
   await db.updateOcrJobItem(itemId, { status: 'running', startedAt: new Date() });
   const startedAt = Date.now();
 
   try {
+    // Inside the try so a switched-off service fails this item (recorded,
+    // webhook sent, job completion counted) instead of throwing into the queue
+    // and being retried. A paused job was already held above.
+    await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
     const projectId = ctx.projectId ?? '';
     const document = await resolveDocument(ctx, item);
 

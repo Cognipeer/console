@@ -93,7 +93,7 @@ export function SkillMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
         const pattern = this.likePattern(filters.search.trim());
-        clauses.push('(title LIKE @search OR key LIKE @search OR header LIKE @search)');
+        clauses.push(this.likeAny(['title', 'key', 'header'], '@search'));
         params.search = pattern;
       }
 

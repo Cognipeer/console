@@ -72,6 +72,9 @@ describe('iamCenter i18n', () => {
     let checked = 0;
     for (const file of centerSources()) {
       const source = readFileSync(file, 'utf8');
+      // A file with a translator of its own namespace only (e.g. ConsoleIdentityNote's `consoleIdentity`) is not the center's.
+      const namespaces = [...source.matchAll(/useTranslations\(\s*'([\w.]+)'/g)].map((m) => m[1]);
+      if (namespaces.length > 0 && !namespaces.includes('iamCenter')) continue;
       for (const match of source.matchAll(/(?<![\w.$])t\(\s*'([^']+)'/g)) {
         const key = match[1];
         checked++;

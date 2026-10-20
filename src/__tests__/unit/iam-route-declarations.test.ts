@@ -49,6 +49,8 @@ describe('route authorization declarations', () => {
       ['GET', '/api/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json', 'self'],
       ['POST', '/api/public/a2a/:tenantId/:endpointSlug', 'self'],
       ['POST', '/api/public/hooks/:tenantId/:hookId', 'self'],
+      ['GET', '/api/public/identity/:tenantId/.well-known/jwks.json', 'public'],
+      ['GET', '/api/public/identity/:tenantId/.well-known/openid-configuration', 'public'],
       ['GET', '/api/health/live', 'public'],
       ['GET', '/api/health/ready', 'public'],
       ['GET', '/api/support/status', 'authenticated'],

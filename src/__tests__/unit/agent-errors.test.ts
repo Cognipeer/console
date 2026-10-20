@@ -13,6 +13,7 @@ import {
     classifyAgentRunError,
     publicRunFailureMessage,
 } from '@/lib/services/agents/agentErrors';
+import { ServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 
 const providerError = (status: number, message: string) => Object.assign(new Error(message), { status });
 
@@ -32,6 +33,17 @@ describe('classifyAgentRunError', () => {
     it('a provider refusing access is a 502 permission error', () => {
         const classified = classifyAgentRunError(providerError(403, 'deployment access denied'));
         expect(classified).toMatchObject({ status: 502, error: { type: 'provider_permission_error' } });
+    });
+
+    it('a service the run needs being switched off is the refusal every route answers with, not the provider\'s', () => {
+        expect(classifyAgentRunError(new ServiceDisabledError({ service: 'agents', source: 'env' }))).toEqual({
+            status: 403,
+            error: { message: 'The "agents" service is switched off on this deployment.', type: 'permission_error', code: 'service_disabled' },
+        });
+        expect(classifyAgentRunError(new ServiceDisabledError({ service: 'agents', source: 'license', via: 'models' }))).toMatchObject({
+            status: 402,
+            error: { type: 'permission_error', code: 'service_not_licensed' },
+        });
     });
 
     it('the agent\'s own configuration errors are 409 agent_config_error', () => {

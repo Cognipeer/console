@@ -35,6 +35,7 @@ import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { FeedbackError, recordMessageFeedback } from '@/lib/services/agents/agentFeedback';
 import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction, toClientTranscriptMessage } from '@/lib/services/agents/clientWire';
 import { messageIdOf } from '@/lib/services/agents/messageIds';
+import { cancelReminder, listReminders, serializeReminder } from '@/lib/services/agents/agentReminders';
 import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, roundUsd, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
 import {
   SESSION_LIST_DEFAULT_LIMIT,
@@ -358,6 +359,61 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Reminders the agent set itself in this session (agentReminders.ts) ──
+  //
+  // `GET .../reminders?status=active|all` (default active: the ones still waiting to fire), newest first.
+  // `DELETE .../reminders/:reminderId` cancels one that has not fired yet: 404 for an id of another session,
+  // 409 once it is running or done.
+  app.get('/client/v1/agents/sessions/:conversationId/reminders', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireSession(request, reply, ctx, 'view');
+      if (!conversation) return reply;
+      const { status } = (request.query ?? {}) as { status?: string };
+      if (status !== undefined && status !== 'active' && status !== 'all') {
+        return reply.code(400).send(apiErrorBody('invalid_request_error', 'status must be active or all', 'invalid_status'));
+      }
+      const runs = await listReminders(
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        { agentKey: conversation.agentKey, conversationId: String(conversation._id), active: status !== 'all', limit: 200 },
+      );
+      return reply.code(200).send({ object: 'list', data: runs.map(serializeReminder) });
+    } catch (error) {
+      logger.error('Client agent session reminders error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  }));
+
+  app.delete('/client/v1/agents/sessions/:conversationId/reminders/:reminderId', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireSession(request, reply, ctx, 'manage');
+      if (!conversation) return reply;
+      const { reminderId } = request.params as { reminderId: string };
+      const outcome = await cancelReminder(
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        reminderId,
+        {
+          agentKey: conversation.agentKey,
+          conversationId: String(conversation._id),
+          actor: {
+            ...(ctx.tokenRecord.userId ? { userId: ctx.tokenRecord.userId } : {}),
+            ...(ctx.tokenRecord._id ? { tokenId: String(ctx.tokenRecord._id) } : {}),
+            via: 'api',
+          },
+        },
+      );
+      if (outcome.kind === 'not_found') {
+        return reply.code(404).send(apiErrorBody('not_found_error', 'Reminder not found', 'reminder_not_found'));
+      }
+      if (outcome.kind === 'not_scheduled') {
+        return reply.code(409).send(apiErrorBody('invalid_request_error', `The reminder is no longer waiting (${outcome.run.status}).`, 'reminder_not_scheduled'));
+      }
+      return reply.code(200).send({ reminder: serializeReminder(outcome.run) });
+    } catch (error) {
+      logger.error('Client agent session reminder cancel error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  }));
+
   // ── Runtime state: running / idle / waiting for an action ──
   app.get('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
@@ -663,6 +719,8 @@ export async function resolveClientSessionAction(
       // May this token answer? The engine decides, as the token's owner within the token's scope.
       authorize: approvalAuthorizerFor(request, ctx.tenantDbName),
       mode: background ? 'background' : 'sync',
+      // A switched-off agent does not continue; the request stays open for when it is back on.
+      requireActiveAgent: true,
       runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
         userId: ctx.tokenRecord.userId,
         tokenId: apiTokenId,
@@ -741,6 +799,8 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
       return { status: 400, body: apiErrorBody('invalid_request_error', outcome.message, 'invalid_resolution') };
     case 'busy':
       return { status: 409, body: RUN_CONFLICT_BODY };
+    case 'agent_inactive':
+      return { status: 400, body: apiErrorBody('invalid_request_error', 'Agent is not active', 'agent_inactive') };
     default:
       return null;
   }

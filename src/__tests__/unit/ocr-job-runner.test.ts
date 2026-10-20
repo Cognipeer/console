@@ -36,7 +36,7 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(async () => db),
 }));
 
-import { processOcrItem } from '@/lib/services/ocrJobs/ocrJobRunner';
+import { OCR_ITEM_HELD_WHILE_PAUSED, processOcrItem } from '@/lib/services/ocrJobs/ocrJobRunner';
 import { sendOcrJobWebhook } from '@/lib/services/ocrJobs/ocrJobWebhook';
 import { handleOcrRequest } from '@/lib/services/models/inferenceService';
 
@@ -189,5 +189,18 @@ describe('processOcrItem', () => {
       'item-1',
       expect.objectContaining({ status: 'failed', errorMessage: 'Job archived' }),
     );
+  });
+
+  it('leaves the item pending, marked as held, when the parent job is paused', async () => {
+    db.findOcrJobItemById.mockResolvedValue(makeItem());
+    db.findOcrJobById.mockResolvedValue(makeJob({ status: 'paused' }));
+
+    await processOcrItem(CTX, 'item-1');
+
+    expect(handleOcr).not.toHaveBeenCalled();
+    // Only the marker is written: the status stays pending and nothing is counted.
+    expect(db.updateOcrJobItem).toHaveBeenCalledTimes(1);
+    expect(db.updateOcrJobItem).toHaveBeenCalledWith('item-1', { errorMessage: OCR_ITEM_HELD_WHILE_PAUSED });
+    expect(db.incrementOcrJobAggregates).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IMcpStdioConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
 import { maskSecretValues } from '@/lib/services/logRedaction';
 import { openStdioEnv } from './secretVault';
+import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 
 const logger = createLogger('mcp-stdio-runner');
 
@@ -471,6 +472,9 @@ export async function stdioCallTool(
       .join('\n');
     throw new Error(text || 'MCP tool call failed');
   }
+
+  // Images/audio/resources survive as a ToolOutput; text-only results keep the legacy unwrap.
+  if (contentHasMedia(result?.content)) return mcpResultToToolOutput(result);
 
   if (result?.structuredContent !== undefined) return result.structuredContent;
 

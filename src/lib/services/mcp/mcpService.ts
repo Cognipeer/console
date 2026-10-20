@@ -1,3 +1,4 @@
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import { createHash, randomUUID } from 'crypto';
 import { getDatabase } from '@/lib/database';
@@ -41,7 +42,7 @@ import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { resolveTenantDbName } from '@/lib/services/guardrail/hooks/recordCache';
-import { isMcpToolInputError, McpToolInputError, McpUpstreamError } from './errors';
+import { isMcpToolInputError, McpServerConfigError, McpToolInputError, McpUpstreamError } from './errors';
 import { buildOpenApiRequest } from './openApiRequest';
 import { specDeclaredParameters } from './openApiSpecParameters';
 import {
@@ -60,6 +61,13 @@ import {
   sealStdioEnv,
 } from './secretVault';
 import { remoteCallTool, remoteListTools } from './remoteMcpClient';
+import {
+  CONSOLE_IDENTITY_AUTH_TYPE,
+  consoleIdentityHeaders,
+  ensureConsoleIdentityKey,
+  isConsoleIdentityRefusal,
+  type ConsoleIdentityCaller,
+} from '@/lib/iam/consoleIdentity';
 import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
 import { mcpSandboxRunner } from '@/enterprise/registry';
 import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
@@ -99,8 +107,38 @@ export const DEFAULT_MCP_EXPOSURE: IMcpExposureConfig = {
   accessMode: 'token',
 };
 
-export function resolveSourceType(server: IMcpServer): McpSourceType {
+export function resolveSourceType(server: Pick<IMcpServer, 'sourceType'>): McpSourceType {
   return server.sourceType ?? 'openapi';
+}
+
+/**
+ * A browser reaches whatever address the console can, so a server that drives
+ * one is called with a token only: neither the browser server itself nor a
+ * composite that includes it can be public.
+ */
+const BROWSER_PROVIDER_ID = 'browser';
+const BROWSER_TOKEN_ONLY_MESSAGE =
+  'A browser server is available with an API token only: it cannot be public, and neither can a composite server that includes it.';
+
+/** An internal-source server built on the browser provider. */
+export function isBrowserServer(server: Pick<IMcpServer, 'sourceType' | 'metadata'>): boolean {
+  if (resolveSourceType(server) !== 'internal') return false;
+  const internal = (server.metadata as Record<string, unknown> | undefined)?.internal as { provider?: unknown } | undefined;
+  return internal?.provider === BROWSER_PROVIDER_ID;
+}
+
+/** A browser server, or a composite with a browser member (members are read from the current tenant database). */
+export async function reachesBrowser(
+  db: DatabaseProvider,
+  server: Pick<IMcpServer, 'sourceType' | 'metadata'>,
+): Promise<boolean> {
+  if (isBrowserServer(server)) return true;
+  if (resolveSourceType(server) !== 'composite') return false;
+  for (const member of getCompositeConfig(server).members) {
+    const record = await db.findMcpServerById(member.serverId);
+    if (record && isBrowserServer(record)) return true;
+  }
+  return false;
 }
 
 export function resolveExposure(server: IMcpServer): IMcpExposureConfig {
@@ -618,7 +656,7 @@ export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'a
  * Discover the tool list for a server config. For 'stdio' + 'sandbox' the
  * sandbox must already be provisioned (pass the ensured base URL).
  */
-async function discoverToolsForServer(server: IMcpServer): Promise<IMcpTool[]> {
+async function discoverToolsForServer(server: IMcpServer, identity?: ConsoleIdentityCaller): Promise<IMcpTool[]> {
   const sourceType = resolveSourceType(server);
 
   if (sourceType === 'openapi') {
@@ -628,11 +666,13 @@ async function discoverToolsForServer(server: IMcpServer): Promise<IMcpTool[]> {
 
   if (sourceType === 'remote') {
     if (!server.remoteConfig?.url) throw new Error('Server has no remote MCP URL');
-    return remoteListTools({
-      url: server.remoteConfig.url,
-      transport: server.remoteConfig.transport,
+    const identityAuth = await serverConsoleIdentityAuth(server, sourceType, identity);
+    return withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
+      url: server.remoteConfig!.url,
+      transport: server.remoteConfig!.transport,
       auth: openAuthConfig(server.upstreamAuth),
-    });
+      ...(identityAuth ? { extraHeaders: identityAuth.headers } : {}),
+    }));
   }
 
   if (sourceType === 'internal') {
@@ -758,6 +798,7 @@ function validateCreateInput(input: CreateMcpServerInput): McpSourceType {
       throw new Error('internalConfig.instanceKey is required for source type "internal"');
     }
   }
+  if (input.upstreamAuth?.type === CONSOLE_IDENTITY_AUTH_TYPE) assertConsoleIdentitySource(sourceType);
   if (sourceType === 'composite') {
     if (!input.compositeConfig?.members?.length) {
       throw new Error('compositeConfig.members is required for source type "composite"');
@@ -796,6 +837,7 @@ interface BuiltCompositeTools {
   members: IMcpCompositeMemberConfig[];
   memberSummaries: IMcpCompositeMemberSummary[];
   hasInternalMember: boolean;
+  hasBrowserMember: boolean;
 }
 
 async function buildCompositeTools(
@@ -813,6 +855,7 @@ async function buildCompositeTools(
   const members: IMcpCompositeMemberConfig[] = [];
   const memberSummaries: IMcpCompositeMemberSummary[] = [];
   let hasInternalMember = false;
+  let hasBrowserMember = false;
 
   for (const cfg of memberConfigs) {
     const member = await db.findMcpServerById(cfg.serverId);
@@ -820,6 +863,7 @@ async function buildCompositeTools(
     const m = member!;
     const memberSourceType = resolveSourceType(m);
     if (memberSourceType === 'internal') hasInternalMember = true;
+    if (isBrowserServer(m)) hasBrowserMember = true;
 
     members.push({
       serverId: cfg.serverId,
@@ -872,7 +916,7 @@ async function buildCompositeTools(
     origin: { serverId: entries[i].serverId, serverKey: entries[i].serverKey, realName: entries[i].realName },
   }));
 
-  return { tools, members, memberSummaries, hasInternalMember };
+  return { tools, members, memberSummaries, hasInternalMember, hasBrowserMember };
 }
 
 /** Rebuild + persist one composite's snapshot from its stored member config. */
@@ -961,6 +1005,7 @@ export async function createMcpServer(
   audit?: McpAuditContext,
 ): Promise<IMcpServer> {
   const sourceType = validateCreateInput(input);
+  if (input.upstreamAuth?.type === CONSOLE_IDENTITY_AUTH_TYPE) await prepareConsoleIdentityKey(tenantDbName);
 
   const key = await generateUniqueKey(tenantDbName, projectId, input.key?.trim() || input.name);
   const endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug);
@@ -979,11 +1024,21 @@ export async function createMcpServer(
       throw new Error('Upstream base URL is required. Provide it explicitly or include a servers array in the spec.');
     }
   } else if (sourceType === 'remote') {
-    tools = await remoteListTools({
+    // Discovery runs as the person saving the server.
+    const identityAuth = await consoleIdentityAuthFor({
+      authType: openedAuth.type,
+      tenantId,
+      tenantDbName,
+      projectId,
+      audience: input.remoteConfig!.url,
+      identity: { userId, source: 'console' },
+    });
+    tools = await withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
       url: input.remoteConfig!.url,
       transport: input.remoteConfig!.transport,
       auth: openedAuth,
-    });
+      ...(identityAuth ? { extraHeaders: identityAuth.headers } : {}),
+    }));
   } else if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'subprocess') {
     // Discover eagerly so the create screen fails fast on a broken package.
     tools = await stdioListTools(input.stdioConfig!, { tenantId });
@@ -1000,6 +1055,9 @@ export async function createMcpServer(
   if (sourceType === 'internal') {
     const ctx = { tenantDbName, tenantId, projectId };
     const provider = requireInternalMcpProvider(input.internalConfig!.provider);
+    if (provider.id === BROWSER_PROVIDER_ID && normalizeExposure(input.exposure).accessMode === 'public') {
+      throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+    }
     const instanceKey = input.internalConfig!.instanceKey;
     const config = input.internalConfig!.config ?? {};
     await provider.validateInstance(ctx, instanceKey, config);
@@ -1015,6 +1073,9 @@ export async function createMcpServer(
       alwaysPrefix: m.alwaysPrefix,
     }));
     const built = await buildCompositeTools(db, { tenantId, projectId }, memberConfigs);
+    if (built.hasBrowserMember && normalizeExposure(input.exposure).accessMode === 'public') {
+      throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+    }
     tools = built.tools;
     compositeMetadata = metadataWithComposite(
       undefined,
@@ -1145,6 +1206,38 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
   return changes;
 }
 
+/**
+ * What an update leaves behind must keep a browser off public URLs: the
+ * server itself, a composite through its members, and a server that becomes a
+ * browser server while a public composite includes it.
+ */
+async function assertBrowserStaysTokenOnly(
+  db: DatabaseProvider,
+  existing: IMcpServer,
+  sourceType: McpSourceType,
+  updateData: Record<string, unknown>,
+): Promise<void> {
+  const after = {
+    sourceType,
+    metadata: (updateData.metadata as IMcpServer['metadata'] | undefined) ?? existing.metadata,
+  };
+  const exposure = (updateData.exposure as IMcpExposureConfig | undefined) ?? resolveExposure(existing);
+  if (exposure.accessMode === 'public' && await reachesBrowser(db, after)) {
+    throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
+  }
+  if (isBrowserServer(after) && !isBrowserServer(existing)) {
+    const id = String(existing._id);
+    const publicComposite = (await db.listMcpServers({})).find((server) => resolveSourceType(server) === 'composite'
+      && resolveExposure(server).accessMode === 'public'
+      && getCompositeConfig(server).members.some((member) => member.serverId === id));
+    if (publicComposite) {
+      throw new McpServerConfigError(
+        `${BROWSER_TOKEN_ONLY_MESSAGE} This server is a member of the public composite server "${publicComposite.name}".`,
+      );
+    }
+  }
+}
+
 export async function updateMcpServer(
   tenantDbName: string,
   serverId: string,
@@ -1168,6 +1261,10 @@ export async function updateMcpServer(
   if (input.status !== undefined) updateData.status = input.status;
   if (input.upstreamBaseUrl !== undefined) updateData.upstreamBaseUrl = input.upstreamBaseUrl;
   if (input.upstreamAuth !== undefined) {
+    if (input.upstreamAuth.type === CONSOLE_IDENTITY_AUTH_TYPE) {
+      assertConsoleIdentitySource(resolveSourceType(existing));
+      await prepareConsoleIdentityKey(tenantDbName);
+    }
     updateData.upstreamAuth = mergeAuthConfigUpdate(existing.upstreamAuth, input.upstreamAuth);
   }
   if (input.exposure !== undefined) updateData.exposure = normalizeExposure(input.exposure);
@@ -1216,11 +1313,22 @@ export async function updateMcpServer(
     const auth = updateData.upstreamAuth
       ? openAuthConfig(updateData.upstreamAuth as IMcpAuthConfig)
       : openAuthConfig(existing.upstreamAuth);
-    updateData.tools = await remoteListTools({
-      url: input.remoteConfig.url,
-      transport: input.remoteConfig.transport,
-      auth,
+    const remoteConfig = input.remoteConfig;
+    // Discovery runs as the person saving the server.
+    const identityAuth = await consoleIdentityAuthFor({
+      authType: auth.type,
+      tenantId: existing.tenantId,
+      tenantDbName,
+      projectId: existing.projectId,
+      audience: remoteConfig.url,
+      identity: { userId, source: 'console' },
     });
+    updateData.tools = await withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
+      url: remoteConfig.url,
+      transport: remoteConfig.transport,
+      auth,
+      ...(identityAuth ? { extraHeaders: identityAuth.headers } : {}),
+    }));
     updateData.toolsDiscoveredAt = new Date();
   }
   if (sourceType === 'stdio' && input.stdioConfig !== undefined
@@ -1278,6 +1386,8 @@ export async function updateMcpServer(
       built.memberSummaries,
     );
   }
+
+  await assertBrowserStaysTokenOnly(db, existing, sourceType, updateData);
 
   // Tool enable/disable list (metadata-backed). Runs after tool rediscovery so
   // the incoming names are validated against the tool list being persisted.
@@ -1439,7 +1549,7 @@ export async function refreshMcpServerTools(
       // triggered by a member's own update).
       updated = await reconcileOneComposite(db, server);
     } else {
-      const tools = await discoverToolsForServer(server);
+      const tools = await discoverToolsForServer(server, { userId, source: 'console' });
       forgetLastErrorWrite(server);
       const refreshUpdate: Partial<IMcpServer> = {
         tools,
@@ -2038,14 +2148,15 @@ function recordMcpServerMetric(
 }
 
 /**
- * A disabled tool and a guardrail enforce-mode block are policy outcomes, not
- * server faults. They are told apart by message (the same text a routed call
+ * A disabled tool, a guardrail enforce-mode block and a Console identity
+ * refusal (nobody to mint a token for) are policy outcomes, not server faults. They are told apart by message (the same text a routed call
  * carries back from another node) and kept out of the health rollup so they
  * cannot raise the server's error rate.
  */
 function isMcpPolicyOutcome(error: unknown): boolean {
   const message = error instanceof Error ? error.message : '';
-  return /^Tool ".*" is disabled on MCP server /.test(message)
+  return isConsoleIdentityRefusal(error)
+    || /^Tool ".*" is disabled on MCP server /.test(message)
     || message.startsWith('Blocked by Aegis shield')
     || message.startsWith('Response blocked by Aegis shield');
 }
@@ -2062,6 +2173,8 @@ export interface McpInvokeJob {
   toolName: string;
   args: Record<string, unknown>;
   runtimeHeaders?: Record<string, string>;
+  /** Who the call is for (plain data, no token): the executing node mints the upstream token itself. */
+  identity?: ConsoleIdentityCaller;
 }
 
 /**
@@ -2079,12 +2192,16 @@ export async function executeMcpTool(
   toolName: string,
   args: Record<string, unknown>,
   runtimeHeaders?: Record<string, string>,
+  /** Who the call is for; a server set up for Console identity refuses a call without a person. */
+  identity?: ConsoleIdentityCaller,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  // Refuse before queuing a remote call and before a failure row is logged.
+  await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const startedAt = Date.now();
   try {
     let outcome: { result: unknown; latencyMs: number };
     if (server._id === undefined || server._id === null) {
-      outcome = await executeMcpToolLocal(server, toolName, args, runtimeHeaders);
+      outcome = await executeMcpToolLocal(server, toolName, args, runtimeHeaders, identity);
     } else {
       const job: McpInvokeJob = {
         tenantId: server.tenantId,
@@ -2093,6 +2210,7 @@ export async function executeMcpTool(
         toolName,
         args,
         runtimeHeaders,
+        ...(identity ? { identity } : {}),
       };
       outcome = await routeInstanceCall(
         {
@@ -2101,7 +2219,7 @@ export async function executeMcpTool(
           jobName: 'invoke',
         },
         job as unknown as QueuePayload,
-        () => executeMcpToolLocal(server, toolName, args, runtimeHeaders),
+        () => executeMcpToolLocal(server, toolName, args, runtimeHeaders, identity),
       );
     }
     recordMcpServerMetric(server, 'ok', Date.now() - startedAt);
@@ -2149,6 +2267,99 @@ function sanitizeExecutionError(error: unknown, secretValues: string[]): Error {
   }
 }
 
+// ── Console identity (lib/iam/consoleIdentity.ts) ─────────────────────────
+
+/** Remote MCP and OpenAPI servers are the sources with an upstream to send a Console identity token to. */
+function assertConsoleIdentitySource(sourceType: McpSourceType): void {
+  if (sourceType !== 'remote' && sourceType !== 'openapi') {
+    throw new McpServerConfigError('Console identity is available for remote MCP and OpenAPI servers only');
+  }
+}
+
+/** Create the workspace's signing key when an administrator turns Console identity on, so its key set is published. */
+async function prepareConsoleIdentityKey(tenantDbName: string): Promise<void> {
+  try {
+    await ensureConsoleIdentityKey(tenantDbName);
+  } catch (error) {
+    // The first call creates it otherwise.
+    logger.warn('Could not prepare the Console identity signing key', { error });
+  }
+}
+
+/** The audience of a server's tokens: the remote MCP endpoint, or an OpenAPI server's base URL (one per server, not per operation). */
+function consoleIdentityAudienceOf(server: IMcpServer, sourceType: McpSourceType): string | undefined {
+  if (sourceType === 'remote') return server.remoteConfig?.url;
+  if (sourceType === 'openapi') return server.upstreamBaseUrl;
+  return undefined;
+}
+
+interface ConsoleIdentityAuth {
+  headers: Record<string, string>;
+  token: string;
+}
+
+/**
+ * The Console identity header of a call, when the upstream is set up for it (`authType` is
+ * `console_identity`); `undefined` otherwise. Throws `ConsoleIdentityError` when no token can be
+ * minted, so such an upstream never receives a call without one.
+ */
+async function consoleIdentityAuthFor(input: {
+  authType: string | undefined;
+  tenantId: string;
+  tenantDbName?: string;
+  projectId?: string;
+  audience: string | undefined;
+  identity: ConsoleIdentityCaller | undefined;
+}): Promise<ConsoleIdentityAuth | undefined> {
+  if (input.authType !== CONSOLE_IDENTITY_AUTH_TYPE || input.audience === undefined) return undefined;
+  const { headers, token } = await consoleIdentityHeaders({
+    tenantId: input.tenantId,
+    tenantDbName: input.tenantDbName,
+    audience: input.audience,
+    caller: input.identity
+      ? { ...input.identity, projectId: input.identity.projectId ?? input.projectId }
+      : undefined,
+  });
+  return { headers, token };
+}
+
+function serverConsoleIdentityAuth(
+  server: IMcpServer,
+  sourceType: McpSourceType,
+  identity: ConsoleIdentityCaller | undefined,
+): Promise<ConsoleIdentityAuth | undefined> {
+  return consoleIdentityAuthFor({
+    authType: server.upstreamAuth?.type,
+    tenantId: server.tenantId,
+    projectId: server.projectId,
+    audience: consoleIdentityAudienceOf(server, sourceType),
+    identity,
+  });
+}
+
+/** Runtime headers with the identity header laid over them: no case variant of its name survives. */
+function withConsoleIdentityHeader(
+  runtimeHeaders: Record<string, string> | undefined,
+  identityHeaders: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!identityHeaders) return runtimeHeaders;
+  const replaced = new Set(Object.keys(identityHeaders).map((name) => name.toLowerCase()));
+  const kept = Object.entries(runtimeHeaders ?? {}).filter(([name]) => !replaced.has(name.toLowerCase()));
+  return { ...Object.fromEntries(kept), ...identityHeaders };
+}
+
+/** Run an upstream request; the identity token is masked in whatever it throws (an upstream may echo it). */
+async function withConsoleIdentityScrubbed<T>(
+  identityAuth: ConsoleIdentityAuth | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw identityAuth ? sanitizeExecutionError(error, [identityAuth.token]) : error;
+  }
+}
+
 export async function executeMcpToolLocal(
   server: IMcpServer,
   toolName: string,
@@ -2159,7 +2370,10 @@ export async function executeMcpToolLocal(
    * upstream HTTP request to attach them to.
    */
   runtimeHeaders?: Record<string, string>,
+  /** Who the call is for: a remote / OpenAPI server set up for Console identity gets a token for them. */
+  identity?: ConsoleIdentityCaller,
 ): Promise<{ result: unknown; latencyMs: number }> {
+  await assertServiceEnabled({ tenantId: server.tenantId }, 'mcp');
   const sourceType = resolveSourceType(server);
   const start = Date.now();
   // A caller may address the tool by its renamed (exposed) name — resolve
@@ -2179,6 +2393,12 @@ export async function executeMcpToolLocal(
   if (!isMcpToolEnabled(server, realToolName)) {
     throw new Error(`Tool "${toolName}" is disabled on MCP server "${server.name}"`);
   }
+
+  // Console identity: a token for the person behind this call, minted for this upstream. Refused
+  // (nobody behind the call, an unknown or disabled account) before anything else runs.
+  const identityAuth = await serverConsoleIdentityAuth(server, sourceType, identity);
+  const upstreamHeaders = withConsoleIdentityHeader(runtimeHeaders, identityAuth?.headers);
+  const identitySecrets = identityAuth ? [identityAuth.token] : [];
 
   // Guardrail `tool.pre` hook. `ensureMcpGuardrailHook()` fills the seam with
   // the community bridge on first call (an overlay that claimed it first
@@ -2214,14 +2434,14 @@ export async function executeMcpToolLocal(
   let result: unknown;
   try {
     if (sourceType === 'openapi') {
-      result = await executeOpenApiTool(server, realToolName, effectiveArgs, runtimeHeaders);
+      result = await executeOpenApiTool(server, realToolName, effectiveArgs, upstreamHeaders);
     } else if (sourceType === 'remote') {
       result = await remoteCallTool(
         {
           url: server.remoteConfig!.url,
           transport: server.remoteConfig!.transport,
           auth: openAuthConfig(server.upstreamAuth),
-          extraHeaders: runtimeHeaders,
+          extraHeaders: upstreamHeaders,
         },
         realToolName,
         effectiveArgs,
@@ -2240,14 +2460,14 @@ export async function executeMcpToolLocal(
         throw new Error('Could not resolve tenant database for internal MCP execution');
       }
       result = await provider.execute(
-        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId },
+        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId, serverKey: server.key },
         internal.instanceKey,
         internal.config ?? {},
         realToolName,
         effectiveArgs,
       );
     } else if (sourceType === 'composite') {
-      result = await executeCompositeTool(server, realToolName, effectiveArgs, runtimeHeaders);
+      result = await executeCompositeTool(server, realToolName, effectiveArgs, runtimeHeaders, identity);
     } else if (server.stdioConfig?.executionMode === 'sandbox') {
       const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
       await ensureSandboxInstance(server, runner, ref, runnerConfig);
@@ -2255,11 +2475,12 @@ export async function executeMcpToolLocal(
     } else {
       result = await stdioCallTool(server.stdioConfig!, realToolName, effectiveArgs, { tenantId: server.tenantId });
     }
-    // The server's own upstream credential is never legitimate output: mask it
-    // here, before the result reaches the guardrail, the caller or the log.
-    result = maskSecretValues(result, upstreamCredentialValues(server));
+    // The server's own upstream credential (and the identity token minted for
+    // it) is never legitimate output: mask it here, before the result reaches
+    // the guardrail, the caller or the log.
+    result = maskSecretValues(result, [...upstreamCredentialValues(server), ...identitySecrets]);
   } catch (error) {
-    const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
+    const secretValues = [...mcpRequestSecretValues(server, upstreamHeaders), ...identitySecrets];
     const safeError = sanitizeExecutionError(error, secretValues);
     // A call the caller got wrong says nothing about the server's health.
     // Anything else is persisted on the record so the monitor can surface it.
@@ -2300,6 +2521,7 @@ async function executeCompositeTool(
   toolName: string,
   args: Record<string, unknown>,
   runtimeHeaders: Record<string, string> | undefined,
+  identity: ConsoleIdentityCaller | undefined,
 ): Promise<unknown> {
   const tool = (server.tools ?? []).find((t) => t.name === toolName);
   if (!tool?.origin) {
@@ -2329,7 +2551,8 @@ async function executeCompositeTool(
   const memberSecrets = mcpRequestSecretValues(m, runtimeHeaders);
 
   try {
-    const { result } = await executeMcpTool(m, tool.origin.realName, args, runtimeHeaders);
+    // A member set up for Console identity mints its own token, for its own URL.
+    const { result } = await executeMcpTool(m, tool.origin.realName, args, runtimeHeaders, identity);
     if (tenantDbName) {
       void logMcpRequest(tenantDbName, {
         tenantId: m.tenantId,

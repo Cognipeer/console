@@ -143,6 +143,7 @@ vi.mock('@cognipeer/agent-sdk', () => {
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
 import {
+  __testables,
   agentRelayCallbacks,
   executeAgentChat,
   executeAgentChatLocal,
@@ -579,6 +580,39 @@ describe('routed entry points', () => {
     const options = hoisted.routeInstanceCall.mock.calls[0][3] as { relay: { handlers: Record<string, (d: unknown) => void> } };
     options.relay.handlers.text({ not: 'text' });
     expect(onTextChunk).not.toHaveBeenCalled();
+  });
+});
+
+describe('toToolCallEvent', () => {
+  const { toToolCallEvent } = __testables;
+  const start = { type: 'tool_call', phase: 'start', name: 'search', id: 'c1', args: { q: 'x' } } as never;
+
+  it('an unstamped event keeps today\'s shape, with no subagent or resumed key', () => {
+    expect(toToolCallEvent(start)).toStrictEqual({ phase: 'start', name: 'search', id: 'c1', args: { q: 'x' } });
+  });
+
+  it('a stamped event carries the sub-agent; errors keep their message', () => {
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'success', name: 'lookup', id: 'c2', subagentName: 'helper', subagentId: 's1', durationMs: 5 } as never))
+      .toMatchObject({ subagent: { id: 's1', name: 'helper' }, durationMs: 5 });
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'error', name: 'lookup', subagentName: 'helper', error: new Error('boom') } as never))
+      .toMatchObject({ error: 'boom', subagent: { name: 'helper' } });
+  });
+
+  it('other events and phases produce nothing', () => {
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'skipped', name: 'x' } as never)).toBeUndefined();
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start' } as never)).toBeUndefined();
+    expect(toToolCallEvent({ type: 'summarization', name: 'x' } as never)).toBeUndefined();
+  });
+
+  it('marks only the start of a re-entered delegation call', () => {
+    const resumedSet = new Set(['d1']);
+    const delegate = { type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1' } as never;
+    expect(toToolCallEvent(delegate, resumedSet)).toMatchObject({ resumed: true });
+    expect(toToolCallEvent(delegate, new Set(['other']))).not.toHaveProperty('resumed');
+    expect(toToolCallEvent(delegate)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'success', name: 'delegate_to', id: 'd1' } as never, resumedSet)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start', name: 'delegate_to', id: 'd1', subagentName: 'helper' } as never, resumedSet)).not.toHaveProperty('resumed');
+    expect(toToolCallEvent({ type: 'tool_call', phase: 'start', name: 'lookup', id: 'd1' } as never, resumedSet)).not.toHaveProperty('resumed');
   });
 });
 

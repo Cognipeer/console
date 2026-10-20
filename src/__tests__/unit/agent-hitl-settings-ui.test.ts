@@ -33,7 +33,7 @@ describe('hitlToolRows', () => {
     expect(byName.memory_search).toMatchObject({ readOnly: true, effective: 'never' });
     expect(byName.memory_write).toMatchObject({ readOnly: false, effective: 'always' });
     expect(byName.sandbox_exec).toMatchObject({ readOnly: false, effective: 'always' });
-    expect(byName.sandbox_read_file).toMatchObject({ readOnly: true, effective: 'never' });
+    expect(byName.read).toMatchObject({ readOnly: true, effective: 'never' });
     expect(new Set(rows.map((row) => row.name)).size).toBe(rows.length);
   });
 

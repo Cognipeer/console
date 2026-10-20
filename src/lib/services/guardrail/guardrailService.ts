@@ -16,6 +16,7 @@
  * was actually rewritten. The tests and the two API plugins match on all four.
  */
 
+import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { randomUUID } from 'node:crypto';
 import { getDatabase } from '@/lib/database';
 import type { IGuardrail, GuardrailType } from '@/lib/database';
@@ -403,6 +404,20 @@ export async function evaluateGuardrail(params: {
   const record = await resolveGuardrail(tenantDbName, guardrailKey, projectId);
   if (!record) {
     throw new Error(`Guardrail with key "${guardrailKey}" not found`);
+  }
+
+  // Fail OPEN when the guardrails service is switched off for the tenant (the
+  // unknown-key check above still answers first, so the 404 contract holds).
+  if (record.enabled && await safetyCheckSkipped({ tenantId, tenantDbName }, 'guardrails', { source: params.source })) {
+    return {
+      passed: true,
+      blocked: false,
+      guardrailKey: record.key,
+      guardrailName: record.name,
+      action: record.action,
+      findings: [],
+      disabled: true,
+    };
   }
 
   if (!record.enabled) {

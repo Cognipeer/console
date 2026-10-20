@@ -56,7 +56,8 @@ data/agent-bundles/
 data/files/
 /data/
 
-# VitePress build output
+# VitePress build output (the docs live in docs/; a run started from the repository root writes its cache here)
+/.vitepress/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 

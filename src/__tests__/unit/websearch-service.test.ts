@@ -37,7 +37,7 @@ vi.mock('@/lib/services/models/inferenceService', () => ({
   handleChatCompletion: vi.fn(),
 }));
 
-import { runWebSearch, listWebSearchRunLogs } from '@/lib/services/webSearch/webSearchService';
+import { runWebSearch, listWebSearchProviders, listWebSearchRunLogs } from '@/lib/services/webSearch/webSearchService';
 import {
   listProviderConfigs,
   loadProviderRuntimeData,
@@ -167,6 +167,25 @@ describe('instance resolution without an explicit key', () => {
     await expect(
       runWebSearch('tenant_acme', 'tenant-1', 'proj-1', { query: 'q' }),
     ).rejects.toThrow(/no active web search instance/i);
+  });
+});
+
+describe('listWebSearchProviders', () => {
+  it('lists the websearch providers of the project, as the plain view', async () => {
+    (listProviderConfigs as ReturnType<typeof vi.fn>).mockResolvedValue([{ key: 'a' }]);
+    await expect(listWebSearchProviders('tenant_acme', 'tenant-1', 'proj-1')).resolves.toEqual([{ key: 'a' }]);
+    expect(listProviderConfigs).toHaveBeenCalledWith('tenant_acme', 'tenant-1', { type: 'websearch', projectId: 'proj-1' }, undefined);
+  });
+
+  it('passes on what the caller wants added to the view (the dashboard edit form asks for the stored credential fields)', async () => {
+    (listProviderConfigs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await listWebSearchProviders('tenant_acme', 'tenant-1', 'proj-1', { credentialFields: true });
+    expect(listProviderConfigs).toHaveBeenCalledWith(
+      'tenant_acme',
+      'tenant-1',
+      { type: 'websearch', projectId: 'proj-1' },
+      { credentialFields: true },
+    );
   });
 });
 

@@ -75,6 +75,8 @@ const nextConfig = {
     // The 'cognipeer' PII engine (services/pii/cognipeerEngine.ts) — same
     // reason as @cognipeer/guardrail directly above.
     '@cognipeer/pii',
+    // Azure Blob file provider (providers/contracts/azure): imported lazily on first use, so keep it out of the bundle.
+    '@azure/storage-blob',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

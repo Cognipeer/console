@@ -228,6 +228,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
     { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },
     { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
+    // The dashboard's cross-agent Sessions list: a project's sessions by last activity.
+    { key: { projectId: 1, updatedAt: -1, _id: -1 }, options: { name: 'idx_project_updatedAt' } },
     // A chat-completions client that resends its transcript is matched back to its session by the transcript's digest.
     { key: { projectId: 1, agentKey: 1, createdBy: 1, transcriptHash: 1, updatedAt: -1 }, options: { name: 'idx_transcript_hash' } },
   ],

@@ -12,7 +12,15 @@
  */
 
 import type { FastifyRequest } from 'fastify';
-import { pageOfVisibleRows, type SessionActor } from './agent-session-access';
+import { getDatabase } from '@/lib/database';
+import { chooseRelativeFileKey } from '@/lib/services/files';
+import {
+  pageOfVisibleRows,
+  refuseSessionLinked,
+  sessionActorOf,
+  type SessionActor,
+  type SessionRefusal,
+} from './agent-session-access';
 
 /** The conversation id a file record belongs to, or null for any other file. */
 export function sessionOfFile(record: { purpose?: string | null; conversationId?: string | null } | null | undefined): string | null {
@@ -80,4 +88,50 @@ export async function listVisibleFiles<R extends { items: Array<{ purpose?: stri
     ...(prefix !== undefined ? { prefix } : {}),
     ...(page.next ? { nextCursor: page.next } : {}),
   };
+}
+
+/**
+ * The first refusal among the sessions whose files an upload under this exact key would write over. Bytes written under
+ * the key of a file a session holds change that session's file, like converting or deleting it: its owner always may,
+ * anybody else needs `agent.session_manage_others`. A key that names a folder (or no key) gets a generated name of its
+ * own, so nothing is there to write over. `null`: the key holds no session file, or the caller may manage its session.
+ *
+ * Every route that takes an upload asks this before it spends a quota or writes a byte: the Document Store (the
+ * signed-in person) and the client Files API (the token's owner, passed as `actor`).
+ *
+ * The hint is already in the spelling the drivers store (`composeUploadKeyHint`: backslashes read as slashes, runs of
+ * slashes collapsed), so the key looked up here is the key the object lands on.
+ */
+export async function sessionRefusedForUpload(
+  request: FastifyRequest,
+  input: {
+    tenantDbName: string;
+    projectId: string;
+    bucket: { providerKey: string; key: string };
+    keyHint: string | undefined;
+    fileName: string;
+    /** Who the upload acts for when the route already resolved them (a token's owner); default: the signed-in session. */
+    actor?: SessionActor;
+  },
+): Promise<Exclude<SessionRefusal, { status: 404 }> | null> {
+  const { keyHint } = input;
+  if (!keyHint || keyHint.endsWith('/')) return null;
+  const key = chooseRelativeFileKey(keyHint, input.fileName);
+  const db = await getDatabase();
+  await db.switchToTenant(input.tenantDbName);
+  const occupants = await db.listFileRecordsByKeys({
+    providerKey: input.bucket.providerKey,
+    bucketKey: input.bucket.key,
+    projectId: input.projectId,
+    keys: [key],
+  });
+  const sessions = [...new Set(occupants.map((record) => sessionOfFile(record)).filter((id): id is string => id !== null))];
+  if (sessions.length === 0) return null;
+
+  const actor = input.actor ?? await sessionActorOf(request);
+  for (const conversationId of sessions) {
+    const denial = await refuseSessionLinked(request, conversationId, 'manage', { actor });
+    if (denial) return denial;
+  }
+  return null;
 }

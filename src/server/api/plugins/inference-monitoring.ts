@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { IInferenceServer } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
-import { InferenceMonitoringService } from '@/lib/services/inferenceMonitoring';
+import { InferenceMonitoringService, InferenceServerDisabledError } from '@/lib/services/inferenceMonitoring';
 import { normalizeBaseUrl, sanitizeServer } from '@/lib/services/inferenceMonitoring/utils';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -200,6 +200,9 @@ export const inferenceMonitoringApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ metrics });
     } catch (error) {
+      if (error instanceof InferenceServerDisabledError) {
+        return reply.code(409).send({ error: error.message, code: error.code });
+      }
       logger.error('Poll inference server error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Failed to poll server',

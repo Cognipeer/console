@@ -98,7 +98,7 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
         const names = [
             ...(groups.exec ? ['sandbox_exec'] : []),
             ...(groups.code ? ['sandbox_run_code'] : []),
-            ...(groups.files ? ['sandbox_read_file', 'sandbox_write_file', 'sandbox_list_files'] : []),
+            ...(groups.files ? ['read', 'sandbox_write_file', 'sandbox_list_files'] : []),
             ...(config.sandbox.preview?.enabled ? ['sandbox_preview_link'] : []),
         ];
         for (const name of names) {

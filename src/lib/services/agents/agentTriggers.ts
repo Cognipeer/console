@@ -17,6 +17,7 @@ import type {
   AgentResponseFormat,
   AgentTriggerTypeSettings,
   IAgentConfig,
+  DatabaseProvider,
   IAgentTrigger,
   IAgentTriggerBase,
   IAgentRun,
@@ -27,6 +28,7 @@ import { AgentQuotaExceededError, AgentSpendLimitError } from './agentErrors';
 import { resolveRunVariables, type VariableIssue } from './agentVariables';
 import { publicAgentRunId, resolveAgentRunLimits, startAgentRun } from './agentRunService';
 import { createConversation, resolveAgentConfig } from './agentService';
+import { serviceOffReason } from '@/lib/services/availability/serviceAvailability';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import { initialNextFireAt } from './agentTriggerSchedule';
 import { serializeWebhook } from './agentTriggerWebhookIntake';
@@ -171,8 +173,9 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
           }
         }
 
-        const agent = await db.findAgentByKey(trigger.agentKey, trigger.projectId);
-        if (!agent || agent.status !== 'active') return { kind: 'failed', reason: 'agent is not active' };
+        const target = await triggerTargetAvailability(db, trigger);
+        if (!target.ok) return { kind: 'failed', reason: target.reason };
+        const agent = (await db.findAgentByKey(trigger.agentKey, trigger.projectId))!;
 
         const metadata = { ...(trigger.metadata ?? {}), ...(input.metadata ?? {}) };
         if (Object.keys(metadata).length > RUN_METADATA_MAX_KEYS) {
@@ -281,6 +284,28 @@ export async function fireTrigger(trigger: IAgentTrigger, tenant: TriggerTenant,
     await publishTriggerEvent(trigger, tenant, 'trigger.failed', { trigger: input.trigger, event: input.event, reason: result.reason });
   }
   return result;
+}
+
+// ── Can the target run now ───────────────────────────────────────────────
+
+export type TriggerTargetAvailability = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Whether the thing a trigger runs may run right now. The scheduler asks before it
+ * claims a due slot, so a slot that cannot run is skipped (or, for a one-shot, left
+ * pending) instead of being spent on a refused fire. One place for every "off"
+ * condition: the agents service of the tenant (switched off for the deployment or
+ * left out of its license) and the agent's status.
+ */
+export async function triggerTargetAvailability(
+  db: Pick<DatabaseProvider, 'findAgentByKey'>,
+  trigger: Pick<IAgentTrigger, 'agentKey' | 'projectId' | 'tenantId'>,
+): Promise<TriggerTargetAvailability> {
+  const off = await serviceOffReason({ tenantId: trigger.tenantId }, 'agents');
+  if (off) return { ok: false, reason: off.source === 'env' ? 'agents service is switched off' : 'agents service is not licensed' };
+  const agent = await db.findAgentByKey(trigger.agentKey, trigger.projectId);
+  if (!agent || agent.status !== 'active') return { ok: false, reason: 'agent is not active' };
+  return { ok: true };
 }
 
 // ── Variables at fire time ───────────────────────────────────────────────

@@ -220,8 +220,9 @@ Every tool is returned with a complete `annotations` block (`title`, `readOnlyHi
 `destructiveHint`, `idempotentHint`, `openWorldHint`). Strict clients — OpenAI's MCP
 connector among them — reject servers that omit these hints. Values come from the tool
 definition when present; otherwise they are derived (read-only for `GET`/`HEAD` OpenAPI
-operations, read-only for internal Knowledge Base / Agent Observability tools, and the
-conservative "not read-only, potentially destructive" default elsewhere).
+operations, read-only for internal Knowledge Base / Agent Observability tools and for the
+Browser tools that only observe the page, and the conservative "not read-only, potentially
+destructive" default elsewhere).
 
 To override a hint or reword a tool, open the MCP server's **Tools** tab in the dashboard
 and use the row action, or `PATCH` the server directly:

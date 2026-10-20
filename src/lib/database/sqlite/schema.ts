@@ -1828,7 +1828,8 @@ export const TENANT_SCHEMA_SQL = `
     usePublished INTEGER,
     createdBy TEXT,
     clientTool TEXT,
-    subagent TEXT
+    subagent TEXT,
+    delegationToolCallId TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
   CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
@@ -2774,6 +2775,8 @@ export const TENANT_SCHEMA_SQL = `
     env TEXT,
     envSealed TEXT,
     envKeys TEXT,
+    envRefs TEXT,
+    groupRefs TEXT,
     entrypoint TEXT,
     toolboxPort INTEGER NOT NULL,
     previewPorts TEXT,
@@ -2810,6 +2813,9 @@ export const TENANT_SCHEMA_SQL = `
     env TEXT,
     envSealed TEXT,
     envKeys TEXT,
+    envRefs TEXT,
+    groupRefs TEXT,
+    envDelivery TEXT,
     persist INTEGER NOT NULL DEFAULT 0,
     blockNetwork INTEGER NOT NULL DEFAULT 0,
     previewEnabled INTEGER NOT NULL DEFAULT 1,
@@ -2894,6 +2900,11 @@ export const TENANT_SCHEMA_SQL = `
     blockNetwork INTEGER NOT NULL DEFAULT 0,
     resources TEXT,
     warmPoolSize INTEGER,
+    envDelivery TEXT,
+    envSealed TEXT,
+    envKeys TEXT,
+    envRefs TEXT,
+    groupRefs TEXT,
     sizeBytes INTEGER,
     status TEXT NOT NULL,
     lastError TEXT,

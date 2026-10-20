@@ -92,7 +92,7 @@ export function PromptMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.search) {
         const pattern = this.likePattern(filters.search.trim());
-        clauses.push('(name LIKE @search OR key LIKE @search OR description LIKE @search)');
+        clauses.push(this.likeAny(['name', 'key', 'description'], '@search'));
         params.search = pattern;
       }
 

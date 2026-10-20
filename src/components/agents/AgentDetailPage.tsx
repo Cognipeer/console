@@ -42,6 +42,7 @@ import {
   IconLayoutDashboard,
   IconPlus,
   IconArrowsLeftRight,
+  IconX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { ResourceUsageSection } from '@/components/common/confirm';
@@ -62,6 +63,9 @@ import CopyableCode from './CopyableCode';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
+import AgentRemindersSettings from './studio/AgentRemindersSettings';
+import AgentRemindersTable from './studio/AgentRemindersTable';
+import { showRemindersView, type AgentRemindersResponse } from './studio/reminderUi';
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
@@ -70,6 +74,8 @@ import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
+import { isSessionOngoing } from '@/lib/services/agents/sessionActivityState';
+import { SESSION_QUERY_PARAM } from './session/sessionLinks';
 import AgentRunSettingsPanel from './studio/AgentRunSettingsPanel';
 import AgentVariablesEditor from './studio/AgentVariablesEditor';
 import AgentFilesPanel from './studio/AgentFilesPanel';
@@ -80,7 +86,6 @@ import { normalizeClientTools } from './studio/clientToolsSettings';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
 import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
 import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
-import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentTriggersPanel from './studio/AgentTriggersPanel';
@@ -101,6 +106,7 @@ import type {
   IAgentCallbackConfig,
   IAgentClientToolSurfaces,
   IAgentHumanInTheLoopConfig,
+  IAgentRemindersConfig,
   IAgentAdditionalModel,
   IAgentClientToolConfig,
   IAgentRuntimeConfig,
@@ -254,6 +260,7 @@ export default function AgentDetailPage() {
   const searchParams = useSearchParams()!;
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
+  const tIdentity = useTranslations('consoleIdentity');
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -309,6 +316,7 @@ export default function AgentDetailPage() {
   const [callbackConfig, setCallbackConfig] = useState<IAgentCallbackConfig | undefined>(undefined);
   const [budgetConfig, setBudgetConfig] = useState<IAgentConfig['budget']>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
+  const [remindersConfig, setRemindersConfig] = useState<IAgentRemindersConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
   const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
   const [attachmentsConfig, setAttachmentsConfig] = useState<AttachmentsSettings | undefined>(undefined);
@@ -361,10 +369,12 @@ export default function AgentDetailPage() {
   const [sessionsOwnOnly, setSessionsOwnOnly] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
-  const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
-  /** Background runs narrowed to one trigger (its "Runs" link). */
-  const [runsTrigger, setRunsTrigger] = useState<{ id: string; name: string } | null>(null);
-  const [activeRunCount, setActiveRunCount] = useState(0);
+  const [sessionsView, setSessionsView] = useState<'sessions' | 'reminders'>('sessions');
+  /** Sessions narrowed to the ones one trigger started (its "Runs" link). */
+  const [sessionsTrigger, setSessionsTrigger] = useState<{ id: string; name: string } | null>(null);
+  /** The agent has (had) reminders — shows the Reminders view even when the setting is off now. */
+  const [hasReminders, setHasReminders] = useState(false);
+  const [activeReminderCount, setActiveReminderCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
    * What the server's config check said on the last save: errors blocked it,
@@ -429,6 +439,7 @@ export default function AgentDetailPage() {
         setCallbackConfig(cfg.callback);
         setBudgetConfig(cfg.budget);
         setHitlConfig(cfg.humanInTheLoop);
+        setRemindersConfig(cfg.reminders);
         setClientToolsConfig(cfg.clientTools);
         setClientToolSurfaces(cfg.clientToolSurfaces);
         setAttachmentsConfig(cfg.attachments);
@@ -471,10 +482,11 @@ export default function AgentDetailPage() {
     }
   }, [agent, agentId]);
 
-  const loadSessions = useCallback(async () => {
-    setSessionsLoading(true);
+  const loadSessions = useCallback(async (silent = false) => {
+    if (!silent) setSessionsLoading(true);
     try {
-      const res = await fetch(`/api/agents/${agentId}/sessions`, { cache: 'no-store' });
+      const triggerQuery = sessionsTrigger ? `?triggerId=${encodeURIComponent(sessionsTrigger.id)}` : '';
+      const res = await fetch(`/api/agents/${agentId}/sessions${triggerQuery}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions ?? []);
@@ -485,6 +497,19 @@ export default function AgentDetailPage() {
       console.error('Failed to load sessions', err);
     } finally {
       setSessionsLoading(false);
+    }
+  }, [agentId, sessionsTrigger]);
+
+  // Whether the agent has any reminder at all (the Reminders view is hidden for one that never used them).
+  const loadReminderSummary = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/agents/${agentId}/reminders?status=all&limit=1`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json() as AgentRemindersResponse;
+      setHasReminders((data.reminders ?? []).length > 0);
+      setActiveReminderCount(data.summary?.active ?? 0);
+    } catch {
+      // Without the answer the view just stays hidden unless the setting is on.
     }
   }, [agentId]);
 
@@ -590,6 +615,38 @@ export default function AgentDetailPage() {
       void loadSessions();
     }
   }, [activeTab, agent, loadSessions]);
+
+  // A session whose turn runs (a background run, or one answering a caller right now) changes without anyone touching the page.
+  const hasOngoingSession = sessions.some(isSessionOngoing);
+  useEffect(() => {
+    if (activeTab !== 'sessions' || !hasOngoingSession) return;
+    const timer = setInterval(() => { void loadSessions(true); }, 5_000);
+    return () => clearInterval(timer);
+  }, [activeTab, hasOngoingSession, loadSessions]);
+
+  // `?session=` opens that session's inspector (the Sessions lists link here), on arrival and whenever the link changes.
+  // The value ends up in API paths, so anything but a plain id is ignored.
+  const rawLinkedSession = searchParams.get(SESSION_QUERY_PARAM);
+  const linkedSessionId = rawLinkedSession && /^[A-Za-z0-9_-]{1,128}$/.test(rawLinkedSession) ? rawLinkedSession : null;
+  useEffect(() => {
+    if (!linkedSessionId) return;
+    setActiveTab('sessions');
+    setViewedSessionId(linkedSessionId);
+  }, [linkedSessionId]);
+
+  const closeSession = useCallback(() => {
+    setViewedSessionId(null);
+    if (!linkedSessionId) return;
+    // Leave the link behind, or reloading the page would open the session again.
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete(SESSION_QUERY_PARAM);
+    next.set('tab', 'sessions');
+    router.replace(`/dashboard/agents/${encodeURIComponent(agentId)}?${next.toString()}`, { scroll: false });
+  }, [linkedSessionId, searchParams, router, agentId]);
+
+  useEffect(() => {
+    if (activeTab === 'sessions' && agent && agent.config?.kind !== 'external') void loadReminderSummary();
+  }, [activeTab, agent, loadReminderSummary]);
 
   /**
    * Configure is one long page, so "go to the Prompt section" is a scroll,
@@ -702,6 +759,8 @@ export default function AgentDetailPage() {
     // Absent stays absent: an agent that never opened Approvals & questions
     // (every agent from before it existed) must keep never pausing.
     nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
+    // Absent = reminders off.
+    nextConfig.reminders = remindersConfig && Object.keys(remindersConfig).length > 0 ? remindersConfig : undefined;
     nextConfig.clientTools = normalizeClientTools(clientToolsConfig);
     nextConfig.clientToolSurfaces = clientToolSurfaces && Object.keys(clientToolSurfaces).length > 0 ? clientToolSurfaces : undefined;
     // Absent = files off.
@@ -936,11 +995,13 @@ export default function AgentDetailPage() {
         <div>
           <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
           <Text size="sm">
-            {connection?.hasApiKey
-              ? t('connectModal.apiKey')
-              : connection?.credentialProviderKey
-                ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                : '—'}
+            {connection?.authType === 'console_identity'
+              ? tIdentity('optionLabel')
+              : connection?.hasApiKey
+                ? t('connectModal.apiKey')
+                : connection?.credentialProviderKey
+                  ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                  : '—'}
           </Text>
         </div>
         {connection?.responsePath ? (
@@ -1092,6 +1153,12 @@ export default function AgentDetailPage() {
    * agent has only General. Sections are always open: the config is edited as
    * a whole and saved by one button, so folding them only hid what the agent is.
    */
+  const remindersViewAvailable = showRemindersView({
+    draft: remindersConfig,
+    published: publishedConfig?.reminders as IAgentRemindersConfig | undefined,
+    hasAny: hasReminders,
+  });
+
   const buildSection = (id: string, description: string, body: ReactNode, meta?: ReactNode) =>
     (id === 'basic' || !isConnected) && sectionVisible(id) ? (
       <ConfigSection
@@ -1227,19 +1294,42 @@ export default function AgentDetailPage() {
             title="Sessions"
             description="Every conversation with this agent — console tests, API, A2A and trigger runs. Click one to inspect it; sessions started here can be continued."
           >
-            <SegmentedControl
-              mb="md"
-              size="sm"
-              w="fit-content"
-              value={sessionsView}
-              onChange={(value) => setSessionsView(value as 'sessions' | 'runs')}
-              data={[
-                { value: 'sessions', label: `Sessions · ${sessions.length}` },
-                { value: 'runs', label: activeRunCount > 0 ? `Background runs · ${activeRunCount} active` : 'Background runs' },
-              ]}
-            />
-            {sessionsView === 'sessions' ? (
+            {remindersViewAvailable ? (
+              <SegmentedControl
+                mb="md"
+                size="sm"
+                w="fit-content"
+                value={sessionsView}
+                onChange={(value) => setSessionsView(value as 'sessions' | 'reminders')}
+                data={[
+                  { value: 'sessions', label: `Sessions · ${sessions.length}` },
+                  { value: 'reminders', label: t('reminders.viewLabel', { count: activeReminderCount }) },
+                ]}
+              />
+            ) : null}
+            {sessionsTrigger ? (
+              <Group gap={6} mb="sm">
+                <Badge
+                  variant="light"
+                  rightSection={(
+                    <ActionIcon size="xs" variant="transparent" color="gray" aria-label={t('triggers.sessionsFilterClear')} onClick={() => setSessionsTrigger(null)}>
+                      <IconX size={10} />
+                    </ActionIcon>
+                  )}
+                >
+                  {t('triggers.runsFilter', { name: sessionsTrigger.name })}
+                </Badge>
+              </Group>
+            ) : null}
+            {remindersViewAvailable && sessionsView === 'reminders' ? (
+              <AgentRemindersTable
+                agentId={agentId}
+                onOpenSession={(id) => setViewedSessionId(id)}
+                onActiveCountChange={setActiveReminderCount}
+              />
+            ) : (
               <SessionList
+                agentId={agentId}
                 sessions={sessions}
                 ownOnly={sessionsOwnOnly}
                 loading={sessionsLoading}
@@ -1247,28 +1337,20 @@ export default function AgentDetailPage() {
                 onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
                 onStart={() => setStartSessionOpen(true)}
                 onRefresh={() => void loadSessions()}
+                onRunStopped={() => void loadSessions(true)}
                 refreshing={sessionsLoading}
                 tracesHref={`/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
               />
-            ) : null}
-            {/* Mounted even while hidden so the active-run count stays live for the toggle label. */}
-            <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
-              <AgentRunsTable
-                agentId={agentId}
-                trigger={runsTrigger}
-                onClearTrigger={() => setRunsTrigger(null)}
-                onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
-                onActiveCountChange={setActiveRunCount}
-              />
-            </div>
+            )}
             <SessionDetailDrawer
               agentId={agentId}
               session={viewedSessionId
-                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId, source: 'api' }
+                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId }
                 : null}
-              onClose={() => setViewedSessionId(null)}
+              onClose={closeSession}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
               onResolved={() => void loadSessions()}
+              onSessionChanged={() => void loadSessions(true)}
             />
           </SectionCard>
         </Tabs.Panel>
@@ -1449,11 +1531,18 @@ export default function AgentDetailPage() {
             {buildSection(
               'advanced',
               'How the agent loop behaves: planning, budgets, context handling and reasoning.',
+              <>
               <AgentAdvancedSettings
                 value={runtimeConfig}
                 onChange={setRuntimeConfig}
                 toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
-              />,
+              />
+              <AgentRemindersSettings
+                value={remindersConfig}
+                onChange={setRemindersConfig}
+                onGoToSection={(section) => document.getElementById(`config-${section}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              />
+              </>,
             )}
             {buildSection(
               'variables',
@@ -1706,8 +1795,8 @@ export default function AgentDetailPage() {
                   declaredVariables={agent.config?.variables}
                   versions={versions.map((version) => version.version)}
                   onShowRuns={(trigger) => {
-                    setRunsTrigger(trigger);
-                    setSessionsView('runs');
+                    setSessionsTrigger(trigger);
+                    setSessionsView('sessions');
                     setActiveTab('sessions');
                   }}
                 />

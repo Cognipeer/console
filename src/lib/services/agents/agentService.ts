@@ -48,6 +48,8 @@ import {
     type KnowledgeBindingSource,
     type KnowledgeHit,
 } from './agentKnowledgeBindings';
+import { applyServiceAvailability, assertAgentsEnabled, filterChildSources } from './agentServiceAvailability';
+import { getDisabledServices } from '@/lib/services/availability/serviceAvailability';
 import { getDatabase, runWithTenantScope, type AgentResponseFormat, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import {
@@ -86,6 +88,7 @@ import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
 import type { AgentPlugin as AgentSdkPlugin, BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
+import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
@@ -123,6 +126,14 @@ import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from '.
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
+import {
+    createCompositeImageSource,
+    createToolMediaStore,
+    withToolMedia,
+    type ToolMediaContext,
+} from './toolMedia';
+import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
+import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
@@ -172,6 +183,9 @@ import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { withSandboxOutputsPrompt } from './agentSandboxOutputs';
 import { buildFileOutputTools, fileOutputsPrompt, mergeOutputCollectors, type FileOutputTools } from './agentFileOutputTools';
+import { buildReminderTools, reminderApprovalMode, reminderNoteText, remindersPrompt, type ReminderTools, type ReminderWake } from './agentReminderTools';
+import { resolveRemindersConfig } from './agentRemindersConfig';
+import { getConfig } from '@/lib/core/config';
 import { inspectFileBucket } from './sessionFilesBucket';
 import { outputsAvailability } from './sessionFilesConfig';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
@@ -192,7 +206,7 @@ import {
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
-import { delegatedSubagentName, delegationFailure, isSubagentEvent, nameSubagentOnApprovalStep } from './subagentEvents';
+import { delegatedSubagentName, delegationFailure, isDelegationTool, isSubagentEvent, nameSubagentOnApprovalStep, resumedDelegationIds, subagentStampOf } from './subagentEvents';
 import { resolveAgentConfig } from './agentConfigResolution';
 import { activeSubagentEntries, resolveSubagentTarget } from './subagentRoster';
 import {
@@ -1169,6 +1183,10 @@ async function buildKnowledgeTools(
         logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: ragModuleKey, projectId });
         return { tools: [], toolDefinitions: [] };
     }
+    if (knowledgeModule.status !== 'active') {
+        logger.warn('Skipping knowledge engine that is switched off', { key: ragModuleKey, projectId });
+        return { tools: [], toolDefinitions: [] };
+    }
     // Every later read re-resolves the module by key; pinning the scope it was
     // found in keeps those reads on this same row ('' = tenant-wide only).
     const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
@@ -1361,6 +1379,10 @@ async function buildCombinedKnowledgeTools(
         const mod = await resolveAgentKnowledgeModule(tenantDbName, binding.key, projectId);
         if (!mod) {
             logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: binding.key, projectId });
+            continue;
+        }
+        if (mod.status !== 'active') {
+            logger.warn('Skipping knowledge engine that is switched off', { key: binding.key, projectId });
             continue;
         }
         visible.push({ binding, scope: mod.projectId ? String(mod.projectId) : '' });
@@ -1638,6 +1660,7 @@ export const __testables = {
     MessageRewriteLedger,
     persistedUserTurn,
     firstTurnTitle,
+    toToolCallEvent,
 };
 
 /**
@@ -1830,10 +1853,16 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
+    /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
+    identity?: ConsoleIdentityCaller;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
     images?: SessionImagesOptions;
+    /** The run's tool-image store: a child's tools show their images the same way (judged by the child's own model). */
+    toolMedia?: ToolMediaContext;
+    /** The parent's model takes images: what a child without a model of its own runs on. */
+    modelTakesImages?: boolean;
     /** Whose run this is, for the usage rows of a sub-agent's model calls. */
     caller?: AgentModelCaller;
     /**
@@ -1877,11 +1906,15 @@ type BuildSubagentsInput = {
  * edit in a leaf agent silently multiply every parent's tool surface. Nesting
  * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
  */
-async function buildAgentSubagents(
+export async function buildAgentSubagents(
     input: BuildSubagentsInput,
 ): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>>; models: PricedModel[] }> {
     const entries = input.subagents;
     if (entries.length === 0) return { subagents: [], cleanupTasks: [], models: [] };
+    // A child is an agent run of the same tenant: refused with the agents service,
+    // and its own knowledge and tools lose what a switched-off service provided.
+    await assertAgentsEnabled({ tenantId: input.tenantId, tenantDbName: input.tenantDbName });
+    const disabledServices = await getDisabledServices(input.tenantId);
 
     const subagents: AgentSdkSubagentDef[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
@@ -1935,6 +1968,7 @@ async function buildAgentSubagents(
         }
 
         const childTools: AgentSdkToolInterface[] = [];
+        ({ knowledge: knowledgeSource, toolBindings } = filterChildSources(knowledgeSource, toolBindings, disabledServices));
         if (hasKnowledgeConfigured(knowledgeSource)) {
             const knowledge = await buildAgentKnowledgeTools(
                 input.tenantDbName,
@@ -1955,6 +1989,9 @@ async function buildAgentSubagents(
                 input.zod,
                 input.guard,
                 input.runtimeContext,
+                input.identity && entry.kind === 'ref' && entry.agentKey
+                    ? { ...input.identity, agentKey: entry.agentKey }
+                    : input.identity,
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
@@ -1968,10 +2005,13 @@ async function buildAgentSubagents(
         }
 
         let childModel: unknown;
+        let childTakesImages = input.modelTakesImages === true;
         if (modelKey) {
             const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
             if (built.ok) {
                 childModel = built.chatModel;
+                // Its model is only wrapped to resolve image references when the run has image options.
+                childTakesImages = built.takesImages && Boolean(input.images);
                 models.push(built.model);
             } else {
                 input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
@@ -1986,7 +2026,9 @@ async function buildAgentSubagents(
             ...(entry.title ? { title: entry.title } : {}),
             header: entry.header || entry.title || entry.name,
             systemPrompt,
-            ...(childTools.length > 0 ? { tools: childTools } : {}),
+            ...(childTools.length > 0
+                ? { tools: input.toolMedia ? childTools.map((tool) => withToolMedia(tool, { ...input.toolMedia!, modelTakesImages: childTakesImages })) : childTools }
+                : {}),
             ...(childModel ? { model: childModel } : {}),
             ...(entry.limits ? { limits: entry.limits } : {}),
             ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
@@ -2065,7 +2107,7 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<{ ok: true; chatModel: unknown; model: PricedModel } | { ok: false; message: string }> {
+): Promise<{ ok: true; chatModel: unknown; model: PricedModel; takesImages: boolean } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') {
@@ -2092,6 +2134,7 @@ async function buildSubagentModel(
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
             model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+            takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
@@ -2148,12 +2191,15 @@ export async function buildBoundTools(
     zod: typeof import('zod').z,
     guard: AgentToolGuard,
     runtimeContext?: AgentRuntimeContext,
+    /** Who the run is for, as MCP servers set up for Console identity are told (default: from `runtimeContext`). */
+    identity?: ConsoleIdentityCaller,
 ): Promise<{
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
     definitions: TraceToolDefinition[];
 }> {
     if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
+    const mcpIdentity = identity ?? consoleIdentityCallerOf(runtimeContext, { projectId });
 
     const tools: AgentSdkToolInterface[] = [];
     const definitions: TraceToolDefinition[] = [];
@@ -2235,6 +2281,8 @@ export async function buildBoundTools(
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
                                     isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
                                 );
+                                // A result with media stays an object: `withToolMedia` shows its images to the model.
+                                if (isToolOutput(result)) return result;
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {
                                 const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
@@ -2296,7 +2344,8 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
+                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
+                    if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
@@ -2998,6 +3047,10 @@ export async function publishAgent(
     );
     const nextVersion = latestKnownVersion + 1;
 
+    // An imported agent waits as a draft until someone reviews and publishes it, so
+    // publishing turns it on. An agent someone switched off stays inactive.
+    const status = agent.status === 'draft' ? 'active' : agent.status;
+
     const version = await db.createAgentVersion({
         tenantId: agent.tenantId,
         projectId: agent.projectId,
@@ -3008,7 +3061,7 @@ export async function publishAgent(
             name: agent.name,
             description: agent.description,
             config: agent.config,
-            status: agent.status,
+            status,
         },
         changelog,
         publishedBy: userId,
@@ -3018,6 +3071,7 @@ export async function publishAgent(
     await db.updateAgent(agentId, {
         publishedVersion: nextVersion,
         latestVersion: nextVersion,
+        ...(status !== agent.status ? { status } : {}),
         updatedBy: userId,
     });
 
@@ -3374,6 +3428,11 @@ export interface AgentChatRequest {
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
     /**
+     * The reminder this turn is the wake-up of (a run of `channel: 'reminder'`): the turn starts
+     * with a note framed as the agent's own (`reminderNoteText`), stored with `metadata.origin`.
+     */
+    reminder?: ReminderWake;
+    /**
      * No interactive user on this turn (a schedule, an eval or red-team case, an
      * OpenAI-shaped client). An approval-gated tool call or a
      * question then follows the agent's `humanInTheLoop.unattended` setting —
@@ -3497,6 +3556,36 @@ export interface AgentToolCallEvent {
     durationMs?: number;
     /** Filled on `error`. */
     error?: string;
+    /**
+     * Set when a delegated child made the call (a step of its own loop). Absent
+     * on the agent's own calls and on the delegation call that handed the task
+     * over: a child cannot delegate, so it never emits a delegation tool event.
+     */
+    subagent?: { id?: string; name: string };
+    /**
+     * Set only on the `start` of a delegation call the SDK re-enters after a
+     * child's pause was answered (same call id as in the paused turn).
+     */
+    resumed?: true;
+}
+
+/** The notification for an SDK tool_call event, or undefined for any other event. */
+function toToolCallEvent(event: AgentSdkEvent, resumedCalls?: ReadonlySet<string>): AgentToolCallEvent | undefined {
+    if (event.type !== 'tool_call' || !event.name) return undefined;
+    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return undefined;
+    const subagent = subagentStampOf(event);
+    const resumed = event.phase === 'start' && !subagent && isDelegationTool(event.name)
+        && typeof event.id === 'string' && Boolean(resumedCalls?.has(event.id));
+    return {
+        phase: event.phase,
+        name: event.name,
+        id: event.id,
+        ...(event.args !== undefined ? { args: event.args } : {}),
+        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+        ...(event.error?.message ? { error: event.error.message } : {}),
+        ...(subagent ? { subagent } : {}),
+        ...(resumed ? { resumed: true as const } : {}),
+    };
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -3776,6 +3865,7 @@ export async function executeAgentChat(
     // queue consumer and background worker call the Local variant instead, so
     // a run is never counted twice.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // The callback and the signal cannot be serialized over the queue —
@@ -3855,6 +3945,8 @@ async function runExternalAgentTurn(input: {
     history: Array<{ role: string; content: string }>;
     userMessage: string;
     runtimeContext?: AgentRuntimeContext;
+    /** A trigger run's accountable person: a connection set up for Console identity gets a token for them. */
+    accountableUserId?: string;
     source: 'agent' | 'agent-playground';
     onTextChunk?: (text: string) => void;
     signal?: AbortSignal;
@@ -3871,7 +3963,16 @@ async function runExternalAgentTurn(input: {
     const reply = await invokeExternalAgent(
         connection,
         [...input.history, { role: 'user', content: userMessage }],
-        { tenantDbName, tenantId, projectId },
+        {
+            tenantDbName,
+            tenantId,
+            projectId,
+            identity: consoleIdentityCallerOf(input.runtimeContext, {
+                agentKey,
+                projectId,
+                accountableUserId: input.accountableUserId,
+            }),
+        },
         resolveRuntimeHeaders(input.runtimeContext, 'agent', agentKey, connection.runtimeHeaders),
         {
             ...(streamChunks ? { onTextChunk: streamChunks } : {}),
@@ -3961,11 +4062,34 @@ async function buildLocalAgentRun(input: {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
     literalVariables?: string[];
+    /**
+     * What the reminder tools need about this turn (agentReminderTools.ts): the run it is, whose it
+     * is, the version a reminder runs on, the reminder that woke it, and whether it starts having
+     * read outside content.
+     */
+    reminders?: {
+        runId?: string;
+        accountableUserId?: string;
+        version?: number;
+        usePublished?: boolean;
+        wake?: ReminderWake;
+        startsTainted?: boolean;
+    };
+    /** A trigger run's accountable person (its `userId` is synthetic): Console identity tokens are minted for them. */
+    accountableUserId?: string;
+    /** The person a continued pause is for (stored with the pause): replaces the runtime context's caller, who may be the approver. */
+    identity?: ConsoleIdentityPerson;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
+    // Who MCP servers and connected agents set up for Console identity are told this run is for.
+    const identity: ConsoleIdentityCaller = input.identity
+        ? { ...input.identity, agentKey, projectId }
+        : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
-    const config = migrateAgentReasoning(input.config);
+    // Bindings of a switched-off service (knowledge engine, MCP, tools, browser, web search, memory,
+    // files, sandbox) are dropped here, so every builder below sees a config without them.
+    const config = await applyServiceAvailability(tenantId, migrateAgentReasoning(input.config), { agentKey });
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
 
@@ -4069,6 +4193,7 @@ async function buildLocalAgentRun(input: {
         z,
         toolGuard,
         runtimeContext,
+        identity,
     );
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
@@ -4117,43 +4242,36 @@ async function buildLocalAgentRun(input: {
         toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
     }
 
-    // Files attached to the session: the agent can list them and read them page
-    // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file and the agent takes uploads
-    // or writes files (then they are its own outputs). While it holds an
-    // image and the model takes images, the agent can also look at the image
-    // again (`session_files_view_image`).
+    // Files attached to the session: the agent can list them (`session_files_list`) and read
+    // them, images included, with `read` (built below next to the sandbox). Offered whenever the
+    // conversation holds a file and the agent takes uploads or writes files (then they are its
+    // own outputs).
     const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
     const filesCfg = resolveAttachmentsConfig(config.attachments);
     const sessionFilesScope = { tenantDbName, tenantId, projectId };
     const outputsOn = outputsAvailability(config);
-    let sessionImages: SessionImagesOptions | undefined;
+    // What this run's tools showed the model (screenshots, rendered pages): shared with its sub-agents.
+    const toolMedia: ToolMediaContext = {
+        store: createToolMediaStore(),
+        modelTakesImages,
+        maxImageBytes: Math.min(filesCfg.maxBytes, 5 * 1024 * 1024),
+    };
+    let sessionFacts: Awaited<ReturnType<typeof conversationFileFacts>> = { any: false, images: false };
     if (input.conversation) {
         const conversationId = String(input.conversation._id);
-        const facts = agentTakesAttachments(config) || outputsOn.available
+        sessionFacts = agentTakesAttachments(config) || outputsOn.available
             ? await conversationFileFacts(db, conversationId)
             : { any: false, images: false };
-        const viewImage = facts.images && modelTakesImages;
-        if (facts.any) {
+        if (sessionFacts.any) {
             tools.push(...buildSessionFileTools({
                 createToolFn: createTool,
                 zod: z,
                 guard: toolGuard,
                 scope: sessionFilesScope,
                 conversationId,
-                readPageChars: filesCfg.readPageChars,
-                viewImage,
             }));
-            toolDefinitions.push(...sessionFileToolDefinitions(filesCfg.readPageChars, { viewImage }));
+            toolDefinitions.push(...sessionFileToolDefinitions());
         }
-        // Images in this session's context are references; the bytes are read at the model call.
-        // Wrapped even for an agent that no longer takes files: its saved state can still hold references.
-        sessionImages = {
-            source: createSessionImageSource(sessionFilesScope, conversationId),
-            maxImages: filesCfg.maxImages,
-            maxBytes: filesCfg.maxBytes,
-            viewImageTool: viewImage,
-        };
     }
 
     // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
@@ -4205,8 +4323,79 @@ async function buildLocalAgentRun(input: {
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
+    // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
+    const readSession = input.conversation && sessionFacts.any
+        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars }
+        : undefined;
+    const readTool = buildReadTool({
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+        ...(readSession ? { session: readSession } : {}),
+        media: { store: toolMedia.store },
+        modelTakesImages,
+    });
+    if (readTool) {
+        tools.push(readTool);
+        toolDefinitions.push(readToolDefinition({
+            ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+            ...(readSession ? { session: readSession } : {}),
+            media: { store: toolMedia.store },
+        }));
+    }
+    // Images in this session's context are references (a session file, or a tool's image of this run); the
+    // bytes are read at the model call. Wrapped even for an agent that no longer takes files (its saved
+    // state can still hold references) and for a stateless run, which still shows what its tools return.
+    const sessionImages: SessionImagesOptions | undefined = input.conversation || modelTakesImages
+        ? {
+            source: createCompositeImageSource(
+                toolMedia.store,
+                input.conversation ? createSessionImageSource(sessionFilesScope, String(input.conversation._id)) : null,
+            ),
+            maxImages: filesCfg.maxImages,
+            maxBytes: filesCfg.maxBytes,
+            viewImageTool: Boolean(readTool),
+            toolMedia: toolMedia.store,
+        }
+        : undefined;
     if (sandboxTools.promptNote) {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
+    }
+
+    // Reminders the agent sets itself (`reminder_set` / `_list` / `_cancel`): off unless the agent turns them on,
+    // and only for a run with a session to come back to. Built last of the agent's own tools so the watch over the
+    // others (outside content, see agentReminderTools.ts) covers all of them; before the client tools' name reservation.
+    let reminderTools: ReminderTools | undefined;
+    const remindersOn = resolveRemindersConfig(config.reminders, getConfig().agent.reminders);
+    // A wake turn runs as a person (the owner checks need one): never offered to a run without one.
+    if (input.conversation && remindersOn.available && input.userId) {
+        reminderTools = buildReminderTools({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            scope: { tenantDbName, tenantId, projectId },
+            agentKey,
+            conversationId: String(input.conversation._id),
+            agentConfig: config,
+            settings: remindersOn,
+            creator: {
+                userId: input.userId,
+                ...(input.reminders?.accountableUserId ? { accountableUserId: input.reminders.accountableUserId } : {}),
+                ...(runtimeContext?.tokenId ? { tokenId: runtimeContext.tokenId } : {}),
+                ...(runtimeContext?.via ? { via: runtimeContext.via } : {}),
+                ...(input.reminders?.runId ? { runId: input.reminders.runId } : {}),
+                ...(input.reminders?.version != null ? { version: input.reminders.version } : {}),
+                ...(input.reminders?.usePublished !== undefined ? { usePublished: input.reminders.usePublished } : {}),
+            },
+            ...(input.reminders?.wake ? { wake: input.reminders.wake } : {}),
+            startsTainted: input.reminders?.startsTainted === true,
+            approvalMode: reminderApprovalMode(hitl, { unattended: input.unattended, canPause: input.canPause }),
+        });
+        tools.push(...reminderTools.tools);
+        toolDefinitions.push(...reminderTools.definitions);
+        const note = remindersPrompt(remindersOn, input.reminders?.wake);
+        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${note}` : note;
     }
 
     // Tools the CALLER runs. Two sources: the ones the agent declares itself
@@ -4299,8 +4488,11 @@ async function buildLocalAgentRun(input: {
         zod: z,
         guard: toolGuard,
         runtimeContext,
+        identity,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
+        toolMedia,
+        modelTakesImages,
         caller: {
             agentKey,
             ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
@@ -4339,17 +4531,27 @@ async function buildLocalAgentRun(input: {
     // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
     // gets an error result, the tool never runs) or runs them as they are
     // (`allow`, the owner's explicit choice).
-    const gatedTools = hitlMode === 'ask'
-        ? applyToolApprovals(tools, hitl, allowedTools)
+    // `read` is exempt from approval by name, so no other tool may carry it (an MCP/custom tool called
+    // `read` could be state-changing): the built-in wins and the other is left out.
+    const approvable = tools.filter((tool) => {
+        const clash = tool !== readTool && (tool as { name?: unknown }).name === READ_TOOL;
+        if (clash) warnings.add(`A tool named "${READ_TOOL}" was left out: the name is reserved for the built-in read tool.`);
+        return !clash;
+    });
+    const ownTools = reminderTools ? reminderTools.watchTools(approvable) : approvable;
+    const policyGated = hitlMode === 'ask'
+        ? applyToolApprovals(ownTools, hitl, allowedTools)
         : hitlMode === 'deny'
-            ? denyUnattendedTools(tools, hitl, allowedTools)
-            : tools;
+            ? denyUnattendedTools(ownTools, hitl, allowedTools)
+            : ownTools;
+    const gatedTools = reminderTools ? reminderTools.gate(policyGated) : policyGated;
+    if (reminderTools) clientTools = reminderTools.watchTools(clientTools);
 
     const sdkAgent = createSmartAgent({
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools, ...clientTools] } : {}),
+        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools.map((tool) => withToolMedia(tool, toolMedia)), ...clientTools] } : {}),
         // Nobody to ask in the other modes, so the question tool is not offered.
         ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
@@ -4380,6 +4582,8 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        /** Who the run's Console identity tokens are for; a pause stores it for its continuation. */
+        identity,
         // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
         collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
@@ -4387,6 +4591,7 @@ async function buildLocalAgentRun(input: {
         /** After the turn: the trace session's totals take in the sub-agents' calls (see `reconcileTraceTotals`). */
         /** Feed every SDK event: a child's approval / question is remembered so its trace step can name the child. */
         noteSdkEvent: (event: AgentSdkEvent) => {
+            reminderTools?.noteSdkEvent(event);
             const e = event as { type?: string; id?: unknown; subagentName?: unknown };
             if ((e.type === 'tool_approval' || e.type === 'user_question') && typeof e.id === 'string' && typeof e.subagentName === 'string') {
                 approvalSubagents.set(e.id, e.subagentName);
@@ -4698,16 +4903,19 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
-/** What a continuation must apply again: the turn's own structured output and variables. */
+/** What a continuation must apply again: the turn's own structured output and variables, and who the turn is for. */
 function pausedTurnOptions(
     request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt' | 'literalVariables'>,
+    identity?: ConsoleIdentityCaller,
 ): PausedTurnOptions | undefined {
-    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
+    const person = consoleIdentityPersonOf(identity);
+    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false && !person) return undefined;
     return {
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.variablesInPrompt === false && request.literalVariables?.length ? { literalVariables: request.literalVariables } : {}),
+        ...(person ? { identity: person } : {}),
     };
 }
 
@@ -4804,6 +5012,8 @@ export function routingCallerOf(request: AgentChatRequest): RoutingCallerContext
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // The last stop for a turn that arrives without the entry above (a queue worker, a background run).
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
@@ -4831,8 +5041,16 @@ async function runAgentChatTurn(
     // user turn like the words themselves: it is what the model reads, what the
     // transcript stores and what a resume replays.
     const userMessage = neutralizeAttachmentMarker(
-        composeUserMessageWithVariables(request.userMessage, request.variables, { externalContent: request.externalContent }),
+        composeUserMessageWithVariables(
+            request.reminder ? reminderNoteText(request.reminder) : request.userMessage,
+            request.variables,
+            { externalContent: request.externalContent },
+        ),
     );
+    // A reminder's wake turn: screens show the note itself, not the framing the model reads.
+    const reminderMeta = request.reminder
+        ? { origin: 'reminder' as const, reminder: { runId: request.reminder.runId, message: request.reminder.message, setAt: request.reminder.setAt } }
+        : undefined;
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4882,6 +5100,8 @@ async function runAgentChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -4923,7 +5143,8 @@ async function runAgentChatTurn(
         conversationId,
         ...(request.runId ? { runId: request.runId } : {}),
         userMessage: () => rewriteLedger.resolve(userMessage),
-        trigger: 'message',
+        trigger: request.reminder ? 'reminder' : 'message',
+        ...(reminderMeta ? { userMessageData: reminderMeta } : {}),
         ...(modelChoice ? { model: modelChoice } : {}),
         superseded: () => request.cancellationCell?.abandoned === true,
     });
@@ -4966,6 +5187,7 @@ async function runAgentChatTurn(
             history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
             userMessage,
             runtimeContext: turnRuntimeContext,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             source: 'agent',
             onTextChunk,
             signal: request.signal,
@@ -5011,7 +5233,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5024,6 +5246,7 @@ async function runAgentChatTurn(
         source: 'agent',
         route: 'agent.chat',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
         version: resolvedVersion,
         conversation,
         memoryConversationId: conversationId,
@@ -5038,6 +5261,14 @@ async function runAgentChatTurn(
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.literalVariables ? { literalVariables: request.literalVariables } : {}),
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(request.version !== undefined ? { version: request.version } : {}),
+            ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
+            ...(request.reminder ? { wake: request.reminder } : {}),
+            startsTainted: request.externalContent === true,
+        },
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5104,7 +5335,7 @@ async function runAgentChatTurn(
             const outcome = { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL };
             const partialMessages: IAgentConversation['messages'] = [
                 ...(conversation.messages || []),
-                { role: 'user', content: rewriteLedger.resolve(userMessage), timestamp: now },
+                { role: 'user', content: rewriteLedger.resolve(userMessage), ...(reminderMeta ? { metadata: reminderMeta } : {}), timestamp: now },
                 { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
             ];
             logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
@@ -5199,7 +5430,7 @@ async function runAgentChatTurn(
                 hitl,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
-                turn: pausedTurnOptions(request),
+                turn: pausedTurnOptions(request, identity),
                 createdBy: request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
@@ -5213,6 +5444,7 @@ async function runAgentChatTurn(
                 role: 'user',
                 content: persistedUserMessage,
                 ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+                ...(reminderMeta ? { metadata: reminderMeta } : {}),
                 timestamp: now,
             },
             {
@@ -5309,6 +5541,7 @@ export async function executePlaygroundChat(
     // portals and realtime voice share; the caller is the one the server
     // stamped into the runtime context. See agentQuota.ts.
     const caller = agentRunCallerOf(request);
+    await assertAgentsEnabled(request);
     await enforceAgentRunQuota(caller);
 
     // Callbacks and the signal can't serialize over the queue — kept out of
@@ -5567,6 +5800,7 @@ function describeStructuredOutputError(error: unknown): string {
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         const runtime = request.runtimeContext;
@@ -5624,6 +5858,8 @@ async function runPlaygroundChatTurn(
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
         : undefined;
     if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
+    // Attachments are judged from this config below, before the agent is built.
+    config = await applyServiceAvailability(tenantId, config, { agentKey });
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -5747,7 +5983,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5777,6 +6013,8 @@ async function runPlaygroundChatTurn(
         ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
         ...(request.revealReasoning ? { revealReasoning: true } : {}),
         ...(request.onReasoningChunk ? { onReasoningChunk: request.onReasoningChunk } : {}),
+        // A reminder set here wakes the session on the config this turn ran: the draft, or the version picked.
+        reminders: ranVersion !== null ? { version: ranVersion, usePublished: true } : { usePublished: false },
     });
 
     const attached = await assembleMessageAttachments({
@@ -5813,17 +6051,11 @@ async function runPlaygroundChatTurn(
                 noteTurnCompaction(event, { compactions, turnEvents, onCompaction, agentKey });
                 return;
             }
-            if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
-            if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+            if (!onToolEvent) return;
+            const payload = toToolCallEvent(event);
+            if (!payload) return;
             try {
-                onToolEvent({
-                    phase: event.phase,
-                    name: event.name,
-                    id: event.id,
-                    ...(event.args !== undefined ? { args: event.args } : {}),
-                    ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                    ...(event.error?.message ? { error: event.error.message } : {}),
-                });
+                onToolEvent(payload);
             } catch (callbackError) {
                 logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
             }
@@ -5944,6 +6176,7 @@ async function runPlaygroundChatTurn(
             // The run stopped for a person: keep what it needs to continue.
             let pause: OpenedPause | null = null;
             if (outcome.stopReason === 'paused') {
+                const pausedFor = consoleIdentityPersonOf(identity);
                 pause = await openPause(db, {
                     state: result.state,
                     source: 'agent-playground',
@@ -5954,6 +6187,7 @@ async function runPlaygroundChatTurn(
                     hitl,
                     agentVersion: ranVersion,
                     usePublished: ranVersion !== null,
+                    ...(pausedFor ? { turn: { identity: pausedFor } } : {}),
                     createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
                 });
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
@@ -6297,6 +6531,7 @@ export function executeAgentContinueLocal(
  * is no new user message.
  */
 export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
+    await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
         return await runAgentResumeTurn(request, scope);
@@ -6400,8 +6635,17 @@ async function runAgentResumeTurn(
 
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+    // A continued pause calls MCP servers and connected agents for the person whose turn it is, never for whoever answered it.
+    const pausedFor = paused
+        ? consoleIdentityOfPausedTurn({
+            stored: paused.turn?.identity,
+            ...(anchorAction?.createdBy ? { startedBy: anchorAction.createdBy } : {}),
+            ...(runtimeContext?.source ? { source: runtimeContext.source } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        })
+        : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6417,6 +6661,8 @@ async function runAgentResumeTurn(
         source,
         route: source === 'agent' ? 'agent.chat' : 'agent.playground',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        ...(pausedFor ? { identity: pausedFor } : {}),
         version,
         conversation,
         memoryConversationId: conversationId,
@@ -6426,6 +6672,13 @@ async function runAgentResumeTurn(
         ...(turnOptions.variables ? { variables: turnOptions.variables } : {}),
         ...(turnOptions.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(turnOptions.literalVariables ? { literalVariables: turnOptions.literalVariables } : {}),
+        // A continued turn already holds tool results and answers from outside.
+        reminders: {
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+            ...(version != null ? { version, usePublished: true } : { usePublished: false }),
+            startsTainted: true,
+        },
     });
 
     try {
@@ -6508,6 +6761,8 @@ async function runAgentResumeTurn(
             throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
         }
 
+        // Read now: the SDK deletes each entry as its delegation completes.
+        const reEntered = resumedDelegationIds(state);
         const inputMessageCount = (state.messages ?? []).length;
         const compactions: IAgentTurnCompaction[] = [];
         const streamed = captureStreamedText(onTextChunk);
@@ -6522,17 +6777,11 @@ async function runAgentResumeTurn(
                     noteTurnCompaction(event, { compactions, turnEvents, onCompaction: request.onCompaction, agentKey });
                     return;
                 }
-                if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
-                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                if (!request.onToolEvent) return;
+                const payload = toToolCallEvent(event, reEntered);
+                if (!payload) return;
                 try {
-                    request.onToolEvent({
-                        phase: event.phase,
-                        name: event.name,
-                        id: event.id,
-                        ...(event.args !== undefined ? { args: event.args } : {}),
-                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                        ...(event.error?.message ? { error: event.error.message } : {}),
-                    });
+                    request.onToolEvent(payload);
                 } catch (callbackError) {
                     logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
                 }
@@ -6608,6 +6857,8 @@ async function runAgentResumeTurn(
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !superseded) {
             const firstAction = anchorAction;
+            const repausedFor = consoleIdentityPersonOf(identity);
+            const repauseTurn: PausedTurnOptions = { ...turnOptions, ...(repausedFor ? { identity: repausedFor } : {}) };
             pause = await openPause(db, {
                 state: result.state,
                 source,
@@ -6619,7 +6870,7 @@ async function runAgentResumeTurn(
                 hitl,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
-                ...(Object.keys(turnOptions).length > 0 ? { turn: turnOptions } : {}),
+                ...(Object.keys(repauseTurn).length > 0 ? { turn: repauseTurn } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);

@@ -152,6 +152,10 @@ export interface QuotaResourceCaps {
   maxAgentSyncTimeoutSeconds?: number;
   maxAgentBackgroundDurationMinutes?: number;
   maxConcurrentAgentRuns?: number;
+  /** Agent reminders waiting to fire across the tenant. */
+  maxActiveAgentReminders?: number;
+  /** Agent reminders set in any rolling 24 hours. */
+  maxAgentRemindersPerDay?: number;
 }
 
 export interface QuotaBudget {

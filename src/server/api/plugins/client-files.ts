@@ -1,10 +1,11 @@
 import { Buffer } from 'node:buffer';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
+  composeUploadKeyHint,
   createFileProvider,
   deleteFile,
   downloadFile,
@@ -20,13 +21,21 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
+import { bucketInactiveError, isFileServiceError } from '@/lib/services/files/errors';
+import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
+import { decodedByteLength } from '@/lib/services/files/payloadSize';
+import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
+import { toHeaderSafeJson } from '@/lib/utils/headerSafeJson';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
+  readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
+import { isUploadMetadata, sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
 import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
-import { listVisibleFiles, sessionOfFile } from './session-linked-files';
+import { listVisibleFiles, sessionOfFile, sessionRefusedForUpload } from './session-linked-files';
 
 /** The caller of a client route, as the session checks name them: the token's owner, in the token's project. */
 const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { userId?: string } }): SessionActor => ({
@@ -37,24 +46,19 @@ const actorOf = (ctx: { tenantDbName: string; projectId: string; tokenRecord: { 
 
 const logger = createLogger('api:client-files');
 
-function estimateBase64Bytes(input: unknown): number | undefined {
-  if (typeof input !== 'string') {
-    return undefined;
-  }
+/** The most the `X-File-Metadata` header carries: clients read at most 16 KB of response headers, all of them together. */
+const FILE_METADATA_HEADER_MAX_CHARS = 8 * 1024;
 
-  const base64 = input.includes('base64,') ? input.split('base64,').pop() ?? '' : input;
-  if (!base64) {
-    return 0;
-  }
-
-  const normalized = base64.replace(/\s/g, '');
-  const paddingMatch = normalized.match(/=+$/);
-  const padding = paddingMatch ? paddingMatch[0].length : 0;
-  const bytes = Math.floor((normalized.length * 3) / 4) - padding;
-  return bytes > 0 ? bytes : 0;
+/** A failed call, answered the way the Document Store answers it (status, code and a safe message). */
+function fail(reply: FastifyReply, error: unknown, action: string, options: FileErrorOptions = {}) {
+  return sendFileError(reply, error, { logger, action, ...options });
 }
 
 export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
+  // A file travels base64-encoded in a JSON body, so an upload request is a third larger than the file: the route
+  // takes a body up to the configured file limit plus that, and answers a larger one as a file that is too large.
+  const uploadRoute = { bodyLimit: uploadBodyLimit(), errorHandler: uploadRouteErrorHandler };
+
   app.get('/client/v1/files/providers', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
@@ -66,10 +70,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ providers });
     } catch (error) {
-      logger.error('List client file providers error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return fail(reply, error, 'list providers');
     }
   }));
 
@@ -94,10 +95,14 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         metadata: body.metadata as Record<string, unknown> | undefined,
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
+        // The files permission is enough to create a provider here, but naming a directory of this server (the base
+        // directory of the local disk driver) is for owners and admins, the role of the person the call acts for.
+        allowHostPaths: isOwnerOrAdmin(ctx.user?.role),
       });
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       logger.error('Create client file provider error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -114,10 +119,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         count: buckets.length,
       });
     } catch (error) {
-      logger.error('List client file buckets error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to list buckets',
-      });
+      return fail(reply, error, 'list buckets');
     }
   }));
 
@@ -133,10 +135,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ bucket });
     } catch (error) {
-      logger.error('Get client file bucket error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to get bucket',
-      });
+      return fail(reply, error, 'read bucket');
     }
   }));
 
@@ -172,32 +171,57 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       const unavailable = sendClientListUnavailable(reply, request, error);
       if (unavailable) return unavailable;
-      logger.error('List client file objects error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to list files',
-      });
+      return fail(reply, error, 'list objects');
     }
   }));
 
-  app.post('/client/v1/files/buckets/:bucketKey/objects', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/files/buckets/:bucketKey/objects', uploadRoute, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { bucketKey } = request.params as { bucketKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody(request);
 
       if (typeof body.fileName !== 'string') {
         return reply.code(400).send({ error: 'fileName is required' });
       }
+      // An empty string is content too: an empty file (a placeholder, a marker) is stored as it is. (The Document
+      // Store's own upload asks for a file to have bytes; this API is called by programs that may not.)
       if (typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required (base64 or data URL)' });
       }
+      // Metadata is a set of named values: a text or a list would be stored as something other than what was sent.
+      if (!isUploadMetadata(body.metadata)) {
+        return reply.code(400).send({ error: 'metadata must be an object' });
+      }
+      // The same destination rules as the Document Store: no "." / ".." segments, no control characters.
+      const destination = composeUploadKeyHint({ keyHint: body.keyHint });
+      if ('error' in destination) return reply.code(400).send({ error: destination.error });
+
+      // The bucket first: the quotas below are those of its provider, and a bucket that is missing or switched
+      // off is refused before any of them is spent.
+      const bucket = await getFileBucket(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey);
+      if (bucket.status !== 'active') throw bucketInactiveError();
+
+      // Before any quota is spent: bytes written under the key of a session's file are the session's to allow. The
+      // token acts as its owner, who is held to the sessions they may change like anybody else.
+      const sessionRefusal = await sessionRefusedForUpload(request, {
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+        bucket,
+        keyHint: destination.keyHint,
+        fileName: body.fileName,
+        actor: actorOf(ctx),
+      });
+      if (sessionRefusal) return sendClientSessionRefusal(reply, request, sessionRefusal);
 
       const tokenId = ctx.tokenRecord._id?.toString() ?? ctx.token;
-      const estimatedFileBytes = estimateBase64Bytes(body.data);
+      // What the service will decode from `data`, not what the text claims: the quotas below are asked about it.
+      const estimatedFileBytes = decodedByteLength(body.data);
       const quotaContext = {
         domain: 'file' as const,
         licenseType: ctx.tenant.licenseType as LicenseType,
         projectId: ctx.projectId,
+        providerKey: bucket.providerKey,
         resourceKey: bucketKey,
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
@@ -216,7 +240,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const rateLimitResult = await checkRateLimit(quotaContext, {
         files: 1,
         requests: 1,
-        storageBytes: estimatedFileBytes ?? 0,
+        storageBytes: estimatedFileBytes,
       });
       if (!rateLimitResult.allowed) {
         return reply.code(429).send({ error: rateLimitResult.reason || 'Rate limit exceeded' });
@@ -233,7 +257,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const storageLimit = quotaResult.effectiveLimits.quotas?.maxStorageBytes;
       if (storageLimit !== undefined && storageLimit !== -1) {
         const currentBytes = await db.sumFileRecordBytes({ projectId: ctx.projectId });
-        const projected = currentBytes + (estimatedFileBytes ?? 0);
+        const projected = currentBytes + estimatedFileBytes;
         if (projected > storageLimit) {
           return reply.code(429).send({
             error: `storageBytes limit exceeded (${projected}/${storageLimit})`,
@@ -248,8 +272,8 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         createdBy: ctx.user?._id?.toString() ?? 'api',
         data: body.data,
         fileName: body.fileName,
-        keyHint: body.keyHint as string | undefined,
-        metadata: body.metadata as Record<string, unknown> | undefined,
+        keyHint: destination.keyHint,
+        metadata: (body.metadata ?? undefined) as Record<string, unknown> | undefined,
       });
 
       return reply.code(201).send({
@@ -257,10 +281,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         message: 'File uploaded successfully',
       });
     } catch (error) {
-      logger.error('Upload client file error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to upload file',
-      });
+      return fail(reply, error, 'upload', { storage: true, body: true });
     }
   }));
 
@@ -279,10 +300,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ file });
     } catch (error) {
-      logger.error('Get client file error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to get file',
-      });
+      return fail(reply, error, 'read object');
     }
   }));
 
@@ -310,13 +328,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         objectKey,
       });
     } catch (error) {
-      logger.error('Delete client file error', { error });
-      if (error instanceof Error && error.message.includes('not found')) {
-        return reply.code(404).send({ error: 'File not found' });
-      }
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to delete file',
-      });
+      return fail(reply, error, 'delete object', { storage: true });
     }
   }));
 
@@ -347,16 +359,26 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       reply
         .header('Content-Type', result.contentType ?? 'application/octet-stream')
-        .header('Content-Length', String(result.size ?? result.data.length))
-        .header('Content-Disposition', `attachment; filename="${encodeURIComponent(result.fileName)}"`);
+        .header('Content-Length', String(result.size ?? result.data.length));
+      setFileDownloadHeaders(reply, result.fileName, 'attachment');
 
       if (result.etag) {
         reply.header('ETag', result.etag);
       }
 
-      if (result.metadata) {
+      // The file's own metadata, as it was stored with the record: the same on every driver. (A store keeps its own
+      // spelling of it on the object - S3 lower-cases and re-encodes the names and adds a checksum.)
+      const metadata = wanted.metadata;
+      if (metadata && Object.keys(metadata).length > 0) {
         try {
-          reply.header('X-File-Metadata', JSON.stringify(result.metadata));
+          // A header value is ASCII: metadata in any language travels as \uXXXX escapes, which JSON.parse reads back.
+          const serialized = toHeaderSafeJson(metadata);
+          if (serialized.length <= FILE_METADATA_HEADER_MAX_CHARS) {
+            reply.header('X-File-Metadata', serialized);
+          } else {
+            // A header much larger than this is refused by the client that reads the response; the record has the metadata.
+            logger.warn('File metadata is too large for a header and was left out of the download', { size: serialized.length });
+          }
         } catch (error) {
           logger.warn('Failed to serialize client file metadata', { error });
         }
@@ -364,15 +386,11 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(Buffer.from(result.data));
     } catch (error) {
-      logger.error('Download client file error', { error });
-      const message = error instanceof Error ? error.message : 'Failed to download file';
-      if (message.includes('not found') || message.includes('does not exist')) {
-        return reply.code(404).send({ error: 'File not found' });
+      // The client API has always answered a Markdown copy that does not exist with 400 (the Document Store: 409).
+      if (isFileServiceError(error) && error.code === 'markdown_unavailable') {
+        return reply.code(400).send({ error: error.message, code: error.code });
       }
-      if (message.includes('markdown not available') || message.includes('conversion')) {
-        return reply.code(400).send({ error: message });
-      }
-      return reply.code(500).send({ error: message });
+      return fail(reply, error, 'download', { storage: true });
     }
   }));
 };

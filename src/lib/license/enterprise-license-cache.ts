@@ -15,13 +15,15 @@
  * the TTL.
  */
 import { getCache } from '@/lib/core/cache';
-import type { LicenseType } from './license-manager';
+import type { LicenseServiceClaim, LicenseType } from './license-manager';
 
 const TTL_SECONDS = 30;
 
 export interface CachedEnterpriseLicense {
   licenseType: LicenseType | string;
   expiresAt?: string;
+  licenseExpiresAt?: string;
+  services?: LicenseServiceClaim;
 }
 
 export function enterpriseLicenseCacheKey(tenantId: string): string {

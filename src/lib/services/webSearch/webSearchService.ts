@@ -8,6 +8,7 @@
  * on a miss.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { getDatabase, type IWebSearchRunLog } from '@/lib/database';
@@ -15,6 +16,7 @@ import {
   listProviderConfigs,
   loadProviderRuntimeData,
   type ProviderConfigView,
+  type ProviderViewOptions,
 } from '@/lib/services/providers/providerService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
@@ -46,11 +48,12 @@ export async function listWebSearchProviders(
   tenantDbName: string,
   tenantId: string,
   projectId?: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView[]> {
   return listProviderConfigs(tenantDbName, tenantId, {
     type: 'websearch',
     projectId,
-  });
+  }, options);
 }
 
 async function withTenantDb(tenantDbName: string) {
@@ -276,6 +279,7 @@ export async function runWebSearch(
   projectId: string | undefined,
   options: RunWebSearchOptions,
 ): Promise<WebSearchResult> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'websearch');
   const query = options.query?.trim();
   if (!query) throw new Error('`query` is required.');
 

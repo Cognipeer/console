@@ -11,6 +11,7 @@ import {
 import {
   captureLiveScreenshot,
   captureScreenshot,
+  captureScreenshotOutput,
   captureSnapshot,
   closeBrowserSession,
   createBrowser,
@@ -302,11 +303,26 @@ export const clientBrowserApiPlugin: FastifyPluginAsync = async (app) => {
       const ctx = await getApiTokenContextForRequest(request);
       const { sessionKey } = request.params as { sessionKey: string };
       const input = browserScreenshotInputSchema.parse(readJsonBody<unknown>(request));
-      const result = await captureScreenshot(
-        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
-        sessionKey,
-        { ...input, createdBy: ctx.user?.email ?? 'api-token' },
-      );
+      const { inline, persist, ...capture } = input;
+      const sessionCtx = { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId };
+      const createdBy = ctx.user?.email ?? 'api-token';
+      if (inline) {
+        // One capture serves both the inline image and (optionally) the saved artifact.
+        const out = await captureScreenshotOutput(sessionCtx, sessionKey, {
+          ...capture,
+          persist: persist !== false,
+          createdBy,
+        });
+        const structured = (out.structuredContent ?? {}) as { artifact?: unknown };
+        return reply.code(structured.artifact ? 201 : 200).send({
+          ...(structured.artifact ? { artifact: structured.artifact, eventId: out.eventId } : {}),
+          // A caller that asked for the capture to be saved can tell it was not (no bucket, upload failed).
+          ...(persist !== false && !structured.artifact ? { persisted: false } : {}),
+          content: out.content,
+          structured,
+        });
+      }
+      const result = await captureScreenshot(sessionCtx, sessionKey, { ...capture, createdBy });
       return reply.code(201).send(result);
     } catch (error) {
       logger.error('Persist screenshot failed', { error });

@@ -32,6 +32,8 @@
  * cache about it.
  */
 
+import { getCache } from '@/lib/core/cache';
+import { createLogger } from '@/lib/core/logger';
 import { getDatabase, runWithTenantScope } from '@/lib/database';
 import type { IGuardrail, IPiiPolicy, ITenant } from '@/lib/database';
 
@@ -65,6 +67,27 @@ export const TENANT_CACHE_TTL_MS = 5 * 60_000;
 const MAX_ENTRIES = 500;
 
 /**
+ * CROSS-REPLICA INVALIDATION. `invalidate*` only reaches the process that wrote,
+ * so without more every other replica would keep serving the old record (enabled,
+ * mode, rules) for up to the TTL, in both directions. A writer therefore also
+ * bumps a per-tenant generation token in the shared cache (Redis in production),
+ * and each reader compares it with the copy it last saw, at most once per
+ * `RECORD_GENERATION_CHECK_MS`, dropping its local entries for that tenant when it
+ * changed. The lookup hot path stays local: it pays one shared-cache read per
+ * tenant per interval, not one per guardrail lookup. Any shared-cache error falls
+ * back to the TTL behaviour above.
+ */
+export const RECORD_GENERATION_CHECK_MS = 2_000;
+/** Long enough to outlive any local entry; an expired token only costs a harmless extra drop. */
+const GENERATION_TTL_SECONDS = 24 * 60 * 60;
+
+const logger = createLogger('guardrail-record-cache');
+
+function generationKey(kind: string, tenantDbName: string): string {
+  return `guardrail-record-gen:${kind}:${tenantDbName}`;
+}
+
+/**
  * Written as an ESCAPE rather than as a literal NUL byte in the source: a raw
  * NUL makes the file read as binary to `grep`, `file` and every diff viewer,
  * which two sibling modules in this tree have already had to fix.
@@ -91,12 +114,73 @@ class RecordCache<T> {
   private readonly entries = new Map<string, CacheEntry<T>>();
   private readonly inflight = new Map<string, Promise<T | null>>();
 
+  /** Per tenant: the generation token last seen in the shared cache, and when it was read. */
+  private readonly generations = new Map<string, { token: string | null; checkedAt: number }>();
+  private readonly generationReads = new Map<string, Promise<void>>();
+
+  /** `kind` names the shared generation counter; without it the cache is process-local only. */
   constructor(
     private readonly ttlMs: number,
     private readonly missTtlMs: number,
+    private readonly kind?: string,
   ) {}
 
+  /**
+   * Drops this process's entries for the tenant when another replica has saved since
+   * the last look. Resolves at once (no await on the caller's path) inside the check
+   * interval; never rejects.
+   */
+  private syncGeneration(key: string, now: number): Promise<void> | null {
+    if (!this.kind) return null;
+    const tenantDbName = key.slice(0, key.indexOf(KEY_SEP));
+    const seen = this.generations.get(tenantDbName);
+    if (seen && now - seen.checkedAt < RECORD_GENERATION_CHECK_MS) return null;
+    const running = this.generationReads.get(tenantDbName);
+    if (running) return running;
+
+    const kind = this.kind;
+    const read = (async () => {
+      try {
+        const token = (await (await getCache()).get<string>(generationKey(kind, tenantDbName))) ?? null;
+        const before = this.generations.get(tenantDbName);
+        if (before && before.token !== token) this.invalidate(`${tenantDbName}${KEY_SEP}`, { local: true });
+        this.remember(tenantDbName, token);
+      } catch (error) {
+        // Fail open: keep serving on the TTL, and do not retry on every lookup.
+        logger.warn('Could not read the guardrail cache generation', { kind, error: error instanceof Error ? error.message : String(error) });
+        this.remember(tenantDbName, this.generations.get(tenantDbName)?.token ?? null);
+      } finally {
+        this.generationReads.delete(tenantDbName);
+      }
+    })();
+    this.generationReads.set(tenantDbName, read);
+    return read;
+  }
+
+  private remember(tenantDbName: string, token: string | null): void {
+    if (this.generations.size >= MAX_ENTRIES && !this.generations.has(tenantDbName)) this.generations.clear();
+    this.generations.set(tenantDbName, { token, checkedAt: Date.now() });
+  }
+
+  /** Tells the other replicas a tenant's records changed (best effort, off the caller's path). */
+  private publishGeneration(tenantDbName: string): void {
+    if (!this.kind) return;
+    const kind = this.kind;
+    const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    void (async () => {
+      try {
+        await (await getCache()).set(generationKey(kind, tenantDbName), token, GENERATION_TTL_SECONDS);
+        // This process already dropped its own entries; do not drop them again on its next look.
+        this.remember(tenantDbName, token);
+      } catch (error) {
+        logger.warn('Could not publish the guardrail cache generation', { kind, error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+  }
+
   async get(key: string, load: () => Promise<T | null>): Promise<T | null> {
+    const syncing = this.syncGeneration(key, Date.now());
+    if (syncing) await syncing;
     const now = Date.now();
     const hit = this.entries.get(key);
     if (hit && hit.expiresAt > now) return hit.value;
@@ -136,12 +220,17 @@ class RecordCache<T> {
 
   /** Drops every entry whose key starts with `prefix`; `undefined` clears all.
    *  Iterating is fine: the map is capped, and invalidation runs on save, not
-   *  on the request path. */
-  invalidate(prefix?: string): void {
+   *  on the request path. Unless `local`, a tenant's prefix is also announced to the other replicas. */
+  invalidate(prefix?: string, options: { local?: boolean } = {}): void {
     if (prefix === undefined) {
       this.entries.clear();
       this.inflight.clear();
+      this.generations.clear();
       return;
+    }
+    if (!options.local) {
+      const end = prefix.indexOf(KEY_SEP);
+      if (end > 0) this.publishGeneration(prefix.slice(0, end));
     }
     for (const key of this.entries.keys()) {
       if (key.startsWith(prefix)) this.entries.delete(key);
@@ -169,8 +258,8 @@ function freezeInDev<T>(value: T | null): T | null {
   return value;
 }
 
-const guardrailCache = new RecordCache<IGuardrail>(RECORD_CACHE_TTL_MS, RECORD_CACHE_MISS_TTL_MS);
-const piiPolicyCache = new RecordCache<IPiiPolicy>(RECORD_CACHE_TTL_MS, RECORD_CACHE_MISS_TTL_MS);
+const guardrailCache = new RecordCache<IGuardrail>(RECORD_CACHE_TTL_MS, RECORD_CACHE_MISS_TTL_MS, 'guardrail');
+const piiPolicyCache = new RecordCache<IPiiPolicy>(RECORD_CACHE_TTL_MS, RECORD_CACHE_MISS_TTL_MS, 'pii');
 const tenantCache = new RecordCache<ITenant>(TENANT_CACHE_TTL_MS, RECORD_CACHE_MISS_TTL_MS);
 
 /**

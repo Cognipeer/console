@@ -35,6 +35,7 @@
  * never persisted on the run record.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import slugify from 'slugify';
 import { createLogger } from '@/lib/core/logger';
@@ -687,6 +688,7 @@ export async function runBrowserFlow(
   idOrKey: string,
   input: RunBrowserFlowInput,
 ): Promise<BrowserFlowRunView> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   return runWithTenantScope(ctx.tenantDbName, async (db) => {
     const setup = await prepareFlowRun(db, ctx, idOrKey, input);
     return executeFlowRun(db, ctx, setup, input);
@@ -712,6 +714,7 @@ export async function startBrowserFlowRun(
   idOrKey: string,
   input: RunBrowserFlowInput,
 ): Promise<BrowserFlowRunView> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const setup = await runWithTenantScope(ctx.tenantDbName, (db) => (
     prepareFlowRun(db, ctx, idOrKey, input)
   ));
@@ -755,6 +758,7 @@ export async function runBrowserFlowSteps(
   idOrKey: string,
   input: RunBrowserFlowStepsInput,
 ): Promise<BrowserFlowStepsResult> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const flow = await resolveFlowRecord(ctx, idOrKey);
   if (!flow) throw new Error(`Browser flow not found: ${idOrKey}`);
 

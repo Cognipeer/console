@@ -10,6 +10,7 @@
  * it does not modify the RAG or evaluation engines.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IEvaluationDatasetItem } from '@/lib/database';
@@ -164,6 +165,7 @@ function buildGenerationMessages(block: string, perBlock: number, language?: str
 export async function generateDatasetItems(
   params: GenerateDatasetItemsParams,
 ): Promise<GenerateDatasetItemsResult> {
+  await assertServiceEnabled({ tenantDbName: params.tenantDbName, tenantId: params.tenantId }, 'evaluations');
   const count = params.count ?? 10;
   const blocks = await gatherBlocks(params);
 

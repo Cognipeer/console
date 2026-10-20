@@ -20,6 +20,8 @@
  */
 
 import { useTranslations } from '@/lib/i18n';
+import { isPendingWake, reminderOfMessage } from '../studio/reminderUi';
+import { useSessionReminders } from '../studio/useSessionReminders';
 import { useDeleteResource } from '@/components/common/confirm';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -80,7 +82,8 @@ import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/comm
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { IAgentAttachmentsConfig, IAgentConfig, IAgentHumanInTheLoopConfig, IAgentSessionBudget } from '@/lib/database/provider/types.domain';
 import { agentTakesAttachments, resolveAttachmentsConfig } from '@/lib/services/agents/sessionFilesConfig';
-import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
+import { isContinuableSession, sessionSourceLabel, sessionSourceOf } from '../studio/SessionList';
+import { sessionInspectorHref } from './sessionLinks';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
 import SessionSidePanel from './SessionSidePanel';
@@ -137,7 +140,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig; reminders?: { enabled?: boolean } };
 }
 
 interface VersionOption {
@@ -218,6 +221,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const ta = useTranslations('agents.attachments');
     const tp = useTranslations('agents.sessionPage');
     const tsa = useTranslations('agents.sessionAccess');
+    const tall = useTranslations('agents.allSessions');
     const router = useRouter();
     const tConfirm = useTranslations('common.confirm');
     const deleteResource = useDeleteResource();
@@ -230,6 +234,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [agentModels, setAgentModels] = useState<Array<{ key: string; label: string; default: boolean }>>([]);
     const [pickedModel, setPickedModel] = useState('');
     const [loading, setLoading] = useState(true);
+    // The session is not one this page shows: the inspector is being opened instead.
+    const [redirecting, setRedirecting] = useState(false);
     // Why the page could not be shown: the session is not there, or the person may not open it.
     const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
 
@@ -240,8 +246,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // API / A2A / scheduled sessions are real traffic: shown, never extended
     // from here. Only console sessions (or legacy ones without a source) take
     // new messages — the same rule the Sessions panel applies to Continue.
-    const source = session?.metadata?.source;
-    const sessionSource = typeof source === 'string' ? source : undefined;
+    const sessionSource = sessionSourceOf(session?.metadata);
     const readOnly = !isContinuableSession(sessionSource);
     const sessionContext = session?.metadata?.runtimeContext as Record<string, unknown> | undefined;
     const [search, setSearch] = useState('');
@@ -258,7 +263,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // Following a turn this page did not start: it shows the same live view as
     // one it ran itself, fed from the session event log instead.
     const [following, setFollowing] = useState(false);
-    const [followedUser, setFollowedUser] = useState<string | null>(null);
+    const [followedUser, setFollowedUser] = useState<{ content: string; reminder?: { message: string; setAt?: string } } | null>(null);
     const [followDismissed, setFollowDismissed] = useState(false);
     const liveActive = sending || following;
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
@@ -452,6 +457,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     const load = useCallback(async () => {
         setLoading(true);
+        setRedirecting(false);
+        // Leaving for the inspector: `loading` stays true so every effect waiting for it stays idle until the route changes.
+        let leaving = false;
         try {
             const [agentRes, sessionRes] = await Promise.all([
                 fetch(`/api/agents/${agentId}`, { cache: 'no-store' }),
@@ -465,6 +473,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLoadFailure(null);
             const agentData = await agentRes.json();
             const sessionData = await sessionRes.json();
+            // This page is the chat for sessions started from the console. Any other is real traffic: the
+            // inspector shows it, and nothing below (follow, stream, composer) may start for it.
+            if (!isContinuableSession(sessionSourceOf(sessionData.session?.metadata))) {
+                leaving = true;
+                setRedirecting(true);
+                router.replace(sessionInspectorHref(agentId, sessionId));
+                return;
+            }
             setAgent(agentData.agent);
             setAgentModels(Array.isArray(agentData.models) ? agentData.models : []);
             // The session remembers the model its last turn ran on: the picker starts there.
@@ -486,9 +502,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             console.error('Failed to load session', err);
             setLoadFailure('notFound');
         } finally {
-            setLoading(false);
+            if (!leaving) setLoading(false);
         }
-    }, [agentId, sessionId]);
+    }, [agentId, sessionId, router]);
 
     useEffect(() => {
         void load();
@@ -908,8 +924,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // operator sees it live instead of an idle page that suddenly changes.
     const followedStatus = session?.runtimeStatus;
     const followedSeq = session?.lastEventSeq ?? 0;
+    /** Where the next follow starts when the wake watcher below saw the turn begin (so its first events are not missed). */
+    const followFromSeq = useRef<number | null>(null);
     useEffect(() => {
         if (loading || sending || followDismissed || followedStatus !== 'running') return undefined;
+        const after = followFromSeq.current ?? followedSeq;
+        followFromSeq.current = null;
         const controller = new AbortController();
         let active = true;
         setFollowing(true);
@@ -920,7 +940,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const stopped = { current: false };
         void (async () => {
             try {
-                const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${followedSeq}`, {
+                const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${after}`, {
                     headers: { Accept: 'text/event-stream' },
                     signal: controller.signal,
                     cache: 'no-store',
@@ -929,7 +949,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 await consumeSse(res.body, (event, frame) => {
                     if (!active) return;
                     const step = interpretSessionEvent(event, frame);
-                    if (step.kind === 'user') setFollowedUser(step.content);
+                    if (step.kind === 'user') setFollowedUser({ content: step.content, ...(step.reminder ? { reminder: step.reminder } : {}) });
                     else if (step.kind === 'tool') setLiveSegments((current) => applyLiveToolEvent(current, step.event));
                     else if (step.kind === 'text') setLiveSegments((current) => appendLiveText(current, step.text));
                     else if (step.kind === 'reasoning') setLiveSegments((current) => appendLiveReasoning(current, step.text));
@@ -971,6 +991,63 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         };
     }, [loading, sending, followDismissed, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
 
+    // The session's reminders: the inspector lists them, and while a wake is still to come the page
+    // watches the event log, so the turn a reminder starts shows up live instead of after a reload.
+    const { reminders: sessionReminders, reload: reloadSessionReminders } = useSessionReminders(agentId, sessionId, true, 'all');
+    const wakePending = (sessionReminders ?? []).some(isPendingWake);
+    const remindersKey = `${followedStatus ?? ''}:${messages.length}`;
+    const lastRemindersKey = useRef<string | null>(null);
+    useEffect(() => {
+        // A turn ended (or the transcript changed): a reminder may have been set, fired or used up.
+        if (lastRemindersKey.current !== null && lastRemindersKey.current !== remindersKey) void reloadSessionReminders();
+        lastRemindersKey.current = remindersKey;
+    }, [remindersKey, reloadSessionReminders]);
+
+    useEffect(() => {
+        if (!wakePending || loading || sending || followedStatus === 'running') return undefined;
+        let active = true;
+        let controller = new AbortController();
+        void (async () => {
+            let after = followedSeq;
+            while (active) {
+                controller = new AbortController();
+                let firstSeq: number | null = null;
+                try {
+                    const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${after}`, {
+                        headers: { Accept: 'text/event-stream' },
+                        signal: controller.signal,
+                        cache: 'no-store',
+                    });
+                    if (!res.ok || !res.body) return;
+                    await consumeSse(res.body, (_event, frame) => {
+                        const seq = Number((frame as { seq?: unknown } | null)?.seq);
+                        if (firstSeq !== null || !Number.isFinite(seq)) return;
+                        firstSeq = seq;
+                        controller.abort();
+                    });
+                } catch {
+                    // Aborted on the first event (or by the cleanup), or the connection dropped.
+                }
+                if (!active) return;
+                if (firstSeq !== null) {
+                    // Something happened on the idle session: if a turn runs now, follow it from its first event.
+                    followFromSeq.current = firstSeq - 1;
+                    const fresh = await refreshSession();
+                    if (fresh?.runtimeStatus === 'running') return;
+                    followFromSeq.current = null;
+                    after = Math.max(firstSeq, fresh?.lastEventSeq ?? 0);
+                    continue;
+                }
+                // The stream ended on its own (its time cap): open it again shortly.
+                await new Promise((resolve) => { setTimeout(resolve, 3000); });
+            }
+        })();
+        return () => {
+            active = false;
+            controller.abort();
+        };
+    }, [wakePending, loading, sending, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
+
     const deleteSession = async () => {
         setDeleting(true);
         try {
@@ -997,7 +1074,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    if (loading) return <LoadingState label="Loading session..." minHeight={400} />;
+    if (loading || redirecting) return <LoadingState label={redirecting ? tall('openingInspector') : 'Loading session...'} minHeight={400} />;
     if (loadFailure || !agent) {
         const refused = loadFailure === 'forbidden';
         return (
@@ -1190,6 +1267,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         {messages.map((msg, i) => {
                                             if (matchedIndexes && !matchedIndexes.has(i)) return null;
                                             const previous = messages[i - 1];
+                                            const reminder = msg.role === 'user' ? reminderOfMessage(msg) : null;
                                             return (
                                                 <Box
                                                     key={i}
@@ -1208,6 +1286,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 }
                                                                 : undefined}
                                                         />
+                                                    ) : reminder ? (
+                                                        <ReminderNote message={reminder.message} at={reminder.setAt ?? msg.timestamp} />
                                                     ) : (
                                                         <>
                                                             <Group gap={6} mb={4} align="center">
@@ -1249,12 +1329,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                             </Text>
                                         ) : null}
                                         {following && followedUser ? (
-                                            <Box>
-                                                <Group gap={6} mb={4}>
-                                                    <RoleBadge user agentName={agent.name} />
-                                                </Group>
-                                                <Text size="sm" className={classes.preWrap}>{followedUser}</Text>
-                                            </Box>
+                                            followedUser.reminder ? (
+                                                <ReminderNote message={followedUser.reminder.message} at={followedUser.reminder.setAt} />
+                                            ) : (
+                                                <Box>
+                                                    <Group gap={6} mb={4}>
+                                                        <RoleBadge user agentName={agent.name} />
+                                                    </Group>
+                                                    <Text size="sm" className={classes.preWrap}>{followedUser.content}</Text>
+                                                </Box>
+                                            )
                                         ) : null}
                                         {liveActive ? (
                                             <Box>
@@ -1436,6 +1520,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             publishedVersion={agent.publishedVersion ?? null}
                             sessionContext={sessionContext}
                             agentConfig={agent.config}
+                            remindersEnabled={!isConnected && agent.config?.reminders?.enabled === true}
+                            reminders={sessionReminders}
+                            onRemindersChanged={() => void reloadSessionReminders()}
+                            readOnly={readOnly}
                             messages={messages}
                             onGoToTurn={goToTurn}
                             // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
@@ -1474,6 +1562,22 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
                 />
             </DetailShell>
+    );
+}
+
+/** A reminder's wake-up turn: the agent's own earlier note, so it is a muted card, not a user bubble. */
+function ReminderNote({ message, at }: { message: string; at?: string }) {
+    const tRem = useTranslations('agents.reminders');
+    return (
+        <Box p="sm" style={{ background: 'var(--mantine-color-gray-light)', borderRadius: 'var(--mantine-radius-sm)' }}>
+            <Group gap={6} mb={4}>
+                <IconClock size={12} color="var(--mantine-color-dimmed)" />
+                <Text size="xs" c="dimmed">
+                    {tRem('transcriptHeader', { time: at ? new Date(at).toLocaleString() : '—' })}
+                </Text>
+            </Group>
+            <Text size="sm" className={classes.preWrap}>{message}</Text>
+        </Box>
     );
 }
 

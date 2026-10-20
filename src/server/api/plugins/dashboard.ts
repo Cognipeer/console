@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { abortSignalOnDisconnect } from '../requestAbort';
 import { authz } from '@/lib/iam/routeAuthz';
@@ -30,6 +30,7 @@ import {
 } from '@/lib/providers/contracts/decisionHelpers';
 import { DecisionBackendError } from '@/lib/providers/contracts/structuredDecisionRuntime';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { ProviderDisabledError } from '@/lib/services/providers/providerService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -44,6 +45,12 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:dashboard');
+
+/** A switched-off provider is a 403 for the caller, not a server fault. */
+function sendProviderDisabledError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof ProviderDisabledError)) return null;
+  return reply.code(403).send({ error: error.message, code: error.code });
+}
 
 // The overview is a per-project summary for any member of the project (the
 // project context already limits what it shows). The handler drops the sections
@@ -140,6 +147,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Dashboard data error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Failed to fetch dashboard data',
         });
@@ -238,6 +246,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Chat completion failed',
         });
@@ -328,6 +337,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Playground transcription error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Transcription failed',
         });
@@ -374,6 +384,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Playground speech error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Speech synthesis failed',
         });
@@ -414,6 +425,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Playground image error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Image generation failed',
         });
@@ -543,6 +555,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Playground embeddings error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Embedding request failed',
         });
@@ -640,6 +653,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Playground OCR error', { error });
       return sendProjectContextError(reply, error)
+        ?? sendProviderDisabledError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'OCR failed',
         });

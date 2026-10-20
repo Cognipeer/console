@@ -85,9 +85,11 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       if (filters?.projectId) query.projectId = filters.projectId;
       if (filters?.status) query.status = filters.status;
       if (filters?.search) {
+        // The text as typed, not a pattern: a `\` or a `(` in a name is a character of the name.
+        const pattern = this.escapeRegex(filters.search);
         query.$or = [
-          { name: { $regex: filters.search, $options: 'i' } },
-          { key: { $regex: filters.search, $options: 'i' } },
+          { name: { $regex: pattern, $options: 'i' } },
+          { key: { $regex: pattern, $options: 'i' } },
         ];
       }
       const docs = await db
@@ -202,7 +204,7 @@ export function MemoryMixin<TBase extends Constructor<MongoDBProviderBase>>(Base
       if (filters?.status) query.status = filters.status;
       if (filters?.tags?.length) query.tags = { $in: filters.tags };
       if (filters?.search) {
-        query.content = { $regex: filters.search, $options: 'i' };
+        query.content = { $regex: this.escapeRegex(filters.search), $options: 'i' };
       }
       const col = db.collection<IMemoryItem>(COLLECTIONS.memoryItems);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

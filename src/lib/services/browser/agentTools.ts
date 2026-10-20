@@ -23,7 +23,7 @@
 import { z } from 'zod';
 import { createTool } from '@cognipeer/agent-sdk';
 import {
-  captureScreenshot,
+  captureScreenshotOutput,
   captureSnapshot,
   closeBrowserSession,
   exportSessionPdf,
@@ -308,13 +308,17 @@ export function buildBrowserAgentTools(ctx: ToolBindCtx) {
   const screenshotTool = createTool({
     name: 'browser_screenshot',
     description:
-      'Capture a full-page or element screenshot, persist it to the session bucket, and return a download URL.',
+      'Take a screenshot of the page or of one element. The image is shown to you so you can check layout and visual state. Set persist: true to also save it and get a download URL.',
     schema: z.object({
       ...targetShape,
       fullPage: z.boolean().optional(),
+      persist: z
+        .boolean()
+        .optional()
+        .describe("Also save it to the session's artifact bucket and return a download URL. Default false."),
     }),
     func: wrap(ctx, 'browser_screenshot', async (input) =>
-      captureScreenshot(sessionCtx, ctx.sessionKey, { ...input, createdBy: ctx.createdBy }),
+      captureScreenshotOutput(sessionCtx, ctx.sessionKey, { ...input, createdBy: ctx.createdBy }),
     ),
   });
 

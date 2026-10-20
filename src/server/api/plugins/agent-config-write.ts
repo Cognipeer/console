@@ -15,7 +15,7 @@ import {
   SANDBOX_SECRETS_UNREADABLE_MESSAGE,
   sandboxSecretsConflict,
 } from '@/lib/services/agents/agentSandboxSecrets';
-import type { IAgent, IAgentConfig, IAgentVersion, IUser } from '@/lib/database';
+import { runWithTenantScope, type IAgent, type IAgentConfig, type IAgentVersion, type IUser } from '@/lib/database';
 import {
   normalizeA2aMetadataUpdate,
   prepareConnectionForStorage,
@@ -33,7 +33,17 @@ import {
   type BucketNamingRefusal,
   type CanNameBucket,
 } from '@/lib/services/agents/attachmentsBucketAccess';
+import {
+  addsConfigTargets,
+  configRefTargets,
+  loadProjectConfigIndex,
+  normalizeConfigGroupRefs,
+  normalizeConfigValueRefs,
+  rawConfigRefTargets,
+} from '@/lib/services/config/configRefs';
 import { readJsonBody } from '../fastify-utils';
+import { configReadRequiredBody } from './config-permission';
+import { CONSOLE_IDENTITY_AUTH_TYPE, ensureConsoleIdentityKey } from '@/lib/iam/consoleIdentity';
 import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { FILES_WRITE_REQUIRED_MESSAGE } from './files-permission';
 
@@ -166,6 +176,19 @@ export interface AgentConfigWriteScope {
    * Files decision. A refusal's `decisionId` is quoted in the 403; an engine that cannot decide throws its 503.
    */
   canNameBucket: CanNameBucket;
+  /**
+   * May the caller read Config in this project? Asked only when a write points `config.sandbox.envRefs`,
+   * `secretRefs` or `groupRefs` at a config item or group the stored config did not: a reference makes the
+   * value readable by the agent's commands, so naming one is a Config read decision. Re-saving stored
+   * references asks nothing.
+   */
+  canReferenceConfig: () => Promise<boolean>;
+}
+
+/** `canReferenceConfig` answered once per write: it is asked before the lookups and again after them. */
+function onceCanReferenceConfig(scope: AgentConfigWriteScope): AgentConfigWriteScope {
+  let answer: Promise<boolean> | undefined;
+  return { ...scope, canReferenceConfig: () => (answer ??= scope.canReferenceConfig()) };
 }
 
 /** A config write refused with a 400 (`badRequest` is the body) or a 403 (`forbidden`), or accepted. */
@@ -206,14 +229,129 @@ export async function attachmentsBucketRefusal(
   return refusal ? { forbidden: bucketNamingForbiddenBody(refusal) } : null;
 }
 
+/** The sandbox reference fields of an agent config (value maps and the group list). */
+const SANDBOX_REF_FIELDS = [
+  { key: 'envRefs', refs: true },
+  { key: 'secretRefs', refs: true },
+  { key: 'groupRefs', refs: false },
+] as const;
+
+/**
+ * The 403 for a write whose RAW references (ids or keys, not yet looked up) name a config item or group the
+ * stored config did not, without Config read access, else null. Asked before anything is normalized, so a
+ * caller without Config read learns nothing about what Config holds from a 400 (unknown key, secret item,
+ * other project) that the lookup would have produced.
+ */
+async function rawConfigReferenceRefusal(
+  sandbox: NonNullable<IAgentConfig['sandbox']>,
+  previous: IAgentConfig | undefined,
+  scope: Pick<AgentConfigWriteScope, 'canReferenceConfig'>,
+): Promise<{ forbidden: Record<string, unknown> } | null> {
+  for (const { key, refs } of SANDBOX_REF_FIELDS) {
+    const raw = rawConfigRefTargets(refs ? { refs: [sandbox[key]] } : { groupRefs: [sandbox[key]] });
+    if (raw.size === 0) continue;
+    const stored = previous?.sandbox?.[key] as never;
+    if (!addsConfigTargets(raw, configRefTargets(refs ? { refs: [stored] } : { groupRefs: [stored] }))) continue;
+    if (await scope.canReferenceConfig()) return null;
+    return { forbidden: configReadRequiredBody(`config.sandbox.${key}`) };
+  }
+  return null;
+}
+
+/**
+ * Normalizes `config.sandbox.envRefs` / `secretRefs` / `groupRefs` to the stored shape (ids, never values), in
+ * place, against the request's project. A name that is both a typed value and a reference is refused. Returns
+ * the 403 body (the raw references add a target and the caller cannot read Config; checked before any lookup),
+ * the 400 body, or null. The project's Config is loaded only when a reference is present.
+ */
+async function normalizeSandboxConfigRefs(
+  config: IAgentConfig,
+  previous: IAgentConfig | undefined,
+  scope: Pick<AgentConfigWriteScope, 'tenantDbName' | 'projectId' | 'canReferenceConfig'>,
+): Promise<{ badRequest: Record<string, unknown> } | { forbidden: Record<string, unknown> } | null> {
+  const sandbox = config.sandbox;
+  if (!sandbox || typeof sandbox !== 'object') return null;
+  const sent = [sandbox.envRefs, sandbox.secretRefs, sandbox.groupRefs];
+  if (sent.every((value) => value === undefined)) return null;
+
+  const forbidden = await rawConfigReferenceRefusal(sandbox, previous, scope);
+  if (forbidden) return forbidden;
+
+  const needsIndex = sent.some((value) => (Array.isArray(value) ? value.length > 0 : value !== null && typeof value === 'object' ? Object.keys(value).length > 0 : value !== undefined && value !== null));
+  // One tenant binding for every read below: a process-global switchToTenant can be overwritten by another
+  // tenant's request between the awaits.
+  return runWithTenantScope(scope.tenantDbName, async (db) => {
+    const errors: AgentConfigIssue[] = [];
+    const index = needsIndex
+      ? await loadProjectConfigIndex(db, scope.projectId)
+      : { projectId: scope.projectId, groups: [], items: [] };
+
+    const valueMaps = [
+      { key: 'envRefs', typed: 'env', allowSecret: false },
+      { key: 'secretRefs', typed: 'secrets', allowSecret: true },
+    ] as const;
+    for (const { key, typed, allowSecret } of valueMaps) {
+      const field = `config.sandbox.${key}`;
+      const { refs, issues } = await normalizeConfigValueRefs(db, index, sandbox[key], field, { allowSecret });
+      errors.push(...issues);
+      if (refs === undefined) continue;
+      const typedNames = new Set(Object.keys(sandbox[typed] ?? {}));
+      for (const name of Object.keys(refs)) {
+        if (typedNames.has(name)) {
+          errors.push({ field: `${field}.${name}`, message: `${name} is also set in ${typed}: set it in one place` });
+        }
+      }
+      if (Object.keys(refs).length > 0) sandbox[key] = refs;
+      else delete sandbox[key];
+    }
+    const groups = await normalizeConfigGroupRefs(db, index, sandbox.groupRefs, 'config.sandbox.groupRefs');
+    errors.push(...groups.issues);
+    if (groups.refs !== undefined) {
+      if (groups.refs.length > 0) sandbox.groupRefs = groups.refs;
+      else delete sandbox.groupRefs;
+    }
+    return errors.length > 0 ? { badRequest: invalidConfigBody({ errors, warnings: [] }) } : null;
+  });
+}
+
+/**
+ * The 403 for a write that points the sandbox at a config item or group its stored version did not, without
+ * Config read access, else null. Re-saving what is stored asks nothing.
+ */
+async function configReferenceRefusal(
+  next: IAgentConfig,
+  previous: IAgentConfig | undefined,
+  scope: Pick<AgentConfigWriteScope, 'canReferenceConfig'>,
+): Promise<{ forbidden: Record<string, unknown> } | null> {
+  for (const { key, refs } of SANDBOX_REF_FIELDS) {
+    const pick = (config: IAgentConfig | undefined) => config?.sandbox?.[key] as never;
+    const targets = (config: IAgentConfig | undefined) =>
+      configRefTargets(refs ? { refs: [pick(config)] } : { groupRefs: [pick(config)] });
+    if (!addsConfigTargets(targets(next), targets(previous))) continue;
+    if (await scope.canReferenceConfig()) return null;
+    return { forbidden: configReadRequiredBody(`config.sandbox.${key}`) };
+  }
+  return null;
+}
+
+/**
+ * A connected agent set up for Console identity: make sure the workspace's signing key exists, so
+ * its key set is published before the first call (that call creates it otherwise).
+ */
+export async function prepareConnectedAgentIdentity(config: IAgentConfig, tenantDbName: string): Promise<void> {
+  if (config.kind !== 'external' || config.connection?.authType !== CONSOLE_IDENTITY_AUTH_TYPE) return;
+  await ensureConsoleIdentityKey(tenantDbName).catch(() => undefined);
+}
+
 /**
  * A new agent's config, as both create routes store it: normalized, guardrail
  * bindings validated, then the whole config validated.
  */
 export async function prepareNewAgentConfig(
   rawConfig: unknown,
-  scope: AgentConfigWriteScope,
+  writeScope: AgentConfigWriteScope,
 ): Promise<ConfigWriteOutcome<{ config: IAgentConfig; warnings: AgentConfigIssue[] }>> {
+  const scope = onceCanReferenceConfig(writeScope);
   let config: IAgentConfig;
   try {
     config = normalizeAgentConfig(rawConfig);
@@ -224,6 +362,9 @@ export async function prepareNewAgentConfig(
   }
   const bindingError = await applyConfigGuardrailBindings(config, scope.tenantDbName, scope.projectId, scope.user);
   if (bindingError) return { badRequest: { error: bindingError } };
+  const refsError = await normalizeSandboxConfigRefs(config, undefined, scope);
+  if (refsError) return refsError;
+  await prepareConnectedAgentIdentity(config, scope.tenantDbName);
 
   const validation = await validateAgentConfig({
     tenantDbName: scope.tenantDbName,
@@ -234,6 +375,8 @@ export async function prepareNewAgentConfig(
   if (validation.errors.length > 0) return { badRequest: invalidConfigBody(validation) };
   const refusal = await attachmentsBucketRefusal(config, undefined, scope);
   if (refusal) return refusal;
+  const configRefusal = await configReferenceRefusal(config, undefined, scope);
+  if (configRefusal) return configRefusal;
   return { config, warnings: validation.warnings };
 }
 
@@ -252,16 +395,19 @@ export function connectedConfigForUpdate(cfg: Record<string, unknown>, existing:
 export async function validateNativeConfigUpdate(
   cfg: Record<string, unknown>,
   agentKey: string,
-  scope: AgentConfigWriteScope,
-  /** The config stored now: re-saving its bucket is not a change. */
+  writeScope: AgentConfigWriteScope,
+  /** The config stored now: re-saving its bucket or its config references is not a change. */
   previous?: IAgentConfig,
 ): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }> | { conflict: Record<string, unknown> }> {
+  const scope = onceCanReferenceConfig(writeScope);
   // The config replaces the stored one wholesale, so the projected legacy
   // slots must be written on the SAME object — leaving them out would clear
   // the columns an older binary still reads.
   const config = cfg as IAgentConfig;
   const bindingError = await applyConfigGuardrailBindings(config, scope.tenantDbName, scope.projectId, scope.user);
   if (bindingError) return { badRequest: { error: bindingError } };
+  const refsError = await normalizeSandboxConfigRefs(config, previous, scope);
+  if (refsError) return refsError;
 
   // A config that would not run as configured is not saved: the runtime
   // would skip the broken parts silently.
@@ -276,6 +422,8 @@ export async function validateNativeConfigUpdate(
   if (sandboxSecretsConflict(config.sandbox, previous?.sandbox)) return { conflict: sandboxSecretsUnreadableBody() };
   const refusal = await attachmentsBucketRefusal(config, previous, scope);
   if (refusal) return refusal;
+  const configRefusal = await configReferenceRefusal(config, previous, scope);
+  if (configRefusal) return configRefusal;
   return { warnings: validation.warnings };
 }
 

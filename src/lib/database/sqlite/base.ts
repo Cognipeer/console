@@ -662,6 +662,14 @@ export class SQLiteProviderBase {
     for (const table of ['sandbox_templates', 'sandbox_instances']) {
       this.ensureTableColumn(db, table, 'envSealed', 'envSealed TEXT');
       this.ensureTableColumn(db, table, 'envKeys', 'envKeys TEXT');
+      // Config references (ids only, never values), resolved at launch.
+      this.ensureTableColumn(db, table, 'envRefs', 'envRefs TEXT');
+      this.ensureTableColumn(db, table, 'groupRefs', 'groupRefs TEXT');
+    }
+    // How launch values reach a sandbox; snapshots of a 'file' sandbox carry its sealed env and references.
+    this.ensureTableColumn(db, 'sandbox_instances', 'envDelivery', 'envDelivery TEXT');
+    for (const column of ['envDelivery', 'envSealed', 'envKeys', 'envRefs', 'groupRefs']) {
+      this.ensureTableColumn(db, 'sandbox_snapshots', column, `${column} TEXT`);
     }
     this.ensureTableColumn(
       db,
@@ -1183,11 +1191,14 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
     // The sub-agent a surfaced child pause belongs to.
     this.ensureTableColumn(db, TABLES.agentPendingActions, 'subagent', 'subagent TEXT');
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'delegationToolCallId', 'delegationToolCallId TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_transcript ON ${TABLES.agentConversations}(projectId, agentKey, createdBy, transcriptHash, updatedAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
+    // The dashboard's cross-agent Sessions list: a project's sessions by last activity.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_updated ON ${TABLES.agentConversations}(projectId, updatedAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique
@@ -1461,11 +1472,22 @@ export class SQLiteProviderBase {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /** SQLite LIKE pattern ("contains" search). */
+  /**
+   * SQLite LIKE pattern ("contains" search): the text with a backslash put before %, _ and \ (they are wildcards and the
+   * escape character itself), between two %. SQLite reads that backslash as an escape only when the clause names it -
+   * build the clause with `likeAny`, or write `ESCAPE '\\'` after the LIKE.
+   */
   protected likePattern(value: string): string {
-    // Escape %, _ which are special in LIKE
-    const escaped = value.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    return `%${escaped}%`;
+    return `%${value.replace(/[\\%_]/g, '\\$&')}%`;
+  }
+
+  /**
+   * `(a LIKE @p ESCAPE '\' OR b LIKE @p ESCAPE '\')`: the search clause that goes with `likePattern`. Without the ESCAPE
+   * the backslashes of the pattern are literal characters, and a search for `my_prompt` or `100%` finds nothing.
+   * `param` is the placeholder as the statement writes it: `@search`, or `?` once for each column.
+   */
+  protected likeAny(columns: readonly string[], param: string): string {
+    return `(${columns.map((column) => `${column} LIKE ${param} ESCAPE '\\'`).join(' OR ')})`;
   }
 
   protected normalizeThreadId(value: unknown): string | undefined {

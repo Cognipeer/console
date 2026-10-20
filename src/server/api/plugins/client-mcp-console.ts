@@ -18,6 +18,7 @@
  *   POST /api/client/v1/mcp/console/message        — JSON-RPC message endpoint
  */
 
+import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getRequiredPermissionLevel, type PermissionService } from '@/lib/security/rbac';
@@ -265,6 +266,9 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
             tenantDbName: ctx.tenantDbName,
             projectId: ctx.projectId,
           }, isServiceAllowed);
+          if (isToolOutput(result)) {
+            return respond(jsonRpcOk(id, toMcpCallResult(result, MCP_PROTOCOL_VERSION)));
+          }
           return respond(jsonRpcOk(id, {
             content: [
               {

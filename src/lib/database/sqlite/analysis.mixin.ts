@@ -115,7 +115,7 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.analysisDefinitions} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapAnalysisDefinitionRow(r));
@@ -209,8 +209,8 @@ export function AnalysisMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (filters?.source !== undefined) { clauses.push('source = @source'); params.source = filters.source; }
       // tags stored as a JSON array string; match the quoted token (exact tag).
       // JSON.stringify('a') === '"a"', so the LIKE pattern becomes %"a"%.
-      if (filters?.tag) { clauses.push('tags LIKE @tag'); params.tag = `%${JSON.stringify(filters.tag)}%`; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.tag) { clauses.push(this.likeAny(['tags'], '@tag')); params.tag = this.likePattern(JSON.stringify(filters.tag)); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const limit = filters?.limit ?? 100;
       const skip = filters?.skip ?? 0;

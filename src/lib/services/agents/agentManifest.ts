@@ -15,8 +15,16 @@
 
 import YAML from 'yaml';
 
-import { getDatabase } from '@/lib/database';
-import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
+import type { DatabaseProvider, IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
+import {
+    addsConfigTargets,
+    configRefTargets,
+    loadProjectConfigIndex,
+    normalizeConfigGroupRefs,
+    normalizeConfigValueRefs,
+    rawConfigRefTargets,
+} from '@/lib/services/config/configRefs';
 import { subagentConfigIssues } from './subagentConfigRules';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
@@ -365,6 +373,36 @@ export async function previewAgentImport(
 
 // ── Apply ────────────────────────────────────────────────────────────────
 
+async function assertMayReferenceConfig(
+    next: IAgentConfig,
+    previous: IAgentConfig | undefined,
+    canReferenceConfig: (() => Promise<boolean>) | undefined,
+): Promise<void> {
+    const field = addedConfigRefField(next, previous);
+    if (field && !(canReferenceConfig && await canReferenceConfig())) throw new ConfigReferenceForbiddenError(field);
+}
+
+/**
+ * The same question as `assertMayReferenceConfig`, asked of the manifest's RAW references (ids or keys, before
+ * any lookup in the target project): a caller without Config read is refused before the project's Config is
+ * touched, so the re-binding warnings cannot tell it what the project holds.
+ */
+async function assertMayReferenceConfigRaw(
+    spec: IAgentConfig,
+    previous: IAgentConfig | undefined,
+    canReferenceConfig: (() => Promise<boolean>) | undefined,
+): Promise<void> {
+    for (const field of ['envRefs', 'secretRefs', 'groupRefs'] as const) {
+        const isGroups = field === 'groupRefs';
+        const raw = rawConfigRefTargets(isGroups ? { groupRefs: [spec.sandbox?.[field]] } : { refs: [spec.sandbox?.[field]] });
+        if (raw.size === 0) continue;
+        const stored = previous?.sandbox?.[field] as never;
+        if (!addsConfigTargets(raw, configRefTargets(isGroups ? { groupRefs: [stored] } : { refs: [stored] }))) continue;
+        if (canReferenceConfig && await canReferenceConfig()) return;
+        throw new ConfigReferenceForbiddenError(`config.sandbox.${field}`);
+    }
+}
+
 export type AgentImportMode = 'create' | 'update' | 'upsert';
 
 export interface AgentImportResult {
@@ -372,6 +410,112 @@ export interface AgentImportResult {
     action: 'created' | 'updated';
     /** Dependencies the target project does not have. The agent is still written. */
     missing: ManifestDependencyStatus[];
+    /** Config references of the manifest the target project cannot resolve (they were dropped). */
+    warnings: Array<{ code: string; message: string }>;
+}
+
+/** Thrown when an import points the sandbox at config the caller may not read (the routes answer 403). */
+export class ConfigReferenceForbiddenError extends Error {
+    readonly field: string;
+
+    constructor(field: string) {
+        super('Taking a value from Config needs read access to Config in this project.');
+        this.name = 'ConfigReferenceForbiddenError';
+        this.field = field;
+    }
+}
+
+/**
+ * Re-binds the sandbox's Config references to the target project: a reference keeps its item (or group) when
+ * that id is in the project, else it is looked up by key. What cannot be resolved (no such key, the key is in
+ * two groups, a secret under `envRefs`) is dropped and reported; an import never fails over a reference.
+ * `storedSecretNames`: the typed secrets the target agent keeps (a manifest carries none, so they stay).
+ */
+async function rebindSandboxConfigRefs(
+    db: DatabaseProvider,
+    projectId: string,
+    config: IAgentConfig,
+    storedSecretNames: string[] = [],
+): Promise<{ config: IAgentConfig; warnings: Array<{ code: string; message: string }> }> {
+    const sandbox = config.sandbox;
+    if (!sandbox || (sandbox.envRefs === undefined && sandbox.secretRefs === undefined && sandbox.groupRefs === undefined)) {
+        return { config, warnings: [] };
+    }
+    const index = await loadProjectConfigIndex(db, projectId);
+    const warnings: Array<{ code: string; message: string }> = [];
+    const next = { ...sandbox };
+    const itemIds = new Set(index.items.map((item) => String(item._id)));
+    const groupIds = new Set(index.groups.map((group) => String(group._id)));
+    const malformed = (field: string) => warnings.push({
+        code: 'config_reference_dropped',
+        message: `sandbox.${field} was left out: it is not in the expected shape.`,
+    });
+
+    for (const [field, allowSecret] of [['envRefs', false], ['secretRefs', true]] as const) {
+        const stored = sandbox[field];
+        if (stored === undefined) continue;
+        if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+            if (stored !== null) malformed(field);
+            delete next[field];
+            continue;
+        }
+        // A name that is also a typed value is set in one place only (the write path refuses it); the typed value stays.
+        const typedNames = new Set(Object.keys((field === 'envRefs' ? sandbox.env : sandbox.secrets) ?? {}));
+        if (field === 'secretRefs' && sandbox.secrets === undefined) storedSecretNames.forEach((name) => typedNames.add(name));
+        const kept: NonNullable<typeof stored> = {};
+        for (const [name, ref] of Object.entries(stored)) {
+            if (typedNames.has(name)) {
+                warnings.push({
+                    code: 'config_reference_dropped',
+                    message: `${name} (config item "${ref?.key ?? '?'}") was left out: ${name} is also set in ${field === 'envRefs' ? 'env' : 'secrets'}.`,
+                });
+                continue;
+            }
+            const lookup = ref?.configId && itemIds.has(ref.configId) ? { configId: ref.configId } : { configKey: ref?.key };
+            const { refs, issues } = await normalizeConfigValueRefs(db, index, { [name]: lookup }, `sandbox.${field}`, { allowSecret });
+            if (refs?.[name]) {
+                kept[name] = refs[name];
+            } else {
+                warnings.push({
+                    code: 'config_reference_dropped',
+                    message: `${name} (config item "${ref?.key ?? '?'}") was left out: ${issues[0]?.message ?? 'it cannot be resolved in this project'}.`,
+                });
+            }
+        }
+        if (Object.keys(kept).length > 0) next[field] = kept;
+        else delete next[field];
+    }
+    if (sandbox.groupRefs !== undefined && !Array.isArray(sandbox.groupRefs)) {
+        if (sandbox.groupRefs !== null) malformed('groupRefs');
+        delete next.groupRefs;
+    } else if (Array.isArray(sandbox.groupRefs)) {
+        const kept: NonNullable<typeof sandbox.groupRefs> = [];
+        for (const ref of sandbox.groupRefs) {
+            const lookup = ref?.groupId && groupIds.has(ref.groupId) ? { groupId: ref.groupId } : { groupKey: ref?.key };
+            const { refs, issues } = await normalizeConfigGroupRefs(db, index, [lookup], 'sandbox.groupRefs');
+            if (refs?.[0]) {
+                kept.push(refs[0]);
+            } else {
+                warnings.push({
+                    code: 'config_reference_dropped',
+                    message: `Config group "${ref?.key ?? '?'}" was left out: ${issues[0]?.message ?? 'it cannot be resolved in this project'}.`,
+                });
+            }
+        }
+        if (kept.length > 0) next.groupRefs = kept;
+        else delete next.groupRefs;
+    }
+    return { config: { ...config, sandbox: next }, warnings };
+}
+
+/** The field of the first sandbox reference `next` adds over `previous` (it needs Config read access), else null. */
+function addedConfigRefField(next: IAgentConfig, previous: IAgentConfig | undefined): string | null {
+    for (const field of ['envRefs', 'secretRefs'] as const) {
+        const pick = (config: IAgentConfig | undefined) => configRefTargets({ refs: [config?.sandbox?.[field]] });
+        if (addsConfigTargets(pick(next), pick(previous))) return `config.sandbox.${field}`;
+    }
+    const groups = (config: IAgentConfig | undefined) => configRefTargets({ groupRefs: [config?.sandbox?.groupRefs] });
+    return addsConfigTargets(groups(next), groups(previous)) ? 'config.sandbox.groupRefs' : null;
 }
 
 /**
@@ -405,6 +549,12 @@ export async function applyAgentManifest(
          * refusal throws `BucketNamingForbiddenError`.
          */
         canNameBucket: CanNameBucket;
+        /**
+         * May the caller read Config in the target project? Asked only when the (re-bound) manifest points the
+         * sandbox at a config item or group the agent it overwrites did not; a refusal throws
+         * `ConfigReferenceForbiddenError`. A caller that passes none cannot add references (it fails closed).
+         */
+        canReferenceConfig?: () => Promise<boolean>;
     },
 ): Promise<AgentImportResult> {
     const issues = validateAgentManifest(manifest);
@@ -418,9 +568,20 @@ export async function applyAgentManifest(
         );
     }
 
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
+    // One tenant binding for every read and write below (and the config lookups of the re-binding): a
+    // process-global switchToTenant can be overwritten by another tenant's request between the awaits.
+    return runWithTenantScope(tenantDbName, (db) => importManifest(db, tenantId, projectId, userId, manifest, options, preview));
+}
 
+async function importManifest(
+    db: DatabaseProvider,
+    tenantId: string,
+    projectId: string,
+    userId: string,
+    manifest: AgentManifest,
+    options: Parameters<typeof applyAgentManifest>[5],
+    preview: Awaited<ReturnType<typeof previewAgentImport>>,
+): Promise<AgentImportResult> {
     const key = options.key?.trim() || manifest.metadata.key;
     const name = options.name?.trim() || manifest.metadata.name;
     const mode = options.mode ?? 'upsert';
@@ -428,8 +589,13 @@ export async function applyAgentManifest(
 
     if (existing) {
         if (mode === 'create') throw new AgentManifestError(`Agent key "${key}" already exists`, [], 'agent_key_conflict');
-        const incoming = sanitizeConfig(manifest.spec);
+        const spec = sanitizeConfig(manifest.spec);
+        await assertMayReferenceConfigRaw(spec, existing.config, options.canReferenceConfig);
+        const storedSecretNames = Object.keys(maskAgentSandboxConfig(existing.config?.sandbox)?.secrets ?? {});
+        const rebound = await rebindSandboxConfigRefs(db, projectId, spec, storedSecretNames);
+        const incoming = rebound.config;
         await assertMayNameBucket(incoming, existing.config, options.canNameBucket);
+        await assertMayReferenceConfig(incoming, existing.config, options.canReferenceConfig);
         const updated = await db.updateAgent(String(existing._id), {
             name,
             description: manifest.metadata.description,
@@ -439,13 +605,17 @@ export async function applyAgentManifest(
         });
         if (!updated) throw new AgentManifestError(`Agent "${key}" could not be updated`);
         logger.info('Agent imported over existing record', { key, projectId, missing: preview.missing.length });
-        return { agent: updated, action: 'updated', missing: preview.missing };
+        return { agent: updated, action: 'updated', missing: preview.missing, warnings: rebound.warnings };
     }
 
     if (mode === 'update') throw new AgentManifestError(`Agent "${key}" does not exist`, [], 'agent_not_found');
 
-    const incoming = sanitizeConfig(manifest.spec);
+    const spec = sanitizeConfig(manifest.spec);
+    await assertMayReferenceConfigRaw(spec, undefined, options.canReferenceConfig);
+    const rebound = await rebindSandboxConfigRefs(db, projectId, spec);
+    const incoming = rebound.config;
     await assertMayNameBucket(incoming, undefined, options.canNameBucket);
+    await assertMayReferenceConfig(incoming, undefined, options.canReferenceConfig);
     const created = await db.createAgent({
         tenantId,
         projectId,
@@ -459,5 +629,5 @@ export async function applyAgentManifest(
         createdBy: userId,
     });
     logger.info('Agent imported as new record', { key, projectId, missing: preview.missing.length });
-    return { agent: created, action: 'created', missing: preview.missing };
+    return { agent: created, action: 'created', missing: preview.missing, warnings: rebound.warnings };
 }

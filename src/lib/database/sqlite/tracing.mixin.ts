@@ -475,8 +475,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const freeText =
         typeof filters?.query === 'string' ? filters.query.trim() : '';
       if (freeText) {
-        clauses.push('(sessionId LIKE @freeText OR threadId LIKE @freeText OR agentName LIKE @freeText)');
-        params.freeText = `%${freeText}%`;
+        clauses.push(this.likeAny(['sessionId', 'threadId', 'agentName'], '@freeText'));
+        params.freeText = this.likePattern(freeText);
       }
 
       // Same key charset the ingest sanitizer enforces (client-tracing.ts) —
@@ -881,6 +881,27 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       sql += ' ORDER BY sequence ASC, createdAt ASC';
       const rows = db.prepare(sql).all(params) as SqliteRow[];
       return rows.map((r) => this.mapAgentTracingEventRow(r));
+    }
+
+    async getAgentTracingWaitState(
+      sessionId: string,
+      projectId?: string,
+    ): Promise<{ latestStatus?: string; latestHumanStatus?: string }> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = { sessionId };
+      let scope = '';
+      if (projectId) { scope = ' AND projectId = @projectId'; params.projectId = projectId; }
+      const latest = (typeFilter: string): string | undefined => {
+        const row = db.prepare(
+          `SELECT status FROM ${TABLES.agentTracingEvents} WHERE sessionId = @sessionId${scope}${typeFilter}
+           ORDER BY sequence DESC, createdAt DESC LIMIT 1`,
+        ).get(params) as { status?: string | null } | undefined;
+        return row?.status ?? undefined;
+      };
+      return {
+        latestStatus: latest(''),
+        latestHumanStatus: latest(" AND type IN ('tool_approval', 'user_question')"),
+      };
     }
 
     async findAgentTracingEventById(

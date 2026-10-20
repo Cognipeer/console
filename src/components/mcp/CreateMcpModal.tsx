@@ -23,6 +23,7 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
+import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView } from '@/lib/services/mcp';
 
 interface CreateMcpModalProps {
@@ -31,7 +32,7 @@ interface CreateMcpModalProps {
   onCreated: (server: McpServerView) => void;
 }
 
-type AuthType = 'none' | 'token' | 'header' | 'basic';
+type AuthType = 'none' | 'token' | 'header' | 'basic' | 'console_identity';
 type SourceType = 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite';
 type StdioRuntime = 'npx' | 'uvx';
 type ExecutionMode = 'subprocess' | 'sandbox';
@@ -77,6 +78,8 @@ interface McpCapabilities {
    */
   aegis?: { hookAvailable: boolean };
   mcpHub?: { available: boolean; enterpriseBuild: boolean; licenseEnterprise?: boolean };
+  /** Issuer details shown under the Console identity auth option (absent on an older API). */
+  consoleIdentity?: ConsoleIdentityIssuerInfo;
   internalProviders?: InternalProviderInfo[];
 }
 
@@ -113,6 +116,8 @@ interface McpMemberOption {
   key: string;
   name: string;
   sourceType: SourceType;
+  /** The internal provider of an internal-service server. */
+  provider?: string;
   status: string;
   toolCount: number;
 }
@@ -124,10 +129,34 @@ const NO_HUB_VALUE = '__none__';
 // its own option value rather than the empty string, which Mantine's Select
 // treats as "nothing selected".
 const DEFAULT_GUARDRAIL_VALUE = '__default__';
-// Providers other than Knowledge Base aren't scoped to a per-instance
-// resource yet (one MCP server covers the whole project) — this must match
-// the instance key each such provider's `listInstances()` returns.
+// Providers without an entry in INSTANCE_PICKERS aren't scoped to a
+// per-instance resource (one MCP server covers the whole project) — this must
+// match the instance key each such provider's `listInstances()` returns.
 const SINGLE_INSTANCE_KEY = 'project';
+
+/** Providers whose MCP server publishes one chosen resource, and how to ask for it. */
+const INSTANCE_PICKERS: Record<string, {
+  label: string;
+  hint: string;
+  placeholder: string;
+  empty: string;
+  required: string;
+}> = {
+  'knowledge-base': {
+    label: 'Knowledge Base',
+    hint: 'The RAG module this tool searches.',
+    placeholder: 'Choose a Knowledge Base',
+    empty: 'No Knowledge Bases yet — create one under Dashboard → Knowledge Base first.',
+    required: 'Choose which Knowledge Base to publish',
+  },
+  browser: {
+    label: 'Browser',
+    hint: 'The browser these tools drive. Each caller opens its own session with browser_open_session.',
+    placeholder: 'Choose a browser',
+    empty: 'No active browsers yet — create one under Dashboard → Browser first.',
+    required: 'Choose which browser to publish',
+  },
+};
 
 interface FormValues {
   name: string;
@@ -202,7 +231,7 @@ export default function CreateMcpModal({
   const [loading, setLoading] = useState(false);
   const [capabilities, setCapabilities] = useState<McpCapabilities | null>(null);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
-  const [ragModules, setRagModules] = useState<InternalInstanceOption[]>([]);
+  const [instanceOptions, setInstanceOptions] = useState<Record<string, InternalInstanceOption[]>>({});
   const [hubs, setHubs] = useState<McpHubOption[]>([]);
   const [memberOptions, setMemberOptions] = useState<McpMemberOption[]>([]);
 
@@ -255,10 +284,9 @@ export default function CreateMcpModal({
         errors.stdioPackage = 'Package name is required';
       }
       if (values.sourceType === 'internal') {
-        if (values.internalProvider === 'knowledge-base') {
-          if (!values.internalInstanceKey.trim()) {
-            errors.internalInstanceKey = 'Choose which Knowledge Base to publish';
-          }
+        const picker = INSTANCE_PICKERS[values.internalProvider];
+        if (picker && !values.internalInstanceKey.trim()) {
+          errors.internalInstanceKey = picker.required;
         }
         if (values.hubChoice === NEW_HUB_VALUE && !values.newHubName.trim()) {
           errors.newHubName = 'Name the new hub';
@@ -318,18 +346,23 @@ export default function CreateMcpModal({
         })).filter((g: GuardrailOption) => g.key));
       })
       .catch(() => setGuardrails([]));
-    // Knowledge Base modules — instances for the "internal" (Knowledge Base) source.
-    fetch('/api/rag/modules?status=active')
+    // Instances for the "internal" providers that publish one chosen resource.
+    const loadInstances = (provider: string, url: string, field: string) => fetch(url)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const list = Array.isArray(data?.modules) ? data.modules : [];
-        setRagModules(list.map((m: { key: string; name: string; description?: string }) => ({
-          key: m.key,
-          label: m.name,
-          description: m.description,
-        })));
+        const list = Array.isArray(data?.[field]) ? data[field] : [];
+        setInstanceOptions((prev) => ({
+          ...prev,
+          [provider]: list.map((m: { key: string; name: string; description?: string }) => ({
+            key: m.key,
+            label: m.name,
+            description: m.description,
+          })),
+        }));
       })
-      .catch(() => setRagModules([]));
+      .catch(() => setInstanceOptions((prev) => ({ ...prev, [provider]: [] })));
+    loadInstances('knowledge-base', '/api/rag/modules?status=active', 'modules');
+    loadInstances('browser', '/api/browser/browsers?status=active', 'browsers');
     // MCP hubs — enterprise only; degrade silently when unavailable.
     fetch('/api/mcp/hubs')
       .then((r) => (r.ok ? r.json() : null))
@@ -352,11 +385,15 @@ export default function CreateMcpModal({
         setMemberOptions(
           list
             .filter((s: { sourceType?: string }) => s.sourceType !== 'composite')
-            .map((s: { id: string; key: string; name: string; sourceType?: string; status: string; tools?: unknown[] }) => ({
+            .map((s: {
+              id: string; key: string; name: string; sourceType?: string; status: string; tools?: unknown[];
+              metadata?: { internal?: { provider?: string } };
+            }) => ({
               id: s.id,
               key: s.key,
               name: s.name,
               sourceType: (s.sourceType ?? 'openapi') as SourceType,
+              provider: s.metadata?.internal?.provider,
               status: s.status,
               toolCount: s.tools?.length ?? 0,
             })),
@@ -380,16 +417,27 @@ export default function CreateMcpModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, hubs, capabilities, form.values.sourceType]);
 
-  // Providers without a per-instance picker (anything but Knowledge Base, for
-  // now) always target the same single project-scoped instance.
+  // Providers without a per-instance picker always target the same single
+  // project-scoped instance.
   useEffect(() => {
     if (form.values.sourceType !== 'internal') return;
-    if (form.values.internalProvider === 'knowledge-base') return;
+    if (INSTANCE_PICKERS[form.values.internalProvider]) return;
     if (form.values.internalInstanceKey !== SINGLE_INSTANCE_KEY) {
       form.setFieldValue('internalInstanceKey', SINGLE_INSTANCE_KEY);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.values.sourceType, form.values.internalProvider]);
+
+  // A browser reaches whatever address the console can: its server, and a
+  // composite that includes it, take an API token only (the server refuses
+  // a public one).
+  const browserTokenOnly = (form.values.sourceType === 'internal' && form.values.internalProvider === 'browser')
+    || (form.values.sourceType === 'composite'
+      && form.values.compositeMembers.some((id) => memberOptions.find((m) => m.id === id)?.provider === 'browser'));
+  useEffect(() => {
+    if (browserTokenOnly && form.values.accessMode === 'public') form.setFieldValue('accessMode', 'token');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [browserTokenOnly, form.values.accessMode]);
 
   const v = form.values;
 
@@ -587,6 +635,7 @@ export default function CreateMcpModal({
     token: 'Bearer token',
     header: 'Custom header',
     basic: 'Basic auth',
+    console_identity: 'Console identity',
   };
 
   const sourceLabel: Record<SourceType, string> = {
@@ -597,7 +646,9 @@ export default function CreateMcpModal({
     composite: 'Composite (other servers)',
   };
 
-  const selectedRagModule = ragModules.find((m) => m.key === v.internalInstanceKey);
+  const instancePicker = INSTANCE_PICKERS[v.internalProvider];
+  const providerInstances = instanceOptions[v.internalProvider] ?? [];
+  const selectedInstance = providerInstances.find((m) => m.key === v.internalInstanceKey);
   // undefined while the default option is selected — that binding names no
   // guardrail at all, so there is nothing to warn about.
   const selectedGuardrail = guardrails.find((g) => g.key === v.guardrailKey);
@@ -663,10 +714,10 @@ export default function CreateMcpModal({
               value={capabilities?.internalProviders?.find((p) => p.id === v.internalProvider)?.label
                 ?? v.internalProvider}
             />
-            {v.internalProvider === 'knowledge-base' ? (
+            {instancePicker ? (
               <SummaryKV
-                label="Knowledge Base"
-                value={selectedRagModule?.label || <span className="ds-faint">—</span>}
+                label={instancePicker.label}
+                value={selectedInstance?.label || <span className="ds-faint">—</span>}
               />
             ) : null}
             <SummaryKV
@@ -850,24 +901,24 @@ export default function CreateMcpModal({
                   // ChipPicker<T> types onChange as T | Set<T> for multi-select;
                   // this usage is single-select, so val is always a plain string.
                   form.setFieldValue('internalProvider', val as string);
-                  // Instance picking only applies to Knowledge Base today —
-                  // reset it when switching so a stale key can't leak through.
+                  // Instance keys belong to one provider — reset on switch so a
+                  // stale key can't leak through.
                   form.setFieldValue('internalInstanceKey', '');
                 }}
               />
             </FormField>
 
-            {v.internalProvider === 'knowledge-base' ? (
+            {instancePicker ? (
               <FormRow cols={1}>
-                <FormField label="Knowledge Base" required hint="The RAG module this tool searches.">
-                  {ragModules.length === 0 ? (
+                <FormField label={instancePicker.label} required hint={instancePicker.hint}>
+                  {providerInstances.length === 0 ? (
                     <Alert color="yellow" icon={<IconInfoCircle size={16} />}>
-                      No Knowledge Bases yet — create one under Dashboard → Knowledge Base first.
+                      {instancePicker.empty}
                     </Alert>
                   ) : (
                     <Select
-                      placeholder="Choose a Knowledge Base"
-                      data={ragModules.map((m) => ({ value: m.key, label: m.label }))}
+                      placeholder={instancePicker.placeholder}
+                      data={providerInstances.map((m) => ({ value: m.key, label: m.label }))}
                       value={v.internalInstanceKey || null}
                       onChange={(val) => form.setFieldValue('internalInstanceKey', val ?? '')}
                     />
@@ -1060,6 +1111,7 @@ export default function CreateMcpModal({
                 { value: 'token', label: 'Bearer token' },
                 { value: 'header', label: 'Custom header' },
                 { value: 'basic', label: 'Basic auth' },
+                { value: 'console_identity', label: 'Console identity' },
               ]}
               value={v.authType}
               onChange={(val) => form.setFieldValue('authType', val as AuthType)}
@@ -1110,6 +1162,10 @@ export default function CreateMcpModal({
               </FormField>
             </FormRow>
           ) : null}
+
+          {v.authType === 'console_identity' ? (
+            <ConsoleIdentityNote info={capabilities?.consoleIdentity} />
+          ) : null}
         </FormSection>
       ) : null}
 
@@ -1148,15 +1204,19 @@ export default function CreateMcpModal({
         ) : null}
         <FormField
           label="Access mode"
-          hint={v.accessMode === 'public'
-            ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
-            : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
+          hint={browserTokenOnly
+            ? 'A browser can reach any address the console can, so this server takes an API token only. Callers send a Cognipeer API token (PAT) in the Authorization header.'
+            : v.accessMode === 'public'
+              ? 'Anyone with the URL can call this server — treat it like a webhook URL.'
+              : 'Callers must send a Cognipeer API token (PAT) in the Authorization header.'}
         >
           <ChipPicker<AccessMode>
-            options={[
-              { value: 'token', label: 'API token required' },
-              { value: 'public', label: 'Public URL (no auth)' },
-            ]}
+            options={browserTokenOnly
+              ? [{ value: 'token', label: 'API token required' }]
+              : [
+                { value: 'token', label: 'API token required' },
+                { value: 'public', label: 'Public URL (no auth)' },
+              ]}
             value={v.accessMode}
             onChange={(val) => form.setFieldValue('accessMode', val as AccessMode)}
           />

@@ -1,3 +1,4 @@
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'crypto';
 import slugify from 'slugify';
 import {
@@ -174,6 +175,18 @@ export async function getMemoryStore(
   return store as MemoryStoreView;
 }
 
+/** Raised for a store update the caller got wrong; routes answer it with a 400. */
+export class MemoryStoreInputError extends Error {
+  readonly statusCode = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemoryStoreInputError';
+  }
+}
+
+/** The statuses an operator may set; 'error' is only ever recorded by the system. */
+const SETTABLE_STORE_STATUSES = new Set(['active', 'inactive']);
+
 export async function updateMemoryStore(
   tenantDbName: string,
   _tenantId: string,
@@ -181,6 +194,9 @@ export async function updateMemoryStore(
   storeKey: string,
   updates: UpdateMemoryStoreRequest,
 ): Promise<IMemoryStore> {
+  if (updates.status !== undefined && !SETTABLE_STORE_STATUSES.has(updates.status as string)) {
+    throw new MemoryStoreInputError('status must be "active" or "inactive"');
+  }
   const db = await withTenantDb(tenantDbName);
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
@@ -237,6 +253,7 @@ export async function addMemory(
   storeKey: string,
   request: AddMemoryRequest,
 ): Promise<IMemoryItem> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   const db = await withTenantDb(tenantDbName);
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
@@ -324,6 +341,7 @@ export async function addMemoryBatch(
   storeKey: string,
   memories: AddMemoryRequest[],
 ): Promise<{ added: number; duplicates: number }> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   let added = 0;
   let duplicates = 0;
   for (const mem of memories) {
@@ -490,6 +508,7 @@ export async function searchMemories(
   storeKey: string,
   request: MemorySearchRequest,
 ): Promise<MemorySearchResponse> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   const db = await withTenantDb(tenantDbName);
   const store = await db.findMemoryStoreByKey(storeKey, projectId);
   if (!store) throw new Error('Memory store not found.');
@@ -590,6 +609,7 @@ export async function recallForChat(
   storeKey: string,
   request: MemoryRecallRequest,
 ): Promise<MemoryRecallResponse> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'memory');
   const searchResult = await searchMemories(
     tenantDbName,
     tenantId,

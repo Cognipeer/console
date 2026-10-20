@@ -281,12 +281,37 @@
       "id": "aws-s3-files",
       "driver": "aws-s3-files",
       "name": "Amazon S3",
-      "tagline": "S3-compatible object storage",
-      "description": "Store ingested files and artifacts in an S3 bucket — AWS S3 or any S3-compatible store (MinIO, Ceph RGW) via a custom endpoint.",
+      "glyph": "S3",
+      "tagline": "Object storage on AWS",
+      "description": "Store ingested files and artifacts in an Amazon S3 bucket. Providers set up earlier with a custom endpoint keep working; use S3-compatible storage for MinIO, Ceph and similar stores.",
       "domains": ["file"],
       "color": "#ff9900",
       "tags": ["managed"],
-      "aliases": ["s3", "minio", "s3-compatible"]
+      "aliases": ["s3"]
+    },
+    {
+      "id": "s3-compatible-files",
+      "driver": "s3-compatible-files",
+      "name": "S3-compatible storage",
+      "glyph": "S3C",
+      "tagline": "MinIO, Ceph, SeaweedFS, Garage, R2, Wasabi and other S3 APIs",
+      "description": "Store files in any S3-compatible object store reachable over http(s), typically self-hosted. Supports private CAs and self-signed certificates.",
+      "domains": ["file"],
+      "color": "#c72c48",
+      "tags": ["self-hosted"],
+      "aliases": ["minio", "ceph", "rgw", "seaweedfs", "garage", "r2", "cloudflare-r2", "wasabi", "storagegrid", "s3-compatible", "object-storage"]
+    },
+    {
+      "id": "azure-blob-files",
+      "driver": "azure-blob-files",
+      "name": "Azure Blob Storage",
+      "glyph": "AB",
+      "tagline": "Microsoft Azure object storage",
+      "description": "Store files in an Azure Blob Storage container. Sign in with an account key, a SAS token, a connection string or a Microsoft Entra service principal. Also works with Azurite, Azure Stack Hub and the sovereign clouds.",
+      "domains": ["file"],
+      "color": "#0078d4",
+      "tags": ["managed"],
+      "aliases": ["blob", "azure-blob", "azure blob storage", "azure storage", "azurite", "adls", "data lake"]
     },
     {
       "id": "mongodb-gridfs-files",

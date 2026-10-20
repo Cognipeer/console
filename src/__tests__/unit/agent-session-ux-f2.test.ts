@@ -47,7 +47,7 @@ import { messageImageViews } from '@/components/common/llm/messageImages';
 import { parseFlattenedParts, tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { CHIP_CONTRAST_PAIRS } from '@/components/agents/session/attachmentChipStyles';
 import SessionFilesPanel from '@/components/agents/session/SessionFilesPanel';
-import { createdByWho, SessionFileCells } from '@/components/files/FileBrowseParts';
+import { createdByWho, UploaderCell } from '@/components/files/bucket/FileBrowseParts';
 import { sessionLoadFailure } from '@/components/agents/session/sessionLoadFailure';
 import { parseByteRange } from '@/lib/services/agents/byteRange';
 import { displayNameOf, resolveUserDisplayNames, withUploaderNames } from '@/lib/services/users/userDisplayNames';
@@ -459,10 +459,9 @@ describe('the uploader is a person, not an id', () => {
   });
 
   it('the Document Store row shows the name too, the id only as its tooltip', () => {
-    const row = (uploadedByName?: string) => render(h(Table, null, h(Table.Tbody, null, h(Table.Tr, null, h(SessionFileCells, {
-      record: { purpose: 'conversation', conversationId: 'c1', agentKey: 'ag', expiresAt: new Date('2099-01-01T00:00:00Z'), uploadedBy: 'u1', ...(uploadedByName ? { uploadedByName } : {}) },
-      agentId: 'a1', now: new Date('2026-10-11T00:00:00Z'), locale: 'en',
-    })))));
+    const row = (uploadedByName?: string) => render(h(Table, null, h(Table.Tbody, null, h(Table.Tr, null, h(Table.Td, null, h(UploaderCell, {
+      record: { purpose: 'conversation', uploadedBy: 'u1', ...(uploadedByName ? { uploadedByName } : {}) },
+    }))))));
     const named = row('Ada Lovelace');
     expect(named).toContain('Ada Lovelace');
     expect(named).toContain('title="u1"');
@@ -506,8 +505,8 @@ describe('the uploader is a person, not an id', () => {
     });
 
     it('the Document Store prints it through the helper and the translated line', () => {
-      const manager = source('components/files/FileObjectManager.tsx');
-      expect(manager).toContain('createdByWho(record, showSessionColumns)');
+      const manager = source('components/files/bucket/BucketFilesTab.tsx');
+      expect(manager).toContain('createdByWho(record, sessionColumns)');
       expect(manager).toContain("t('createdBy', { who })");
       expect(manager).not.toMatch(/Created by \{record\.createdBy/);
       expect(en.files.createdBy).toBe('Created by {who}');

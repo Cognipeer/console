@@ -89,16 +89,22 @@ export function listProbeCatalog(customProbes: IRedTeamCustomProbe[] = []): Prob
 export function buildProbes(keys?: string[], customProbes: IRedTeamCustomProbe[] = []): Probe[] {
   const selected = keys && keys.length > 0 ? keys : BUILTIN_PROBE_KEYS;
   const customByKey = new Map(customProbes.map((def) => [def.key, def]));
-  return selected.map((key) => {
+  const probes: Probe[] = [];
+  for (const key of selected) {
     if (isCustomProbeKey(key)) {
       const def = customByKey.get(key);
       if (!def) throw new Error(`Unknown red-team probe: "${key}"`);
-      return buildCustomProbe(def);
+      // A probe the operator switched off stays in the campaign's selection but
+      // is not run, so disabling it takes effect without editing every campaign.
+      if (def.enabled === false) continue;
+      probes.push(buildCustomProbe(def));
+      continue;
     }
     const factory = PROBE_REGISTRY[key];
     if (!factory) throw new Error(`Unknown red-team probe: "${key}"`);
-    return factory();
-  });
+    probes.push(factory());
+  }
+  return probes;
 }
 
 export {

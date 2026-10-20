@@ -233,8 +233,8 @@ describe('inline or paged', () => {
     const over = await assembleTurnAttachments({ scope, records: [fileRecord('a')], cfg: cfg(99), supportsVision: false });
     expect(over.mode).toBe('paged');
     expect(over.block).not.toContain('xxxx');
-    expect(over.block).toContain('session_files_read');
-    expect(over.block).toContain('(id a, 4 pages)');
+    expect(over.block).toContain('read({ fileId, offset, limit })');
+    expect(over.block).toContain('(id a, 400 characters)');
   });
 
   it('decides for the message as a whole: two files that fit alone but not together are both paged', async () => {
@@ -655,8 +655,9 @@ describe('serving a file’s bytes', () => {
 });
 
 describe('approvals and config checks', () => {
-  it('the two file tools are read-only: never asked about by default', () => {
-    expect(HITL_READ_ONLY_TOOLS).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+  it('the file tools are read-only: never asked about by default (the old read names stay for stored configs)', () => {
+    expect(HITL_READ_ONLY_TOOLS).toEqual(expect.arrayContaining(['session_files_list', 'read', 'session_files_read', 'session_files_view_image', 'sandbox_read_file']));
+    expect(isReadOnlyTool('read')).toBe(true);
     expect(isReadOnlyTool('session_files_read')).toBe(true);
     expect(isReadOnlyTool('session_files_list')).toBe(true);
   });

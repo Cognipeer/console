@@ -50,6 +50,17 @@ type PwBrowser = {
   isConnected(): boolean;
 };
 
+type PwRequest = {
+  url(): string;
+  redirectedFrom(): PwRequest | null;
+};
+
+type PwWebSocketRoute = {
+  url(): string;
+  close(options?: { code?: number; reason?: string }): Promise<void>;
+  connectToServer(): unknown;
+};
+
 type PwContext = {
   newPage(): Promise<PwPage>;
   pages(): PwPage[];
@@ -59,6 +70,10 @@ type PwContext = {
   route(
     pattern: string | RegExp,
     handler: (route: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) => unknown,
+  ): Promise<void>;
+  routeWebSocket(
+    pattern: string | RegExp | ((url: URL) => boolean),
+    handler: (ws: PwWebSocketRoute) => unknown,
   ): Promise<void>;
 };
 
@@ -195,6 +210,10 @@ interface LiveSession {
   networkFailures: NetworkFailureRecord[];
   /** Last dialog the page raised, after the configured policy answered it. */
   lastDialog?: { type: string; message: string; action: 'accept' | 'dismiss'; at: Date };
+  /** Redirect hops still being checked against the egress policy (see `watchRedirects`). */
+  egressChecks: Set<Promise<void>>;
+  /** Set when a redirect reached a blocked address: the session is closing and nothing it loaded is returned. */
+  egressBlocked?: string;
   /** Optional callback to persist closure side-effects (events, status). */
   onClose?: (reason: string) => Promise<void> | void;
 }
@@ -437,7 +456,8 @@ class BrowserManager {
       // Allow/block-list and egress enforcement on every navigation/resource request.
       const access = sessionConfig.access;
       const blockPrivateNetwork = cfg.blockPrivateNetwork;
-      if (blockPrivateNetwork || access?.allowList?.length || access?.blockList?.length) {
+      const guarded = Boolean(blockPrivateNetwork || access?.allowList?.length || access?.blockList?.length);
+      if (guarded) {
         await context.route('**/*', async (route) => {
           const url = route.request().url();
           const decision = await evaluateBrowserRequestAccess(url, access, {
@@ -456,6 +476,22 @@ class BrowserManager {
             return route.abort();
           }
           return route.continue();
+        });
+        // A page's WebSockets never reach the route handler above: refuse a
+        // blocked one before it connects.
+        await context.routeWebSocket(() => true, async (ws) => {
+          const decision = await evaluateBrowserRequestAccess(ws.url().replace(/^ws/i, 'http'), access, {
+            blockPrivateNetwork,
+          });
+          if (decision.allowed) {
+            ws.connectToServer();
+            return;
+          }
+          logger.warn('Browser WebSocket blocked by egress policy', {
+            reason: decision.reason,
+            urlHost: getSafeUrlHost(ws.url()),
+          });
+          await ws.close({ code: 1008, reason: 'Blocked by the browser egress policy' }).catch(() => undefined);
         });
       }
 
@@ -483,9 +519,11 @@ class BrowserManager {
         refIndex: new Map(),
         console: [],
         networkFailures: [],
+        egressChecks: new Set(),
         onClose: input.onClose,
       };
       this.instrumentPage(live, page);
+      if (guarded) this.watchRedirects(live, blockPrivateNetwork);
 
       // A `target="_blank"` link, an OAuth popup, a `window.open` — the
       // context opens the page whether or not we are watching, and a session
@@ -675,6 +713,46 @@ class BrowserManager {
   }
 
   /**
+   * Check every redirect hop against the egress policy.
+   *
+   * The route handler only ever sees the first URL of a redirect chain —
+   * Playwright continues the hops itself — so a public address that redirects
+   * to a blocked one would load it unchecked. Every hop is still announced as
+   * a request: one that lands on a blocked address closes the session, and
+   * `settleEgress` keeps whatever it loaded there from being returned in the
+   * meantime.
+   */
+  private watchRedirects(live: LiveSession, blockPrivateNetwork: boolean): void {
+    live.context.on('request', (request: PwRequest) => {
+      if (!request.redirectedFrom() || live.egressBlocked) return;
+      const check: Promise<void> = evaluateBrowserRequestAccess(request.url(), live.config.access, { blockPrivateNetwork })
+        .then(async (decision) => {
+          if (decision.allowed || live.egressBlocked) return;
+          live.egressBlocked = `${decision.reason ?? 'Browser navigation blocked by egress policy'} (reached through a redirect); the session was closed.`;
+          logger.warn('Browser redirect blocked by egress policy; closing the session', {
+            sessionKey: live.sessionKey,
+            reason: decision.reason,
+            urlHost: getSafeUrlHost(request.url()),
+          });
+          await this.closeSession(live.sessionKey, 'egress-blocked');
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          live.egressChecks.delete(check);
+        });
+      live.egressChecks.add(check);
+    });
+  }
+
+  /** Wait for the redirect hops seen so far to be checked; refuse a session a redirect took to a blocked address. */
+  private async settleEgress(live: LiveSession): Promise<void> {
+    while (live.egressChecks.size > 0) {
+      await Promise.all(live.egressChecks);
+    }
+    if (live.egressBlocked) throw new Error(live.egressBlocked);
+  }
+
+  /**
    * Turn a volatile `ref` into the durable descriptor a flow step can store.
    *
    * The index is rebuilt by every `captureAriaSnapshot`, so this only answers
@@ -783,6 +861,7 @@ class BrowserManager {
         text: text || undefined,
       };
     }).catch(() => null);
+    await this.settleEgress(live);
 
     if (!detail) return known ? { target: known, path: known.role ?? '', tag: '' } : null;
 
@@ -1052,9 +1131,10 @@ class BrowserManager {
         }
       }
 
+      await this.settleEgress(live);
       const page = this.activePage(live);
       const ariaSnapshot = await this.captureAriaSnapshot(live).catch(() => undefined);
-      return {
+      const result: BrowserActionResult = {
         ok: true,
         url: page.url(),
         pageTitle: await page.title().catch(() => undefined),
@@ -1063,7 +1143,16 @@ class BrowserManager {
         targetStrategy: strategy,
         tabs,
       };
+      // Hops announced while the page was being described count too.
+      await this.settleEgress(live);
+      return result;
     } catch (err) {
+      // A redirect to a blocked address closed the session: say so, and
+      // describe nothing of the page it reached.
+      const blocked = await this.settleEgress(live).then(() => undefined, (error: Error) => error.message);
+      if (blocked) {
+        return { ok: false, targetStrategy: strategy, errorMessage: blocked };
+      }
       // A `goto` that times out (a slow network, a heavy corporate-proxied
       // page) often leaves a partially- or fully-rendered page behind, not a
       // blank one -- capture it best-effort instead of returning nothing, so
@@ -1198,16 +1287,17 @@ class BrowserManager {
         return target.innerText();
       };
 
+      const values: string[] = [];
       if (input.multiple) {
         const count = await loc.count();
-        const values: string[] = [];
         for (let i = 0; i < count; i += 1) {
           values.push(await readOne(loc.nth(i)));
         }
-        return { ok: true, values, resolvedTarget };
+      } else {
+        values.push(await readOne(loc));
       }
-
-      return { ok: true, values: [await readOne(loc)], resolvedTarget };
+      await this.settleEgress(live);
+      return { ok: true, values, resolvedTarget };
     } catch (err) {
       return {
         ok: false,
@@ -1242,6 +1332,7 @@ class BrowserManager {
           target: total > 1 ? { text, nth: i } : { text },
         });
       }
+      await this.settleEgress(live);
       return { ok: true, matches };
     } catch (err) {
       return {
@@ -1262,12 +1353,15 @@ class BrowserManager {
    */
   async exportStorageState(sessionKey: string): Promise<Record<string, unknown>> {
     const live = this.requireSession(sessionKey);
-    return live.context.storageState();
+    const state = await live.context.storageState();
+    await this.settleEgress(live);
+    return state;
   }
 
   /** Console messages, failed requests and the last dialog this session saw. */
   getObservations(sessionKey: string): BrowserObservations {
     const live = this.requireSession(sessionKey);
+    if (live.egressBlocked) throw new Error(live.egressBlocked);
     return {
       console: live.console.map((entry) => ({
         type: entry.type,
@@ -1294,7 +1388,9 @@ class BrowserManager {
   async listTabs(sessionKey: string): Promise<BrowserActionResult['tabs']> {
     const live = this.requireSession(sessionKey);
     this.pruneClosedPages(live);
-    return this.describeTabs(live);
+    const tabs = await this.describeTabs(live);
+    await this.settleEgress(live);
+    return tabs;
   }
 
   async screenshot(sessionKey: string, input: BrowserScreenshotInput = {}): Promise<{ buffer: Buffer; contentType: string }> {
@@ -1310,6 +1406,7 @@ class BrowserManager {
     } else {
       buffer = await this.activePage(live).screenshot(opts);
     }
+    await this.settleEgress(live);
     return { buffer, contentType: type === 'jpeg' ? 'image/jpeg' : 'image/png' };
   }
 
@@ -1321,6 +1418,7 @@ class BrowserManager {
       printBackground: input.printBackground ?? true,
     };
     const buffer = await this.activePage(live).pdf(opts);
+    await this.settleEgress(live);
     return { buffer, contentType: 'application/pdf' };
   }
 
@@ -1386,6 +1484,7 @@ class BrowserManager {
         }
       }
     }
+    await this.settleEgress(live);
     live.refIndex = indexAriaRefs(snapshot);
     return snapshot;
   }
@@ -1397,7 +1496,7 @@ class BrowserManager {
     startedAt: Date;
   } | null {
     const live = this.sessions.get(sessionKey);
-    if (!live) return null;
+    if (!live || live.egressBlocked) return null;
     return {
       url: this.activePage(live).url(),
       lastActivityAt: live.lastActivityAt,

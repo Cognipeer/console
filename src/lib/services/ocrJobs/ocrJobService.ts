@@ -7,6 +7,7 @@
  * processed independently via per-item queue fan-out (concurrent, multi-node).
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
@@ -15,7 +16,7 @@ import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { queueNameFor } from '@/lib/core/cluster';
 import { uploadFile } from '@/lib/services/files/fileService';
 import { resolveUsageAttribution } from '@/lib/services/usage/usageEvents';
-import { processOcrItem } from './ocrJobRunner';
+import { OCR_ITEM_HELD_WHILE_PAUSED, processOcrItem } from './ocrJobRunner';
 import {
   type AddFilesResult,
   type CreateOcrJobInput,
@@ -52,6 +53,7 @@ function validateRules(input: { ocrModelKey?: string; outputs?: OcrOutputKind[];
 }
 
 export async function createOcrJob(ctx: OcrJobContext, input: CreateOcrJobInput): Promise<IOcrJob> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'ocr');
   validateRules(input);
   if (!input.bucketKey) throw new OcrJobValidationError('`bucketKey` is required (select a Document Store bucket)');
   const db = await withTenantDb(ctx.tenantDbName);
@@ -223,14 +225,36 @@ export async function getOcrJobItem(
 }
 
 export async function setOcrJobStatus(
-  ctx: Pick<OcrJobContext, 'tenantDbName' | 'tenantId'>,
+  ctx: Pick<OcrJobContext, 'tenantDbName' | 'tenantId'> & Partial<Pick<OcrJobContext, 'projectId' | 'userId'>>,
   jobId: string,
   status: IOcrJob['status'],
 ): Promise<IOcrJob | null> {
   const db = await withTenantDb(ctx.tenantDbName);
   const job = await db.findOcrJobById(jobId);
   if (!job || job.tenantId !== ctx.tenantId) return null;
-  return db.updateOcrJob(jobId, { status });
+  const updated = await db.updateOcrJob(jobId, { status });
+
+  // Items that reached the consumer while the job was paused were left pending
+  // and their queue messages are gone, so resuming has to enqueue them again.
+  if (updated && status === 'active' && job.status === 'paused') {
+    const pending = (await db.listOcrJobItems(jobId, { status: 'pending' }))
+      .filter((item) => item.errorMessage === OCR_ITEM_HELD_WHILE_PAUSED);
+    if (pending.length > 0) {
+      const queue = await getQueue();
+      const itemCtx: OcrJobContext = {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId ?? job.projectId,
+        userId: ctx.userId ?? '',
+      };
+      for (const item of pending) {
+        await db.updateOcrJobItem(String(item._id), { errorMessage: '' });
+        const payload = { ctx: itemCtx, itemId: String(item._id) } as unknown as QueuePayload;
+        await queue.publish(queueNameFor('ocr'), 'ocr.item', payload, { attempts: 3, backoffMs: 2000 });
+      }
+    }
+  }
+  return updated;
 }
 
 export async function deleteOcrJob(

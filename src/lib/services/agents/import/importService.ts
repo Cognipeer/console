@@ -36,6 +36,7 @@ import { assertMayNameBucket, type CanNameBucket } from '../attachmentsBucketAcc
 import {
     remapSpecResourceKeys,
     type ManifestAuthShape,
+    type ManifestMcpAuthShape,
     type ManifestResourceType,
     type ManifestResources,
 } from '../manifestResources';
@@ -87,6 +88,8 @@ export interface ImportContext {
  */
 export interface ImportWriteContext extends ImportContext {
     canNameBucket: CanNameBucket;
+    /** Same for Config: pointing the sandbox at a config item or group takes read access to Config (see `applyAgentManifest`). */
+    canReferenceConfig?: () => Promise<boolean>;
 }
 
 // ── Preview ─────────────────────────────────────────────────────────────
@@ -143,7 +146,7 @@ export interface EmbeddedResourceRow {
     detail?: string;
     existing?: { key: string; name: string };
     /** Credential the importer has to supply when creating (secrets are never exported). */
-    auth?: ManifestAuthShape;
+    auth?: ManifestAuthShape | ManifestMcpAuthShape;
     /** stdio MCP: env var names whose values have to be supplied. */
     envKeys?: string[];
 }
@@ -182,7 +185,8 @@ async function embeddedResourceRows(ctx: ImportContext, resources: ManifestResou
                 name: server.name,
                 detail: server.remoteConfig?.url ?? (server.stdioConfig ? `${server.stdioConfig.runtime} ${server.stdioConfig.packageName}` : server.upstreamBaseUrl ?? server.sourceType),
                 ...(found ? { existing: { key: found.key, name: found.name } } : {}),
-                ...(server.auth.type !== 'none' ? { auth: server.auth } : {}),
+                // Console identity asks for no credential: the importing workspace signs its own tokens.
+                ...(server.auth.type !== 'none' && server.auth.type !== 'console_identity' ? { auth: server.auth } : {}),
                 ...(server.stdioConfig?.envKeys?.length ? { envKeys: server.stdioConfig.envKeys } : {}),
             });
         }
@@ -630,6 +634,7 @@ export async function applyAgentDocumentImport(
         const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, manifest, {
             mode: 'create',
             canNameBucket: ctx.canNameBucket,
+            canReferenceConfig: ctx.canReferenceConfig,
         });
 
         // Provenance: where this agent came from, for whoever opens it next.
@@ -659,7 +664,10 @@ export async function applyAgentDocumentImport(
 
 // ── Cognipeer manifest (with optional embedded definitions) ─────────────
 
-function mergeAuth(shape: ManifestAuthShape, secret: Extract<ResourceImportChoice, { action: 'create' }>['auth']) {
+function mergeAuth<T extends ManifestMcpAuthShape['type']>(
+    shape: { type: T; headerName?: string; username?: string },
+    secret: Extract<ResourceImportChoice, { action: 'create' }>['auth'],
+) {
     return {
         type: shape.type,
         ...(shape.type === 'token' && secret?.token ? { token: secret.token } : {}),
@@ -824,6 +832,7 @@ async function applyManifestDocument(
             key,
             name: input.name,
             canNameBucket: ctx.canNameBucket,
+            canReferenceConfig: ctx.canReferenceConfig,
         });
         return {
             agent: result.agent,
@@ -837,6 +846,7 @@ async function applyManifestDocument(
             warnings: [
                 ...warnings,
                 ...result.missing.map((dep) => ({ code: 'missing_dependency', message: `${dep.type} "${dep.key}" does not exist in this project.` })),
+                ...(result.warnings ?? []),
             ],
         };
     });

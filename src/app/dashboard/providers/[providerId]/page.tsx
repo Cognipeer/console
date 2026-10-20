@@ -31,6 +31,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { providerRequestError } from '@/components/providers/providerFormModel';
 import ProviderConnectionCard from '@/components/providers/ProviderConnectionCard';
 import ProviderProjectsTab, { useProviderUsage } from '@/components/providers/ProviderProjectsTab';
 import { AssignProviderShell } from '@/components/providers/ProviderAssignStep';
@@ -38,6 +39,7 @@ import { effectiveProjectIds, usageSummary } from '@/components/providers/provid
 import {
   resolveServiceCatalogEntry,
   serviceGlyph,
+  serviceGlyphFontSize,
   DOMAIN_LABELS,
 } from '@/lib/services/serviceCatalog';
 import type {
@@ -296,7 +298,7 @@ export default function ProviderDetailPage() {
               background: service.color,
               color: '#fff',
               fontWeight: 700,
-              fontSize: 20,
+              fontSize: serviceGlyphFontSize(serviceGlyph(service), 20),
               display: 'grid',
               placeItems: 'center',
             }}
@@ -490,7 +492,7 @@ export default function ProviderDetailPage() {
                     background: service.color,
                     color: '#fff',
                     fontWeight: 700,
-                    fontSize: 16,
+                    fontSize: serviceGlyphFontSize(serviceGlyph(service), 16),
                     display: 'grid',
                     placeItems: 'center',
                   }}
@@ -625,7 +627,8 @@ export default function ProviderDetailPage() {
           );
           const body = await res.json().catch(() => null);
           if (!res.ok) {
-            throw new Error(body?.error || 'Failed to update provider');
+            // The refusal names the form field it is about: the edit form marks it.
+            throw providerRequestError(body, 'Failed to update provider');
           }
           notifications.show({
             color: 'green',

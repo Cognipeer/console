@@ -29,12 +29,13 @@ vi.mock('@/lib/services/mcp', async (importActual) => ({
   getMcpServerByKey: vi.fn(),
   executeMcpTool: vi.fn(),
   logMcpRequest: vi.fn(),
+  updateMcpServer: vi.fn(),
 }));
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase, type IMcpServer } from '@/lib/database';
 import { getConfigSource, setConfigSource } from '@/lib/core/config';
-import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpToolInputError, McpUpstreamError } from '@/lib/services/mcp';
+import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpServerConfigError, McpToolInputError, McpUpstreamError, updateMcpServer } from '@/lib/services/mcp';
 import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from '@/server/api/plugins/client-mcp-console';
 import { createMockDb } from '../helpers/db.mock';
@@ -142,6 +143,20 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('updating a server', () => {
+    it('answers settings the server cannot take with 400, not 500', async () => {
+      vi.mocked(updateMcpServer).mockRejectedValue(new McpServerConfigError('Console identity is available for remote MCP and OpenAPI servers only'));
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/client/v1/mcp/crm',
+        headers,
+        payload: JSON.stringify({ upstreamAuth: { type: 'console_identity' } }),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toBe('Console identity is available for remote MCP and OpenAPI servers only');
+    });
+  });
+
   describe('the REST execute endpoints', () => {
     it.each([
       ['an ordinary server', '/api/client/v1/mcp/crm/execute'],
@@ -225,6 +240,35 @@ describe('token MCP routes', () => {
       await post('/api/client/v1/mcp/crm/message', callTool());
       const [, entry] = vi.mocked(logMcpRequest).mock.calls[0];
       expect(entry).toMatchObject({ status: 'error', errorMessage: 'boom: details', callerType: 'api' });
+    });
+  });
+
+  describe('media tool results', () => {
+    const image = {
+      kind: 'tool_output',
+      content: [
+        { type: 'text', text: 'shot' },
+        { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+        { type: 'audio', mimeType: 'audio/wav', data: 'BBBB' },
+      ],
+    };
+
+    it('sends a ToolOutput as native MCP image and audio blocks', async () => {
+      vi.mocked(executeMcpTool).mockResolvedValue({ result: image, latencyMs: 4 } as never);
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const content = JSON.parse(response.body).result.content;
+      expect(content).toEqual([
+        { type: 'text', text: 'shot' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        { type: 'audio', data: 'BBBB', mimeType: 'audio/wav' },
+      ]);
+    });
+
+    it('keeps a text-only result as one text block', async () => {
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const result = JSON.parse(response.body).result as Rpc['result'];
+      expect(result?.content).toEqual([{ type: 'text', text: '{"found":1}' }]);
+      expect(result?.isError).toBe(false);
     });
   });
 });

@@ -1,8 +1,8 @@
 # Browser Automation
 
-The Browser module wraps Playwright behind a managed surface: reusable **browser profiles**, ephemeral **sessions** that own a real Chromium tab, and a per-browser **MCP endpoint** so agents (and any MCP-aware client) can drive the same toolset.
+The Browser module wraps Playwright behind a managed surface: reusable **browser profiles**, ephemeral **sessions** that own a real Chromium tab, and a **Browser** internal service in the MCP module so any MCP-aware client can drive the same toolset.
 
-It replaces the previous standalone "Browser Agent" feature. Console-managed agents now browse by attaching the `Browser Use` system tool to a project agent; everything else (external runtimes, custom orchestrators) talks to the browser session API or per-browser MCP directly.
+It replaces the previous standalone "Browser Agent" feature. Console-managed agents now browse by attaching the `Browser Use` system tool to a project agent; everything else (external runtimes, custom orchestrators) talks to the browser session API directly or to a Browser MCP server.
 
 Operators manage browsers under **Operate → Browser**.
 
@@ -268,11 +268,14 @@ curl -X DELETE /api/browser/sessions/<sessionKey>
 
 The live screenshot endpoint (`GET …/screenshot/live`) returns an inline PNG/JPEG with `cache-control: no-store` — use it to drive a preview pane in the dashboard.
 
-## Per-browser MCP
+## Browser over MCP
 
-Every profile exposes its own MCP server at `/api/client/v1/browser/:browserKey/mcp/*`. The toolset mirrors the action API but follows the Model Context Protocol:
+A browser is published over MCP from the MCP module: **MCP Servers → New MCP server → Internal service → Browser**, then pick the browser. The server gets the MCP module's endpoints, tool toggles and renames, guardrail binding, logs and hubs, like any other MCP server. It has no public URL: a browser server, and a composite server with a browser member, is always called with an API token. (Browsers no longer expose an MCP endpoint of their own; the former `/api/client/v1/browser/:browserKey/mcp/*` routes have been removed.)
+
+The toolset mirrors the action API and is derived from the same tool definitions the `Browser Use` system tool binds, so the two surfaces cannot drift apart:
 
 ```
+browser_open_session ·
 browser_navigate · browser_history · browser_click · browser_hover ·
 browser_type · browser_press · browser_select · browser_check ·
 browser_upload · browser_scroll · browser_wait · browser_tabs ·
@@ -281,22 +284,7 @@ browser_screenshot · browser_pdf · browser_list_flows · browser_run_flow ·
 browser_close
 ```
 
-The list is derived from the same tool definitions the `Browser Use` system
-tool binds, so the two surfaces cannot drift apart.
-
-Open the SSE stream first:
-
-```http
-GET /api/client/v1/browser/:browserKey/mcp/sse
-```
-
-The response carries an `X-Mcp-Session-Id` header and an `endpoint` SSE event with the message URL. Subsequent calls go to:
-
-```http
-POST /api/client/v1/browser/:browserKey/mcp/message?sessionId=<id>
-```
-
-…with the standard JSON-RPC payload (`initialize`, `tools/list`, `tools/call`, etc.). This is what the **Browser Use** system tool uses under the hood, so any MCP-compatible agent runtime can connect the same way.
+Sessions are explicit: `browser_open_session` returns a `sessionKey`, every page tool takes it, and `browser_close` ends it (an abandoned session is closed by the idle timeout). A session can only be driven through the MCP server that opened it. Flow tools need no session — a flow runs in its own.
 
 ## Sessions in the dashboard
 

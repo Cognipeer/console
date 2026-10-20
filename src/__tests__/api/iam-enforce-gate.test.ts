@@ -13,7 +13,7 @@
  *   - project access through groups,
  *   - a 403 names its reason in `error`, in every error dialect.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
@@ -92,6 +92,7 @@ import { authz } from '@/lib/iam/routeAuthz';
 import { enqueueAuditLog, stampDecisionHeader } from '@/server/api/plugin';
 import { createPolicy, deletePolicy } from '@/lib/iam/store';
 import { reloadConfig } from '@/lib/core/config';
+import { clearServiceAvailabilityMemo } from '@/lib/services/availability/serviceAvailability';
 import { iamApiPlugin } from '@/server/api/plugins/iam';
 import { authApiPlugin } from '@/server/api/plugins/auth';
 import { metricsApiPlugin } from '@/server/api/plugins/metrics';
@@ -961,5 +962,43 @@ describe('a 403 names its reason in `error`, in every error dialect', () => {
     for (const [dialect, refusal] of [['openai', openai], ['anthropic', anthropic]] as const) {
       expect(refusal.headers['x-decision-id'], dialect).toBe(refusal.body.error.decision_id);
     }
+  });
+});
+
+describe('a switched-off service at the handlers (CONSOLE_DISABLED_SERVICES)', () => {
+  const switchOff = (ids: string) => {
+    process.env.CONSOLE_DISABLED_SERVICES = ids;
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+  };
+  afterEach(() => {
+    delete process.env.CONSOLE_DISABLED_SERVICES;
+    reloadConfig();
+    clearServiceAvailabilityMemo();
+  });
+
+  it('the dashboard overview blanks the section of an off service and still answers', async () => {
+    switchOff('tracing');
+    const res = await call('GET', '/api/dashboard', users.member, inProject(otherProjectId));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.stats.tracing).toEqual({ totalSessions: 0, totalTokens: 0, activeSessions: 0 });
+    expect(res.body.recentSessions).toEqual([]);
+    expect(res.body.stats.models.total).toBe(3); // a service that is on is untouched
+  });
+
+  it('a route open to several services refuses a target whose service is off, however the gate let the caller in', async () => {
+    switchOff('agents');
+    const probe = (token: string, kind: 'agent' | 'model') =>
+      call('POST', '/api/client/v1/responses/anyof-probe', null, { token, body: { kind } });
+    // let in on agents (models is on, so the gate passes the route), then refused for the agent it targets
+    const admittedOnAgents = await probe('tok-agents-only', 'agent');
+    expect(admittedOnAgents.status).toBe(403);
+    expect(admittedOnAgents.body.error).toMatchObject({ type: 'permission_error', code: 'service_disabled' });
+    // let in on models and asked about agents: the same refusal
+    const askedAboutAgents = await probe('tok-plain', 'agent');
+    expect(askedAboutAgents.status).toBe(403);
+    expect(askedAboutAgents.body.error).toMatchObject({ code: 'service_disabled' });
+    // a model is still served
+    expect((await probe('tok-models-only', 'model')).body).toEqual({ ok: true, admittedOn: 'models' });
   });
 });

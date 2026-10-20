@@ -50,6 +50,14 @@ describe('Knowledge Base provider', () => {
     expect(rag.queryRag).not.toHaveBeenCalled();
   });
 
+  it('reports a switched-off knowledge base as an input error', async () => {
+    const { RagModuleInactiveError } = await import('@/lib/services/rag/errors');
+    rag.queryRag.mockRejectedValueOnce(new RagModuleInactiveError());
+    const error = await run('search', { query: 'hello' }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(McpToolInputError);
+    expect((error as Error).message).toBe('Knowledge Engine module is not active');
+  });
+
   it('reports an unknown or foreign document as an input error', async () => {
     rag.getRagDocument.mockResolvedValueOnce(null);
     const error = await run('read_document', { documentId: 'doc-404' }).catch((caught: unknown) => caught);

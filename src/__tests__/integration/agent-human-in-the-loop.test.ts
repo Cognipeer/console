@@ -67,6 +67,7 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { RESUME_TIMEOUT_ACTOR, runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTruncate';
+import { parsePausedState } from '@/lib/services/agents/agentPendingActions';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
@@ -1066,6 +1067,38 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
     expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
   });
 
+  it('leaves the request open when the channel needs the agent on and it is switched off', async () => {
+    const { id, actionId } = await paused();
+    const agent = await db.findAgentByKey(AGENT_KEY, PROJECT_ID);
+    await db.updateAgent(String(agent!._id), { status: 'inactive' } as never);
+    const modelCalls = hoisted.buildGatewayChatModel.mock.calls.length;
+    const eventsBefore = (await events(id)).length;
+
+    const client = { requireActiveAgent: true };
+    expect(await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    expect(await checkAgentPendingActionResolution({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, ...client,
+    })).toEqual({ kind: 'agent_inactive' });
+    // Nothing was recorded: the same request is still open and the agent was not run.
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+    expect((await events(id)).length).toBe(eventsBefore);
+    expect(hoisted.buildGatewayChatModel.mock.calls.length).toBe(modelCalls);
+
+    // The dashboard does not ask for it, so a draft agent can still be tested.
+    expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
+
+    // Switched back on, the same approval goes through on the client channel.
+    await db.updateAgent(String(agent!._id), { status: 'active' } as never);
+    expect((await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId,
+      body: { decision: 'allow' }, actor: ownerActor, authorize: allow, mode: 'sync', ...client,
+    })).kind).toBe('resumed');
+  });
+
   it('says invalid for a body the resolve flow would refuse', async () => {
     const { id, actionId } = await paused();
     expect(await check(id, actionId, {})).toMatchObject({ kind: 'invalid' });
@@ -1776,5 +1809,42 @@ describe('a paused run follows its pause', () => {
     expect(await statusOf(runId)).toMatchObject({ status: 'succeeded' });
     const running = (await db.listAgentSessionEvents(id, { runId })).filter((event) => event.type === 'session.status_running');
     expect(running.at(-1)?.data).toMatchObject({ trigger: 'timeout' });
+  });
+});
+
+describe('(i) who a continued turn is for', () => {
+  it('stays the person whose turn it is when somebody else approves (Console identity tokens follow it)', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel((call, messages) => {
+      if (call === 0) {
+        return {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall('c1', 'sandbox_exec', { command: 'one' }), toolCall('c2', 'sandbox_exec', { command: 'two' })],
+        };
+      }
+      return { role: 'assistant', content: `ran ${messages.filter((m) => m.role === 'tool').length}` };
+    });
+    const id = String((await newConversation())._id);
+    const pausedFor = async () => parsePausedState((await db.findAgentConversationState(id))!.pausedSnapshot!)!.turn?.identity;
+
+    const first = await chat(id, 'do both', { runtimeContext: { userId: OWNER, source: 'portal' } });
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
+
+    const after = await resolveAgentPendingAction({
+      tenantDbName: DB_NAME,
+      tenantId,
+      projectId: PROJECT_ID,
+      conversationId: id,
+      actionId: first.required_action!.actions[0].id,
+      body: { decision: 'allow' },
+      actor: { userId: 'approver-9', channel: 'dashboard' },
+      authorize: allow,
+      mode: 'sync',
+      runtimeContext: { userId: 'approver-9', tokenId: 'tok-9', source: 'playground' },
+    });
+    expect(after.kind).toBe('resumed');
+    // It paused again, on the second call, and the turn is still the owner's, not the approver's.
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
   });
 });

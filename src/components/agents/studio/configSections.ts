@@ -54,7 +54,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     files: ['attachments'],
     hitl: ['humanInTheLoop'],
     clienttools: ['clientTools'],
-    advanced: ['runtime'],
+    advanced: ['runtime', 'reminders'],
     variables: ['variables'],
     output: ['structuredOutput'],
 };

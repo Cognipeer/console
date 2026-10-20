@@ -15,6 +15,7 @@
  */
 
 import { getConfig } from '@/lib/core/config';
+import { REMINDER_INSTRUCTIONS_MAX_CHARS } from './agentRemindersConfig';
 import { hasKnowledgeConfigured } from './agentKnowledgeBindings';
 import { getCrawler, crawlerHasCredentials, crawlerHasHostScope } from '@/lib/services/crawler';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
@@ -319,6 +320,46 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         } else if ((attachments.enabled === true || attachments.outputs?.enabled === true) && !attachments.bucketKey?.trim()) {
             // Files (uploads or the agent's own outputs) are kept in a bucket of the project; there is no built-in storage to fall back to.
             issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
+        }
+    }
+
+    const reminders = config.reminders;
+    if (reminders !== undefined && reminders !== null) {
+        if (typeof reminders !== 'object' || Array.isArray(reminders)) {
+            issues.errors.push({ field: 'reminders', message: 'must be an object' });
+        } else {
+            const platform = getConfig().agent.reminders;
+            if (reminders.enabled !== undefined && typeof reminders.enabled !== 'boolean') {
+                issues.errors.push({ field: 'reminders.enabled', message: 'must be true or false' });
+            }
+            checkNumber(issues, 'reminders.minDelaySeconds', reminders.minDelaySeconds, { min: 30, max: 30 * 24 * 3600, integer: true });
+            checkNumber(issues, 'reminders.maxHorizonHours', reminders.maxHorizonHours, { min: 1, max: 720, integer: true });
+            checkNumber(issues, 'reminders.maxActivePerSession', reminders.maxActivePerSession, { min: 1, max: 1000, integer: true });
+            checkNumber(issues, 'reminders.maxFiresPerSession', reminders.maxFiresPerSession, { min: 1, max: 100_000, integer: true });
+            checkEnum(issues, 'reminders.runClass', reminders.runClass, new Set(['default', 'deferred']));
+            checkEnum(issues, 'reminders.whenBusy', reminders.whenBusy, new Set(['postpone', 'skip']));
+            checkEnum(issues, 'reminders.afterUntrustedContent', reminders.afterUntrustedContent, new Set(['approve', 'deny', 'allow']));
+            if (reminders.instructions !== undefined && reminders.instructions !== null) {
+                if (typeof reminders.instructions !== 'string') {
+                    issues.errors.push({ field: 'reminders.instructions', message: 'must be text' });
+                } else if (reminders.instructions.length > REMINDER_INSTRUCTIONS_MAX_CHARS) {
+                    issues.errors.push({ field: 'reminders.instructions', message: `must be at most ${REMINDER_INSTRUCTIONS_MAX_CHARS} characters` });
+                }
+            }
+            // The platform caps every limit; a higher value saves but is not what runs.
+            const over = (field: string, value: unknown, cap: number, kind: 'max' | 'min') => {
+                if (!isNumber(value)) return;
+                if (kind === 'max' ? value > cap : value < cap) {
+                    issues.warnings.push({ field, message: `the platform ${kind === 'max' ? 'allows at most' : 'requires at least'} ${cap}; ${cap} is used` });
+                }
+            };
+            over('reminders.minDelaySeconds', reminders.minDelaySeconds, platform.minDelaySeconds, 'min');
+            over('reminders.maxHorizonHours', reminders.maxHorizonHours, platform.maxHorizonHours, 'max');
+            over('reminders.maxActivePerSession', reminders.maxActivePerSession, platform.maxActivePerSession, 'max');
+            over('reminders.maxFiresPerSession', reminders.maxFiresPerSession, platform.maxFiresPerSession, 'max');
+            if (reminders.enabled === true && !platform.enabled) {
+                issues.warnings.push({ field: 'reminders.enabled', message: 'reminders are turned off on this server (AGENT_REMINDERS_ENABLED=false)' });
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { Fragment, useEffect } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { ActionIcon, Text } from '@mantine/core';
@@ -184,22 +184,26 @@ export default function MobileNavDrawer({
                   ? item.matcher(pathname, searchParams)
                   : pathname === item.href;
                 return (
-                  <Link
-                    key={item.id}
-                    href={item.href}
-                    className={`${classes.mobileNavItem} ${active ? classes.mobileNavItemActive : ''}`}
-                    onNavigate={onClose}
-                    aria-current={active ? 'page' : undefined}
-                    data-pending={pendingAttr(item.href, active)}
-                  >
-                    <span className={classes.mobileNavItemIcon}>
-                      <ItemIcon size={16} stroke={1.7} />
-                    </span>
-                    <span>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
-                    {item.badge ? (
-                      <span className={classes.subnavBadge}>{item.badge}</span>
+                  <Fragment key={item.id}>
+                    {item.sectionKey ? (
+                      <div className={classes.mobileNavSectionTitle}>{tNav(item.sectionKey)}</div>
                     ) : null}
-                  </Link>
+                    <Link
+                      href={item.href}
+                      className={`${classes.mobileNavItem} ${active ? classes.mobileNavItemActive : ''}`}
+                      onNavigate={onClose}
+                      aria-current={active ? 'page' : undefined}
+                      data-pending={pendingAttr(item.href, active)}
+                    >
+                      <span className={classes.mobileNavItemIcon}>
+                        <ItemIcon size={16} stroke={1.7} />
+                      </span>
+                      <span>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
+                      {item.badge ? (
+                        <span className={classes.subnavBadge}>{item.badge}</span>
+                      ) : null}
+                    </Link>
+                  </Fragment>
                 );
               })}
             </div>

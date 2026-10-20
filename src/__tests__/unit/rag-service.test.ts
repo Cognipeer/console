@@ -902,6 +902,12 @@ describe('RAG Service', () => {
       db.createRagQueryLog.mockResolvedValue({ tenantId: TENANT_ID, ragModuleKey: 'my-rag', query: 'what is AI?', topK: 3, matchCount: 1 });
     });
 
+    it('does not query a module that is not active', async () => {
+      db.findRagModuleByKey.mockResolvedValue({ ...mockModule, status: 'disabled' });
+      await expect(queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq)).rejects.toThrow(/not active/i);
+      expect(queryVectorIndex).not.toHaveBeenCalled();
+    });
+
     it('throws if RAG module not found', async () => {
       db.findRagModuleByKey.mockResolvedValue(null);
       await expect(queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq)).rejects.toThrow(/not found/i);

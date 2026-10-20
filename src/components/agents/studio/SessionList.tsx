@@ -14,7 +14,7 @@
  * (`summariseConversation`), so no transcript is shipped just to draw a row.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import {
     ActionIcon,
@@ -33,12 +33,14 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { DatePickerInput } from '@mantine/dates';
+import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
     IconArrowDown,
     IconArrowUp,
     IconCheck,
     IconCalendar,
+    IconClock,
     IconCopy,
     IconExternalLink,
     IconCoin,
@@ -46,6 +48,7 @@ import {
     IconInfoCircle,
     IconMessageCircle,
     IconPlayerPlay,
+    IconPlayerStop,
     IconPlus,
     IconRefresh,
     IconSearch,
@@ -53,12 +56,14 @@ import {
     IconX,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
+import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { AnswerBlockedReason } from '../session/pendingActions';
 import { waitingFor } from '../session/sessionActivityUi';
 import type { SessionOwnerView } from '../session/sessionTypes';
+import { reminderRowHint } from './reminderUi';
 import classes from './SessionList.module.css';
 
 
@@ -136,6 +141,10 @@ function SortHeader({
 /** A row as the summarising list route sends it — see `summariseConversation`. */
 export interface SessionListItem {
     _id: string;
+    /** Set by the project-wide list, where rows of different agents sit together. */
+    agentId?: string;
+    agentKey?: string;
+    agentName?: string;
     title?: string;
     createdAt?: string;
     updatedAt?: string;
@@ -171,6 +180,16 @@ export interface SessionListItem {
      */
     canResolve?: boolean;
     resolveBlockedReason?: AnswerBlockedReason;
+    /** The newest run that is waiting for its time, queued or running on this session. */
+    activeRun?: {
+        id: string;
+        status: 'scheduled' | 'queued' | 'running' | 'requires_action';
+        /** Epoch seconds. */
+        scheduledFor?: number;
+        cancelRequested?: boolean;
+    };
+    /** Present only while the session holds scheduled reminders. */
+    reminders?: { active: number; nextAt: string };
 }
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -198,6 +217,12 @@ export function isContinuableSession(source: string | undefined): boolean {
     return source === undefined || source === 'console';
 }
 
+/** The source a stored session carries (`metadata.source`); undefined for one recorded before sources existed. */
+export function sessionSourceOf(metadata: Record<string, unknown> | undefined): string | undefined {
+    const source = metadata?.source;
+    return typeof source === 'string' ? source : undefined;
+}
+
 export function SessionSourceBadge({ source }: { source: string | undefined }) {
     if (!source) return null;
     const meta = SOURCE_LABELS[source] ?? { label: source, color: 'gray' };
@@ -221,6 +246,8 @@ export function sessionOwnerText(session: Pick<SessionListItem, 'owner' | 'creat
 }
 
 export interface SessionListProps {
+    /** Needed to stop a run from the list (a row's own `agentId` wins). */
+    agentId?: string;
     sessions: SessionListItem[];
     /** The caller sees only the sessions they started (the permission to view others' is not theirs). */
     ownOnly?: boolean;
@@ -229,28 +256,58 @@ export interface SessionListProps {
     onOpen: (sessionId: string) => void;
     /** Resume a console session in the chat view. */
     onContinue?: (sessionId: string) => void;
-    onStart: () => void;
+    /** Offered in the empty state; a list that cannot start sessions (the project-wide one) leaves it out. */
+    onStart?: () => void;
+    /** Adds the Agent column and filter, for rows of several agents. */
+    showAgent?: boolean;
+    emptyTitle?: string;
+    emptyDescription?: string;
     /** Reload the list (Sessions tab). */
     onRefresh?: () => void;
     refreshing?: boolean;
+    /** A run was stopped from the list, so the rows are out of date. */
+    onRunStopped?: () => void;
     /** The same runs as traces — span-level detail lives in Tracing. */
     tracesHref?: string;
 }
 
+/** Column widths (px). The cross-agent table has one column more, so its fixed ones are narrower and the name keeps room at 1440 px. */
+const COLUMN_WIDTHS = {
+    single: { agent: 0, source: 100, owner: 130, id: 130, turns: 70, tokens: 90, cost: 90, active: 90, updated: 110 },
+    wide: { agent: 130, source: 90, owner: 110, id: 110, turns: 70, tokens: 80, cost: 80, active: 80, updated: 100 },
+} as const;
+/** The least the name of a cross-agent row is given. */
+const WIDE_NAME_MIN_WIDTH = 170;
+/** The cross-agent table's fixed columns plus that name; narrower screens scroll the table, not the page. */
+const WIDE_TABLE_MIN_WIDTH = 1080;
+
+function TableScroller({ on, children }: { on: boolean; children: ReactNode }) {
+    return on ? <Table.ScrollContainer minWidth={WIDE_TABLE_MIN_WIDTH} type="native">{children}</Table.ScrollContainer> : <>{children}</>;
+}
+
 export default function SessionList({
+    agentId,
     sessions,
     ownOnly,
     loading,
     onOpen,
     onContinue,
     onStart,
+    showAgent,
+    emptyTitle,
+    emptyDescription,
     onRefresh,
     refreshing,
+    onRunStopped,
     tracesHref,
 }: SessionListProps) {
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
     const ts = useTranslations('agents.sessionAccess');
+    const tr = useTranslations('agents.reminders');
+    const tall = useTranslations('agents.allSessions');
+    const columns = showAgent ? COLUMN_WIDTHS.wide : COLUMN_WIDTHS.single;
+    const [stopping, setStopping] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -258,8 +315,24 @@ export default function SessionList({
     const [activity, setActivity] = useState<ActivityFilter>('all');
     const [status, setStatus] = useState<StatusFilter>('all');
     const [source, setSource] = useState<string>('all');
+    const [agentFilter, setAgentFilter] = useState<string>('all');
     const [range, setRange] = useState<DateRange>([null, null]);
     const [sort, setSort] = useState<SortState>({ column: 'updatedAt', direction: 'desc' });
+
+    const stopRun = async (ownerAgentId: string, runId: string) => {
+        setStopping(runId);
+        try {
+            const res = await fetch(`/api/agents/${ownerAgentId}/runs/${runId}/cancel`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+            notifications.show({ color: 'teal', message: tr('runStopRequested') });
+            onRunStopped?.();
+        } catch (error) {
+            notifications.show({ color: 'red', message: `${tr('runStopFailed')}: ${error instanceof Error ? error.message : String(error)}` });
+        } finally {
+            setStopping(null);
+        }
+    };
 
     const filtered = useMemo(() => {
         const needle = query.trim().toLowerCase();
@@ -287,6 +360,7 @@ export default function SessionList({
                 if (waitingFor(session) !== (status === 'waiting' ? 'you' : 'elsewhere')) return false;
             } else if (status !== 'all' && session.status !== status) return false;
             if (source !== 'all' && (session.source ?? 'unknown') !== source) return false;
+            if (agentFilter !== 'all' && session.agentId !== agentFilter) return false;
             if (activity === 'used' && (session.turns ?? 0) === 0) return false;
             if (activity === 'empty' && (session.turns ?? 0) > 0) return false;
             if (activity === 'unpriced' && session.costComplete !== false) return false;
@@ -294,7 +368,7 @@ export default function SessionList({
         });
 
         return sortSessions(matching, sort);
-    }, [sessions, query, timeWindow, range, activity, status, source, sort]);
+    }, [sessions, query, timeWindow, range, activity, status, source, agentFilter, sort]);
 
     // Only the sources that actually occur — a filter offering "Red team" on
     // an agent nobody red-teamed is a filter that always returns nothing.
@@ -306,10 +380,28 @@ export default function SessionList({
         ];
     }, [sessions]);
 
+    // Likewise only the agents that occur among the rows.
+    const agentOptions = useMemo(() => {
+        const seen = new Map<string, string>();
+        for (const session of sessions) {
+            if (session.agentId && !seen.has(session.agentId)) seen.set(session.agentId, session.agentName ?? session.agentKey ?? session.agentId);
+        }
+        return [
+            { value: 'all', label: tall('allAgents') },
+            ...[...seen].map(([value, label]) => ({ value, label })),
+        ];
+    }, [sessions, tall]);
+
     const filtersActive = Boolean(query.trim()) || timeWindow !== 'all' || activity !== 'all'
-        || status !== 'all' || source !== 'all';
+        || status !== 'all' || source !== 'all' || agentFilter !== 'all';
     const clearFilters = () => {
-        setQuery(''); setTimeWindow('all'); setRange([null, null]); setActivity('all'); setStatus('all'); setSource('all');
+        setQuery(''); setTimeWindow('all'); setRange([null, null]); setActivity('all'); setStatus('all'); setSource('all'); setAgentFilter('all');
+    };
+
+    // The whole row opens the inspector; the controls inside it (copy, stop, links, the filters' portals) keep their own click.
+    const openFromRow = (event: React.MouseEvent<HTMLElement>, sessionId: string) => {
+        if ((event.target as HTMLElement).closest('a,button,input,textarea,select,label,[role="button"],[role="option"],[data-no-row-click]')) return;
+        onOpen(sessionId);
     };
 
     const toggleSort = (column: SortColumn) => {
@@ -332,14 +424,14 @@ export default function SessionList({
         return (
             <EmptyState
                 icon={<IconMessageCircle size={28} />}
-                title="No sessions yet"
-                description="Start a session to try this agent — every message, tool call and answer is saved so you can come back to it."
+                title={emptyTitle ?? 'No sessions yet'}
+                description={emptyDescription ?? 'Start a session to try this agent — every message, tool call and answer is saved so you can come back to it.'}
                 minHeight={200}
-                action={
+                action={onStart ? (
                     <Button size="sm" leftSection={<IconPlus size={14} />} onClick={onStart}>
                         Start new session
                     </Button>
-                }
+                ) : undefined}
             />
         );
     }
@@ -419,6 +511,17 @@ export default function SessionList({
                             aria-label="Filter by source"
                         />
                     ) : null}
+                    {showAgent && agentOptions.length > 2 ? (
+                        <Select
+                            size="xs"
+                            w={160}
+                            data={agentOptions}
+                            value={agentFilter}
+                            onChange={(next) => setAgentFilter(next ?? 'all')}
+                            allowDeselect={false}
+                            aria-label={tall('agentColumn')}
+                        />
+                    ) : null}
                     <Select
                         size="xs"
                         w={170}
@@ -481,32 +584,34 @@ export default function SessionList({
                     No session matches these filters.
                 </Text>
             ) : (
+            <TableScroller on={Boolean(showAgent)}>
             <Table highlightOnHover verticalSpacing={6} className={classes.table}>
                 <Table.Thead>
                     <Table.Tr>
                         <Table.Th>
                             <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
                         </Table.Th>
-                        <Table.Th w={100}>Source</Table.Th>
-                        <Table.Th w={130}>{ts('ownerColumn')}</Table.Th>
-                        <Table.Th w={130}>Session ID</Table.Th>
-                        <Table.Th w={70} ta="right">
+                        {showAgent ? <Table.Th w={columns.agent}>{tall('agentColumn')}</Table.Th> : null}
+                        <Table.Th w={columns.source}>Source</Table.Th>
+                        <Table.Th w={columns.owner}>{ts('ownerColumn')}</Table.Th>
+                        <Table.Th w={columns.id}>Session ID</Table.Th>
+                        <Table.Th w={columns.turns} ta="right">
                             <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
                         </Table.Th>
-                        <Table.Th w={90} ta="right">
+                        <Table.Th w={columns.tokens} ta="right">
                             <SortHeader column="totalTokens" sort={sort} onSort={toggleSort} align="right">Tokens</SortHeader>
                         </Table.Th>
-                        <Table.Th w={90} ta="right">
+                        <Table.Th w={columns.cost} ta="right">
                             <SortHeader column="costUsd" sort={sort} onSort={toggleSort} align="right">Cost</SortHeader>
                         </Table.Th>
-                        <Table.Th w={90} ta="right">
+                        <Table.Th w={columns.active} ta="right">
                             <Tooltip label="Time the agent spent working, summed over turns" withArrow>
                                 <span>
                                     <SortHeader column="activeMs" sort={sort} onSort={toggleSort} align="right">Active</SortHeader>
                                 </span>
                             </Tooltip>
                         </Table.Th>
-                        <Table.Th w={110}>
+                        <Table.Th w={columns.updated}>
                             <SortHeader column="updatedAt" sort={sort} onSort={toggleSort}>Last activity</SortHeader>
                         </Table.Th>
                         <Table.Th w={40} />
@@ -514,9 +619,9 @@ export default function SessionList({
                 </Table.Thead>
                 <Table.Tbody>
                     {filtered.map((session) => (
-                                <Table.Tr key={session._id} className={classes.row}>
+                                <Table.Tr key={session._id} className={classes.row} onClick={(event) => openFromRow(event, session._id)}>
                                     <Table.Td>
-                                        <Group gap={6} wrap="nowrap">
+                                        <Group gap={6} wrap="nowrap" miw={showAgent ? WIDE_NAME_MIN_WIDTH : undefined}>
                                             <UnstyledButton onClick={() => onOpen(session._id)} className={classes.nameButton}>
                                                 <Text size="sm" fw={500} lineClamp={1}>
                                                     {session.title || 'New session'}
@@ -545,6 +650,39 @@ export default function SessionList({
                                                     </Badge>
                                                 </Tooltip>
                                             ) : null}
+                                            {session.activeRun && session.activeRun.status !== 'requires_action' ? (
+                                                <Group gap={2} wrap="nowrap">
+                                                    <Tooltip
+                                                        label={session.activeRun.status === 'scheduled' && session.activeRun.scheduledFor
+                                                            ? tr('runScheduledFor', { time: new Date(session.activeRun.scheduledFor * 1000).toLocaleString() })
+                                                            : session.activeRun.id}
+                                                        withArrow
+                                                    >
+                                                        <span>
+                                                            <StatusBadge status={session.activeRun.cancelRequested ? 'canceling' : session.activeRun.status} label={session.activeRun.cancelRequested ? tr('runCanceling') : undefined} />
+                                                        </span>
+                                                    </Tooltip>
+                                                    {(session.agentId ?? agentId) && !session.activeRun.cancelRequested ? (
+                                                        <Tooltip label={tr('stopRun')} withArrow>
+                                                            <ActionIcon
+                                                                size="xs"
+                                                                variant="subtle"
+                                                                color="gray"
+                                                                loading={stopping === session.activeRun.id}
+                                                                onClick={() => void stopRun((session.agentId ?? agentId)!, session.activeRun!.id)}
+                                                                aria-label={tr('stopRun')}
+                                                            >
+                                                                <IconPlayerStop size={12} />
+                                                            </ActionIcon>
+                                                        </Tooltip>
+                                                    ) : null}
+                                                </Group>
+                                            ) : null}
+                                            {session.reminders && session.reminders.active > 0 ? (
+                                                <Tooltip label={reminderRowHint(session.reminders, tr)} withArrow>
+                                                    <IconClock size={13} color="var(--mantine-color-dimmed)" aria-label={tr('rowHintLabel')} />
+                                                </Tooltip>
+                                            ) : null}
                                             {session.status === 'error' ? (
                                                 <Tooltip
                                                     label={session.failedCalls
@@ -561,6 +699,23 @@ export default function SessionList({
                                             ) : null}
                                         </Group>
                                     </Table.Td>
+                                    {showAgent ? (
+                                        <Table.Td>
+                                            {session.agentId ? (
+                                                <Tooltip label={tall('openAgent')} withArrow>
+                                                    <Text
+                                                        component={Link}
+                                                        href={`/dashboard/agents/${session.agentId}?tab=sessions`}
+                                                        size="xs"
+                                                        lineClamp={1}
+                                                        className={classes.agentLink}
+                                                    >
+                                                        {session.agentName ?? session.agentKey ?? session.agentId}
+                                                    </Text>
+                                                </Tooltip>
+                                            ) : null}
+                                        </Table.Td>
+                                    ) : null}
                                     <Table.Td>
                                         <SessionSourceBadge source={session.source} />
                                     </Table.Td>
@@ -637,6 +792,7 @@ export default function SessionList({
                     ))}
                 </Table.Tbody>
             </Table>
+            </TableScroller>
             )}
         </Stack>
     );

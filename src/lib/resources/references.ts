@@ -212,6 +212,18 @@ kind('mcp.guardrail', 'mcp-server', 'guardrail', 'project-then-tenant', 'error',
 // A stdio MCP server that runs in a sandbox needs its template; enterprise type, see agent.sandboxTemplate.
 // sandboxMcpRunner resolves it with the same throwing resolveTemplateIdByKey.
 kind('mcp.sandboxTemplate', 'mcp-server', 'sandbox-template', 'tenant', 'error');
+
+// ── config references (env / secrets taken from Config) ──────────────────────
+// Stored by id (never by key: an item key is unique only within its group) and resolved only in the project
+// the referrer runs in (resolveConfigRefs), hence same-project for an agent. A missing item is left out of the
+// run, which continues without the variable: warning. A group edge exists for a bound group and for the group
+// of every single-item reference, so "used by" on a group also covers its items.
+kind('agent.configItem', 'agent', 'config-item', 'same-project-id', 'warning', { by: 'id' });
+kind('agent.configGroup', 'agent', 'config-group', 'same-project-id', 'warning', { by: 'id' });
+// A sandbox template (enterprise type) is tenant-wide and its references resolve in the project of the sandbox
+// started from it. An unresolvable reference fails that launch, so it is an error.
+kind('sandboxTemplate.configItem', 'sandbox-template', 'config-item', 'tenant', 'error', { by: 'id' });
+kind('sandboxTemplate.configGroup', 'sandbox-template', 'config-group', 'tenant', 'error', { by: 'id' });
 kind('mcp.compositeMember', 'mcp-server', 'mcp-server', 'same-project-id', 'warning', {
   by: 'id', inactiveBreaks: true,
 });

@@ -13,6 +13,7 @@
  * Future cache layer wraps this service's run() without strategy changes.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -181,6 +182,7 @@ export async function runReranker(
   rerankerKey: string,
   request: RerankerRunRequest,
 ): Promise<RerankerRunResult> {
+  await assertServiceEnabled({ tenantDbName, tenantId }, 'reranker');
   const start = Date.now();
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

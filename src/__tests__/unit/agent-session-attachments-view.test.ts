@@ -51,7 +51,8 @@ const noop = () => undefined;
 const photo = { fileId: 'f-photo', name: 'photo.png', mimeType: 'image/png', size: 2048 };
 const report = { fileId: 'f-report', name: 'report.pdf', mimeType: 'application/pdf', size: 4096 };
 const now = new Date('2026-10-11T12:00:00Z');
-const listed = (...ids: string[]): SessionFileItem[] => ids.map((id) => ({ id, name: id, mimeType: 'x/y', size: 1, expiresAt: '2026-10-20T00:00:00Z' }));
+// Far in the future: some calls below read the real clock, so a near date turns these files expired once it passes.
+const listed = (...ids: string[]): SessionFileItem[] => ids.map((id) => ({ id, name: id, mimeType: 'x/y', size: 1, expiresAt: '2099-01-01T00:00:00Z' }));
 
 describe('the content route addresses', () => {
   it('builds /files/:fileId/content with the variant and disposition asked for', () => {
@@ -257,7 +258,7 @@ describe('the request inspector draws the files a message carried', () => {
 describe('the session inspector hands a message’s attachments to the request inspector', () => {
   const messages: ChatMessage[] = [
     { role: 'user', content: 'read this', attachments: [photo, report], timestamp: '2026-10-11T10:00:00Z' },
-    { role: 'assistant', content: 'done', steps: [{ id: 's1', name: 'sandbox_read_file', args: {}, output: 'x' }] },
+    { role: 'assistant', content: 'done', steps: [{ id: 's1', name: 'read', args: {}, output: 'x' }] },
     { role: 'user', content: 'and no files here', timestamp: '2026-10-11T10:05:00Z' },
   ];
 

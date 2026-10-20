@@ -481,13 +481,13 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
-    async promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null> {
+    async promoteScheduledAgentRun(runId: string, tenantId: string, options: { notBefore?: Date } = {}): Promise<IAgentRun | null> {
       try {
         // The partial unique index takes the conversation's slot as the row turns active.
         return await this.updateAgentRunIf(runId, `
-          UPDATE ${TABLES.agentRuns} SET status = 'queued', updatedAt = @updatedAt
+          UPDATE ${TABLES.agentRuns} SET status = 'queued', updatedAt = @updatedAt${options.notBefore ? ', notBefore = @notBefore' : ''}
           WHERE id = @id AND tenantId = @tenantId AND status = 'scheduled'
-        `, { id: runId, tenantId, updatedAt: this.now() });
+        `, { id: runId, tenantId, updatedAt: this.now(), ...(options.notBefore ? { notBefore: options.notBefore.toISOString() } : {}) });
       } catch (error) {
         if (isSqliteUniqueConstraintError(error)) {
           const held = await this.findAgentRunByIdRaw(runId);
@@ -578,7 +578,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
 
     async countAgentRunsByStatus(
       tenantId: string,
-      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
     ): Promise<Record<string, number>> {
       const result: Record<string, number> = Object.fromEntries(opts.statuses.map((status) => [status, 0]));
       if (opts.statuses.length === 0) return result;
@@ -587,6 +587,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       let sql = `SELECT status, COUNT(*) AS cnt FROM ${TABLES.agentRuns} WHERE tenantId = @tenantId AND status IN (${keys.join(', ')})`;
       if (opts.projectId) { sql += ' AND projectId = @projectId'; params.projectId = opts.projectId; }
       if (opts.runClass) sql += ` AND ${this.runClassCondition(opts.runClass)}`;
+      if (opts.channel) { sql += ' AND channel = @channel'; params.channel = opts.channel; }
+      if (opts.createdAfter) { sql += ' AND createdAt > @createdAfter'; params.createdAfter = opts.createdAfter.toISOString(); }
       sql += ' GROUP BY status';
       for (const row of this.getTenantDb().prepare(sql).all(params) as Array<{ status: string; cnt: number }>) {
         result[row.status] = Number(row.cnt);

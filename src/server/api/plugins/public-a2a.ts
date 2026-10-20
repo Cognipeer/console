@@ -17,6 +17,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { DatabaseProvider, IAgent, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
 import { resolveA2aExposure } from '@/lib/services/agents/a2aExposure';
@@ -58,6 +59,8 @@ async function resolvePublicAgent(
   const db = await getDatabase();
   const tenant = await db.findTenantById(tenantId).catch(() => null);
   if (!tenant?.dbName) return null;
+  // A switched-off agents service answers like an unknown agent.
+  if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'agents'))) return null;
 
   const agent = await withTenantDb(db, tenant.dbName, async () => {
     const agents = await db.listAgents();

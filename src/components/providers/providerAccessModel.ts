@@ -16,13 +16,25 @@ export interface AccessProject {
   };
 }
 
+/** One step of a file provider's connection check (`details.steps` of a test result). */
+export interface ProviderTestStep {
+  step: string;
+  ok: boolean;
+  message?: string;
+}
+
 /** `POST /api/providers/test` and `POST /api/providers/:id/test`. */
 export interface ProviderTestResult {
   /** `null`: the driver has no test. */
   ok: boolean | null;
   latencyMs: number;
   message: string;
-  details?: { deployments?: string[]; models?: string[] };
+  details?: {
+    deployments?: string[];
+    models?: string[];
+    /** File providers: the steps their check ran (list, write, read, delete) and how each ended. */
+    steps?: ProviderTestStep[];
+  };
 }
 
 /** `lastTest` of a stored provider (`at` arrives as an ISO string over JSON). */

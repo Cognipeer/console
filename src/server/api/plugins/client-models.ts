@@ -61,9 +61,11 @@ import {
   authorizeServiceForRequest,
   readJsonBody,
   sendApiTokenError,
+  serviceOffRefusal,
   serviceRefusalError,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import {
   legacyGuardrailSlots,
   legacyGuardrailWriteConflict,
@@ -76,12 +78,13 @@ const logger = createLogger('api:client-models');
 /**
  * The list and fetch routes admit a reader of `models` or of `agents` (an OpenAI client's model picker lists both);
  * what each caller is shown depends on which of them it may read. The service the gate admitted it on needs no
- * second question.
+ * second permission question, but it may be switched off (the gate refuses an `anyOf` route only when both are):
+ * a switched-off service is not shown.
  */
 const MODELS_OR_AGENTS_READ = { config: authz.serviceAnyOf(['models', 'agents'], 'read') };
 
 async function readAccess(request: FastifyRequest, service: 'models' | 'agents') {
-  if (request.iamGateService === service) return null;
+  if (request.iamGateService === service) return serviceOffRefusal(request, service, { level: 'read' });
   const result = await authorizeServiceForRequest(request, service, { level: 'read' });
   return result.allowed ? null : result;
 }
@@ -201,6 +204,7 @@ export const clientModelsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof Error && error.message.includes('already exists')) {
         return reply.code(409).send({ error: error.message });
       }

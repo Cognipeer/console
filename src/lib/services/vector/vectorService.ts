@@ -1,3 +1,4 @@
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import slugify from 'slugify';
 import {
   getDatabase,
@@ -101,7 +102,11 @@ async function buildRuntimeContext(
   tenantId: string,
   providerKey: string,
   projectId?: string,
+  options: { cleanup?: boolean } = {},
 ): Promise<{ runtime: VectorProviderRuntime; record: IProviderRecord }> {
+  // Deleting stays possible while the service is off, so removing a knowledge
+  // engine, a memory store or a project still cleans up its vectors.
+  if (!options.cleanup) await assertServiceEnabled({ tenantDbName, tenantId }, 'vector');
   try {
     const { record, credentials } = await loadProviderRuntimeData(
       tenantDbName,
@@ -636,6 +641,7 @@ export async function deleteVectorIndex(
     tenantId,
     providerKey,
     projectId,
+    { cleanup: true },
   );
 
   const db = await withTenantDb(tenantDbName);
@@ -697,6 +703,7 @@ export async function deleteVectors(
     tenantId,
     request.providerKey,
     projectId,
+    { cleanup: true },
   );
 
   const db = await withTenantDb(tenantDbName);

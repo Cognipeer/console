@@ -31,6 +31,7 @@ import {
   readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:client-vector');
@@ -125,6 +126,7 @@ export const clientVectorApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       logger.error('Create client vector provider error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

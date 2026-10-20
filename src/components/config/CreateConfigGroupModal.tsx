@@ -37,7 +37,7 @@ export default function CreateConfigGroupModal({
       tags: '',
     },
     validate: {
-      name: (v) => (!v.trim() ? 'Name is required' : null),
+      name: (v) => (!v.trim() ? t('nameRequired') : null),
     },
   });
 
@@ -103,14 +103,14 @@ export default function CreateConfigGroupModal({
         />
         <SummaryKV
           label={t('groupKey')}
-          value={values.key ? <span className="ds-mono">{values.key}</span> : <span className="ds-faint">auto</span>}
+          value={values.key ? <span className="ds-mono">{values.key}</span> : <span className="ds-faint">{t('auto')}</span>}
         />
         <SummaryKV
           label={t('tags')}
           value={values.tags || <span className="ds-faint">—</span>}
         />
       </SummaryGroup>
-      <SummaryGroup title="Pre-flight">
+      <SummaryGroup title={t('preflight')}>
         <Checklist items={checklist} />
       </SummaryGroup>
     </>
@@ -122,9 +122,9 @@ export default function CreateConfigGroupModal({
       onClose={onClose}
       icon={<IconFolder size={16} />}
       title={t('createGroup')}
-      subtitle="Organize secrets, API keys, and configuration values into a named group."
+      subtitle={t('createGroupSubtitle')}
       summary={summary}
-      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      footerStatus={t('ready', { done: checklist.filter((c) => c.done).length, total: checklist.length })}
       primaryAction={{
         label: t('create'),
         icon: <IconCheck size={13} />,
@@ -142,13 +142,13 @@ export default function CreateConfigGroupModal({
       <FormSection
         number={1}
         title={t('groupName')}
-        description="Identity for this config group across the console."
+        description={t('groupIdentityDescription')}
         done={validName}
       >
         <FormRow cols={1}>
           <FormField label={t('groupName')} required>
             <TextInput
-              placeholder="e.g. OpenAI Credentials"
+              placeholder={t('groupNamePlaceholder')}
               {...form.getInputProps('name')}
             />
           </FormField>
@@ -156,7 +156,7 @@ export default function CreateConfigGroupModal({
         <FormRow cols={1}>
           <FormField
             label={t('groupKey')}
-            hint="Unique identifier used in API calls. Auto-generated from name if empty."
+            hint={t('groupKeyHint')}
             optional
           >
             <TextInput
@@ -168,7 +168,7 @@ export default function CreateConfigGroupModal({
         <FormRow cols={1}>
           <FormField label={t('description')} optional>
             <Textarea
-              placeholder="What is this group for?"
+              placeholder={t('groupDescriptionPlaceholder')}
               autosize
               minRows={2}
               {...form.getInputProps('description')}
@@ -176,9 +176,9 @@ export default function CreateConfigGroupModal({
           </FormField>
         </FormRow>
         <FormRow cols={1}>
-          <FormField label={t('tags')} optional hint="Comma separated.">
+          <FormField label={t('tags')} optional hint={t('tagsHint')}>
             <TextInput
-              placeholder="api, credentials, openai"
+              placeholder={t('tagsPlaceholder')}
               {...form.getInputProps('tags')}
             />
           </FormField>

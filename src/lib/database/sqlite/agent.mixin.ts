@@ -9,7 +9,9 @@ import type {
   AgentStatus,
   AgentSessionRuntimeStatus,
   IAgentConversation,
+  IAgentConversationActivityRow,
   IAgentConversationListItem,
+  IAgentConversationMessageTally,
   IAgentConversationSearchHit,
   IAgentConversationState,
   IAgentPendingAction,
@@ -25,6 +27,21 @@ import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import { findConversationSearchMatch, normalizeConversationSearch, toLikePattern } from '../provider/conversationSearch';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+
+/** A message cut down to what a summary counts, with the same shape the Mongo list pipeline produces (absent fields omitted). */
+function tallyMessage(message: IAgentConversation['messages'][number]): IAgentConversationMessageTally {
+  return {
+    role: message.role,
+    ...(message.usage !== undefined ? { usage: message.usage } : {}),
+    ...(message.latencyMs !== undefined ? { latencyMs: message.latencyMs } : {}),
+    ...(message.stopReason !== undefined ? { stopReason: message.stopReason } : {}),
+    ...(message.outputError !== undefined ? { outputError: message.outputError } : {}),
+    steps: (Array.isArray(message.steps) ? message.steps : []).map((step) => ({
+      ...(step.status !== undefined ? { status: step.status } : {}),
+      ...(step.error !== undefined ? { error: step.error } : {}),
+    })),
+  };
+}
 
 export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class AgentOps extends Base {
@@ -119,8 +136,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters?.projectId !== undefined) { conditions.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { conditions.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        conditions.push('(name LIKE @search OR key LIKE @search OR description LIKE @search)');
-        params.search = `%${filters.search}%`;
+        conditions.push(this.likeAny(['name', 'key', 'description'], '@search'));
+        params.search = this.likePattern(filters.search);
       }
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -464,6 +481,57 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       });
     }
 
+    async listProjectAgentConversations(filters: {
+      projectId: string;
+      runtimeStatuses?: AgentSessionRuntimeStatus[];
+      ids?: string[];
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+      before?: { updatedAt: Date; id: string };
+      limit: number;
+    }): Promise<IAgentConversationActivityRow[]> {
+      // Narrowing lists that cannot match anything need no query.
+      if (filters.runtimeStatuses?.length === 0 || filters.ids?.length === 0) return [];
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
+      if (filters.ids) {
+        const names = filters.ids.map((id, i) => { params[`id${i}`] = id; return `@id${i}`; });
+        conditions.push(`id IN (${names.join(', ')})`);
+      }
+      if (filters.runtimeStatuses) {
+        const names = filters.runtimeStatuses.map((status, i) => { params[`status${i}`] = status; return `@status${i}`; });
+        // A conversation that never ran has no status: "idle" covers it.
+        conditions.push(`(runtimeStatus IN (${names.join(', ')})${filters.runtimeStatuses.includes('idle') ? ' OR runtimeStatus IS NULL' : ''})`);
+      }
+      if (filters.ownOnly) {
+        // The caller's own sessions, and every session of the agents they may view; nothing else.
+        params.ownOnlyUser = filters.ownOnly.userId;
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) {
+          conditions.push('createdBy = @ownOnlyUser');
+        } else {
+          const names = keys.map((key, i) => { params[`ownOnlyKey${i}`] = key; return `@ownOnlyKey${i}`; });
+          conditions.push(`(createdBy = @ownOnlyUser OR agentKey IN (${names.join(', ')}))`);
+        }
+      }
+      if (filters.before) {
+        // Keyset on (updatedAt, id), newest first: the rows strictly after the last one of the previous page.
+        conditions.push('(updatedAt < @beforeUpdatedAt OR (updatedAt = @beforeUpdatedAt AND id < @beforeId))');
+        params.beforeUpdatedAt = filters.before.updatedAt.toISOString();
+        params.beforeId = filters.before.id;
+      }
+      const rows = this.getTenantDb().prepare(
+        `SELECT * FROM ${TABLES.agentConversations}
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY updatedAt DESC, id DESC
+         LIMIT @limit`,
+      ).all(params) as SqliteRow[];
+      // Messages are stored as one JSON column, so they are parsed whole and cut down here.
+      return rows.map((row) => {
+        const conversation = this.mapConversation(row);
+        return { ...conversation, messages: conversation.messages.map(tallyMessage) };
+      });
+    }
+
     async searchAgentConversations(filters: {
       projectId: string;
       search: string;
@@ -616,10 +684,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         INSERT INTO ${TABLES.agentPendingActions}
         (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
          allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy,
-         clientTool, subagent)
+         clientTool, subagent, delegationToolCallId)
         VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
          @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
-         @usePublished, @createdBy, @clientTool, @subagent)
+         @usePublished, @createdBy, @clientTool, @subagent, @delegationToolCallId)
       `);
       const created: IAgentPendingAction[] = actions.map((action) => ({
         ...action,
@@ -652,6 +720,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             createdBy: action.createdBy ?? null,
             clientTool: action.clientTool ? this.toJson(action.clientTool) : null,
             subagent: action.subagent ?? null,
+            delegationToolCallId: action.delegationToolCallId ?? null,
           });
         }
       })();
@@ -933,6 +1002,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.createdBy ? { createdBy: String(row.createdBy) } : {}),
         ...(row.clientTool ? { clientTool: this.parseJson<NonNullable<IAgentPendingAction['clientTool']>>(row.clientTool, { timeoutSeconds: 60 }) } : {}),
         ...(row.subagent ? { subagent: String(row.subagent) } : {}),
+        ...(row.delegationToolCallId ? { delegationToolCallId: String(row.delegationToolCallId) } : {}),
       };
     }
 

@@ -31,6 +31,7 @@ vi.mock('@cognipeer/agent-sdk', () => ({
 }));
 vi.mock('@/lib/services/providers/providerService', () => ({
   loadProviderRuntimeData: h.loadProviderRuntimeData,
+  assertProviderEnabled: () => undefined,
 }));
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: h.getModelByKey,

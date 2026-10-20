@@ -456,6 +456,7 @@ function answerRefusal(outcome: ResolveOutcome): { error: string; status: number
         case 'unavailable': return { error: 'Authorization is temporarily unavailable', status: 503 };
         case 'invalid': return { error: outcome.message, status: 400 };
         case 'busy': return { error: 'another run is active for this conversation', status: 409 };
+        case 'agent_inactive': return { error: 'Agent is not active', status: 400 };
         case 'queued': return { error: 'unexpected background continuation', status: 500 };
         default: return null;
     }
@@ -659,6 +660,7 @@ async function answerToolCalls(input: RunAgentCompletionInput, answers: ToolAnsw
             actor: input.answer.actor,
             authorize: input.answer.authorize,
             mode: 'sync',
+            requireActiveAgent: true,
             // This caller cannot answer an approval, but it runs the agent's client tools on the continuation too.
             unattended: true,
             answersClientTools: true,

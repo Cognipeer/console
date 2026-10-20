@@ -7,6 +7,7 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentConversationActivityRow,
   IAgentConversationListItem,
   IAgentConversationSearchHit,
   AgentSessionRuntimeStatus,
@@ -66,8 +67,11 @@ import type {
   IConfigItem,
   IFileBucketRecord,
   IFileRecord,
+  FileRecordPatch,
   IFileEntriesPage,
+  IFileBucketStats,
   FileListPurpose,
+  FileTypeFilter,
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
@@ -470,6 +474,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       projection?: Record<string, 0 | 1>;
     },
   ): Promise<IAgentTracingEvent[]>;
+  /**
+   * Where a session stands on a person: the status of its latest event, and of its latest approval or question
+   * event (`tool_approval` / `user_question`). Two single-row reads (highest sequence), no sections: the
+   * finalizer's "is it waiting" check does not need the event list.
+   */
+  getAgentTracingWaitState(
+    sessionId: string,
+    projectId?: string,
+  ): Promise<{ latestStatus?: string; latestHumanStatus?: string }>;
   deleteAgentTracingEvents(
     sessionId: string,
     projectId?: string,
@@ -680,10 +693,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   createFileRecord(
     record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<IFileRecord>;
-  updateFileRecord(
-    id: string,
-    data: Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'key' | 'createdBy'>>,
-  ): Promise<IFileRecord | null>;
+  updateFileRecord(id: string, data: FileRecordPatch): Promise<IFileRecord | null>;
   deleteFileRecord(id: string): Promise<boolean>;
   findFileRecordById(id: string): Promise<IFileRecord | null>;
   findFileRecordByKey(
@@ -692,6 +702,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     key: string,
     projectId?: string,
   ): Promise<IFileRecord | null>;
+  /**
+   * The records of one bucket that carry any of `keys`: as the key of the file itself (`field` `key`, the default)
+   * or as the key of its Markdown copy (`markdownKey`). One read for the whole list, so a caller that checks a page
+   * of objects against the records does not ask once per object.
+   */
+  listFileRecordsByKeys(filters: {
+    providerKey: string;
+    bucketKey: string;
+    projectId?: string;
+    keys: string[];
+    field?: 'key' | 'markdownKey';
+  }): Promise<IFileRecord[]>;
   listFileRecords(filters: {
     providerKey: string;
     bucketKey: string;
@@ -700,6 +722,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     /** Only keys under this prefix, however deep (a flat, recursive listing). */
     prefix?: string;
     purpose?: FileListPurpose;
+    /** Only files of this kind (content type first, the name's extension as the fallback); a flat listing like `search`. */
+    type?: FileTypeFilter;
     limit?: number;
     cursor?: string;
   }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
@@ -730,6 +754,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   }): Promise<number>;
 
   sumFileRecordBytes(filters?: { projectId?: string }): Promise<number>;
+
+  /**
+   * The files of every bucket added up in one grouped read: how many records each holds and the bytes they
+   * take (the original plus its Markdown copy), session files included. A bucket without files is absent.
+   * `buckets` narrows the read to those buckets so the (providerKey, bucketKey, key) index serves it.
+   */
+  listFileBucketStats(filters?: {
+    projectId?: string;
+    buckets?: Array<{ providerKey: string; bucketKey: string }>;
+  }): Promise<IFileBucketStats[]>;
 
   getProjectVectorCountApprox(projectId: string): Promise<number>;
   incrementProjectVectorCountApprox(projectId: string, delta: number): Promise<number>;
@@ -1703,6 +1737,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
      */
     ownOnly?: { userId: string; viewableAgentKeys?: string[] };
   }): Promise<IAgentConversationListItem[]>;
+  /**
+   * A project's conversations, most recently updated first (`updatedAt`, then id) - the dashboard's cross-agent
+   * Sessions list, which summarises each row like one agent's list does. The messages are tallies (one per
+   * transcript message, so the same length), never message bodies or step payloads. `runtimeStatuses` and `ids`
+   * narrow it (both given = both apply; an empty list matches nothing; 'idle' also matches a conversation that
+   * never ran); `ownOnly` as in `listAgentConversationPage`; `before` is the keyset of the last row of the
+   * previous page.
+   */
+  listProjectAgentConversations(filters: {
+    projectId: string;
+    runtimeStatuses?: AgentSessionRuntimeStatus[];
+    ids?: string[];
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+    before?: { updatedAt: Date; id: string };
+    limit: number;
+  }): Promise<IAgentConversationActivityRow[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
   /** Upsert by `conversationId`. */
@@ -2251,12 +2301,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     opts?: { mode?: IAgentRun['mode']; runClass?: AgentRunClass },
   ): Promise<number>;
   /**
-   * Row counts per status (queue visibility, deferred caps). Every requested
-   * status is present in the result, 0 when there is none.
+   * Row counts per status (queue visibility, deferred caps, reminder quotas). Every
+   * requested status is present in the result, 0 when there is none.
    */
   countAgentRunsByStatus(
     tenantId: string,
-    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+    opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
   ): Promise<Record<string, number>>;
   /** `scheduled` rows of this tenant whose `notBefore` is due, oldest first. */
   listDueScheduledAgentRuns(tenantId: string, now: Date, limit: number): Promise<IAgentRun[]>;
@@ -2265,8 +2315,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * Null when the row is no longer `scheduled` (another node promoted or
    * canceled it); throws `AgentRunConflictError` when another run holds the
    * slot (the row stays `scheduled`, retried on the next tick).
+   * `options.notBefore` moves the start time too (a reminder fired now, ahead of its time).
    */
-  promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null>;
+  promoteScheduledAgentRun(runId: string, tenantId: string, options?: { notBefore?: Date }): Promise<IAgentRun | null>;
   /** `deferred` `queued` rows (notBefore absent or <= `dueBefore`), oldest first: the dispatcher's input. */
   listQueuedDeferredAgentRuns(
     tenantId: string,

@@ -73,6 +73,7 @@
  * hard-403 every monitor-mode tenant the moment that plane was deleted.
  */
 
+import { safetyCheckSkipped } from '@/lib/services/availability/safetySkip';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
@@ -589,6 +590,13 @@ export async function runHook<S extends HookSubject>(call: HookCall<S>): Promise
   const keys = [...new Set(call.guardrailKeys.filter((key) => Boolean(key)))];
   if (keys.length === 0) {
     return allowVerdict<S>({ hook, traceId: scope.traceId, latencyMs: 0 });
+  }
+
+  // Guardrails fail OPEN when their service is switched off for the tenant:
+  // every enforcement point (model calls, agent turns, tools, streams) comes
+  // through here, so the call passes and the skip is logged and audited once.
+  if (await safetyCheckSkipped({ tenantId: scope.tenantId, tenantDbName: scope.tenantDbName }, 'guardrails', { hook })) {
+    return allowVerdict<S>({ hook, traceId: scope.traceId, guardrailKeys: keys, latencyMs: Date.now() - startedAt });
   }
 
   return runWithTenantScope(scope.tenantDbName, async () => {

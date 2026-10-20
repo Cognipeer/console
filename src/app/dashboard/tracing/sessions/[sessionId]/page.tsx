@@ -79,6 +79,7 @@ import LlmRequestDetailModal, {
     type LlmRequestItem,
 } from '@/components/common/llm/LlmRequestDetail';
 import { isAbnormalFinishReason, isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { foldSupersededSpans } from '@/lib/shared/foldSupersededSpans';
 import { buildSessionModel, cleanLabel, outcomeText, stepCategory, stepOutcome } from '@/components/tracing/sessionModel';
 import EventListGrouped from '@/components/tracing/EventListGrouped';
 import SessionWaterfall from '@/components/tracing/SessionWaterfall';
@@ -1174,8 +1175,9 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
 
     const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
+    // One record per span: a sub-agent that paused is written `pending` and again when it ends.
     const sortedEvents = useMemo(() => {
-        return detail?.events ?? [];
+        return foldSupersededSpans(detail?.events ?? []);
     }, [detail]);
 
     // Integration-agnostic reading of the session: turns (whatever the SDK

@@ -15,7 +15,7 @@ import Link from 'next/link';
 import { ActionIcon, Alert, Anchor, Badge, Box, Button, Group, Loader, Stack, Text, Tooltip } from '@mantine/core';
 import { IconAlertTriangle, IconDownload, IconFileText, IconTrash } from '@tabler/icons-react';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { expiryLabel } from '@/components/files/fileBrowse';
+import { expiryLabel } from '@/components/files/bucket/fileBrowse';
 import { AttachmentIcon, AttachmentPreviewModal, AttachmentThumb } from './SessionAttachments';
 import { CHIP_CAPTION, CHIP_LINK } from './attachmentChipStyles';
 import { formatFileSize, isImageAttachment } from './sessionAttachmentsUi';

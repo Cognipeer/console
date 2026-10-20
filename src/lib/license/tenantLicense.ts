@@ -10,7 +10,7 @@
  */
 
 import { getDatabase } from '@/lib/database';
-import { LicenseManager } from '@/lib/license/license-manager';
+import { LicenseManager, type LicenseServiceClaim } from '@/lib/license/license-manager';
 import {
   getCachedEnterpriseLicense,
   setCachedEnterpriseLicense,
@@ -18,7 +18,7 @@ import {
 
 export async function resolveLiveLicenseForTenant(
   tenantId: string,
-): Promise<{ licenseType: string; licenseExpiresAt?: string }> {
+): Promise<{ licenseType: string; licenseExpiresAt?: string; services?: LicenseServiceClaim }> {
   const cached = await getCachedEnterpriseLicense(tenantId);
   if (cached) {
     return cached;
@@ -30,6 +30,7 @@ export async function resolveLiveLicenseForTenant(
   const resolved = {
     licenseExpiresAt: effective.expiresAt?.toISOString(),
     licenseType: effective.licenseType,
+    ...(effective.services ? { services: effective.services } : {}),
   };
   await setCachedEnterpriseLicense(tenantId, resolved);
   return resolved;

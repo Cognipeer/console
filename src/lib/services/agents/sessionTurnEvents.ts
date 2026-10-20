@@ -51,7 +51,9 @@ export interface SessionTurnEventsOptions {
    * input — see `ensureStarted`.
    */
   userMessage?: string | (() => string);
-  trigger: 'message' | 'resume' | 'timeout';
+  trigger: 'message' | 'resume' | 'timeout' | 'reminder';
+  /** Extra fields of the `user.message` event (a reminder's wake turn: `origin` and the note). */
+  userMessageData?: Record<string, unknown>;
   /** The model the turn runs on, for an agent that offers several (rides on `session.status_running`). */
   model?: { modelKey: string; reason: string };
   bus?: SessionEventBus;
@@ -152,7 +154,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     if (options.userMessage !== undefined) {
       const text = persistedText
         ?? (typeof options.userMessage === 'function' ? options.userMessage() : options.userMessage);
-      writer.emit('user.message', { content: text });
+      writer.emit('user.message', { content: text, ...(options.userMessageData ?? {}) });
     }
     writer.emit('session.status_running', { trigger: options.trigger, ...(options.model ? { model: options.model } : {}) });
   };

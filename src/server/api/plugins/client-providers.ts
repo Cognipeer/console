@@ -21,6 +21,7 @@ import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
+import { isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
 import type {
   CreateProviderConfigInput,
   ProviderStatus,
@@ -34,6 +35,7 @@ import {
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { sendProviderConfigError } from '../providerConfigErrors';
 
 const logger = createLogger('api:client-providers');
 
@@ -137,10 +139,13 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
         type: body.type as ProviderDomain,
+        // Naming a directory of this server is for owners and admins (the role of the person the call acts for).
+        allowHostPaths: isOwnerOrAdmin(auth.user?.role),
         ...(query.scope === 'tenant' ? {} : { projectId: auth.projectId }),
       });
       return reply.code(201).send({ provider });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof Error && error.message.includes('already exists')) {
         return reply.code(409).send({ error: error.message });
       }
@@ -177,6 +182,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { scope?: string };
       const payload = sanitizeUpdatePayload(readJsonBody<Record<string, unknown>>(request));
       payload.updatedBy = String(auth.tokenRecord.userId);
+      payload.allowHostPaths = isOwnerOrAdmin(auth.user?.role);
       const existing = await getProviderConfigById(auth.tenantDbName, id);
       const ok = existing
         && existing.tenantId === auth.tenantId
@@ -191,6 +197,7 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!updated) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ provider: updated });
     } catch (error) {
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof WebSearchCacheConfigError) {
         return reply.code(400).send({ error: error.message });
       }

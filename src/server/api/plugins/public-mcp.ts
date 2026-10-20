@@ -22,9 +22,11 @@
  * quote.
  */
 
+import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
+import { isServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -34,6 +36,7 @@ import {
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
+  reachesBrowser,
   resolveExposure,
   resolveSourceType,
   type McpRequestClientInfo,
@@ -106,12 +109,16 @@ async function resolvePublicServer(
   const db = await getDatabase();
   const tenant = await db.findTenantById(tenantId).catch(() => null);
   if (!tenant?.dbName) return null;
+  // A switched-off MCP service answers like an unknown server.
+  if (!(await isServiceEnabled({ tenantId: String(tenant._id) }, 'mcp'))) return null;
 
   const server = await withTenantDb(db, tenant.dbName, async () =>
     db.findMcpServerByEndpointSlug(endpointSlug));
 
   if (!server || server.status !== 'active') return null;
   if (resolveExposure(server).accessMode !== 'public') return null;
+  // A browser is served with a token only, whatever the stored settings say.
+  if (await withTenantDb(db, tenant.dbName, () => reachesBrowser(db, server))) return null;
   return { tenant, server };
 }
 
@@ -332,6 +339,9 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
     }
 
     if (outcome.ok) {
+      if (isToolOutput(outcome.result)) {
+        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, MCP_PROTOCOL_VERSION)));
+      }
       return respond(jsonRpcOk(id, {
         content: [
           {

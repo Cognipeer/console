@@ -2,7 +2,7 @@
 
 import { type ReactNode } from 'react';
 import type { ServiceCatalogEntry } from '@/lib/services/serviceCatalog';
-import { DOMAIN_LABELS, serviceGlyph } from '@/lib/services/serviceCatalog';
+import { DOMAIN_LABELS, serviceGlyph, serviceGlyphFontSize } from '@/lib/services/serviceCatalog';
 
 export interface ServiceCardProps {
   service: ServiceCatalogEntry;
@@ -22,6 +22,9 @@ export default function ServiceCard({
   compact,
 }: ServiceCardProps) {
   const clickable = Boolean(onClick);
+  const glyph = serviceGlyph(service);
+  // The swatch is sized for one letter (15px, 12.5px compact); a longer mark is scaled down to fit it.
+  const glyphFontSize = Array.from(glyph).length > 1 ? serviceGlyphFontSize(glyph, compact ? 12.5 : 15) : undefined;
   const interactiveProps = clickable
     ? {
         role: 'button',
@@ -52,9 +55,10 @@ export default function ServiceCard({
         style={{
           background: service.color,
           color: '#fff',
+          ...(glyphFontSize ? { fontSize: glyphFontSize } : {}),
         }}
       >
-        {serviceGlyph(service)}
+        {glyph}
       </div>
       <div className="service-card-body">
         <div className="service-card-head">

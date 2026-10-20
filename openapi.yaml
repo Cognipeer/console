@@ -83,7 +83,10 @@ tags:
   - name: Vector
     description: Vector database providers and indexes
   - name: Files
-    description: File storage providers, buckets, and objects
+    description: |-
+      File storage providers, buckets, and objects. A bucket keeps its files in one of the storage providers of the project: the server's disk (`local-filesystem`), Amazon S3 (`aws-s3-files`), any store that speaks the S3 API at an endpoint of its own - MinIO, Ceph RGW, SeaweedFS, Garage, Cloudflare R2, Wasabi (`s3-compatible-files`) - Azure Blob Storage (`azure-blob-files`) or MongoDB GridFS (`mongodb-gridfs-files`).
+
+      A failed call answers `{ "error": "<a sentence that is safe to show>", "code": "<a stable word>" }`. `404`: `bucket_not_found`, `file_not_found`. `409`: `bucket_inactive` (the bucket is switched off: its files can still be listed and downloaded, nothing new is written), and `provider_inactive`, `provider_unassigned`, `provider_missing` or `provider_invalid` (the storage provider of the bucket cannot take files). `413`: `file_too_large` (an upload over the limit) and `object_too_large` (a download of a stored file that is larger than the server reads into memory at once). `415`: `content_type_not_allowed`. `400`: `invalid_content_type`, `invalid_request`, `markdown_unavailable`. `502`: `storage_failure` - the storage provider refused or failed the request; `error` says what to change when the driver can tell (a wrong access key, a missing bucket, an untrusted certificate), otherwise it is "The storage provider request failed.". `503`: `storage_unavailable` (the provider has been failing and calls to it are paused for a moment). `504`: `storage_timeout`. A `400` on creating a provider (`provider_settings_invalid`, `provider_endpoint_not_allowed`) and a `502` caused by a provider setting carry `field`, the name of the setting or credential to change. Quota and rate-limit refusals (`429`) have an `error` and no `code`.
   - name: Config
     description: Remote configuration groups, items, and resolution
   - name: Memory
@@ -123,6 +126,9 @@ tags:
   - name: Agent Triggers
     description: >-
       Saved ways of starting an agent - on a cron schedule, once, by hand, or when an external system posts an event (GitHub, GitLab, Azure DevOps or any sender) - and the public webhook URL that receives those events. Every fire is an ordinary run (`channel: trigger`), listed by `GET /agents/runs?trigger_id=`.
+  - name: Console Identity
+    description: >-
+      Public signing keys of a workspace's Console identity issuer. An MCP server or connected agent set up for Console identity receives, with every call, a short-lived token Console signs for the person behind the call (`Authorization: Bearer`, RS256, five minutes, audience = the server URL); it verifies the token with these keys.
 paths:
   /a2a/{agentKey}:
     post:
@@ -887,6 +893,7 @@ paths:
               - chat_completions
               - a2a
               - trigger
+              - reminder
         - name: trigger
           in: query
           required: false
@@ -1795,6 +1802,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/reminders:
+    get:
+      tags:
+        - Agent Sessions
+      summary: List a session's reminders
+      description: "Reminders the agent set itself in this session with its `reminder_set` tool (an agent that has `reminders.enabled`). Each is a scheduled run of the session (`channel: reminder`) and its id is that run's id. When one comes due the session continues with a turn that starts with the reminder's note (a user message with `origin: reminder`). Newest first, at most 200."
+      operationId: listAgentSessionReminders
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: status
+          in: query
+          required: false
+          description: "`active` (default): the reminders still waiting to fire. `all`: every reminder of the session that is still kept, fired, canceled or failed too."
+          schema:
+            type: string
+            enum:
+              - active
+              - all
+      responses:
+        "200":
+          description: The session's reminders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum:
+                      - list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentReminder"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/reminders/{reminderId}:
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Cancel a reminder
+      description: Cancels a reminder of this session that has not fired yet. A reminder of another session is not found; one that is running or done is a conflict.
+      operationId: cancelAgentSessionReminder
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: reminderId
+          in: path
+          required: true
+          description: The reminder id (`run_…`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The reminder was canceled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reminder:
+                    $ref: "#/components/schemas/AgentReminder"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
@@ -4439,7 +4529,7 @@ paths:
       tags:
         - Browser
       summary: Capture and persist a screenshot
-      description: Captures a full-page or element screenshot, persists it to the session's artifact bucket, and returns an artifact reference with a download URL.
+      description: Captures a full-page or element screenshot. By default it is persisted to the session's artifact bucket and an artifact reference with a download URL is returned. Set `inline` to true to also receive the image as a base64 content block (and `persist` to false to skip saving it).
       operationId: captureBrowserScreenshot
       parameters:
         - name: sessionKey
@@ -4455,12 +4545,20 @@ paths:
             schema:
               $ref: "#/components/schemas/BrowserScreenshotRequest"
       responses:
-        "201":
-          description: Screenshot persisted; artifact reference returned.
+        "200":
+          description: Screenshot captured inline without being persisted (`inline` true, `persist` false).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BrowserArtifactResult"
+                $ref: "#/components/schemas/BrowserScreenshotInlineResult"
+        "201":
+          description: "Screenshot persisted; artifact reference returned (plus `content` and `structured` when `inline` is true; with `inline` the response carries `persisted: false` instead of `artifact` when saving was requested but failed, for example no artifact bucket)."
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BrowserArtifactResult"
+                  - $ref: "#/components/schemas/BrowserScreenshotInlineResult"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -4527,86 +4625,6 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
-  /browser/{browserKey}/mcp/message:
-    post:
-      tags:
-        - Browser
-      summary: Send a browser MCP JSON-RPC message
-      description: "Sends a JSON-RPC 2.0 message to a browser profile's MCP server. Supported methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`. When `sessionId` names an SSE stream this token opened for this browser, the JSON-RPC response is delivered over that stream and this call returns 202 Accepted; any other `sessionId` is answered 404; without one the JSON-RPC response is returned inline (200). The browser toolset mirrors the Browser Use tools (browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_pdf, browser_close, …)."
-      operationId: sendBrowserMcpMessage
-      parameters:
-        - name: browserKey
-          in: path
-          required: true
-          description: Browser profile id or key.
-          schema:
-            type: string
-        - name: sessionId
-          in: query
-          required: false
-          description: MCP session id returned by the SSE stream. Required for `tools/call`; when present, responses are dispatched over the SSE stream and this call returns 202.
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/BrowserJsonRpcRequest"
-            example:
-              jsonrpc: "2.0"
-              id: 1
-              method: tools/list
-      responses:
-        "200":
-          description: Inline JSON-RPC response (non-SSE requests).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BrowserJsonRpcResponse"
-        "202":
-          description: Accepted. The request was a notification, or its JSON-RPC response was dispatched over the bound SSE stream.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          description: "`sessionId` does not name an open stream that this token opened for this browser (JSON-RPC error `-32001`, `Session not found`)."
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /browser/{browserKey}/mcp/sse:
-    get:
-      tags:
-        - Browser
-      summary: Open browser MCP SSE stream
-      description: Opens a Server-Sent Events stream for a browser profile's MCP server. The response carries an `X-Mcp-Session-Id` header and emits an `endpoint` SSE event containing the browser-scoped JSON-RPC message URL (with the MCP `sessionId` query bound). The browser must have status `active`.
-      operationId: openBrowserMcpSse
-      parameters:
-        - name: browserKey
-          in: path
-          required: true
-          description: Browser profile id or key.
-          schema:
-            type: string
-      responses:
-        "200":
-          description: SSE stream. Emits an `endpoint` event with the JSON-RPC message path (not an absolute URL; resolve it against the URL the stream was opened on); subsequent JSON-RPC responses are delivered as `message` events.
-          content:
-            text/event-stream:
-              schema:
-                type: string
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "429":
-          description: Too many open MCP streams. Retry after the `Retry-After` interval.
-        "500":
-          $ref: "#/components/responses/InternalError"
-        "503":
-          description: The gateway has reached its limit of open MCP streams. Retry after the `Retry-After` interval.
   /budgets:
     get:
       tags:
@@ -6338,7 +6356,7 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum number of files to return. Defaults to 50.
+          description: "Maximum number of entries to return. Defaults to 50. A folder listing (`prefix`) holds at most 200, and sub-folders and files count together."
           schema:
             type: integer
             default: 50
@@ -6375,7 +6393,7 @@ paths:
                     example: 12
                   nextCursor:
                     type: string
-                    nullable: true
+                    description: Pass it as `cursor` to read the next page. Absent on the last page.
                     example: def
         "401":
           $ref: "#/components/responses/Unauthorized"
@@ -6383,11 +6401,13 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       tags:
         - Files
       summary: Upload file
-      description: Upload a file to a bucket as multipart/form-data. Optionally convert supported documents (PDF, DOCX, PPTX, HTML, plain text) to Markdown for the Knowledge Engine pipeline.
+      description: "Upload a file to a bucket. The request is JSON and the file travels base64-encoded in `data` (a data URL is accepted too), so the request body is about a third larger than the file. A file larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default) is refused with `413` `file_too_large`; a body too big to hold such a file is refused the same way before it is read. A switched-off bucket takes no upload (`409` `bucket_inactive`) and nothing is counted against the quotas then. With `convertToMarkdown` a Markdown copy for the Knowledge Engine pipeline is made before the response, so it can be downloaded right away. The upload succeeds even when the conversion does not: read `markdownStatus` of the returned file. Ask for a copy only of PDF, Word, PowerPoint, Excel, EPUB, Outlook message, HTML, XML, plain text, CSV, JSON, YAML and Jupyter notebook files; the converter reads any other kind of file as text."
       operationId: uploadFile
       parameters:
         - name: bucketKey
@@ -6399,7 +6419,7 @@ paths:
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/json:
             schema:
               $ref: "#/components/schemas/FileUploadRequest"
       responses:
@@ -6416,21 +6436,52 @@ paths:
                     type: string
                     example: File uploaded successfully
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: "Bad request - `fileName` or `data` is missing, `keyHint` is not a valid key (`.` or `..` segments, control characters, unpaired surrogates, more than 512 characters), `contentType` is not a content type (`invalid_content_type`), or the request is refused as `invalid_request`: the body is not a JSON object, or the store cannot hold the key (a name over its limit, say)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: fileName is required
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The bucket cannot take a file now: it is switched off (`bucket_inactive`), or its storage provider is inactive, not assigned to the project or gone (`provider_inactive`, `provider_unassigned`, `provider_missing`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: File bucket is not active.
+                code: bucket_inactive
+        "413":
+          $ref: "#/components/responses/FileTooLarge"
+        "415":
+          description: The content type is not in the deployment's upload allow-list (`content_type_not_allowed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/FileStorageFailure"
+        "503":
+          $ref: "#/components/responses/FileStorageUnavailable"
+        "504":
+          $ref: "#/components/responses/FileStorageTimeout"
   /files/buckets/{bucketKey}/objects/{objectKey}:
     get:
       tags:
         - Files
       summary: Get file metadata
-      description: Get metadata for a specific file object in a bucket.
+      description: "Get metadata for a specific file object in a bucket. Answers `404` (`bucket_not_found` or `file_not_found`) when either is missing. A file an agent session holds is read as that session: the token's owner needs the permission to view it (`403` `session_forbidden`)."
       operationId: getFileObject
       parameters:
         - name: bucketKey
@@ -6442,7 +6493,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
       responses:
@@ -6457,15 +6508,19 @@ paths:
                     $ref: "#/components/schemas/FileObject"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
     delete:
       tags:
         - Files
       summary: Delete file
-      description: Delete a specific file object from a bucket.
+      description: "Delete a specific file object from a bucket: its stored object and its Markdown copy, then its record. An object that is already gone from the storage provider does not stop the delete. A switched-off bucket keeps its files (`409` `bucket_inactive`). A file an agent session holds is changed as that session: the token's owner needs the permission to change it (`403` `session_forbidden`)."
       operationId: deleteFile
       parameters:
         - name: bucketKey
@@ -6477,7 +6532,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
       responses:
@@ -6497,16 +6552,33 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The bucket is switched off (`bucket_inactive`), or its storage provider cannot be used (`provider_inactive`, `provider_unassigned`, `provider_missing`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: File bucket is not active.
+                code: bucket_inactive
         "500":
           $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/FileStorageFailure"
+        "503":
+          $ref: "#/components/responses/FileStorageUnavailable"
+        "504":
+          $ref: "#/components/responses/FileStorageTimeout"
   /files/buckets/{bucketKey}/objects/{objectKey}/download:
     get:
       tags:
         - Files
       summary: Download file
-      description: Download the binary content of a file object. Use the `variant` query parameter to download the original file or its Markdown conversion (if available). Response headers include `Content-Type`, `Content-Disposition`, `Content-Length`, `ETag`, and `X-File-Metadata`.
+      description: "Download the binary content of a file object. Use the `variant` query parameter to download the original file or its Markdown conversion (if available). Response headers include `Content-Type`, `Content-Disposition`, `Content-Length`, `ETag`, `X-Content-Type-Options` (always `nosniff`), `Cache-Control` (always `private, no-store`) and `X-File-Metadata`. A switched-off bucket still gives its files back. A file an agent session holds is read as that session: the token's owner needs the permission to view it (`403` `session_forbidden`)."
       operationId: downloadFile
       parameters:
         - name: bucketKey
@@ -6518,7 +6590,7 @@ paths:
         - name: objectKey
           in: path
           required: true
-          description: Unique key of the file object.
+          description: "The `key` of the file (see `FileObject`). A key that holds slashes is sent as one path segment, with the slashes percent-encoded (`2026%2Fq3%2Freport.pdf`)."
           schema:
             type: string
         - name: variant
@@ -6536,15 +6608,24 @@ paths:
           description: Binary file content
           headers:
             Content-Disposition:
-              description: Attachment disposition with the URL-encoded file name.
+              description: "`attachment` with the file name twice, as RFC 6266 and RFC 8187 have it: an ASCII fallback in `filename` and the exact name, percent-encoded, in `filename*`."
               schema:
                 type: string
+              example: "attachment; filename=\"ozet raporu.pdf\"; filename*=UTF-8''%C3%B6zet%20raporu.pdf"
             ETag:
               description: Entity tag of the file content, when available.
               schema:
                 type: string
+            X-Content-Type-Options:
+              description: Always `nosniff`.
+              schema:
+                type: string
+            Cache-Control:
+              description: "Always `private, no-store`: the file is for the caller who asked for it, so a shared cache or a proxy does not keep it."
+              schema:
+                type: string
             X-File-Metadata:
-              description: JSON-serialized file metadata, when available.
+              description: "The file's metadata as JSON, when the file has any. Every character outside printable ASCII is escaped as `\\uXXXX`, so the value is plain ASCII and `JSON.parse` reads it back unchanged. Left out when the escaped JSON is longer than 8,192 characters, because clients refuse very large response headers; the file's record (`metadata`) always has it all."
               schema:
                 type: string
           content:
@@ -6553,13 +6634,30 @@ paths:
                 type: string
                 format: binary
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: "Bad request - `variant` is neither `original` nor `markdown`, or the file has no Markdown copy (`markdown_unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: Markdown conversion not available for this file.
+                code: markdown_unavailable
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/FileObjectTooLarge"
         "500":
           $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/FileStorageFailure"
+        "503":
+          $ref: "#/components/responses/FileStorageUnavailable"
+        "504":
+          $ref: "#/components/responses/FileStorageTimeout"
   /files/providers:
     get:
       tags:
@@ -6571,10 +6669,10 @@ paths:
         - name: driver
           in: query
           required: false
-          description: Filter providers by driver identifier (e.g. `s3`).
+          description: Filter providers by driver identifier (e.g. `s3-compatible-files`).
           schema:
             type: string
-            example: s3
+            example: s3-compatible-files
         - name: status
           in: query
           required: false
@@ -6583,8 +6681,8 @@ paths:
             type: string
             enum:
               - active
-              - inactive
-              - error
+              - disabled
+              - errored
             example: active
       responses:
         "200":
@@ -6606,7 +6704,7 @@ paths:
       tags:
         - Files
       summary: Create file provider
-      description: Create a new file storage provider configuration for the current project. Requires `key`, `driver`, `label`, and `credentials`.
+      description: "Create a new file storage provider configuration for the current project. Requires `key`, `driver`, `label`, and `credentials`. The driver checks the settings before anything is saved: a setting it cannot work with is a `400` with `code: provider_settings_invalid` and the `field` to change; an endpoint this deployment does not allow (on the hosted service a private or loopback address, unless the operator has opened that private network for the organization) is a `400` with `code: provider_endpoint_not_allowed`. The `key` names the provider's folder in the store, so it cannot be `.` or `..` and cannot hold `/`, `\\` or a control character (`400`, `code: provider_settings_invalid`, `field: key`); a `key` that another provider of the organization already uses, of any kind, is a `409` with `code: duplicate_key`. A `local-filesystem` provider takes `basePath` only on a self-hosted installation and only from an owner or an admin (the person the call acts for), and `subdirectory` only as a relative folder inside it."
       operationId: createFileProvider
       requestBody:
         required: true
@@ -6614,15 +6712,44 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/FileCreateProviderRequest"
-            example:
-              key: s3-prod
-              driver: s3
-              label: Production Storage
-              credentials:
-                accessKeyId: AKIA...
-                secretAccessKey: ...
-              settings:
-                region: us-east-1
+            examples:
+              amazonS3:
+                summary: Amazon S3
+                value:
+                  key: s3-prod
+                  driver: aws-s3-files
+                  label: Production Storage
+                  credentials:
+                    accessKeyId: AKIA...
+                    secretAccessKey: ...
+                  settings:
+                    region: us-east-1
+                    bucket: company-files
+              s3Compatible:
+                summary: MinIO, Ceph, SeaweedFS, Garage, R2 or another S3-compatible store
+                value:
+                  key: minio-archive
+                  driver: s3-compatible-files
+                  label: Archive (MinIO)
+                  credentials:
+                    accessKeyId: archive-service
+                    secretAccessKey: ...
+                  settings:
+                    endpoint: https://minio.internal:9000
+                    bucket: archive
+                    usePathStyleEndpoint: true
+              azureBlob:
+                summary: Azure Blob Storage
+                value:
+                  key: azure-files
+                  driver: azure-blob-files
+                  label: Company files (Azure)
+                  credentials:
+                    accountKey: ...
+                  settings:
+                    authMethod: accountKey
+                    accountName: companystorage
+                    container: cognipeer-files
       responses:
         "201":
           description: File provider created
@@ -6634,11 +6761,18 @@ paths:
                   provider:
                     $ref: "#/components/schemas/FileProvider"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/ProviderConfigInvalid"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "409":
-          $ref: "#/components/responses/Conflict"
+          description: "Conflict - another provider of the organization already has this `key` (`code: duplicate_key`). Provider keys are unique across the organization, whatever the kind of provider."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: Provider with key "minio-archive" already exists.
+                code: duplicate_key
         "500":
           $ref: "#/components/responses/InternalError"
   /guardrails:
@@ -15439,6 +15573,133 @@ paths:
                   type: api_error
                   message: The webhook cannot be looked up right now; retry later.
                   code: webhook_unavailable
+  /identity/{tenantId}/.well-known/jwks.json:
+    servers:
+      - url: https://console.cognipeer.com/api/public
+        description: Cognipeer managed service
+      - url: '{gatewayUrl}/api/public'
+        description: Self-hosted / on-premise gateway
+        variables:
+          gatewayUrl:
+            default: http://localhost:3000
+            description: Scheme and host of your Console gateway
+    get:
+      tags: [Console Identity]
+      summary: Get the public signing keys of a workspace's Console identity issuer (no token)
+      operationId: getConsoleIdentityJwks
+      security: []
+      description: |-
+        The JSON Web Key Set that verifies the tokens Console sends to MCP servers and connected agents set up for
+        **Console identity**. Each token is an RS256 JWT (`typ: at+jwt`) whose `kid` names one of these keys, issued by
+        `https://<console>/api/public/identity/{tenantId}` for the URL it was sent to (`aud`), valid five minutes. A
+        workspace that has not used Console identity yet returns an empty `keys` array. Responses may be cached
+        (`Cache-Control`); fetch the set again when a token names an unknown `kid`.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: The workspace (tenant) id, as it appears in the issuer URL (`iss`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The key set.
+          headers:
+            Cache-Control:
+              description: '`public, max-age=300` (`max-age=30` while the set is empty).'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsoleIdentityJwks'
+              example:
+                keys:
+                  - kty: RSA
+                    n: 0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw
+                    e: AQAB
+                    kid: 3pYhHkY2rQx2uH4Ezm8w3E2b0yYQYw9P8u8t3yJbF1k
+                    alg: RS256
+                    use: sig
+        '404':
+          description: Unknown workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Not found
+        '429':
+          description: Too many requests from this client address.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Too many requests
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /identity/{tenantId}/.well-known/openid-configuration:
+    servers:
+      - url: https://console.cognipeer.com/api/public
+        description: Cognipeer managed service
+      - url: '{gatewayUrl}/api/public'
+        description: Self-hosted / on-premise gateway
+        variables:
+          gatewayUrl:
+            default: http://localhost:3000
+            description: Scheme and host of your Console gateway
+    get:
+      tags: [Console Identity]
+      summary: Get the discovery document of a workspace's Console identity issuer (no token)
+      operationId: getConsoleIdentityDiscovery
+      security: []
+      description: |-
+        OpenID-style discovery metadata of the issuer, for API gateways and libraries that locate keys from the
+        issuer URL (`{issuer}/.well-known/openid-configuration`). Console only issues these tokens to itself; there is
+        no authorization or token endpoint.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: The workspace (tenant) id, as it appears in the issuer URL (`iss`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The discovery document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsoleIdentityDiscovery'
+        '404':
+          description: Unknown workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Not found
+        '429':
+          description: Too many requests from this client address.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Too many requests
+        '500':
+          $ref: '#/components/responses/InternalError'
 components:
   securitySchemes:
     BearerAuth:
@@ -16342,9 +16603,9 @@ components:
         One event of the session's log. `data` depends on `type` (field names snake_case):
 
 
-        - `user.message` `{ content }`
+        - `user.message` `{ content, origin?, reminder? }` (`origin: reminder` and `reminder: { run_id, message, set_at }` on a reminder's wake turn: `content` is the note as the model reads it, show `reminder.message`)
 
-        - `session.status_running` `{ trigger: message | resume | timeout }` (`resume`: a person answered the request the turn paused on; `timeout`: the request timed out and the agent's `onTimeout` of `deny` or `allow` let the turn go on, recorded with the actor `system` and the channel `timeout`)
+        - `session.status_running` `{ trigger: message | resume | timeout | reminder }` (`resume`: a person answered the request the turn paused on; `timeout`: the request timed out and the agent's `onTimeout` of `deny` or `allow` let the turn go on, recorded with the actor `system` and the channel `timeout`; `reminder`: a reminder the agent set itself came due)
 
         - `agent.tool_use` `{ tool_call_id, name, args, subagent? }`
 
@@ -17251,7 +17512,8 @@ components:
             - chat_completions
             - a2a
             - trigger
-          description: Which API started the run.
+            - reminder
+          description: "Which API started the run. `reminder`: a reminder the agent set itself (`reminder_set`), started when it came due."
         trigger:
           type: string
           nullable: true
@@ -19039,6 +19301,44 @@ components:
           minimum: 1
           maximum: 100
           description: JPEG quality (only used when type is jpeg).
+        inline:
+          type: boolean
+          description: Return the image in the response as a base64 `content` block.
+        persist:
+          type: boolean
+          default: true
+          description: Save the screenshot to the session's artifact bucket. `persist:false` requires `inline:true`.
+    BrowserScreenshotInlineResult:
+      type: object
+      required:
+        - content
+        - structured
+      properties:
+        artifact:
+          $ref: "#/components/schemas/BrowserArtifactRef"
+        eventId:
+          type: string
+        content:
+          type: array
+          description: A text block describing the capture and an image block with base64 `data`, `mimeType`, `width` and `height`.
+          items:
+            type: object
+            additionalProperties: true
+        structured:
+          type: object
+          required:
+            - url
+          properties:
+            url:
+              type: string
+            width:
+              type: integer
+            height:
+              type: integer
+            fullPage:
+              type: boolean
+            artifact:
+              $ref: "#/components/schemas/BrowserArtifactRef"
     BrowserSession:
       type: object
       description: A live browser automation session belonging to a browser profile.
@@ -20670,7 +20970,13 @@ components:
                         type: string
         code:
           type: string
-          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`."
+          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`. The Files API adds its own (`bucket_not_found`, `file_not_found`, `bucket_inactive`, `file_too_large`, `storage_failure`, `provider_settings_invalid`, `provider_endpoint_not_allowed` and the others named in the Files section)."
+        field:
+          type: string
+          description: "The provider setting or credential to change, on a refusal of a provider configuration (`provider_settings_invalid`, `provider_endpoint_not_allowed`) and on a `storage_failure` that one of its settings caused."
+        limitBytes:
+          type: integer
+          description: "`object_too_large` only: the largest object, in bytes, the server reads into memory at once."
         message:
           type: string
           description: Repeats `error` on a refusal by the permission gate.
@@ -20879,20 +21185,44 @@ components:
       type: object
       description: A file storage bucket.
       properties:
-        _id:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
           type: string
         key:
           type: string
+          description: The bucket's key, as used in the paths.
+          example: contracts
         name:
           type: string
+          example: Contracts
         description:
           type: string
-        provider:
+        providerKey:
           type: string
+          description: Key of the file provider that stores the bucket's files.
+          example: minio-archive
+        provider:
+          allOf:
+            - $ref: "#/components/schemas/FileProvider"
+          description: The provider named by `providerKey`; absent when that provider no longer exists.
         status:
           type: string
+          enum:
+            - active
+            - disabled
+          description: A disabled bucket takes no new files (`409` `bucket_inactive`); its files can still be listed and downloaded.
+        prefix:
+          type: string
+          description: The folder inside the provider's storage that holds the bucket's files. When it is not set, the bucket key is the folder.
         metadata:
           type: object
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -20910,12 +21240,12 @@ components:
       properties:
         key:
           type: string
-          description: Unique provider key.
+          description: "Unique provider key. It is unique in the organization across every kind of provider (`409` `duplicate_key` when it is taken), and it names the provider's folder in the store, so it cannot be `.` or `..` and cannot hold `/`, `\\` or a control character (`400` `provider_settings_invalid`, `field: key`)."
           example: s3-prod
         driver:
           type: string
-          description: Driver identifier.
-          example: s3
+          description: "Driver identifier: `local-filesystem`, `aws-s3-files` (Amazon S3), `s3-compatible-files` (MinIO, Ceph RGW, SeaweedFS, Garage, Cloudflare R2, Wasabi and other stores with an S3 API at an endpoint of their own), `azure-blob-files` (Azure Blob Storage, Azurite, Azure Stack Hub) or `mongodb-gridfs-files`."
+          example: aws-s3-files
         label:
           type: string
           description: Human-readable label.
@@ -20924,10 +21254,10 @@ components:
           type: string
         credentials:
           type: object
-          description: Driver-specific credentials.
+          description: "Driver-specific credentials. `aws-s3-files` and `s3-compatible-files`: `accessKeyId`, `secretAccessKey`, optional `sessionToken`. `azure-blob-files`: the secret of the chosen `authMethod` - `accountKey`, `sasToken`, `connectionString` or `clientSecret`. `mongodb-gridfs-files`: `uri` (optional; the console's own MongoDB connection is used when it is left out). `local-filesystem`: none, send `{}`. Stored encrypted and never returned."
         settings:
           type: object
-          description: Driver-specific settings.
+          description: "Driver-specific settings. `aws-s3-files`: `region` (required without `endpoint`), `bucket`, `prefix`, `endpoint` (providers set up before `s3-compatible-files` existed), `usePathStyleEndpoint`, `caCertificate`, `allowInsecureTls`. `s3-compatible-files`: `endpoint` (required, with `http://` or `https://`), `bucket`, `region` (default `us-east-1`), `usePathStyleEndpoint` (default `true`), `prefix`, `createBucketIfMissing` (default `false`), `caCertificate`, `allowInsecureTls`. `azure-blob-files`: `container`, `authMethod` (`accountKey`, `sas`, `connectionString` or `entra`; default `accountKey`), `accountName`, `prefix`, `createContainer`, `entraTenantId` and `clientId` (for `entra`), `endpoint`, `authorityHost`, `apiVersion`, `caCertificate`, `allowInsecureTls`. `mongodb-gridfs-files`: `database`, `bucketName`, `chunkSizeBytes`. `local-filesystem`: `basePath` (a directory of the server; accepted only on a self-hosted installation and only from an owner or an admin, the person the call acts for, and refused with `400 provider_settings_invalid` otherwise) and `subdirectory` (a relative folder inside the base directory: no `..`, no leading `/` or `\\`, no drive letter). `caCertificate` is a PEM bundle trusted for this provider only; `allowInsecureTls` skips certificate verification on any deployment (only the boolean `true` does; a value of another type, such as a string, is refused with `400 provider_settings_invalid`)."
         capabilitiesOverride:
           type: array
           description: Optional override of provider capability flags.
@@ -20939,39 +21269,96 @@ components:
           type: string
           enum:
             - active
-            - inactive
+            - disabled
           default: active
     FileObject:
       type: object
-      description: A file object stored in a bucket.
+      description: The record of a file stored in a bucket.
       properties:
-        _id:
+        id:
+          type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        providerKey:
+          type: string
+        bucketKey:
           type: string
         key:
           type: string
-          example: report-pdf
-        bucketKey:
+          description: "The file's key inside the bucket - the `objectKey` of the other file operations. It can hold slashes; in a path it is sent as one segment with the slashes percent-encoded."
+          example: 2026/q3/report-1760947200123-3f9a1c2e.pdf
+        name:
           type: string
-        fileName:
-          type: string
+          description: The file name as uploaded.
           example: report.pdf
-        originalName:
-          type: string
-          example: report.pdf
+        size:
+          type: integer
+          description: Size of the original in bytes.
+          example: 12345
         contentType:
           type: string
           example: application/pdf
-        size:
-          type: integer
-          example: 12345
-        sizeBytes:
-          type: integer
-          example: 12345
+        checksum:
+          type: string
+          description: SHA-256 of the original, as hex.
+        etag:
+          type: string
+          description: The storage provider's entity tag, when it gives one.
         metadata:
           type: object
-        markdownContent:
+        markdownStatus:
           type: string
+          enum:
+            - pending
+            - succeeded
+            - failed
+            - skipped
+          description: "Where the latest Markdown conversion stands. `skipped` when none was asked for or the file cannot be converted."
+        markdownKey:
+          type: string
+          description: "Key of the Markdown copy the file has, if any, whatever the status of its latest conversion. A copy made earlier stays while a new conversion is `pending` and when that one ends `failed` or `skipped`, and `variant=markdown` still downloads it. Uploading to the same key again removes it."
+        markdownSize:
+          type: integer
+          description: Size of the Markdown copy in bytes. Present with `markdownKey`.
+        markdownContentType:
+          type: string
+          description: Content type of the Markdown copy. Present with `markdownKey`.
+          example: text/markdown
+        markdownError:
+          type: string
+          description: Why the conversion failed or was skipped.
+        purpose:
+          type: string
+          enum:
+            - conversation
+          description: "`conversation` on a file that belongs to an agent session; absent on every other file."
+        conversationId:
+          type: string
+          description: The session a session file belongs to.
+        agentKey:
+          type: string
+          description: The agent of the session a session file belongs to.
+        expiresAt:
+          type: string
+          format: date-time
           nullable: true
+          description: When the retention cleanup removes a session file.
+        uploadedBy:
+          type: string
+          description: Who uploaded a session file.
+        origin:
+          type: string
+          enum:
+            - agent_output
+            - import
+          description: "`import` for an object that was already in the storage provider and was registered afterwards, `agent_output` for a file an agent wrote. Absent on an upload."
+        createdBy:
+          type: string
+          description: The user the call ran as, or `api` when there was none.
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -20980,37 +21367,77 @@ components:
           format: date-time
     FileProvider:
       type: object
-      description: A configured file storage provider.
+      description: A configured file storage provider. Credentials are never returned.
       properties:
         _id:
           type: string
+        tenantId:
+          type: string
+        projectId:
+          type: string
+        projectIds:
+          type: array
+          description: The projects the provider is assigned to.
+          items:
+            type: string
         key:
           type: string
-          example: s3-prod
+          example: minio-archive
+        type:
+          type: string
+          enum:
+            - file
         driver:
           type: string
-          example: s3
+          description: "`local-filesystem`, `aws-s3-files`, `s3-compatible-files`, `azure-blob-files` or `mongodb-gridfs-files`."
+          example: s3-compatible-files
         label:
           type: string
-          example: Production Storage
+          example: Archive (MinIO)
         description:
           type: string
         status:
           type: string
           enum:
             - active
-            - inactive
-            - error
+            - disabled
+            - errored
           example: active
-        credentials:
-          type: object
-          description: Provider-specific credentials (returned redacted/encrypted).
         settings:
           type: object
+          description: The driver's settings (endpoint, bucket, region and so on). Secrets are credentials and are not part of it.
+        hasCredentials:
+          type: boolean
+          description: Whether credentials are stored. Their values are never returned.
+        driverCapabilities:
+          type: object
+          description: What the driver supports, such as `supportsMarkdownConversion` and `supportsBulkListing`.
+        capabilitiesOverride:
+          type: array
+          items:
+            type: string
         metadata:
           type: object
-        capabilities:
+        lastTest:
           type: object
+          nullable: true
+          description: The result of the last Test connection run in the console. Absent when there is none, and cleared when the connection changes.
+          properties:
+            ok:
+              type: boolean
+              nullable: true
+              description: "`null` when the driver has no test."
+            at:
+              type: string
+              format: date-time
+            latencyMs:
+              type: integer
+            message:
+              type: string
+        createdBy:
+          type: string
+        updatedBy:
+          type: string
         createdAt:
           type: string
           format: date-time
@@ -21019,14 +21446,14 @@ components:
           format: date-time
     FileUploadRequest:
       type: object
-      description: Multipart form payload to upload a file.
+      description: JSON payload to upload a file. The content travels base64-encoded in `data`.
       required:
-        - file
+        - fileName
+        - data
       properties:
-        file:
+        data:
           type: string
-          format: binary
-          description: The binary file content to upload.
+          description: "The file content, base64-encoded; a data URL (`data:<content type>;base64,<content>`) is accepted too."
         fileName:
           type: string
           description: Name to store the file under.
@@ -21041,10 +21468,10 @@ components:
           description: Convert supported documents to Markdown for the Knowledge Engine pipeline.
         keyHint:
           type: string
-          description: Optional custom key hint for the stored object.
+          description: "Optional key for the stored object. Without it the key is generated from the file name. A value ending in `/` names a folder and the file is stored in it under a generated name. At most 512 characters, no `.` or `..` segments, no control characters and no unpaired surrogates. A value that is the whole key of a file an agent session holds needs the permission to change that session (`403` `session_forbidden`)."
         metadata:
           type: object
-          description: Arbitrary metadata to attach to the file.
+          description: "Arbitrary metadata to attach to the file. Values may be any text, in any language."
     GuardCreateInput:
       type: object
       required:
@@ -22000,6 +22427,70 @@ components:
           additionalProperties:
             type: string
             nullable: true
+    ConsoleIdentityJwks:
+      type: object
+      required:
+        - keys
+      description: JSON Web Key Set (RFC 7517) of the workspace's Console identity issuer. Public keys only.
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, n, e, kid, alg, use]
+            properties:
+              kty:
+                type: string
+                enum: [RSA]
+              n:
+                type: string
+                description: RSA modulus (base64url).
+              e:
+                type: string
+                description: RSA public exponent (base64url).
+              kid:
+                type: string
+                description: Key id; the `kid` header of the tokens this key signs (its RFC 7638 thumbprint).
+              alg:
+                type: string
+                enum: [RS256]
+              use:
+                type: string
+                enum: [sig]
+    ConsoleIdentityDiscovery:
+      type: object
+      required:
+        - issuer
+        - jwks_uri
+      properties:
+        issuer:
+          type: string
+          description: The `iss` of every token of this workspace.
+          example: https://console.cognipeer.com/api/public/identity/65f0c1d2a3b4c5d6e7f80001
+        jwks_uri:
+          type: string
+          example: https://console.cognipeer.com/api/public/identity/65f0c1d2a3b4c5d6e7f80001/.well-known/jwks.json
+        response_types_supported:
+          type: array
+          items:
+            type: string
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        claims_supported:
+          type: array
+          description: Claims a token may carry.
+          items:
+            type: string
     McpUpstreamAuthInput:
       type: object
       required:
@@ -22013,7 +22504,11 @@ components:
             - token
             - header
             - basic
-          description: Upstream auth scheme.
+            - console_identity
+          description: >-
+            Upstream auth scheme. `console_identity` sends no stored secret: every call carries a short-lived token Console
+            signs for the person behind the call (`Authorization: Bearer`, verified with
+            `GET /api/public/identity/{tenantId}/.well-known/jwks.json`). Remote (`http`/`sse`) and OpenAPI servers only.
         token:
           type: string
           description: Bearer token (for `token`).
@@ -27480,6 +27975,82 @@ components:
           description: 'Only on a message that carries agent-created files: those files (`origin: agent_output`).'
           items:
             $ref: '#/components/schemas/AgentSessionMessageFile'
+        origin:
+          type: string
+          enum:
+            - reminder
+          description: 'Only on the user message a reminder''s wake turn starts with: `content` is the note as the model read it; show `reminder.message`.'
+        reminder:
+          type: object
+          description: With `origin`, the reminder that started the turn.
+          properties:
+            id:
+              type: string
+            message:
+              type: string
+            set_at:
+              type: string
+              format: date-time
+              nullable: true
+    AgentReminder:
+      type: object
+      description: A reminder an agent set itself in a session. It is a scheduled run of the session; `id` is that run's id.
+      properties:
+        id:
+          type: string
+          description: The reminder id (`run_…`, the run's id).
+        object:
+          type: string
+          enum:
+            - agent.reminder
+        agent:
+          type: string
+        session_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - scheduled
+            - queued
+            - running
+            - requires_action
+            - succeeded
+            - failed
+            - canceled
+          description: '`scheduled`: waiting to fire. A reminder that came due is a run of the session from there on.'
+        fire_at:
+          type: integer
+          nullable: true
+          description: When it fires (or fired), epoch seconds.
+        message:
+          type: string
+          description: The note the agent left itself; the wake turn starts with it.
+        reason:
+          type: string
+          nullable: true
+          description: A short label the agent gave it.
+        set_by_run:
+          type: string
+          nullable: true
+          description: The run whose turn set it.
+        chain:
+          type: integer
+          description: How many reminders in a row led to this one (1 = set by an ordinary turn).
+        created_at:
+          type: integer
+          nullable: true
+        completed_at:
+          type: integer
+          nullable: true
+        error:
+          type: object
+          nullable: true
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+              nullable: true
     AgentSessionMessageFile:
       type: object
       properties:
@@ -27683,7 +28254,7 @@ components:
         outputs:
           type: object
           description: >-
-            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when uploads (`attachments.enabled`) are on and a bucket is set; with uploads off they stay off until `enabled: true` here, which also needs `bucketKey` (else `400` with `field: attachments.bucketKey`). An explicit `true` or `false` always wins. The read tools `session_files_list` / `session_files_read` are offered when uploads or outputs are on and the session holds a file; with uploads off they see only the session's own files. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
+            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when uploads (`attachments.enabled`) are on and a bucket is set; with uploads off they stay off until `enabled: true` here, which also needs `bucketKey` (else `400` with `field: attachments.bucketKey`). An explicit `true` or `false` always wins. The read tools `session_files_list` / `read` are offered when uploads or outputs are on and the session holds a file; with uploads off they see only the session's own files. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
           properties:
             enabled:
               type: boolean
@@ -29250,7 +29821,7 @@ components:
               value:
                 error: This feature is not available in your license
     SessionForbidden:
-      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`)."
+      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`). The same refusal answers a file an agent session holds on the Files API: getting or downloading it needs the first permission, deleting it or uploading to its key the second."
       content:
         application/json:
           schema:
@@ -29281,6 +29852,87 @@ components:
             error: Authorization is temporarily unavailable
             code: authorization_unavailable
             decisionId: 0b6f2c3e-8d41-4f0a-b7c2-6a1d9e5f3c70
+    ProviderConfigInvalid:
+      description: "Bad request - a provider setting the driver cannot work with (`code: provider_settings_invalid`) or an endpoint this deployment does not allow (`code: provider_endpoint_not_allowed`). `field` names the setting or credential to change and `error` says what is wrong with it. Missing required fields have no `code`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            setting:
+              summary: A setting the driver refuses
+              value:
+                error: Region is required for Amazon S3 (for example eu-central-1).
+                code: provider_settings_invalid
+                field: region
+            endpoint:
+              summary: An endpoint this deployment does not allow
+              value:
+                error: 'Provider endpoint "endpoint" is not allowed: private network addresses are reachable only through networks the operator has opened for this organization'
+                code: provider_endpoint_not_allowed
+                field: endpoint
+    FileTooLarge:
+      description: "The file is larger than the upload limit (`FILE_UPLOAD_MAX_MB`, 50 MB by default), `code: file_too_large`. A request body too big to hold a file within the limit (the content is base64-encoded, so the body is about a third larger than the file) is refused the same way, before it is read."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: File is larger than the 50 MB upload limit.
+            code: file_too_large
+    FileObjectTooLarge:
+      description: "The stored file is larger than the server reads into memory at once (`code: object_too_large`): the larger of twice the upload limit and 100 MB. The size is judged from the file's record, before anything is read, and `limitBytes` says the limit. A file can be that large when it was put in the storage folder by another tool and then registered; use a smaller file, or read it from the storage provider directly."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: The file is larger than the 100 MB this server reads into memory at once.
+            code: object_too_large
+            limitBytes: 104857600
+    FileStorageFailure:
+      description: "The storage provider refused or failed the request (`code: storage_failure`). For an Amazon S3, S3-compatible or Azure Blob provider `error` says what to change (a wrong access key or secret, a missing bucket or container, a region that does not match, an untrusted certificate); for any other failure it is \"The storage provider request failed.\" and the details stay in the server log. When one of the provider's settings is the cause - including an endpoint this deployment does not allow - `field` names it."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: minio.internal:9000 does not recognise this access key ID.
+            code: storage_failure
+    FileStorageUnavailable:
+      description: "The call is refused for now and can be retried in a moment. Either the storage provider has been failing and calls to it are paused for a short time (`code: storage_unavailable`), or, for a file an agent session holds, the permission engine could not decide whether the token's owner may touch the session (`error.code: authorization_unavailable`, in the nested form, with a `Retry-After` header; the call was refused, never allowed)."
+      headers:
+        Retry-After:
+          description: "Seconds to wait before retrying. Present on `authorization_unavailable`."
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            storage:
+              summary: The storage provider is paused
+              value:
+                error: The storage provider is temporarily unavailable. Try again in a moment.
+                code: storage_unavailable
+            authorization:
+              summary: The permission engine could not decide
+              value:
+                error:
+                  type: api_error
+                  code: authorization_unavailable
+                  message: Authorization is temporarily unavailable
+                  decision_id: 0b6f2c3e-8d41-4f0a-b7c2-6a1d9e5f3c70
+    FileStorageTimeout:
+      description: "The storage provider did not answer in time (`code: storage_timeout`). Retry in a moment."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: The storage provider did not answer in time. Try again in a moment.
+            code: storage_timeout
     NotFound:
       description: The requested resource was not found.
       content:

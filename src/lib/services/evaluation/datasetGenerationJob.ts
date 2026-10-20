@@ -13,6 +13,7 @@
  * so the dashboard can poll the normal dataset list and show a live badge.
  */
 
+import { isServiceDisabledError } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import type { IEvaluationDataset } from '@/lib/database';
@@ -34,6 +35,8 @@ export interface DatasetGenerationMeta {
   source: DatasetGenerationSourceKind;
   generated?: number;
   error?: string;
+  /** Set when the job was refused because its service is switched off. */
+  errorCode?: string;
   enqueuedAt?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -148,7 +151,8 @@ export async function runDatasetGenerationJob(payload: DatasetGenerationJobPaylo
     logger.info('Dataset generation completed', { datasetId: payload.datasetId, generated: items.length });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Generation failed';
-    await writeStatus(payload, { ...base, status: 'failed', error: message, finishedAt: nowIso() });
+    const errorCode = isServiceDisabledError(err) ? err.code : undefined;
+    await writeStatus(payload, { ...base, status: 'failed', error: message, ...(errorCode ? { errorCode } : {}), finishedAt: nowIso() });
     logger.error('Dataset generation failed', { datasetId: payload.datasetId, error: message });
     throw err;
   }

@@ -7,6 +7,7 @@
  * routed through the configured file bucket.
  */
 
+import { assertServiceEnabled } from '@/lib/services/availability/serviceAvailability';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
@@ -14,6 +15,8 @@ import { getThisNodeName, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { downloadFile, uploadFile } from '@/lib/services/files';
+import { imageDimensions } from '@/lib/services/tools/mediaSniff';
+import { toolOutput, type ToolOutput } from '@/lib/services/tools/toolOutput';
 import {
   recordUsageEvent,
   resolveUsageAttribution,
@@ -120,6 +123,7 @@ export async function createBrowserSession(
   ctx: SessionContext,
   input: CreateBrowserSessionInput,
 ): Promise<BrowserSessionView> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
   const cfg = getConfig().browser;
   const sessionKey = `bs_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
 
@@ -316,6 +320,16 @@ export async function getBrowserSession(
   return serializeSession(record);
 }
 
+export async function getBrowserSessionByKey(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<BrowserSessionView | null> {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
+  if (!canAccessSession(ctx, record)) return null;
+  return serializeSession(record);
+}
+
 async function loadSessionForKey(
   ctx: SessionContext,
   sessionKey: string,
@@ -324,6 +338,29 @@ async function loadSessionForKey(
   const record = await db.findBrowserSessionByKey(ctx.tenantId, sessionKey, ctx.projectId);
   if (!canAccessSession(ctx, record)) throw new Error(`Browser session not found: ${sessionKey}`);
   return { id: String(record._id), record };
+}
+
+/**
+ * Like loadSessionForKey, but for entries that act on a live page: the parent
+ * browser is re-read so that disabling a browser also ends the sessions that
+ * were opened before it was disabled. Such a session is closed and the call is
+ * refused with the same "is not active" message that session creation uses.
+ */
+async function loadActiveSessionForKey(
+  ctx: SessionContext,
+  sessionKey: string,
+): Promise<{ id: string; record: IBrowserSession }> {
+  await assertServiceEnabled({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId }, 'browser');
+  const loaded = await loadSessionForKey(ctx, sessionKey);
+  const db = await withTenantDb(ctx.tenantDbName);
+  const browser = await db.findBrowserById(loaded.record.browserId);
+  if (browser && browser.status === 'active') return loaded;
+
+  await browserManager.closeSession(sessionKey, 'manual').catch(() => false);
+  await db
+    .updateBrowserSession(loaded.id, { status: 'closed', endedAt: new Date() })
+    .catch(() => undefined);
+  throw new Error(`Browser ${browser?.key ?? loaded.record.browserId} is not active`);
 }
 
 async function persistEvent(
@@ -387,7 +424,7 @@ export async function runBrowserAction(
   // assigned node. We accept a small cost of double-loading the session
   // record (here + inside the local handler) in exchange for keeping
   // routing decisions outside of browserManager.
-  const { record } = await loadSessionForKey(ctx, sessionKey);
+  const { record } = await loadActiveSessionForKey(ctx, sessionKey);
   return routeInstanceCall(
     {
       entityType: 'browser',
@@ -404,7 +441,7 @@ export async function runBrowserActionLocal(
   sessionKey: string,
   action: BrowserAction,
 ): Promise<BrowserActionResult> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const result = await browserManager.runAction(sessionKey, action);
   const durationMs = Date.now() - start;
@@ -436,7 +473,7 @@ export async function extractFromBrowser(
   sessionKey: string,
   input: BrowserExtractInput,
 ): Promise<BrowserExtractResult> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const result = await browserManager.extract(sessionKey, input);
   const durationMs = Date.now() - start;
@@ -464,7 +501,7 @@ export async function searchPageText(
   text: string,
   options: { limit?: number } = {},
 ): Promise<{ ok: boolean; matches: Array<{ text: string; target: unknown }>; errorMessage?: string }> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.findText(sessionKey, text, options);
 }
 
@@ -473,7 +510,7 @@ export async function readSessionObservations(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<ReturnType<typeof browserManager.getObservations>> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.getObservations(sessionKey);
 }
 
@@ -488,7 +525,7 @@ export async function exportSessionStorageState(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<Record<string, unknown>> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.exportStorageState(sessionKey);
 }
 
@@ -496,7 +533,7 @@ export async function captureSnapshot(
   ctx: SessionContext,
   sessionKey: string,
 ): Promise<{ ariaSnapshot: string; url: string }> {
-  const { id } = await loadSessionForKey(ctx, sessionKey);
+  const { id } = await loadActiveSessionForKey(ctx, sessionKey);
   const start = Date.now();
   const snapshot = await browserManager.captureAriaSnapshot(sessionKey);
   const url = browserManager.getLiveStatus(sessionKey)?.url ?? '';
@@ -522,7 +559,7 @@ export async function describeSessionElement(
   sessionKey: string,
   ref: string,
 ): Promise<{ target: BrowserTarget; path: string; tag: string; text?: string } | null> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.describeElement(sessionKey, ref);
 }
 
@@ -535,7 +572,7 @@ export async function captureLiveScreenshot(
   sessionKey: string,
   input?: BrowserScreenshotInput,
 ): Promise<{ buffer: Buffer; contentType: string }> {
-  await loadSessionForKey(ctx, sessionKey);
+  await loadActiveSessionForKey(ctx, sessionKey);
   return browserManager.screenshot(sessionKey, input);
 }
 
@@ -544,14 +581,31 @@ export async function captureScreenshot(
   sessionKey: string,
   input: BrowserScreenshotInput & { createdBy: string; bucketKeyOverride?: string } = { createdBy: 'system' },
 ): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
-  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const { id, record } = await loadActiveSessionForKey(ctx, sessionKey);
   const bucketKey =
     input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
   if (!bucketKey) {
     throw new Error('No artifact bucket configured for this session.');
   }
 
-  const { buffer, contentType } = await browserManager.screenshot(sessionKey, input);
+  const shot = await browserManager.screenshot(sessionKey, input);
+  return persistScreenshotBuffer(ctx, id, sessionKey, bucketKey, shot, input);
+}
+
+/**
+ * Store an already-captured screenshot in the artifact bucket, record the
+ * event and move the session's lastScreenshot pointer. Split out so one
+ * capture can serve both the persisted artifact and an inline image.
+ */
+async function persistScreenshotBuffer(
+  ctx: SessionContext,
+  id: string,
+  sessionKey: string,
+  bucketKey: string,
+  shot: { buffer: Buffer; contentType: string },
+  input: BrowserScreenshotInput & { createdBy: string },
+): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
+  const { buffer, contentType } = shot;
   const ext = contentType === 'image/jpeg' ? 'jpg' : 'png';
   const fileName = `${sessionKey}-${Date.now()}.${ext}`;
   const upload = await uploadFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId ?? '', {
@@ -595,12 +649,73 @@ export async function captureScreenshot(
   return { artifact, eventId: event.id };
 }
 
+/**
+ * One screenshot as a ToolOutput: the image itself (so a model can look at it)
+ * plus a short text line. It is saved to the artifact bucket only when
+ * `persist` is true; a missing bucket then degrades to a note, never an error,
+ * because the caller still has the image.
+ */
+export async function captureScreenshotOutput(
+  ctx: SessionContext,
+  sessionKey: string,
+  input: BrowserScreenshotInput & { persist?: boolean; createdBy: string; bucketKeyOverride?: string },
+): Promise<ToolOutput & { eventId?: string }> {
+  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const shot = await browserManager.screenshot(sessionKey, input);
+  const { buffer, contentType } = shot;
+  const dims = imageDimensions(buffer, contentType);
+  const url = browserManager.getLiveStatus(sessionKey)?.url ?? '';
+  const fullPage = input.fullPage === true;
+
+  let artifact: BrowserArtifactRef | undefined;
+  let eventId: string | undefined;
+  let note = '';
+  if (input.persist === true) {
+    const bucketKey =
+      input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
+    if (!bucketKey) {
+      note = ' — not saved: no artifact bucket configured for this session';
+    } else {
+      try {
+        ({ artifact, eventId } = await persistScreenshotBuffer(ctx, id, sessionKey, bucketKey, shot, input));
+        note = ` — saved: ${artifact.url}`;
+      } catch (err) {
+        note = ` — not saved: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+  }
+
+  const size = dims ? ` (${dims.width}x${dims.height}${fullPage ? ', full page' : ''})` : fullPage ? ' (full page)' : '';
+  const text = `Screenshot of ${url || 'the page'}${size}${note}`;
+  const out = toolOutput(
+    [
+      { type: 'text', text },
+      {
+        type: 'image',
+        mimeType: contentType,
+        data: buffer.toString('base64'),
+        name: contentType === 'image/jpeg' ? 'screenshot.jpg' : 'screenshot.png',
+        ...(dims ? { width: dims.width, height: dims.height } : {}),
+      },
+    ],
+    {
+      structuredContent: {
+        url,
+        ...(dims ? { width: dims.width, height: dims.height } : {}),
+        fullPage,
+        ...(artifact ? { artifact } : {}),
+      },
+    },
+  );
+  return eventId ? Object.assign(out, { eventId }) : out;
+}
+
 export async function exportSessionPdf(
   ctx: SessionContext,
   sessionKey: string,
   input: BrowserPdfInput & { createdBy: string; bucketKeyOverride?: string } = { createdBy: 'system' },
 ): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
-  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const { id, record } = await loadActiveSessionForKey(ctx, sessionKey);
   const bucketKey =
     input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
   if (!bucketKey) {

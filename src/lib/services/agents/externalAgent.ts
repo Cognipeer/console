@@ -28,7 +28,16 @@
 import { createLogger } from '@/lib/core/logger';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import { loadProviderRuntimeData } from '@/lib/services/providers/providerService';
+import {
+  CONSOLE_IDENTITY_AUTH_TYPE,
+  consoleIdentityChunkMasker,
+  consoleIdentityHeaders,
+  scrubConsoleIdentityError,
+  scrubConsoleIdentityToken,
+  scrubConsoleIdentityValue,
+  type ConsoleIdentityCaller,
+} from '@/lib/iam/consoleIdentity';
+import { assertProviderEnabled, loadProviderRuntimeData, ProviderDisabledError } from '@/lib/services/providers/providerService';
 import type { ExternalAgentProtocol, IExternalAgentConnection } from '@/lib/database';
 import {
   createA2aAccumulator,
@@ -135,7 +144,10 @@ export function prepareConnectionForStorage(input: unknown): IExternalAgentConne
   if (typeof raw.responsePath === 'string' && raw.responsePath.trim()) {
     conn.responsePath = raw.responsePath.trim();
   }
-  if (typeof raw.credentialProviderKey === 'string' && raw.credentialProviderKey.trim()) {
+  // Console identity replaces a stored credential: none is kept beside it.
+  const consoleIdentity = raw.authType === CONSOLE_IDENTITY_AUTH_TYPE;
+  if (consoleIdentity) conn.authType = CONSOLE_IDENTITY_AUTH_TYPE;
+  if (!consoleIdentity && typeof raw.credentialProviderKey === 'string' && raw.credentialProviderKey.trim()) {
     conn.credentialProviderKey = raw.credentialProviderKey.trim();
   }
   if (raw.runtimeHeaders && typeof raw.runtimeHeaders === 'object') {
@@ -149,7 +161,9 @@ export function prepareConnectionForStorage(input: unknown): IExternalAgentConne
   }
 
   const rawKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
-  if (rawKey) {
+  if (consoleIdentity) {
+    // No key is stored for a connection that sends Console identity tokens.
+  } else if (rawKey) {
     conn.apiKeyEnc = encryptObject(rawKey);
   } else if (typeof raw.apiKeyEnc === 'string' && raw.apiKeyEnc) {
     // Preserve an already-encrypted key on update when the client doesn't resend it.
@@ -168,6 +182,8 @@ export interface ExternalAgentContext {
   tenantDbName: string;
   tenantId: string;
   projectId?: string;
+  /** Who the call is for: a connection set up for Console identity gets a token for them, and refuses a call without one. */
+  identity?: ConsoleIdentityCaller;
 }
 
 /** Resolve the bearer token for a connection from inline key or provider reference. */
@@ -177,7 +193,7 @@ async function resolveApiKey(
 ): Promise<string | undefined> {
   if (connection.credentialProviderKey) {
     try {
-      const { credentials } = await loadProviderRuntimeData<Record<string, unknown>>(
+      const { record, credentials } = await loadProviderRuntimeData<Record<string, unknown>>(
         ctx.tenantDbName,
         {
           key: connection.credentialProviderKey,
@@ -185,9 +201,12 @@ async function resolveApiKey(
           projectId: ctx.projectId,
         },
       );
+      // A provider an operator switched off lends its credentials to nobody, the inline key included.
+      assertProviderEnabled(record);
       const fromProvider = pickCredentialValue(credentials);
       if (fromProvider) return fromProvider;
     } catch (error) {
+      if (error instanceof ProviderDisabledError) throw error;
       logger.warn('Failed to resolve provider credentials for connected agent', {
         providerKey: connection.credentialProviderKey,
         error,
@@ -225,13 +244,29 @@ async function buildHeaders(
   };
 
   const hasAuthHeader = Object.keys(headers).some((h) => h.toLowerCase() === 'authorization');
-  if (!hasAuthHeader) {
+  if (!hasAuthHeader && connection.authType !== CONSOLE_IDENTITY_AUTH_TYPE) {
     const apiKey = await resolveApiKey(connection, ctx);
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   }
 
   // Caller-supplied runtime headers (already policy-filtered) win over static config.
   Object.assign(headers, runtimeHeaders);
+
+  if (connection.authType === CONSOLE_IDENTITY_AUTH_TYPE) {
+    // Console identity: a token for the person behind the call, for this endpoint. It goes last and
+    // replaces every other Authorization value (static or caller-supplied). Throws when there is
+    // nobody to mint it for, so the request is never sent without one.
+    const { headers: identityHeaders } = await consoleIdentityHeaders({
+      tenantId: ctx.tenantId,
+      tenantDbName: ctx.tenantDbName,
+      audience: connection.url,
+      caller: ctx.identity ? { ...ctx.identity, projectId: ctx.identity.projectId ?? ctx.projectId } : undefined,
+    });
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === 'authorization') delete headers[name];
+    }
+    Object.assign(headers, identityHeaders);
+  }
 
   return headers;
 }
@@ -642,6 +677,10 @@ export async function invokeExternalAgent(
   const { onTextChunk, signal } = options;
   if (signal?.aborted) return cancelledResult('', undefined, false);
   const headers = await buildHeaders(connection, ctx, runtimeHeaders);
+  // The minted token, masked in whatever the agent echoes back: its answer, its stream, its errors.
+  const identityToken = connection.authType === CONSOLE_IDENTITY_AUTH_TYPE
+    ? headers.Authorization?.replace(/^Bearer /, '')
+    : undefined;
 
   const wantStream = Boolean(onTextChunk)
     && !connection.responsePath
@@ -650,7 +689,9 @@ export async function invokeExternalAgent(
   let result: InvokeExternalAgentResult | null = null;
   try {
     if (wantStream && onTextChunk) {
-      result = await invokeStreaming(connection, ctx, messages, headers, onTextChunk, signal);
+      const masker = identityToken ? consoleIdentityChunkMasker(identityToken, onTextChunk) : undefined;
+      result = await invokeStreaming(connection, ctx, messages, headers, masker?.push ?? onTextChunk, signal);
+      if (result && !result.cancelled) masker?.flush();
     }
     if (!result) {
       const request = buildProtocolRequest(connection, messages, false);
@@ -669,8 +710,15 @@ export async function invokeExternalAgent(
     if (signal?.aborted) {
       result = cancelledResult('', undefined, false);
     } else {
-      throw error;
+      throw scrubConsoleIdentityError(error, identityToken);
     }
+  }
+  if (identityToken) {
+    result = {
+      ...result,
+      content: scrubConsoleIdentityToken(result.content, identityToken),
+      raw: scrubConsoleIdentityValue(result.raw, identityToken),
+    };
   }
 
   logger.info(result.cancelled ? 'Connected agent call cancelled' : 'Connected agent invoked', {

@@ -1,9 +1,11 @@
 'use client';
 
+import { Fragment } from 'react';
 import { useTranslations } from '@/lib/i18n';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { ActionIcon, Text, Tooltip } from '@mantine/core';
 import {
+  IconActivity,
   IconAlertTriangle,
   IconArrowLeftRight,
   IconArrowsSort,
@@ -74,6 +76,12 @@ export interface SubNavItem {
   label: string;
   /** A key of the `navigation` messages; when set it is shown instead of `label`, in the viewer's language. */
   labelKey?: string;
+  /**
+   * Starts a titled group: a `navigation` message key drawn as a heading above
+   * this item; the items after it belong to the group until the next item that
+   * starts one.
+   */
+  sectionKey?: string;
   href: string;
   icon: Icon;
   badge?: number | string;
@@ -627,7 +635,10 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
         p.startsWith('/dashboard/agents') &&
         !p.startsWith('/dashboard/agents/tools') &&
         !p.startsWith('/dashboard/agents/skills') &&
-        !p.startsWith('/dashboard/agents/webhooks'),
+        !p.startsWith('/dashboard/agents/webhooks') &&
+        // The project-wide lists; an agent's own `/dashboard/agents/<id>/sessions/<sid>` stays here.
+        p !== '/dashboard/agents/sessions' &&
+        !p.startsWith('/dashboard/agents/sessions/'),
     },
     {
       id: 'tools',
@@ -653,6 +664,24 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       icon: IconWebhook,
       matcher: (p) => p.startsWith('/dashboard/agents/webhooks'),
       requiresService: 'webhooks',
+    },
+    {
+      // Every agent's sessions in one place: the ones in progress, and all of them.
+      id: 'sessions-active',
+      label: 'Active',
+      labelKey: 'agentSessionsActive',
+      sectionKey: 'agentSessions',
+      href: '/dashboard/agents/sessions?view=active',
+      icon: IconActivity,
+      matcher: (p, s) => p === '/dashboard/agents/sessions' && s.get('view') === 'active',
+    },
+    {
+      id: 'sessions-all',
+      label: 'All',
+      labelKey: 'agentSessionsAll',
+      href: '/dashboard/agents/sessions',
+      icon: IconMessages,
+      matcher: (p, s) => p === '/dashboard/agents/sessions' && s.get('view') !== 'active',
     },
   ],
   mcp: [
@@ -855,19 +884,23 @@ export default function ServiceSubNav({
             typeof window !== 'undefined' &&
             isNavigationPendingFor(pendingKey, item.href, window.location.href);
           return (
-            <Link
-              key={item.id}
-              href={item.href}
-              className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
-              aria-current={active ? 'page' : undefined}
-              data-pending={pending ? 'true' : undefined}
-              {...getIntentProps(item.href)}>
-              <ItemIcon size={15} stroke={1.7} />
-              <span className={classes.subnavItemLabel}>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
-              {item.badge ? (
-                <span className={classes.subnavBadge}>{item.badge}</span>
+            <Fragment key={item.id}>
+              {item.sectionKey ? (
+                <div className={classes.subnavSectionTitle}>{tNav(item.sectionKey)}</div>
               ) : null}
-            </Link>
+              <Link
+                href={item.href}
+                className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
+                aria-current={active ? 'page' : undefined}
+                data-pending={pending ? 'true' : undefined}
+                {...getIntentProps(item.href)}>
+                <ItemIcon size={15} stroke={1.7} />
+                <span className={classes.subnavItemLabel}>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
+                {item.badge ? (
+                  <span className={classes.subnavBadge}>{item.badge}</span>
+                ) : null}
+              </Link>
+            </Fragment>
           );
         })}
 

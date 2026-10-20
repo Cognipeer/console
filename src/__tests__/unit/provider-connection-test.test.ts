@@ -13,8 +13,27 @@ import {
 } from '@/lib/services/providers/providerConnectionTest';
 import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
 
+// Names resolve without the network: `srv` holds the targets of an SRV record, `hosts` the addresses of a name.
+const dns = vi.hoisted(() => ({ srv: new Map<string, string[]>(), hosts: new Map<string, string[]>() }));
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(async (host: string) => {
+    const addresses = dns.hosts.get(host);
+    if (!addresses) throw Object.assign(new Error(`ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
+    return addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+  }),
+  resolveSrv: vi.fn(async (name: string) => {
+    const targets = dns.srv.get(name);
+    if (!targets) throw Object.assign(new Error(`querySrv ENODATA ${name}`), { code: 'ENODATA' });
+    return targets.map((target) => ({ name: target, port: 27017, priority: 0, weight: 0 }));
+  }),
+}));
+
 const original = getConfigSource();
-beforeEach(() => setConfigSource({ get: (k: string) => ({ DEPLOYMENT_MODE: 'saas' } as Record<string, string>)[k] ?? process.env[k] } as ConfigSource));
+beforeEach(() => {
+  dns.srv.clear();
+  dns.hosts.clear();
+  setConfigSource({ get: (k: string) => ({ DEPLOYMENT_MODE: 'saas' } as Record<string, string>)[k] ?? process.env[k] } as ConfigSource);
+});
 afterEach(() => setConfigSource(original));
 
 const json = (status: number, body: unknown) => ({ status, json: async () => body }) as unknown as Response;
@@ -121,11 +140,18 @@ describe('http probes of the inference drivers', () => {
     expect(result.message).toContain('***');
   });
 
-  it('stops waiting after the limit', async () => {
+  it('stops waiting after the limit, and says what to look at', async () => {
     const never = vi.fn(() => new Promise<Response>(() => undefined));
     const result = await testProviderConnection(base({}), { fetchImpl: never as never, timeoutMs: 25 });
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/Timed out/);
+    expect(result.message).toMatch(/check its address and port, and any firewall or proxy in between/);
+  });
+
+  it('names the limit in seconds', async () => {
+    const never = vi.fn(() => new Promise<Response>(() => undefined));
+    const result = await testProviderConnection(base({}), { fetchImpl: never as never, timeoutMs: 1_200, graceMs: 0 });
+    expect(result.message).toMatch(/^Timed out after 1 s\. /);
   });
 });
 
@@ -151,14 +177,31 @@ describe('unsupported and local drivers', () => {
     expect(createRuntime).not.toHaveBeenCalled();
   });
 
-  it('SRV connection strings are not dialled', async () => {
+  it('a connection string whose hosts cannot be read at all is not dialled (ok:null)', async () => {
     const createRuntime = vi.fn();
+    for (const uri of ['mongodb+srv://h1.example.net,h2.example.net/db', 'mongodb+srv://h1.example.net:27017/db', 'mongodb://', 'mongodb://%2Ftmp%2Fmongodb-27017.sock/db']) {
+      const result = await testProviderConnection(
+        base({ type: 'vector', driver: 'mongodb', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      );
+      expect(result.ok, uri).toBeNull();
+      expect(result.message, uri).toMatch(/cannot be checked/);
+    }
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('an SRV connection string is checked through its record and then dialled', async () => {
+    dns.srv.set('_mongodb._tcp.cluster0.example.net', ['shard-00.cluster0.example.net.', 'shard-01.cluster0.example.net.']);
+    dns.hosts.set('shard-00.cluster0.example.net', ['93.184.216.34']);
+    dns.hosts.set('shard-01.cluster0.example.net', ['93.184.216.35']);
+    const close = vi.fn();
+    const createRuntime = vi.fn(async () => ({ listIndexes: async () => [{ name: 'docs' }], close }));
     const result = await testProviderConnection(
       base({ type: 'vector', driver: 'mongodb', credentials: { uri: 'mongodb+srv://u:p@cluster0.example.net/db' } }),
       { createRuntime: createRuntime as never },
     );
-    expect(result.ok).toBeNull();
-    expect(createRuntime).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -208,10 +251,43 @@ describe('runtime probes (vector, file)', () => {
     expect(result.message).toContain('***');
   });
 
+  it('scrubs that password in its decoded form too, and only the part after the first colon', async () => {
+    const createRuntime = vi.fn(async () => ({
+      listIndexes: async () => { throw new Error('rejected p@ss:w0rd for user app'); },
+      close: vi.fn(),
+    }));
+    const result = await testProviderConnection(
+      base({
+        type: 'vector',
+        driver: 'pgvector',
+        credentials: { connectionString: 'postgres://app:p%40ss:w0rd@93.184.216.34:5432/vec' },
+      }),
+      { createRuntime: createRuntime as never },
+    );
+    expect(result.message).toBe('rejected *** for user app');
+  });
+
+  it('a value made of colons is read in time proportional to its length', async () => {
+    // Looking for the password of "scheme://user:password@" must not try every colon in turn: a long run of them took
+    // time quadratic in its length (a request body of a megabyte kept the process busy for minutes).
+    const started = performance.now();
+    const result = await testProviderConnection(
+      base({ type: 'file', driver: 'local-filesystem', credentials: { note: `http://${':'.repeat(60_000)}` } }),
+    );
+    expect(result.ok).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('file: lists one object', async () => {
     const listFiles = vi.fn(async () => ({ items: [] }));
     const result = await testProviderConnection(
-      base({ type: 'file', driver: 'aws-s3-files', credentials: { accessKeyId: 'AKIA', secretAccessKey: 'secret-abc-123' } }),
+      base({
+        type: 'file',
+        driver: 'aws-s3-files',
+        credentials: { accessKeyId: 'AKIA', secretAccessKey: 'secret-abc-123' },
+        // The driver's own check runs first: Amazon S3 needs a region and a bucket.
+        settings: { region: 'eu-central-1', bucket: 'archive-bucket' },
+      }),
       { createRuntime: (async () => ({ listFiles })) as never },
     );
     expect(result.ok).toBe(true);
@@ -235,6 +311,40 @@ describe('the outbound guard', () => {
       base({ type: 'vector', driver: 'postgres', credentials: { connectionString: 'postgres://u:p@192.168.0.4:5432/db' } }),
       { createRuntime: createRuntime as never },
     )).rejects.toBeInstanceOf(ProviderEndpointError);
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('a MongoDB GridFS connection URI is held to it too: a private host, and a +srv record that names one or none, are refused on SaaS', async () => {
+    dns.srv.set('_mongodb._tcp.inside.example.net', ['db-0.inside.example.net']);
+    dns.hosts.set('db-0.inside.example.net', ['10.0.0.5']);
+    const createRuntime = vi.fn();
+    for (const uri of [
+      'mongodb://127.0.0.1:27017',
+      'mongodb://u:p@10.0.0.5:27017/files',
+      'mongodb+srv://u:p@inside.example.net/files',
+      'mongodb+srv://u:p@nothing.example.net/files',
+    ]) {
+      await expect(testProviderConnection(
+        base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      ), uri).rejects.toMatchObject({ name: 'ProviderEndpointError', field: 'uri' });
+    }
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it('a MongoDB GridFS connection URI must sign in with the credentials it holds: a method that uses the identity of the server is refused on SaaS', async () => {
+    dns.hosts.set('mongo.example.net', ['93.184.216.34']);
+    const createRuntime = vi.fn();
+    for (const uri of [
+      'mongodb://mongo.example.net/?authMechanism=MONGODB-OIDC&authMechanismProperties=ENVIRONMENT:k8s',
+      'mongodb://mongo.example.net/?tls=true&authMechanism=MONGODB-X509',
+      'mongodb://mongo.example.net/?authMechanism=MONGODB-AWS',
+    ]) {
+      await expect(testProviderConnection(
+        base({ type: 'file', driver: 'mongodb-gridfs-files', credentials: { uri } }),
+        { createRuntime: createRuntime as never },
+      ), uri).rejects.toMatchObject({ name: 'ProviderSettingsError', field: 'uri' });
+    }
     expect(createRuntime).not.toHaveBeenCalled();
   });
 });

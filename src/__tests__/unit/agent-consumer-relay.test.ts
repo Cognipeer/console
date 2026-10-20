@@ -154,6 +154,19 @@ describe('agent queue consumer + stream relay', () => {
     expect(seen).toEqual(['tool:search', 'text:Hel', 'text:lo']);
   });
 
+  it('a sub-agent stamp and the resumed marker survive the relay', async () => {
+    const received: unknown[] = [];
+    const caller = await openCallerRelay({ handlers: { tool: (d) => received.push(d) }, signal: new AbortController().signal });
+    const event = { phase: 'start', name: 'lookup', subagent: { id: 's1', name: 'helper' }, resumed: true };
+    hoisted.executePlaygroundChatLocal.mockImplementation(async (request: Record<string, unknown>) => {
+      (request.onToolEvent as (e: unknown) => void)(event);
+      return { content: 'ok' };
+    });
+    await handler()({ name: 'playground', data: { ...BASE, [STREAM_RELAY_PAYLOAD_KEY]: caller!.descriptor } });
+    await caller!.finish();
+    expect(received).toEqual([event]);
+  });
+
   it('chat job: only onTextChunk and signal are wired', async () => {
     const caller = await openCallerRelay({
       handlers: { text: vi.fn(), tool: vi.fn() },

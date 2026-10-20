@@ -37,6 +37,15 @@ class EnvConfigSource implements ConfigSource {
 export interface AppConfig {
   nodeEnv: string;
 
+  /**
+   * Services switched off for the whole deployment (see
+   * src/lib/services/availability/serviceAvailability.ts). Both empty = nothing off.
+   */
+  services: {
+    disabled: string[];
+    enabled: string[];
+  };
+
   deployment: {
     /** saas = Cognipeer-hosted, onprem = customer-hosted. */
     mode: 'saas' | 'onprem';
@@ -314,6 +323,16 @@ export interface AppConfig {
      * `.suffix` entries matching any subdomain (e.g. `.internal.example.com`).
      */
     allowedHosts: string[];
+    /**
+     * Private networks a provider endpoint may reach even though private targets are blocked, per organization.
+     * Raw `PROVIDER_PRIVATE_NETWORKS` entries (`<tenantId or *>=<cidr>[,<cidr>...]`, separated by `;`). Read and
+     * checked by `lib/security/providerPrivateNetworks`; nothing is opened unless an entry is valid.
+     */
+    providerPrivateNetworks: string[];
+    /**
+     * CIDR ranges (`PROVIDER_PRIVATE_NETWORKS_DENY`) that stay refused even inside an opened network.
+     */
+    providerPrivateNetworksDeny: string[];
     /** Default timeout applied to guarded outbound requests (ms). */
     defaultTimeoutMs: number;
   };
@@ -420,6 +439,15 @@ export interface AppConfig {
       bodyLimitBytes: number;
       /** Runs one trigger's webhook starts per minute; 0 = off. */
       rateLimitPerMinute: number;
+    };
+    /** Reminders agents set for themselves (`reminder_set`): the platform ceilings over every agent's own settings. */
+    reminders: {
+      /** Off = the reminder tools are never offered and due reminders are not run. */
+      enabled: boolean;
+      minDelaySeconds: number;
+      maxHorizonHours: number;
+      maxActivePerSession: number;
+      maxFiresPerSession: number;
     };
   };
 
@@ -540,6 +568,14 @@ function boundedAgentRunConfig(source: ConfigSource) {
       bodyLimitBytes: Math.min(atLeast(int(source, 'AGENT_WEBHOOK_BODY_LIMIT_BYTES', 5_242_880), 16_384), 26_214_400),
       rateLimitPerMinute: atLeast(int(source, 'AGENT_WEBHOOK_RATE_LIMIT_PER_MINUTE', 60), 0),
     },
+    reminders: {
+      enabled: bool(source, 'AGENT_REMINDERS_ENABLED', true),
+      minDelaySeconds: atLeast(int(source, 'AGENT_REMINDER_MIN_DELAY_SECONDS', 60), 30),
+      // A scheduled run may start at most 30 days ahead.
+      maxHorizonHours: Math.min(atLeast(int(source, 'AGENT_REMINDER_MAX_HORIZON_HOURS', 168), 1), 720),
+      maxActivePerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_ACTIVE_PER_SESSION', 10), 1),
+      maxFiresPerSession: atLeast(int(source, 'AGENT_REMINDER_MAX_FIRES_PER_SESSION', 100), 1),
+    },
   };
 }
 
@@ -608,6 +644,13 @@ function list(source: ConfigSource, key: string, fallback: string[]): string[] {
   const raw = source.get(key);
   if (!raw || raw.trim() === '') return fallback;
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Like `list`, split on `;` (for entries whose own value is a comma-separated list). */
+function semicolonList(source: ConfigSource, key: string, fallback: string[]): string[] {
+  const raw = source.get(key);
+  if (!raw || raw.trim() === '') return fallback;
+  return raw.split(';').map((s) => s.trim()).filter(Boolean);
 }
 
 function oneOf<T extends string>(
@@ -693,6 +736,11 @@ function buildConfig(source: ConfigSource): AppConfig {
     deployment: {
       mode: deploymentMode,
       isOnPrem: deploymentMode === 'onprem',
+    },
+
+    services: {
+      disabled: list(source, 'CONSOLE_DISABLED_SERVICES', []),
+      enabled: list(source, 'CONSOLE_ENABLED_SERVICES', []),
     },
 
     license: {
@@ -856,6 +904,8 @@ function buildConfig(source: ConfigSource): AppConfig {
     outboundHttp: {
       blockPrivateNetwork: bool(source, 'OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK', true),
       allowedHosts: list(source, 'OUTBOUND_HTTP_ALLOWED_HOSTS', []),
+      providerPrivateNetworks: semicolonList(source, 'PROVIDER_PRIVATE_NETWORKS', []),
+      providerPrivateNetworksDeny: list(source, 'PROVIDER_PRIVATE_NETWORKS_DENY', []),
       defaultTimeoutMs: int(source, 'OUTBOUND_HTTP_DEFAULT_TIMEOUT_MS', 30_000),
     },
 

@@ -15,7 +15,7 @@ const eslintConfig = [
       'apps/**/next-env.d.ts',
       'out/**',
       'build/**',
-      'docs/.vitepress/**',
+      '**/.vitepress/**',
       'next-env.d.ts',
       'new_design/**',
     ],

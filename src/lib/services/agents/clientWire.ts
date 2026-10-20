@@ -97,11 +97,13 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
 
 /**
  * The `data` of a logged event for a client: keys snake_cased, tool arguments
- * left alone, and — as on a pending action — no `tool_name` for a question.
+ * left alone, and — as on a pending action — no `tool_name` for a question and
+ * no `delegation_tool_call_id` (an internal link the portal uses).
  */
 export function toClientEventData(data: Record<string, unknown>): Record<string, unknown> {
     const wire = toSnakeCaseDeep<Record<string, unknown>>(data);
     if (data.kind === 'user_question') delete wire.tool_name;
+    delete wire.delegation_tool_call_id;
     return wire;
 }
 
@@ -231,7 +233,14 @@ export function toClientMessageAttachments(
 export function toClientTranscriptMessage(
     conversationId: string,
     index: number,
-    message: { role: string; content: string; timestamp: Date | string; attachments?: ReadonlyArray<OutputAttachmentLike>; warnings?: string[] },
+    message: {
+        role: string;
+        content: string;
+        timestamp: Date | string;
+        attachments?: ReadonlyArray<OutputAttachmentLike>;
+        warnings?: string[];
+        metadata?: { origin?: string; reminder?: { runId: string; message: string; setAt?: string } };
+    },
     id: string,
 ) {
     const files = toClientMessageAttachments(conversationId, message.attachments);
@@ -246,5 +255,12 @@ export function toClientTranscriptMessage(
         attachments: files,
         ...(message.warnings?.length ? { warnings: message.warnings } : {}),
         ...(files.some((f) => f.origin === 'agent_output') ? { output_files: files.filter((f) => f.origin === 'agent_output') } : {}),
+        // A reminder's wake turn: `content` is the note as the model read it; show `reminder.message`.
+        ...(message.metadata?.origin === 'reminder' && message.metadata.reminder
+            ? {
+                origin: 'reminder' as const,
+                reminder: { id: message.metadata.reminder.runId, message: message.metadata.reminder.message, set_at: message.metadata.reminder.setAt ?? null },
+            }
+            : {}),
     };
 }

@@ -1,20 +1,24 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import type {
   CreateProviderConfigInput,
   ProviderStatus,
+  ProviderTestOverrides,
+  ProviderTestTarget,
   UpdateProviderConfigInput,
 } from '@/lib/services/providers/providerService';
 import {
   createProviderConfig,
   deleteProviderConfig,
   getProviderConfigById,
+  hasProviderTestOverrides,
   listProviderConfigs,
   loadProviderRuntimeData,
   ProviderCredentialDecryptError,
   recordProviderTest,
+  resolveProviderTestTarget,
   resolveTenantProjectIds,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
@@ -28,8 +32,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-
-import { ProviderEndpointError } from '@/lib/services/providers/providerEndpointGuard';
+import { isProviderConfigError, sendProviderConfigError } from '../providerConfigErrors';
 
 const logger = createLogger('api:providers');
 
@@ -40,18 +43,22 @@ const logger = createLogger('api:providers');
  * invisible in both the UI and the server log.
  */
 function sendProviderError(reply: FastifyReply, error: unknown) {
-  logger.error('Provider request failed', {
-    error: error instanceof Error ? error.message : String(error),
-    name: error instanceof Error ? error.name : undefined,
-  });
+  if (isProviderConfigError(error)) {
+    // A refusal is the caller's to fix and is answered to the caller: a warning, not a failure of the server. Its text can
+    // quote what was typed into an endpoint or credential field, so the log keeps what and where, not the words.
+    logger.warn('Provider request refused', { name: error.name, code: error.code, field: error.field });
+  } else {
+    logger.error('Provider request failed', {
+      error: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : undefined,
+    });
+  }
 
   if (error instanceof ProviderCredentialDecryptError) {
     return reply.code(409).send({ error: error.message });
   }
 
-  if (error instanceof ProviderEndpointError) {
-    return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
-  }
+  if (sendProviderConfigError(reply, error)) return reply;
 
   if (error instanceof WebSearchCacheConfigError) {
     return reply.code(400).send({ error: error.message });
@@ -174,6 +181,30 @@ function readTestPayload(body: unknown): {
   };
 }
 
+/** The stored connection of a provider, decrypted here for a test: nothing typed on top of it. */
+async function loadStoredTestTarget(tenantDbName: string, id: string, tenantId: string): Promise<ProviderTestTarget> {
+  const { record, credentials } = await loadProviderRuntimeData(tenantDbName, { id, tenantId });
+  return { record, credentials, settings: record.settings ?? {} };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The optional body of `POST /providers/:id/test`: the form's unsaved edits, to test instead of what is stored. No body
+ * (or `{}`) is a plain re-test of the stored connection. Throws a message fit for a 400.
+ */
+function readSavedTestOverrides(request: FastifyRequest): ProviderTestOverrides {
+  // An empty body is the plain re-test, not a malformed one (`readJsonBody` refuses both).
+  if (request.body === undefined || request.body === null || request.body === '') return {};
+  const body = readJsonBody<unknown>(request);
+  if (!isPlainObject(body)) throw new Error('Invalid payload');
+  if (body.credentials !== undefined && !isPlainObject(body.credentials)) throw new Error('credentials must be an object');
+  if (body.settings !== undefined && !isPlainObject(body.settings)) throw new Error('settings must be an object');
+  return { credentials: body.credentials, settings: body.settings };
+}
+
 export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
@@ -269,6 +300,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           settings: body.settings as Record<string, unknown> | undefined,
           status: body.status as ProviderStatus | undefined,
           type: body.type as ProviderDomain,
+          // Owners and admins only reach this point (the gate above): they may name directories of this server.
+          allowHostPaths: true,
         });
 
         return reply.code(201).send({ provider });
@@ -288,13 +321,12 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         settings: body.settings as Record<string, unknown> | undefined,
         status: body.status as ProviderStatus | undefined,
         type: body.type as ProviderDomain,
+        allowHostPaths: true,
       });
 
       return reply.code(201).send({ provider });
     } catch (error) {
-      if (error instanceof ProviderEndpointError) {
-        return reply.code(400).send({ error: error.message, code: error.code, field: error.field });
-      }
+      if (sendProviderConfigError(reply, error)) return reply;
       if (error instanceof ProviderProjectIdsError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -334,7 +366,11 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // "Test connection" of a stored provider: its credentials are decrypted here and never leave. The outcome is kept on the record.
+  // "Test connection" of a stored provider: its credentials are decrypted here and never leave. Without a body it re-tests
+  // the stored connection and keeps the outcome on the record. With `{ credentials?, settings? }` (the edit form's unsaved
+  // values) it tests what an update with those values would store - a blank credential keeps the stored one, settings
+  // replace the stored ones - and keeps nothing: the outcome describes a connection that is not saved. Same admin gate as
+  // updating the provider.
   app.post('/providers/:id/test', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
@@ -348,28 +384,37 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
 
-      const { record, credentials } = await loadProviderRuntimeData(session.tenantDbName, {
-        id,
-        tenantId: session.tenantId,
-      });
+      let overrides: ProviderTestOverrides;
+      try {
+        overrides = readSavedTestOverrides(request);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'Invalid payload' });
+      }
+
+      const overridden = hasProviderTestOverrides(overrides);
+      const { record, credentials, settings } = overridden
+        ? await resolveProviderTestTarget(session.tenantDbName, { id, tenantId: session.tenantId }, overrides)
+        : await loadStoredTestTarget(session.tenantDbName, id, session.tenantId);
 
       const result = await testProviderConnection({
         type: record.type,
         driver: record.driver,
         credentials,
-        settings: record.settings ?? {},
+        settings,
         tenantId: session.tenantId,
         providerKey: record.key,
       });
 
-      const deployments = foundCount(result);
-      await recordProviderTest(session.tenantDbName, id, {
-        ok: result.ok,
-        at: new Date(),
-        latencyMs: result.latencyMs,
-        message: result.message,
-        ...(deployments !== undefined ? { deployments } : {}),
-      });
+      if (!overridden) {
+        const deployments = foundCount(result);
+        await recordProviderTest(session.tenantDbName, id, {
+          ok: result.ok,
+          at: new Date(),
+          latencyMs: result.latencyMs,
+          message: result.message,
+          ...(deployments !== undefined ? { deployments } : {}),
+        });
+      }
       return reply.code(200).send(result);
     } catch (error) {
       return sendProviderError(reply, error);
@@ -408,7 +453,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
-        const provider = await getProviderConfigById(session.tenantDbName, id);
+        // The edit form opens from this read: it carries which credential fields are stored (names, never values).
+        const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
         if (!provider || provider.tenantId !== session.tenantId) {
           return reply.code(404).send({ error: 'Not found' });
         }
@@ -417,7 +463,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const provider = await getProviderConfigById(session.tenantDbName, id);
+      const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
       const assigned = provider && (
         String(provider.projectId) === String(projectId)
         || (
@@ -445,6 +491,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       const body = readJsonBody<Record<string, unknown>>(request);
       const payload = sanitizeUpdatePayload(body);
       payload.updatedBy = session.userId;
+      // Naming a directory of this server is for owners and admins, whichever scope the edit is in.
+      payload.allowHostPaths = isProviderAdmin(session.userRole);
 
       // Assignment edits (the Projects tab / assign step) may only name projects of the caller's tenant.
       if (payload.projectIds !== undefined) {

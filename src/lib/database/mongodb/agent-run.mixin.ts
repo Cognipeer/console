@@ -532,7 +532,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
-    async promoteScheduledAgentRun(runId: string, tenantId: string): Promise<IAgentRun | null> {
+    async promoteScheduledAgentRun(runId: string, tenantId: string, options: { notBefore?: Date } = {}): Promise<IAgentRun | null> {
       const scheduled = await this.agentRunsCollection().findOne({ _id: objectId(runId), tenantId, status: 'scheduled' });
       if (!scheduled) return null;
       await this.ensureAgentRunsIndexes();
@@ -542,7 +542,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const locks = this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks);
       let run: IAgentRun | null;
       try {
-        run = await this.setAgentRun({ _id: objectId(runId), tenantId, status: 'scheduled' }, { status: 'queued', updatedAt: new Date() });
+        run = await this.setAgentRun(
+          { _id: objectId(runId), tenantId, status: 'scheduled' },
+          { status: 'queued', updatedAt: new Date(), ...(options.notBefore ? { notBefore: options.notBefore } : {}) },
+        );
       } catch (error) {
         await locks.deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
         if (isDuplicateKey(error)) throw new AgentRunConflictError(scheduled.conversationId);
@@ -654,12 +657,14 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
 
     async countAgentRunsByStatus(
       tenantId: string,
-      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string },
+      opts: { statuses: IAgentRun['status'][]; runClass?: AgentRunClass; projectId?: string; channel?: NonNullable<IAgentRun['channel']>; createdAfter?: Date },
     ): Promise<Record<string, number>> {
       const entries = await Promise.all(opts.statuses.map(async (status) => {
         const and: Record<string, unknown>[] = [{ tenantId, status }];
         if (opts.projectId) and.push({ projectId: opts.projectId });
         if (opts.runClass) and.push(runClassFilter(opts.runClass));
+        if (opts.channel) and.push({ channel: opts.channel });
+        if (opts.createdAfter) and.push({ createdAt: { $gt: opts.createdAfter } });
         return [status, await this.agentRunsCollection().countDocuments({ $and: and })] as const;
       }));
       return Object.fromEntries(entries);
