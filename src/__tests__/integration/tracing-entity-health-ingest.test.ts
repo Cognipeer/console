@@ -63,6 +63,7 @@ import {
   sweepStaleTracingSessions,
   triggerTracingSessionFinalizerRun,
 } from '@/lib/services/tracing/sessionFinalizer';
+import { flushUsageRollup, pendingUsageRollupRows } from '@/lib/services/usage/usageRollup';
 import type { EntityMetricType, IEntityMetricAggregate } from '@/lib/database/provider/types.base';
 import { clientTracingApiPlugin } from '@/server/api/plugins/client-tracing';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
@@ -137,6 +138,10 @@ describeForEachProvider('tracing ingest feeds entity health', (getDb) => {
   afterEach(async () => {
     await app.close();
     await drainPendingTasks();
+    // Write the usage counters this test buffered while its provider is still up: otherwise the rollup's
+    // interval flushes them after the provider is torn down, and that rejection fails the whole run.
+    await flushUsageRollup();
+    expect(pendingUsageRollupRows()).toBe(0);
     __resetEntityMetricsRollupForTests();
   });
 
