@@ -269,13 +269,41 @@ describe('what is offered', () => {
     expect(readToolDefinition({ sandbox }).name).toBe('read');
   });
 
-  it('wants exactly one of path and fileId', async () => {
+  it('wants path or fileId', async () => {
     const { read } = build(fakeSandbox(), { session: true });
-    for (const args of [{}, { path: 'a.txt', fileId: 'f1' }]) {
+    for (const args of [{}, { path: ' ', fileId: '' }]) {
       const out = await read(args);
       expect(out.isError).toBe(true);
-      expect(textOf(out)).toBe('Pass exactly one of path or fileId.');
+      expect(textOf(out)).toBe('Pass path or fileId.');
     }
+  });
+
+  // Strict tool calling (OpenAI, Azure) sends every argument; models then fill both, usually with the same value.
+  it('with both given, reads the path unless the fileId names a tool image or a conversation file', async () => {
+    const fake = fakeSandbox();
+    fake.put('/workspace/shot.png', png(800, 600, 4096));
+    const store = createToolMediaStore();
+    const stored = store.put({ base64: 'QUJD', mediaType: 'image/png', name: 'earlier.png' });
+    sessionFiles.records.set('img1', { _id: 'img1', name: 'cat.png', contentType: 'image/png', size: 2048 });
+    const { read } = build(fake, { session: true, media: store });
+    const filled = { offset: 1, limit: 2000, pages: '1', view: 'auto', frames: 1 };
+
+    const same = await read({ path: '/workspace/shot.png', fileId: '/workspace/shot.png', ...filled });
+    expect(same.isError).toBeFalsy();
+    expect(textOf(same)).toBe('[/workspace/shot.png — image image/png 800x600, 4 KB]');
+    expect(images(same)).toHaveLength(1);
+
+    expect(images(await read({ path: 'shot.png', fileId: stored.id }))[0]).toMatchObject({ fileId: stored.id, name: 'earlier.png' });
+    expect(images(await read({ path: 'shot.png', fileId: 'img1' }))[0]).toMatchObject({ fileId: 'img1', name: 'cat.png' });
+    // An id that is gone or unknown leaves the path to be read.
+    expect(textOf(await read({ path: 'shot.png', fileId: 'tm_7_gone' }))).toMatch(/^\[\/workspace\/shot\.png — image/);
+    expect(textOf(await read({ path: 'shot.png', fileId: 'ghost' }))).toMatch(/^\[\/workspace\/shot\.png — image/);
+  });
+
+  it('with both given and no sandbox, reads the fileId', async () => {
+    sessionFiles.records.set('img1', { _id: 'img1', name: 'cat.png', contentType: 'image/png', size: 2048 });
+    const out = await build(null, { session: true }).read({ path: 'img1', fileId: 'img1' });
+    expect(images(out)[0]).toMatchObject({ fileId: 'img1', name: 'cat.png' });
   });
 
   it('says so when the asked-for place does not exist for this agent', async () => {

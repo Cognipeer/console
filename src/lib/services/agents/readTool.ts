@@ -536,6 +536,24 @@ async function readSessionFile(deps: ReadToolDeps, args: ReadArgs): Promise<Tool
     return text(`${sandboxOnly}${renderLines(record.name, window, offset, lines.length, session.readPageChars)}`);
 }
 
+/**
+ * Whether `args` asks for a sandbox path or a conversation file. Strict tool
+ * calling (OpenAI, Azure) sends every argument, and a model then often fills
+ * `path` and `fileId` both, usually with the same value: the fileId is read
+ * when it names an image of an earlier tool result or a file of this
+ * conversation, else the path.
+ */
+async function pickSource(deps: ReadToolDeps, args: ReadArgs): Promise<'path' | 'fileId' | null> {
+    const path = typeof args.path === 'string' ? args.path.trim() : '';
+    const fileId = typeof args.fileId === 'string' ? args.fileId.trim() : '';
+    if (!path || !fileId) return path ? 'path' : fileId ? 'fileId' : null;
+    if (!deps.sandbox) return 'fileId';
+    const named = fileId.startsWith(TOOL_MEDIA_ID_PREFIX)
+        ? Boolean(deps.media?.store.get(fileId))
+        : Boolean(deps.session && await findSessionFileRecord(deps.session.scope, deps.session.conversationId, fileId));
+    return named ? 'fileId' : 'path';
+}
+
 export function buildReadTool(deps: ReadToolDeps): AgentSdkToolInterface | null {
     if (!deps.sandbox && !deps.session) return null;
     const { zod: zd } = deps;
@@ -558,10 +576,9 @@ export function buildReadTool(deps: ReadToolDeps): AgentSdkToolInterface | null 
         func: deps.guard.protect(
             { name: 'agent.read', requestedName: READ_TOOL },
             async (args: ReadArgs): Promise<ToolOutput> => {
-                const hasPath = typeof args.path === 'string' && args.path.trim() !== '';
-                const hasId = typeof args.fileId === 'string' && args.fileId.trim() !== '';
-                if (hasPath === hasId) return fail(`Pass exactly one of ${[deps.sandbox ? 'path' : '', deps.session || deps.media ? 'fileId' : ''].filter(Boolean).join(' or ')}.`);
-                if (hasPath) {
+                const source = await pickSource(deps, args);
+                if (!source) return fail(`Pass ${[deps.sandbox ? 'path' : '', deps.session || deps.media ? 'fileId' : ''].filter(Boolean).join(' or ')}.`);
+                if (source === 'path') {
                     if (!deps.sandbox) return fail('This agent has no sandbox, so there are no sandbox paths to read. Use fileId.');
                     const sandbox = deps.sandbox;
                     return readSandboxFile(sandbox, args, deps.modelTakesImages).catch((error: unknown) => {
