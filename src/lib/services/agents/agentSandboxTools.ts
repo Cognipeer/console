@@ -64,7 +64,6 @@ const DEFAULT_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 600;
 /** Per stream: a build log can be megabytes, and the end is what explains a failure. */
 const MAX_STREAM_CHARS = 16_000;
-const MAX_FILE_CHARS = 100_000;
 const WORKDIR = '/workspace';
 
 /** What a session sandbox leaves on its conversation. */
@@ -153,6 +152,19 @@ export interface AgentSandboxTools {
     cleanup: () => Promise<void>;
     /** Preloaded-files block for the system prompt (empty when the agent has none). */
     promptNote: string;
+    /**
+     * What the `read` tool (`readTool.ts`) needs to read a file of this sandbox. Present when the files group is
+     * enabled; reading is `read`, not a sandbox tool of its own, so it also serves the session's files and images.
+     */
+    reader?: SandboxReader;
+}
+
+export interface SandboxReader {
+    runner: AgentSandboxRunner;
+    ref: AgentSandboxRef;
+    getInstance(): Promise<string>;
+    resolvePath(path: string): string;
+    scrub(text: string): string;
 }
 
 const NO_TOOLS: AgentSandboxTools = {
@@ -459,18 +471,6 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     }
     if (toolsEnabled.files) {
         add(input.createToolFn({
-            name: 'sandbox_read_file',
-            description: `Read a text file from your sandbox. Relative paths are under ${WORKDIR}.`,
-            schema: z.object({ path: z.string().min(1) }),
-            func: guarded(async (args: { path: string }) => {
-                const instanceId = await getInstance();
-                const content = scrub(await runner.readFile(ref, instanceId, resolvePath(args.path)));
-                return content.length > MAX_FILE_CHARS
-                    ? `${content.slice(0, MAX_FILE_CHARS)}\n… [truncated: ${content.length.toLocaleString()} characters in total]`
-                    : content;
-            }),
-        }));
-        add(input.createToolFn({
             name: 'sandbox_write_file',
             description: `Write a text file in your sandbox, creating parent folders. Relative paths are under ${WORKDIR}. Overwrites an existing file.`,
             schema: z.object({ path: z.string().min(1), content: z.string() }),
@@ -604,7 +604,14 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }
     };
 
-    return { tools, definitions, cleanup, collectOutputs, promptNote: tools.length > 0 ? buildSeedPromptNote(config.seedFiles) : '' };
+    return {
+        tools,
+        definitions,
+        cleanup,
+        collectOutputs,
+        promptNote: tools.length > 0 ? buildSeedPromptNote(config.seedFiles) : '',
+        ...(toolsEnabled.files ? { reader: { runner, ref, getInstance, resolvePath, scrub } } : {}),
+    };
 }
 
 /** The running turn's abort signal as an optional field: a Stop ends a command that is in flight. */

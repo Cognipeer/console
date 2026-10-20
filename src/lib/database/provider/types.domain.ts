@@ -2673,7 +2673,7 @@ export interface IAgentAttachmentsConfig {
   allowedMimeTypes?: string[];
   /** A message's attachments are put in the user turn when their text is at most this many tokens (estimated chars/4); otherwise the agent reads them in pages. Default 30000. */
   inlineMaxTokens?: number;
-  /** Characters per page of `session_files_read`. Default 20000. */
+  /** Characters per page of `read` on a session file. Default 20000. */
   readPageChars?: number;
   /** Days a file lives after upload before the cleanup removes it. Default 30. */
   retentionDays?: number;
@@ -2687,7 +2687,7 @@ export interface IAgentAttachmentsConfig {
    * Most images ONE model request carries. Images travel as references and are
    * read from the bucket at the model call; beyond this the oldest ones become a
    * text placeholder naming the file (the agent can look again with
-   * `session_files_view_image`). Default 6.
+   * `read`). Default 6.
    */
   maxImages?: number;
   /** Most image bytes (before base64) one model request carries, oldest dropped first. Default 12000000. */

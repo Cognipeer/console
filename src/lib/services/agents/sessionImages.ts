@@ -19,8 +19,9 @@
  *    large for one request"), since no amount of room would fit it,
  *  - replaces a reference whose file is gone with `[Image "…" is no longer
  *    available]`, and
- *  - turns the result of `session_files_view_image` into a user message that
- *    carries the image (a tool result is text on every provider's wire).
+ *  - turns the images a tool result names (`attachedImages`, see `toolMedia.ts`;
+ *    the legacy `session_files_view_image` result too) into a user message that
+ *    carries them (a tool result is text on every provider's wire).
  *
  * Nothing here is written back: the messages the SDK holds are never touched.
  */
@@ -33,6 +34,7 @@ import {
     type ContentPart,
 } from './sessionAttachmentText';
 import { SESSION_FILES_VIEW_IMAGE_TOOL } from './sessionFilesConfig';
+import { TOOL_MEDIA_ID_PREFIX, type ToolMediaStore } from './toolMedia';
 
 const logger = createLogger('agent-session-images');
 
@@ -49,8 +51,10 @@ export interface SessionImagesOptions {
     maxImages: number;
     /** Most image bytes, before base64, one request carries (`attachments.maxBytes`). */
     maxBytes: number;
-    /** The placeholder may point at `session_files_view_image`. */
+    /** The placeholder may point at the `read` tool. */
     viewImageTool?: boolean;
+    /** The run's tool images (`tm_…` ids): one an earlier turn left behind is gone and is not shown again. */
+    toolMedia?: ToolMediaStore;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -75,34 +79,51 @@ function roleOf(message: LooseMessage): string | undefined {
     return typed.getType?.() ?? typed._getType?.();
 }
 
-/** `{ fileId, name }` when a tool message is the result of `session_files_view_image`. */
-function viewedImage(message: LooseMessage): { fileId: string; name: string } | null {
-    if (roleOf(message) !== 'tool' || message.name !== SESSION_FILES_VIEW_IMAGE_TOOL) return null;
-    if (typeof message.content !== 'string') return null;
+/** At most this many images one tool result can name. */
+const MAX_IMAGES_PER_RESULT = 16;
+
+/** The images a tool message names: the legacy `session_files_view_image` result, or any result with `attachedImages`. */
+function toolMessageImages(message: LooseMessage): Array<{ fileId: string; name: string }> {
+    if (roleOf(message) !== 'tool' || typeof message.content !== 'string' || !message.content.startsWith('{')) return [];
+    let parsed: { ok?: unknown; fileId?: unknown; name?: unknown; attachedImages?: unknown };
     try {
-        const parsed = JSON.parse(message.content) as { ok?: unknown; fileId?: unknown; name?: unknown };
-        if (parsed.ok === true && typeof parsed.fileId === 'string' && parsed.fileId) {
-            return { fileId: parsed.fileId, name: typeof parsed.name === 'string' && parsed.name ? parsed.name : parsed.fileId };
-        }
+        parsed = JSON.parse(message.content) as typeof parsed;
     } catch {
-        // A refusal ("not attached to this conversation") is plain text: nothing to show.
+        return []; // a refusal ("not attached to this conversation") is plain text: nothing to show
     }
-    return null;
+    if (!parsed || typeof parsed !== 'object') return [];
+    if (message.name === SESSION_FILES_VIEW_IMAGE_TOOL) {
+        if (parsed.ok === true && typeof parsed.fileId === 'string' && parsed.fileId) {
+            return [{ fileId: parsed.fileId, name: typeof parsed.name === 'string' && parsed.name ? parsed.name : parsed.fileId }];
+        }
+        return [];
+    }
+    if (!Array.isArray(parsed.attachedImages)) return [];
+    const found: Array<{ fileId: string; name: string }> = [];
+    for (const entry of parsed.attachedImages.slice(0, MAX_IMAGES_PER_RESULT)) {
+        const item = entry as { fileId?: unknown; name?: unknown } | null;
+        if (!item || typeof item.fileId !== 'string' || !item.fileId) continue;
+        found.push({ fileId: item.fileId, name: typeof item.name === 'string' && item.name ? item.name : item.fileId });
+    }
+    return found;
 }
 
 /**
- * The request with every `session_files_view_image` result followed by a user
- * message carrying the image. The message goes after the whole run of tool
+ * The request with every tool result that names images followed by a user
+ * message carrying them. The message goes after the whole run of tool
  * results of that assistant turn — providers want the results adjacent to the
- * calls they answer.
+ * calls they answer. `keep` leaves out an image that cannot be shown any more.
  */
-export function expandViewedImages(messages: unknown[]): unknown[] {
+export function expandViewedImages(messages: unknown[], options: { keep?: (fileId: string) => boolean } = {}): unknown[] {
     const out: unknown[] = [];
     let pending: Array<{ fileId: string; name: string }> = [];
     let changed = false;
     const flush = () => {
         if (pending.length === 0) return;
-        const unique = [...new Map(pending.map((entry) => [entry.fileId, entry])).values()];
+        const unique = [...new Map(pending.map((entry) => [entry.fileId, entry])).values()]
+            .filter((entry) => !options.keep || options.keep(entry.fileId));
+        pending = [];
+        if (unique.length === 0) return;
         out.push({
             role: 'user',
             content: [
@@ -110,15 +131,13 @@ export function expandViewedImages(messages: unknown[]): unknown[] {
                 ...unique.flatMap((entry) => imageParts(entry.fileId, entry.name, 'requested')),
             ],
         });
-        pending = [];
         changed = true;
     };
     for (const entry of messages) {
         const message = entry as LooseMessage | null;
         if (message && typeof message === 'object' && roleOf(message) === 'tool') {
             out.push(entry);
-            const viewed = viewedImage(message);
-            if (viewed) pending.push(viewed);
+            pending.push(...toolMessageImages(message));
             continue;
         }
         flush();
@@ -170,7 +189,10 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
 
     const prepare = async (messages: unknown): Promise<unknown> => {
         if (!Array.isArray(messages)) return messages;
-        const expanded = expandViewedImages(messages);
+        const expanded = expandViewedImages(messages, {
+            // Tool media from an earlier turn is gone; the tool message already says what it was.
+            keep: (fileId) => !fileId.startsWith(TOOL_MEDIA_ID_PREFIX) || Boolean(options.toolMedia?.get(fileId)),
+        });
 
         const slots: Slot[] = [];
         expanded.forEach((entry, messageIndex) => {
@@ -219,7 +241,7 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
                 replacement.set(i, {
                     type: 'text',
                     text: `[Image "${escapeAttribute(name)}" (id ${slot.fileId}) is not shown: a request carries at most ${limit}, and newer images took the room.`
-                        + `${options.viewImageTool ? ` Use ${SESSION_FILES_VIEW_IMAGE_TOOL} to look at it again.` : ''}]`,
+                        + `${options.viewImageTool ? ` Use read with fileId "${slot.fileId}" to look at it again.` : ''}]`,
                 });
                 continue;
             }

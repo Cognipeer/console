@@ -572,4 +572,25 @@ describe('public MCP routes', () => {
       expect(sseSessionCount()).toBe(before);
     });
   });
+
+  describe('media tool results', () => {
+    it('sends a ToolOutput as a native MCP image block', async () => {
+      await start();
+      vi.mocked(executeMcpTool).mockResolvedValue({
+        result: { kind: 'tool_output', content: [{ type: 'text', text: 'shot' }, { type: 'image', mimeType: 'image/png', data: 'AAAA' }] },
+        latencyMs: 5,
+      } as never);
+      const body = json(await post(callTool()));
+      expect(body.result?.content).toEqual([
+        { type: 'text', text: 'shot' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+      ]);
+    });
+
+    it('keeps a text-only result as one text block', async () => {
+      await start();
+      const body = json(await post(callTool()));
+      expect(body.result?.content).toEqual([{ type: 'text', text: '{"echoed":true}' }]);
+    });
+  });
 });

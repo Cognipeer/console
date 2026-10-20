@@ -4526,7 +4526,7 @@ paths:
       tags:
         - Browser
       summary: Capture and persist a screenshot
-      description: Captures a full-page or element screenshot, persists it to the session's artifact bucket, and returns an artifact reference with a download URL.
+      description: Captures a full-page or element screenshot. By default it is persisted to the session's artifact bucket and an artifact reference with a download URL is returned. Set `inline` to true to also receive the image as a base64 content block (and `persist` to false to skip saving it).
       operationId: captureBrowserScreenshot
       parameters:
         - name: sessionKey
@@ -4542,12 +4542,20 @@ paths:
             schema:
               $ref: "#/components/schemas/BrowserScreenshotRequest"
       responses:
-        "201":
-          description: Screenshot persisted; artifact reference returned.
+        "200":
+          description: Screenshot captured inline without being persisted (`inline` true, `persist` false).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BrowserArtifactResult"
+                $ref: "#/components/schemas/BrowserScreenshotInlineResult"
+        "201":
+          description: "Screenshot persisted; artifact reference returned (plus `content` and `structured` when `inline` is true; with `inline` the response carries `persisted: false` instead of `artifact` when saving was requested but failed, for example no artifact bucket)."
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BrowserArtifactResult"
+                  - $ref: "#/components/schemas/BrowserScreenshotInlineResult"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -19163,6 +19171,44 @@ components:
           minimum: 1
           maximum: 100
           description: JPEG quality (only used when type is jpeg).
+        inline:
+          type: boolean
+          description: Return the image in the response as a base64 `content` block.
+        persist:
+          type: boolean
+          default: true
+          description: Save the screenshot to the session's artifact bucket. `persist:false` requires `inline:true`.
+    BrowserScreenshotInlineResult:
+      type: object
+      required:
+        - content
+        - structured
+      properties:
+        artifact:
+          $ref: "#/components/schemas/BrowserArtifactRef"
+        eventId:
+          type: string
+        content:
+          type: array
+          description: A text block describing the capture and an image block with base64 `data`, `mimeType`, `width` and `height`.
+          items:
+            type: object
+            additionalProperties: true
+        structured:
+          type: object
+          required:
+            - url
+          properties:
+            url:
+              type: string
+            width:
+              type: integer
+            height:
+              type: integer
+            fullPage:
+              type: boolean
+            artifact:
+              $ref: "#/components/schemas/BrowserArtifactRef"
     BrowserSession:
       type: object
       description: A live browser automation session belonging to a browser profile.
@@ -28010,7 +28056,7 @@ components:
         outputs:
           type: object
           description: >-
-            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when uploads (`attachments.enabled`) are on and a bucket is set; with uploads off they stay off until `enabled: true` here, which also needs `bucketKey` (else `400` with `field: attachments.bucketKey`). An explicit `true` or `false` always wins. The read tools `session_files_list` / `session_files_read` are offered when uploads or outputs are on and the session holds a file; with uploads off they see only the session's own files. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
+            Files the agent writes itself with `session_files_create` / `session_files_append` (text types: md, csv, txt, json, html, xml, yaml, yml), no sandbox needed. They reach the person as `output_files`, as message attachments with `origin: agent_output` and as `agent.output_file` events. Default: on when uploads (`attachments.enabled`) are on and a bucket is set; with uploads off they stay off until `enabled: true` here, which also needs `bucketKey` (else `400` with `field: attachments.bucketKey`). An explicit `true` or `false` always wins. The read tools `session_files_list` / `read` are offered when uploads or outputs are on and the session holds a file; with uploads off they see only the session's own files. What a client sees: `attachments.outputs` on `GET /agents/{agentKey}`.
           properties:
             enabled:
               type: boolean

@@ -132,7 +132,7 @@ describe('denyUnattendedTools', () => {
 
   it('replaces the execution of a gated tool with a refusal, and leaves every other tool alone', async () => {
     const exec = makeTool('sandbox_exec');
-    const read = makeTool('sandbox_read_file');
+    const read = makeTool('read');
     const [deniedExec, untouchedRead] = denyUnattendedTools([exec, read], asking, new Set());
 
     expect(untouchedRead).toBe(read);
@@ -183,7 +183,7 @@ describe('which tools are asked about', () => {
 
   it('keeps the read-only list in one exported constant', () => {
     expect(HITL_READ_ONLY_TOOLS).toEqual(expect.arrayContaining([
-      'memory_search', 'sandbox_read_file', 'sandbox_list_files', 'sandbox_preview_link', 'web_search', 'ask_user_question',
+      'memory_search', 'read', 'sandbox_list_files', 'sandbox_preview_link', 'web_search', 'ask_user_question',
     ]));
     expect(isReadOnlyTool('knowledge_search')).toBe(true);
     expect(isReadOnlyTool('knowledge_read_document_lines')).toBe(true);
@@ -191,8 +191,17 @@ describe('which tools are asked about', () => {
     expect(isReadOnlyTool('memory_write')).toBe(false);
   });
 
+  it('a policy stored for a tool `read` replaced carries over to `read` (the stricter one wins)', () => {
+    const cfg = (tools: Record<string, 'always' | 'never'>) => resolveHitlConfig({ toolApproval: { enabled: true, defaultPolicy: 'always', tools } });
+    expect(toolApprovalPolicy(cfg({ sandbox_read_file: 'always' }), 'read')).toBe('always');
+    expect(toolApprovalPolicy(cfg({ session_files_view_image: 'always', session_files_read: 'never' }), 'read')).toBe('always');
+    expect(toolApprovalPolicy(cfg({ session_files_read: 'never' }), 'read')).toBe('never');
+    expect(toolApprovalPolicy(cfg({ sandbox_read_file: 'always', read: 'never' }), 'read')).toBe('always');
+    expect(toolApprovalPolicy(cfg({}), 'read')).toBe('never');
+  });
+
   it('read-only tools are never asked about by default; everything else follows the default policy', () => {
-    for (const name of ['knowledge_search', 'memory_search', 'sandbox_read_file', 'sandbox_list_files', 'sandbox_preview_link', 'web_search', 'ask_user_question']) {
+    for (const name of ['knowledge_search', 'memory_search', 'read', 'sandbox_list_files', 'sandbox_preview_link', 'web_search', 'ask_user_question']) {
       expect(toolApprovalPolicy(asking, name)).toBe('never');
     }
     for (const name of ['sandbox_exec', 'sandbox_run_code', 'sandbox_write_file', 'memory_write', 'memory_forget', 'jira/create_issue', 'my_http_tool']) {
@@ -211,7 +220,7 @@ describe('which tools are asked about', () => {
 });
 
 describe('applyToolApprovals', () => {
-  const tools = [{ name: 'sandbox_exec' }, { name: 'sandbox_read_file' }, { name: 'knowledge_search' }];
+  const tools = [{ name: 'sandbox_exec' }, { name: 'read' }, { name: 'knowledge_search' }];
 
   it('returns the very same tools when tool approval is off', () => {
     expect(applyToolApprovals(tools, resolveHitlConfig(undefined), new Set())).toBe(tools);

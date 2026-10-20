@@ -10,6 +10,7 @@
 
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { McpUpstreamError } from './errors';
+import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 import type { IMcpAuthConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
 
 const JSONRPC_VERSION = '2.0';
@@ -151,6 +152,9 @@ export async function remoteCallTool(
       .join('\n');
     throw new Error(text || 'MCP tool call failed');
   }
+
+  // Images/audio/resources survive as a ToolOutput; text-only results keep the legacy unwrap.
+  if (contentHasMedia(result?.content)) return mcpResultToToolOutput(result);
 
   if (result?.structuredContent !== undefined) return result.structuredContent;
 

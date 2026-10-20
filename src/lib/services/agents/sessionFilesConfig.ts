@@ -24,10 +24,11 @@ export const SESSION_FILES_DEFAULTS = {
 /** Longest `attachments.folder` (after normalising). */
 export const SESSION_FILES_FOLDER_MAX_LENGTH = 200;
 
-/** Names of the two read-only tools, in one place for the tool list and the approval exemption. */
+/** Names of the read-only file tools, in one place for the tool list and the approval exemption. */
 export const SESSION_FILES_LIST_TOOL = 'session_files_list';
-export const SESSION_FILES_READ_TOOL = 'session_files_read';
-/** Looks at an image of the session again; offered while the session holds an image and the model takes images. */
+/** Reads any file: a sandbox path or a session file id (`readTool.ts`). Replaces `sandbox_read_file` / `session_files_read` / `session_files_view_image`. */
+export const READ_TOOL = 'read';
+/** The old "look at an image again" tool: no longer offered, but old conversations hold its results (`sessionImages.ts`). */
 export const SESSION_FILES_VIEW_IMAGE_TOOL = 'session_files_view_image';
 /** The agent writes a text file for the person / adds to one it wrote (`attachments.outputs`, no sandbox needed). */
 export const SESSION_FILES_CREATE_TOOL = 'session_files_create';
@@ -39,7 +40,7 @@ export const SESSION_FILE_OUTPUTS_LIMITS = { maxFilesPerTurn: 20, maxFileSizeMb:
 
 /**
  * The file types the agent may write: extension -> the MIME type it is stored as. Text only, so a
- * file is readable by the next turn (`session_files_read`) and cannot carry anything but text.
+ * file is readable by the next turn (`read`) and cannot carry anything but text.
  */
 export const FILE_OUTPUT_TYPES: Readonly<Record<string, string>> = {
     md: 'text/markdown',

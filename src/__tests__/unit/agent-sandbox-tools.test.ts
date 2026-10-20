@@ -70,6 +70,8 @@ import { agentSandboxRunner, type AgentSandboxRunner } from '@/enterprise/regist
 import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { buildAgentSandboxTools, destroyConversationSandbox } from '@/lib/services/agents/agentSandboxTools';
 import { AGENT_SANDBOX_SECRET_MASK, sealAgentSandboxConfig } from '@/lib/services/agents/agentSandboxSecrets';
+import { buildReadTool } from '@/lib/services/agents/readTool';
+import { toolOutputToText, type ToolOutput } from '@/lib/services/tools/toolOutput';
 import type { IAgentSandboxConfig } from '@/lib/database';
 
 function fakeRunner() {
@@ -131,6 +133,17 @@ async function build(sandbox: IAgentSandboxConfig | undefined, extra: Partial<Pa
     return { ...result, warnings, byName };
 }
 
+/** The `read` tool over a run's sandbox, as the agent is given it. */
+function readOver(reader: Awaited<ReturnType<typeof build>>['reader']) {
+    return buildReadTool({
+        createToolFn: createTool,
+        zod: z,
+        guard: { protect: (_spec, execute) => execute as never },
+        sandbox: reader,
+        modelTakesImages: false,
+    }) as unknown as { invoke: (args: Record<string, unknown>) => Promise<ToolOutput> };
+}
+
 let fake: ReturnType<typeof fakeRunner>;
 beforeEach(() => {
     licensed.value = true;
@@ -152,12 +165,16 @@ describe('which tools an agent gets', () => {
         expect(warnings).toEqual([]);
     });
 
-    it('binds all five tools by default, and only the enabled groups otherwise', async () => {
-        expect((await build({ enabled: true })).tools.map((t: { name: string }) => t.name)).toEqual([
-            'sandbox_exec', 'sandbox_run_code', 'sandbox_read_file', 'sandbox_write_file', 'sandbox_list_files',
+    it('binds four tools by default (reading is the `read` tool, fed by `reader`), and only the enabled groups otherwise', async () => {
+        const all = await build({ enabled: true });
+        expect(all.tools.map((t: { name: string }) => t.name)).toEqual([
+            'sandbox_exec', 'sandbox_run_code', 'sandbox_write_file', 'sandbox_list_files',
         ]);
-        expect((await build({ enabled: true, tools: { exec: false, files: false } })).tools.map((t: { name: string }) => t.name))
-            .toEqual(['sandbox_run_code']);
+        expect(all.definitions.map((d) => d.name)).not.toContain('sandbox_read_file');
+        expect(all.reader).toMatchObject({ runner: fake.runner });
+        const noFiles = await build({ enabled: true, tools: { exec: false, files: false } });
+        expect(noFiles.tools.map((t: { name: string }) => t.name)).toEqual(['sandbox_run_code']);
+        expect(noFiles.reader).toBeUndefined();
     });
 
     it('LICENSE: an unlicensed tenant gets no sandbox tools, and the run is told why', async () => {
@@ -196,12 +213,16 @@ describe('ephemeral sandbox', () => {
         expect((fake.calls[1].args[2] as { timeoutSec: number }).timeoutSec).toBe(120);
     });
 
-    it('resolves relative paths under /workspace', async () => {
-        const { byName } = await build({ enabled: true });
+    it('resolves relative paths under /workspace (the reader the `read` tool uses resolves them the same way)', async () => {
+        const { byName, reader } = await build({ enabled: true });
         await byName('sandbox_write_file').invoke({ path: 'src/app.py', content: 'x' });
-        await byName('sandbox_read_file').invoke({ path: '/etc/hosts' });
         expect(fake.calls[1].args[2]).toBe('/workspace/src/app.py');
-        expect(fake.calls[2].args[2]).toBe('/etc/hosts');
+        expect(reader!.resolvePath('src/app.py')).toBe('/workspace/src/app.py');
+        expect(reader!.resolvePath('./a.txt')).toBe('/workspace/a.txt');
+        expect(reader!.resolvePath('/etc/hosts')).toBe('/etc/hosts');
+        // The reader provisions the same machine on first use.
+        expect(await reader!.getInstance()).toBe('sbx-1');
+        expect(fake.ops()).toEqual(['ensureInstance', 'writeFile']);
     });
 });
 
@@ -307,9 +328,9 @@ describe('values the sandbox launch carries', () => {
         const { byName } = await build({ enabled: true });
         await byName('sandbox_exec').invoke({ command: 'true' });
         await byName('sandbox_exec').invoke({ command: 'true' });
-        await byName('sandbox_read_file').invoke({ path: 'a.txt' });
+        await byName('sandbox_list_files').invoke({});
 
-        expect(fake.ops()).toEqual(['ensureInstance', 'launchSecretValues', 'exec', 'exec', 'readFile']);
+        expect(fake.ops()).toEqual(['ensureInstance', 'launchSecretValues', 'exec', 'exec', 'listFiles']);
         const [ref, instanceId] = fake.calls[1].args as [Record<string, unknown>, string];
         expect(instanceId).toBe('sbx-1');
         // The same reference every other runner call carries: the tenant database and the agent.
@@ -361,16 +382,21 @@ describe('values the sandbox launch carries', () => {
         expect(out.stderr).toBe(`${padding}${MASK}`);
     });
 
-    it('masks them in a file the model reads, and before the file is clipped', async () => {
+    it('masks them in a file the model reads, and before a line is cut', async () => {
+        // A line is cut at 2,000 characters: 2,008 before masking, so the cut would land inside the value; 1,996 after.
+        const body = `PASSWORD=${OTHER}\n${'y'.repeat(1_990)}${LAUNCH}\n`;
+        const bytes = Buffer.byteLength(body);
+        fake.runner.exec = answering(`FILE ${bytes} ${bytes} ${bytes} ${Buffer.from(body).subarray(0, 32).toString('hex')}`);
         fake.runner.readFile = async (...args) => {
             fake.calls.push({ op: 'readFile', args });
-            // 100,007 characters before masking, 99,982 after: the clip at 100,000 would land inside the value.
-            return `PASSWORD=${OTHER}\n${'y'.repeat(99_960)}${LAUNCH}`;
+            return body;
         };
-        const { byName } = await build({ enabled: true });
-        const content = await byName('sandbox_read_file').invoke({ path: 'config.env' }) as string;
-        expect(content).toBe(`PASSWORD=${MASK}\n${'y'.repeat(99_960)}${MASK}`);
-        expect(content).not.toContain(LAUNCH.slice(5));
+        const { reader } = await build({ enabled: true });
+        const content = toolOutputToText(await readOver(reader).invoke({ path: 'config.env' }));
+        expect(content).toContain(`PASSWORD=${MASK}`);
+        expect(content).toContain(`${'y'.repeat(1_990)}${MASK}`);
+        expect(content).not.toContain(OTHER);
+        expect(content).not.toContain(LAUNCH.slice(0, 8));
     });
 
     it('masks them in the names and paths of a listing and leaves the rest of an entry alone', async () => {
@@ -435,7 +461,6 @@ describe('values the sandbox launch carries', () => {
 
     it.each([
         ['sandbox_run_code', { language: 'python', code: 'print(1)' }, 'runCode'],
-        ['sandbox_read_file', { path: 'a.txt' }, 'readFile'],
         ['sandbox_write_file', { path: 'a.txt', content: 'x' }, 'writeFile'],
         ['sandbox_list_files', {}, 'listFiles'],
         ['sandbox_preview_link', { port: 3000 }, 'previewLink'],
@@ -444,6 +469,20 @@ describe('values the sandbox launch carries', () => {
         const { byName } = await build({ enabled: true, preview: { enabled: true } });
         const failure = await byName(tool).invoke({ ...args }).catch((error: Error) => error) as Error;
         expect(failure.message).toBe(`failed with ${MASK}`);
+    });
+
+    it('masks them in the error of read, and keeps what kind of error it was', async () => {
+        class ExecError extends Error {
+            constructor(message: string) {
+                super(message);
+                this.name = 'ExecError';
+            }
+        }
+        fake.runner.exec = async () => { throw new ExecError(`failed with ${LAUNCH}`); };
+        const { reader } = await build({ enabled: true });
+        const failure = await readOver(reader).invoke({ path: 'a.txt' }).catch((error: Error) => error) as Error;
+        expect(failure.message).toBe(`failed with ${MASK}`);
+        expect(failure.name).toBe('ExecError');
     });
 
     it('masks the agent\'s own secrets in the error of a machine that would not start', async () => {

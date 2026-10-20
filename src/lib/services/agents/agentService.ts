@@ -125,6 +125,14 @@ import { addPlaygroundUsage, normalizePlaygroundUsage, pausedLegsUsage } from '.
 import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
+import {
+    createCompositeImageSource,
+    createToolMediaStore,
+    withToolMedia,
+    type ToolMediaContext,
+} from './toolMedia';
+import { buildReadTool, readToolDefinition, READ_TOOL } from './readTool';
+import { isToolOutput } from '@/lib/services/tools/toolOutput';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { outputFileEventData, toClientOutputFiles, toClientPendingAction, toFileAnnotations, type ClientFileAnnotation, type ClientOutputFile, type ClientPendingAction } from './clientWire';
@@ -1848,6 +1856,10 @@ type BuildSubagentsInput = {
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
     images?: SessionImagesOptions;
+    /** The run's tool-image store: a child's tools show their images the same way (judged by the child's own model). */
+    toolMedia?: ToolMediaContext;
+    /** The parent's model takes images: what a child without a model of its own runs on. */
+    modelTakesImages?: boolean;
     /** Whose run this is, for the usage rows of a sub-agent's model calls. */
     caller?: AgentModelCaller;
     /**
@@ -1987,10 +1999,13 @@ export async function buildAgentSubagents(
         }
 
         let childModel: unknown;
+        let childTakesImages = input.modelTakesImages === true;
         if (modelKey) {
             const built = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
             if (built.ok) {
                 childModel = built.chatModel;
+                // Its model is only wrapped to resolve image references when the run has image options.
+                childTakesImages = built.takesImages && Boolean(input.images);
                 models.push(built.model);
             } else {
                 input.onWarning?.(`Sub-agent "${entry.name}" runs on this agent's model: ${built.message}.`);
@@ -2005,7 +2020,9 @@ export async function buildAgentSubagents(
             ...(entry.title ? { title: entry.title } : {}),
             header: entry.header || entry.title || entry.name,
             systemPrompt,
-            ...(childTools.length > 0 ? { tools: childTools } : {}),
+            ...(childTools.length > 0
+                ? { tools: input.toolMedia ? childTools.map((tool) => withToolMedia(tool, { ...input.toolMedia!, modelTakesImages: childTakesImages })) : childTools }
+                : {}),
             ...(childModel ? { model: childModel } : {}),
             ...(entry.limits ? { limits: entry.limits } : {}),
             ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
@@ -2084,7 +2101,7 @@ async function buildSubagentModel(
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
     caller?: AgentModelCaller,
-): Promise<{ ok: true; chatModel: unknown; model: PricedModel } | { ok: false; message: string }> {
+): Promise<{ ok: true; chatModel: unknown; model: PricedModel; takesImages: boolean } | { ok: false; message: string }> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') {
@@ -2111,6 +2128,7 @@ async function buildSubagentModel(
             ok: true,
             chatModel: images ? withSessionImages(chatModel, images) : chatModel,
             model: { key: model.key, modelId: model.modelId, pricing: model.pricing },
+            takesImages: resolveModelCapabilities(model).inputModalities.includes('image'),
         };
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
@@ -2254,6 +2272,8 @@ export async function buildBoundTools(
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
                                     isError ? (typeof result === 'string' ? result : 'Tool reported an error') : undefined,
                                 );
+                                // A result with media stays an object: `withToolMedia` shows its images to the model.
+                                if (isToolOutput(result)) return result;
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {
                                 const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
@@ -2316,6 +2336,7 @@ export async function buildBoundTools(
 
                 const dispatch = async (args: Record<string, unknown>) => {
                     const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
+                    if (isToolOutput(result)) return result;
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
@@ -4192,43 +4213,36 @@ async function buildLocalAgentRun(input: {
         toolDefinitions.push(...memoryToolDefinitions(allowWrites, mountedStores.map((m) => m.mount.storeKey)));
     }
 
-    // Files attached to the session: the agent can list them and read them page
-    // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file and the agent takes uploads
-    // or writes files (then they are its own outputs). While it holds an
-    // image and the model takes images, the agent can also look at the image
-    // again (`session_files_view_image`).
+    // Files attached to the session: the agent can list them (`session_files_list`) and read
+    // them, images included, with `read` (built below next to the sandbox). Offered whenever the
+    // conversation holds a file and the agent takes uploads or writes files (then they are its
+    // own outputs).
     const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
     const filesCfg = resolveAttachmentsConfig(config.attachments);
     const sessionFilesScope = { tenantDbName, tenantId, projectId };
     const outputsOn = outputsAvailability(config);
-    let sessionImages: SessionImagesOptions | undefined;
+    // What this run's tools showed the model (screenshots, rendered pages): shared with its sub-agents.
+    const toolMedia: ToolMediaContext = {
+        store: createToolMediaStore(),
+        modelTakesImages,
+        maxImageBytes: Math.min(filesCfg.maxBytes, 5 * 1024 * 1024),
+    };
+    let sessionFacts: Awaited<ReturnType<typeof conversationFileFacts>> = { any: false, images: false };
     if (input.conversation) {
         const conversationId = String(input.conversation._id);
-        const facts = agentTakesAttachments(config) || outputsOn.available
+        sessionFacts = agentTakesAttachments(config) || outputsOn.available
             ? await conversationFileFacts(db, conversationId)
             : { any: false, images: false };
-        const viewImage = facts.images && modelTakesImages;
-        if (facts.any) {
+        if (sessionFacts.any) {
             tools.push(...buildSessionFileTools({
                 createToolFn: createTool,
                 zod: z,
                 guard: toolGuard,
                 scope: sessionFilesScope,
                 conversationId,
-                readPageChars: filesCfg.readPageChars,
-                viewImage,
             }));
-            toolDefinitions.push(...sessionFileToolDefinitions(filesCfg.readPageChars, { viewImage }));
+            toolDefinitions.push(...sessionFileToolDefinitions());
         }
-        // Images in this session's context are references; the bytes are read at the model call.
-        // Wrapped even for an agent that no longer takes files: its saved state can still hold references.
-        sessionImages = {
-            source: createSessionImageSource(sessionFilesScope, conversationId),
-            maxImages: filesCfg.maxImages,
-            maxBytes: filesCfg.maxBytes,
-            viewImageTool: viewImage,
-        };
     }
 
     // Files the agent writes itself (`session_files_create` / `_append`, no sandbox needed): offered to a run with a
@@ -4280,6 +4294,42 @@ async function buildLocalAgentRun(input: {
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
+    // `read`: one tool for the sandbox's files and the conversation's (images, PDFs, video included).
+    const readSession = input.conversation && sessionFacts.any
+        ? { scope: sessionFilesScope, conversationId: String(input.conversation._id), readPageChars: filesCfg.readPageChars }
+        : undefined;
+    const readTool = buildReadTool({
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+        ...(readSession ? { session: readSession } : {}),
+        media: { store: toolMedia.store },
+        modelTakesImages,
+    });
+    if (readTool) {
+        tools.push(readTool);
+        toolDefinitions.push(readToolDefinition({
+            ...(sandboxTools.reader ? { sandbox: sandboxTools.reader } : {}),
+            ...(readSession ? { session: readSession } : {}),
+            media: { store: toolMedia.store },
+        }));
+    }
+    // Images in this session's context are references (a session file, or a tool's image of this run); the
+    // bytes are read at the model call. Wrapped even for an agent that no longer takes files (its saved
+    // state can still hold references) and for a stateless run, which still shows what its tools return.
+    const sessionImages: SessionImagesOptions | undefined = input.conversation || modelTakesImages
+        ? {
+            source: createCompositeImageSource(
+                toolMedia.store,
+                input.conversation ? createSessionImageSource(sessionFilesScope, String(input.conversation._id)) : null,
+            ),
+            maxImages: filesCfg.maxImages,
+            maxBytes: filesCfg.maxBytes,
+            viewImageTool: Boolean(readTool),
+            toolMedia: toolMedia.store,
+        }
+        : undefined;
     if (sandboxTools.promptNote) {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
     }
@@ -4411,6 +4461,8 @@ async function buildLocalAgentRun(input: {
         runtimeContext,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
+        toolMedia,
+        modelTakesImages,
         caller: {
             agentKey,
             ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
@@ -4449,7 +4501,14 @@ async function buildLocalAgentRun(input: {
     // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
     // gets an error result, the tool never runs) or runs them as they are
     // (`allow`, the owner's explicit choice).
-    const ownTools = reminderTools ? reminderTools.watchTools(tools) : tools;
+    // `read` is exempt from approval by name, so no other tool may carry it (an MCP/custom tool called
+    // `read` could be state-changing): the built-in wins and the other is left out.
+    const approvable = tools.filter((tool) => {
+        const clash = tool !== readTool && (tool as { name?: unknown }).name === READ_TOOL;
+        if (clash) warnings.add(`A tool named "${READ_TOOL}" was left out: the name is reserved for the built-in read tool.`);
+        return !clash;
+    });
+    const ownTools = reminderTools ? reminderTools.watchTools(approvable) : approvable;
     const policyGated = hitlMode === 'ask'
         ? applyToolApprovals(ownTools, hitl, allowedTools)
         : hitlMode === 'deny'
@@ -4462,7 +4521,7 @@ async function buildLocalAgentRun(input: {
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools, ...clientTools] } : {}),
+        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools.map((tool) => withToolMedia(tool, toolMedia)), ...clientTools] } : {}),
         // Nobody to ask in the other modes, so the question tool is not offered.
         ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same

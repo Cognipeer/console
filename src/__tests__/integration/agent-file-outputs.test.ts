@@ -271,11 +271,11 @@ describe('which runs get the tools', () => {
     // The next turn offers the read tools and they see the agent's own file.
     const model = scriptModel((call, messages) => {
       if (call === 0) return calls(['session_files_list', {}]);
-      if (call === 1) return calls(['session_files_read', { fileId: String(record!._id) }]);
+      if (call === 1) return calls(['read', { fileId: String(record!._id) }]);
       return answer(lastToolResult(messages));
     });
     await chat(id, 'what did you write?');
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_create', 'session_files_append', 'session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_create', 'session_files_append', 'session_files_list', 'read']));
     const results = model.seen.flatMap(toolResults);
     expect(results.some((text) => text.includes('plan.md'))).toBe(true);
     expect(results.some((text) => text.includes('step one'))).toBe(true);
@@ -378,7 +378,7 @@ describe('creating a file', () => {
     // The later turn's answer carries nothing new either.
     expect(after.messages.at(-1)).not.toHaveProperty('attachments');
     // The agent can still find its file with the read tools.
-    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'read']));
   });
 
   it('holds the turn to the author’s file count: the files past it are refused with a sentence, the turn goes on', async () => {

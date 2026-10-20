@@ -60,7 +60,7 @@ The session page and the Sessions list do not guess from the viewer's role: the 
 
 ### What is not asked about
 
-Tools that only read are never asked about, unless you set them to *Always ask*: `knowledge_*`, `memory_search`, `sandbox_read_file`, `sandbox_list_files`, `sandbox_preview_link`, `web_search`, `session_files_list`, `session_files_read` and the question tool itself. Everything else Console builds follows the default: bound, MCP and custom tools, memory writes, `sandbox_exec`, `sandbox_run_code`, `sandbox_write_file`.
+Tools that only read are never asked about, unless you set them to *Always ask*: `knowledge_*`, `memory_search`, `read`, `sandbox_list_files`, `sandbox_preview_link`, `web_search`, `session_files_list` and the question tool itself. Everything else Console builds follows the default: bound, MCP and custom tools, memory writes, `sandbox_exec`, `sandbox_run_code`, `sandbox_write_file`.
 
 The agent-sdk's own tools (plan, context, delegation, skills) are never gated.
 

@@ -258,7 +258,7 @@ describe('the request inspector draws the files a message carried', () => {
 describe('the session inspector hands a message’s attachments to the request inspector', () => {
   const messages: ChatMessage[] = [
     { role: 'user', content: 'read this', attachments: [photo, report], timestamp: '2026-10-11T10:00:00Z' },
-    { role: 'assistant', content: 'done', steps: [{ id: 's1', name: 'sandbox_read_file', args: {}, output: 'x' }] },
+    { role: 'assistant', content: 'done', steps: [{ id: 's1', name: 'read', args: {}, output: 'x' }] },
     { role: 'user', content: 'and no files here', timestamp: '2026-10-11T10:05:00Z' },
   ];
 

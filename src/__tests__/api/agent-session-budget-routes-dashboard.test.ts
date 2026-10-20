@@ -167,7 +167,7 @@ describe('POST …/sessions/:sessionId/continue', () => {
 
     it('streams the continuation as SSE in the chat/stream event format', async () => {
         mockFn(executeAgentContinueLocal).mockImplementation(async (request: { onToolEvent?: (e: unknown) => void; onTextChunk?: (t: string) => void }) => {
-            request.onToolEvent?.({ phase: 'start', name: 'sandbox_read_file' });
+            request.onToolEvent?.({ phase: 'start', name: 'read' });
             request.onTextChunk?.('Do');
             return { result: RESULT, response: {}, stopReason: 'end_turn' };
         });

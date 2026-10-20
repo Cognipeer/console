@@ -107,6 +107,8 @@ GET /api/client/v1/browser/sessions/:sessionKey/snapshot
 - `POST /api/client/v1/browser/sessions/:sessionKey/screenshot`
 - `POST /api/client/v1/browser/sessions/:sessionKey/pdf`
 
+The screenshot `POST` saves to the session's artifact bucket and returns `{ artifact, eventId }`. Pass `"inline": true` to also get the image back as a base64 `content` block (plus a `structured` summary with `url`, `width`, `height`), and `"persist": false` to skip saving it (`persist: false` requires `inline: true`). The `browser_screenshot` agent tool shows the image to the model directly; its `persist: true` option also saves it.
+
 ### Find Text / Diagnostics / Export Profile
 
 - `GET /api/client/v1/browser/sessions/:sessionKey/find?text=…&limit=…` — locate visible text and get a **durable target** for each hit, cheaper than a full snapshot.

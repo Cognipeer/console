@@ -227,4 +227,33 @@ describe('token MCP routes', () => {
       expect(entry).toMatchObject({ status: 'error', errorMessage: 'boom: details', callerType: 'api' });
     });
   });
+
+  describe('media tool results', () => {
+    const image = {
+      kind: 'tool_output',
+      content: [
+        { type: 'text', text: 'shot' },
+        { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+        { type: 'audio', mimeType: 'audio/wav', data: 'BBBB' },
+      ],
+    };
+
+    it('sends a ToolOutput as native MCP image and audio blocks', async () => {
+      vi.mocked(executeMcpTool).mockResolvedValue({ result: image, latencyMs: 4 } as never);
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const content = JSON.parse(response.body).result.content;
+      expect(content).toEqual([
+        { type: 'text', text: 'shot' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        { type: 'audio', data: 'BBBB', mimeType: 'audio/wav' },
+      ]);
+    });
+
+    it('keeps a text-only result as one text block', async () => {
+      const response = await post('/api/client/v1/mcp/crm/message', callTool());
+      const result = JSON.parse(response.body).result as Rpc['result'];
+      expect(result?.content).toEqual([{ type: 'text', text: '{"found":1}' }]);
+      expect(result?.isError).toBe(false);
+    });
+  });
 });

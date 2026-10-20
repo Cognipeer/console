@@ -15,6 +15,8 @@ import { getThisNodeName, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { downloadFile, uploadFile } from '@/lib/services/files';
+import { imageDimensions } from '@/lib/services/tools/mediaSniff';
+import { toolOutput, type ToolOutput } from '@/lib/services/tools/toolOutput';
 import {
   recordUsageEvent,
   resolveUsageAttribution,
@@ -586,7 +588,24 @@ export async function captureScreenshot(
     throw new Error('No artifact bucket configured for this session.');
   }
 
-  const { buffer, contentType } = await browserManager.screenshot(sessionKey, input);
+  const shot = await browserManager.screenshot(sessionKey, input);
+  return persistScreenshotBuffer(ctx, id, sessionKey, bucketKey, shot, input);
+}
+
+/**
+ * Store an already-captured screenshot in the artifact bucket, record the
+ * event and move the session's lastScreenshot pointer. Split out so one
+ * capture can serve both the persisted artifact and an inline image.
+ */
+async function persistScreenshotBuffer(
+  ctx: SessionContext,
+  id: string,
+  sessionKey: string,
+  bucketKey: string,
+  shot: { buffer: Buffer; contentType: string },
+  input: BrowserScreenshotInput & { createdBy: string },
+): Promise<{ artifact: BrowserArtifactRef; eventId: string }> {
+  const { buffer, contentType } = shot;
   const ext = contentType === 'image/jpeg' ? 'jpg' : 'png';
   const fileName = `${sessionKey}-${Date.now()}.${ext}`;
   const upload = await uploadFile(ctx.tenantDbName, ctx.tenantId, ctx.projectId ?? '', {
@@ -628,6 +647,67 @@ export async function captureScreenshot(
     .catch(() => undefined);
 
   return { artifact, eventId: event.id };
+}
+
+/**
+ * One screenshot as a ToolOutput: the image itself (so a model can look at it)
+ * plus a short text line. It is saved to the artifact bucket only when
+ * `persist` is true; a missing bucket then degrades to a note, never an error,
+ * because the caller still has the image.
+ */
+export async function captureScreenshotOutput(
+  ctx: SessionContext,
+  sessionKey: string,
+  input: BrowserScreenshotInput & { persist?: boolean; createdBy: string; bucketKeyOverride?: string },
+): Promise<ToolOutput & { eventId?: string }> {
+  const { id, record } = await loadSessionForKey(ctx, sessionKey);
+  const shot = await browserManager.screenshot(sessionKey, input);
+  const { buffer, contentType } = shot;
+  const dims = imageDimensions(buffer, contentType);
+  const url = browserManager.getLiveStatus(sessionKey)?.url ?? '';
+  const fullPage = input.fullPage === true;
+
+  let artifact: BrowserArtifactRef | undefined;
+  let eventId: string | undefined;
+  let note = '';
+  if (input.persist === true) {
+    const bucketKey =
+      input.bucketKeyOverride ?? record.artifactBucketKey ?? getConfig().browser.defaultArtifactBucketKey;
+    if (!bucketKey) {
+      note = ' — not saved: no artifact bucket configured for this session';
+    } else {
+      try {
+        ({ artifact, eventId } = await persistScreenshotBuffer(ctx, id, sessionKey, bucketKey, shot, input));
+        note = ` — saved: ${artifact.url}`;
+      } catch (err) {
+        note = ` — not saved: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+  }
+
+  const size = dims ? ` (${dims.width}x${dims.height}${fullPage ? ', full page' : ''})` : fullPage ? ' (full page)' : '';
+  const text = `Screenshot of ${url || 'the page'}${size}${note}`;
+  const out = toolOutput(
+    [
+      { type: 'text', text },
+      {
+        type: 'image',
+        mimeType: contentType,
+        data: buffer.toString('base64'),
+        name: contentType === 'image/jpeg' ? 'screenshot.jpg' : 'screenshot.png',
+        ...(dims ? { width: dims.width, height: dims.height } : {}),
+      },
+    ],
+    {
+      structuredContent: {
+        url,
+        ...(dims ? { width: dims.width, height: dims.height } : {}),
+        fullPage,
+        ...(artifact ? { artifact } : {}),
+      },
+    },
+  );
+  return eventId ? Object.assign(out, { eventId }) : out;
 }
 
 export async function exportSessionPdf(

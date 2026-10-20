@@ -701,7 +701,7 @@ describe('agent spend counts toward the tenant spend limits', () => {
   });
 
   it('a resumed turn (after an approval) and a continued session are gated too', async () => {
-    // `sandbox_read_file` is read-only, so ask for it explicitly: the first turn pauses after one request.
+    // `read` is read-only, so ask for it explicitly: the first turn pauses after one request.
     await createAgent({
       humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always', tools: { sandbox_read_file: 'always' } } },
     });

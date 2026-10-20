@@ -22,6 +22,7 @@
  * quote.
  */
 
+import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseProvider, IMcpServer, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
@@ -335,6 +336,9 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
     }
 
     if (outcome.ok) {
+      if (isToolOutput(outcome.result)) {
+        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, MCP_PROTOCOL_VERSION)));
+      }
       return respond(jsonRpcOk(id, {
         content: [
           {

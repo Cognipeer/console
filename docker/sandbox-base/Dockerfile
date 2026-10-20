@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \
       build-essential \
       pkg-config \
+      # PDF text + page images for the agent's read tool (pdftotext/pdftoppm/pdfinfo)
+      poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # A few ubiquitous Python libs so simple data tasks work out of the box,

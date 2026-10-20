@@ -14,7 +14,7 @@
  * Every image part has a text handle in front of it
  * (`[Attached image: "name" (id …)]`) — without one the model has nothing to
  * call the picture by once the summarizer flattens the turn, and nothing to ask
- * `session_files_view_image` for.
+ * `read` for.
  *
  * Everything the turn adds to the person's text sits after
  * `ATTACHMENT_BLOCK_MARKER`, so the transcript can keep what the person typed
@@ -24,7 +24,7 @@
 import type { IAgentMessageAttachment } from '@/lib/database/provider/types.domain';
 import {
     SESSION_FILES_LIST_TOOL,
-    SESSION_FILES_READ_TOOL,
+    READ_TOOL,
     SESSION_FILES_VIEW_IMAGE_TOOL,
     isImageMime,
     isSendableImageMime,
@@ -136,7 +136,7 @@ export function attachmentSummaryLine(counts: AttachmentCounts): string {
     const parts: string[] = [];
     if (counts.documentsInline > 0) parts.push(`${plural(counts.documentsInline, 'document')} included below`);
     if (counts.documentsPaged > 0) {
-        parts.push(`${plural(counts.documentsPaged, 'document')} to read with the tools (${SESSION_FILES_LIST_TOOL}, ${SESSION_FILES_READ_TOOL})`);
+        parts.push(`${plural(counts.documentsPaged, 'document')} to read with the tools (${SESSION_FILES_LIST_TOOL}, ${READ_TOOL})`);
     }
     if (counts.documentsUnreadable > 0) parts.push(`${plural(counts.documentsUnreadable, 'document')} whose text could not be extracted`);
     if (counts.imagesShown > 0) parts.push(`${plural(counts.imagesShown, 'image')} shown below`);

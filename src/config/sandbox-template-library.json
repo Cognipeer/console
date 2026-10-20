@@ -18,6 +18,24 @@
         { "port": 8080, "label": "app" }
       ],
       "default": true
+    },
+    {
+      "key": "web-e2e",
+      "name": "Web app + browser testing",
+      "description": "Playwright + Chromium + ffmpeg on top of the base image. Run the app, drive it with Playwright, and read screenshots/videos with read. Launch Chromium with --disable-dev-shm-usage (the sandbox /dev/shm is small).",
+      "baseImage": "cognipeer/sandbox-web-e2e:latest",
+      "runtime": "multi",
+      "isolation": "runc",
+      "resources": { "cpuCores": 2, "memoryMb": 4096, "diskMb": 8192 },
+      "env": {},
+      "toolboxPort": 8787,
+      "previewPorts": [
+        { "port": 3000, "label": "dev server" },
+        { "port": 5173, "label": "vite" },
+        { "port": 8000, "label": "http" },
+        { "port": 8080, "label": "app" },
+        { "port": 9323, "label": "playwright report" }
+      ]
     }
   ]
 }

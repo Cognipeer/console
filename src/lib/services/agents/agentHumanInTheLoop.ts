@@ -29,6 +29,8 @@ import type {
  */
 export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'memory_search',
+    // `read` replaces the next three; the old names stay for stored configs.
+    'read',
     'sandbox_read_file',
     'sandbox_list_files',
     'sandbox_preview_link',
@@ -98,6 +100,17 @@ export function hitlCanPause(resolved: ResolvedHitlConfig): boolean {
     return resolved.toolApprovalEnabled || resolved.askUserEnabled;
 }
 
+/** `read` replaced these tools; a policy an admin stored for one of them keeps applying (the stricter wins). */
+const REPLACED_BY_READ = ['sandbox_read_file', 'session_files_read', 'session_files_view_image'] as const;
+
+function carryOverReadPolicies(policies: Record<string, AgentToolApprovalPolicy>): Record<string, AgentToolApprovalPolicy> {
+    if (policies.read === 'always') return policies;
+    const old = REPLACED_BY_READ.map((name) => policies[name]).filter((policy) => policy === 'always' || policy === 'never');
+    if (old.includes('always')) policies.read = 'always';
+    else if (policies.read === undefined && old.length > 0) policies.read = 'never';
+    return policies;
+}
+
 export function resolveHitlConfig(
     hitl: IAgentConfig['humanInTheLoop'] | undefined,
 ): ResolvedHitlConfig {
@@ -106,7 +119,7 @@ export function resolveHitlConfig(
     return {
         toolApprovalEnabled: approval?.enabled === true,
         defaultPolicy: approval?.defaultPolicy === 'never' ? 'never' : HITL_DEFAULTS.defaultPolicy,
-        toolPolicies: approval?.tools && typeof approval.tools === 'object' ? { ...approval.tools } : {},
+        toolPolicies: carryOverReadPolicies(approval?.tools && typeof approval.tools === 'object' ? { ...approval.tools } : {}),
         askUserEnabled: hitl?.askUser?.enabled === true,
         allowFreeText: hitl?.askUser?.allowFreeText !== false,
         timeoutMinutes: typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 0

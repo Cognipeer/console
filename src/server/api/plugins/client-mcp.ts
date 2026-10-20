@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -451,6 +452,9 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     });
 
     if (outcome.ok) {
+      if (isToolOutput(outcome.result)) {
+        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, MCP_PROTOCOL_VERSION)));
+      }
       return respond(jsonRpcOk(id, {
         content: [
           {
