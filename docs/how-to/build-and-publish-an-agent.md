@@ -194,7 +194,7 @@ apart from the two sub-features flagged below.
 |---|---|
 | 1 · Identity | **Name** (required), **Description** |
 | 2 · Tool source | **Source type**: **OpenAPI spec** · **Remote MCP URL** · **npx / uvx package** |
-| 3 · Upstream authentication | **Authentication type**: None · Bearer token · Custom header · Basic auth. "Secrets are encrypted at rest." Not shown for the npx / uvx source, which makes no upstream HTTP call — the two sections below then renumber to 3 and 4. |
+| 3 · Upstream authentication | **Authentication type**: None · Bearer token · Custom header · Basic auth · Console identity (a token for the person behind each call, for remote and OpenAPI servers). "Secrets are encrypted at rest." Not shown for the npx / uvx source, which makes no upstream HTTP call — the two sections below then renumber to 3 and 4. |
 | 4 · Endpoint exposure | **Protocols** — **Streamable HTTP (JSON-RPC)**, **SSE (legacy)**; at least one must stay enabled. **Access mode** — **API token required** or **Public URL (no auth)**. |
 | 5 · Aegis shield | **Mode** — Off · Monitor · Enforce — and **Shield**. |
 

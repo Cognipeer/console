@@ -342,6 +342,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   `via: { kind: "delegated", issuer }` where a record has a metadata field. A person's drawer in the IAM center has a new
   **Activity** section.
 
+### Console identity for MCP servers and connected agents
+
+- New upstream auth option **Console identity** for remote and OpenAPI MCP servers (`upstreamAuth.type:
+  "console_identity"`) and connected agents (`connection.authType: "console_identity"`). No secret is stored: every
+  call carries `Authorization: Bearer <token>`, an RS256 JWT (`typ: at+jwt`, five minutes) that Console signs for the
+  person behind the call, with `aud` = the server's URL, `sub` = the Console user id, the person's email and name, the SSO
+  subject (`idp`, `idp_sub`) for an SSO account, `src`, `via` (`session`, `api_token`, `delegated`, `trigger`) and
+  `act` (the calling agent). Trigger runs act for the trigger's accountable person; a call with nobody behind it
+  (public MCP / A2A, internal actors), or for an unknown or disabled account, is refused before anything is sent. A
+  turn that continues after an approval or an answer keeps calling for the person the turn is for, not the approver.
+- One RSA key per workspace (`iam_meta`, private half encrypted), created when the option is first saved. Public key set
+  and discovery document, without a token: `GET /api/public/identity/{tenantId}/.well-known/jwks.json` and
+  `.../openid-configuration`; the issuer is built from `APP_URL`. The create and settings screens show the issuer and
+  key set URL. See `docs/console/guide/govern/iam/console-identity` in the docs.
+- Agent manifests that embed MCP servers keep `console_identity` as their auth shape; importing one asks for no credential.
+- Updating an MCP server with settings its source cannot take (Console identity on an npx / uvx, internal or composite
+  server) answers `400` instead of `500`.
+
 ### Portals (Enterprise)
 
 - Opening a portal and running an agent through it are decided by the policy engine. A portal's access list is its

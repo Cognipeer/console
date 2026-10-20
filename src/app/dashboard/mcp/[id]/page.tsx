@@ -62,6 +62,7 @@ import McpToolsPanel from '@/components/mcp/McpToolsPanel';
 import McpMembersPanel from '@/components/mcp/McpMembersPanel';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SpecImportField, { type SpecFormat } from '@/components/common/SpecImportField';
+import ConsoleIdentityNote, { type ConsoleIdentityIssuerInfo } from '@/components/iam/ConsoleIdentityNote';
 import type { McpServerView, McpRequestLogView } from '@/lib/services/mcp';
 
 const AUTH_LABELS: Record<string, string> = {
@@ -69,6 +70,7 @@ const AUTH_LABELS: Record<string, string> = {
   token: 'Bearer Token',
   header: 'Custom Header',
   basic: 'Basic Auth',
+  console_identity: 'Console identity',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -184,6 +186,7 @@ export default function McpDetailPage() {
     stdioSandbox: { available: boolean };
     guardrail?: { available: boolean };
     aegis?: { hookAvailable: boolean };
+    consoleIdentity?: ConsoleIdentityIssuerInfo;
   } | null>(null);
   const [guardrails, setGuardrails] = useState<GuardrailOption[]>([]);
   const [savingGuardrail, setSavingGuardrail] = useState(false);
@@ -2222,6 +2225,10 @@ async with sse_client(
                     { value: 'token', label: 'Bearer Token' },
                     { value: 'header', label: 'Custom Header' },
                     { value: 'basic', label: 'Basic Auth' },
+                    // Console identity needs an upstream URL to mint the token for: remote and OpenAPI servers.
+                    ...(server.sourceType === 'remote' || (server.sourceType ?? 'openapi') === 'openapi'
+                      ? [{ value: 'console_identity', label: 'Console identity' }]
+                      : []),
                   ]}
                   {...form.getInputProps('authType')}
                 />
@@ -2256,6 +2263,10 @@ async with sse_client(
                   <PasswordInput {...form.getInputProps('authPassword')} />
                 </FormField>
               </FormRow>
+            )}
+
+            {form.values.authType === 'console_identity' && (
+              <ConsoleIdentityNote info={caps?.consoleIdentity} />
             )}
           </FormSection>
         ) : null}

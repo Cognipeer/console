@@ -34,7 +34,7 @@ export {
 
 export type { McpServerMonitorEntry, McpRequestClientInfo } from './mcpService';
 
-export { McpToolInputError, McpUpstreamError, isMcpToolInputError, isMcpUpstreamError } from './errors';
+export { McpServerConfigError, McpToolInputError, McpUpstreamError, isMcpServerConfigError, isMcpToolInputError, isMcpUpstreamError } from './errors';
 
 export {
   defaultAnnotationsForSource,

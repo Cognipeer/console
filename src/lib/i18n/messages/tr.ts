@@ -14,6 +14,7 @@ import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
 import { healthDigestTr } from './healthDigest.tr';
+import { consoleIdentityTr } from './consoleIdentity.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { projectTabsTr } from './projectTabs.tr';
 import { portalsNowTr } from './portalsNow.tr';
@@ -1244,6 +1245,7 @@ export const tr: typeof en = {
   entityHealth: entityHealthTr,
   agentTemplates: agentTemplatesTr,
   healthDigest: healthDigestTr,
+  consoleIdentity: consoleIdentityTr,
   analyticsDashboards: analyticsDashboardsTr,
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
@@ -2803,6 +2805,8 @@ export const tr: typeof en = {
       connectionDesc: 'Harici agent’ın protokolünü ve uç noktasını seçin.',
       authSection: 'Kimlik Doğrulama',
       authDesc: 'Her istekle gönderilen isteğe bağlı kimlik bilgileri. Satır içi anahtar, sağlayıcı referansına göre önceliklidir.',
+      authMode: 'Yöntem',
+      authModeKey: 'API anahtarı veya sağlayıcı',
       advancedSection: 'Gelişmiş',
       advancedDesc: 'Standart dışı uç noktalar için isteğe bağlı başlıklar ve yanıt yolu.',
       name: 'Ad',

@@ -67,7 +67,9 @@ async function invokeMcpJob(payload: InvokePayload): Promise<unknown> {
     if (server.status !== 'active') {
       throw new Error('MCP server is disabled');
     }
-    return executeMcpToolLocal(server, payload.toolName, payload.args, payload.runtimeHeaders);
+    // The person a call is for travels as plain data; this node checks the account and mints the token.
+    const identity = (payload as Partial<McpInvokeJob>).identity;
+    return executeMcpToolLocal(server, payload.toolName, payload.args, payload.runtimeHeaders, identity);
   });
 }
 

@@ -191,7 +191,8 @@ export interface IConfigAuditLog {
 
 export type McpServerStatus = 'active' | 'disabled';
 
-export type McpAuthType = 'none' | 'token' | 'header' | 'basic';
+/** `console_identity`: no stored secret; each call carries a token Console signs for the person behind it (lib/iam/consoleIdentity.ts). */
+export type McpAuthType = 'none' | 'token' | 'header' | 'basic' | 'console_identity';
 
 export interface IMcpAuthConfig {
   type: McpAuthType;

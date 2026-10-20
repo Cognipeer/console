@@ -123,6 +123,9 @@ tags:
   - name: Agent Triggers
     description: >-
       Saved ways of starting an agent - on a cron schedule, once, by hand, or when an external system posts an event (GitHub, GitLab, Azure DevOps or any sender) - and the public webhook URL that receives those events. Every fire is an ordinary run (`channel: trigger`), listed by `GET /agents/runs?trigger_id=`.
+  - name: Console Identity
+    description: >-
+      Public signing keys of a workspace's Console identity issuer. An MCP server or connected agent set up for Console identity receives, with every call, a short-lived token Console signs for the person behind the call (`Authorization: Bearer`, RS256, five minutes, audience = the server URL); it verifies the token with these keys.
 paths:
   /a2a/{agentKey}:
     post:
@@ -15439,6 +15442,133 @@ paths:
                   type: api_error
                   message: The webhook cannot be looked up right now; retry later.
                   code: webhook_unavailable
+  /identity/{tenantId}/.well-known/jwks.json:
+    servers:
+      - url: https://console.cognipeer.com/api/public
+        description: Cognipeer managed service
+      - url: '{gatewayUrl}/api/public'
+        description: Self-hosted / on-premise gateway
+        variables:
+          gatewayUrl:
+            default: http://localhost:3000
+            description: Scheme and host of your Console gateway
+    get:
+      tags: [Console Identity]
+      summary: Get the public signing keys of a workspace's Console identity issuer (no token)
+      operationId: getConsoleIdentityJwks
+      security: []
+      description: |-
+        The JSON Web Key Set that verifies the tokens Console sends to MCP servers and connected agents set up for
+        **Console identity**. Each token is an RS256 JWT (`typ: at+jwt`) whose `kid` names one of these keys, issued by
+        `https://<console>/api/public/identity/{tenantId}` for the URL it was sent to (`aud`), valid five minutes. A
+        workspace that has not used Console identity yet returns an empty `keys` array. Responses may be cached
+        (`Cache-Control`); fetch the set again when a token names an unknown `kid`.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: The workspace (tenant) id, as it appears in the issuer URL (`iss`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The key set.
+          headers:
+            Cache-Control:
+              description: '`public, max-age=300` (`max-age=30` while the set is empty).'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsoleIdentityJwks'
+              example:
+                keys:
+                  - kty: RSA
+                    n: 0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw
+                    e: AQAB
+                    kid: 3pYhHkY2rQx2uH4Ezm8w3E2b0yYQYw9P8u8t3yJbF1k
+                    alg: RS256
+                    use: sig
+        '404':
+          description: Unknown workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Not found
+        '429':
+          description: Too many requests from this client address.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Too many requests
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /identity/{tenantId}/.well-known/openid-configuration:
+    servers:
+      - url: https://console.cognipeer.com/api/public
+        description: Cognipeer managed service
+      - url: '{gatewayUrl}/api/public'
+        description: Self-hosted / on-premise gateway
+        variables:
+          gatewayUrl:
+            default: http://localhost:3000
+            description: Scheme and host of your Console gateway
+    get:
+      tags: [Console Identity]
+      summary: Get the discovery document of a workspace's Console identity issuer (no token)
+      operationId: getConsoleIdentityDiscovery
+      security: []
+      description: |-
+        OpenID-style discovery metadata of the issuer, for API gateways and libraries that locate keys from the
+        issuer URL (`{issuer}/.well-known/openid-configuration`). Console only issues these tokens to itself; there is
+        no authorization or token endpoint.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: The workspace (tenant) id, as it appears in the issuer URL (`iss`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The discovery document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsoleIdentityDiscovery'
+        '404':
+          description: Unknown workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Not found
+        '429':
+          description: Too many requests from this client address.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Too many requests
+        '500':
+          $ref: '#/components/responses/InternalError'
 components:
   securitySchemes:
     BearerAuth:
@@ -22000,6 +22130,70 @@ components:
           additionalProperties:
             type: string
             nullable: true
+    ConsoleIdentityJwks:
+      type: object
+      required:
+        - keys
+      description: JSON Web Key Set (RFC 7517) of the workspace's Console identity issuer. Public keys only.
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, n, e, kid, alg, use]
+            properties:
+              kty:
+                type: string
+                enum: [RSA]
+              n:
+                type: string
+                description: RSA modulus (base64url).
+              e:
+                type: string
+                description: RSA public exponent (base64url).
+              kid:
+                type: string
+                description: Key id; the `kid` header of the tokens this key signs (its RFC 7638 thumbprint).
+              alg:
+                type: string
+                enum: [RS256]
+              use:
+                type: string
+                enum: [sig]
+    ConsoleIdentityDiscovery:
+      type: object
+      required:
+        - issuer
+        - jwks_uri
+      properties:
+        issuer:
+          type: string
+          description: The `iss` of every token of this workspace.
+          example: https://console.cognipeer.com/api/public/identity/65f0c1d2a3b4c5d6e7f80001
+        jwks_uri:
+          type: string
+          example: https://console.cognipeer.com/api/public/identity/65f0c1d2a3b4c5d6e7f80001/.well-known/jwks.json
+        response_types_supported:
+          type: array
+          items:
+            type: string
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+        claims_supported:
+          type: array
+          description: Claims a token may carry.
+          items:
+            type: string
     McpUpstreamAuthInput:
       type: object
       required:
@@ -22013,7 +22207,11 @@ components:
             - token
             - header
             - basic
-          description: Upstream auth scheme.
+            - console_identity
+          description: >-
+            Upstream auth scheme. `console_identity` sends no stored secret: every call carries a short-lived token Console
+            signs for the person behind the call (`Authorization: Bearer`, verified with
+            `GET /api/public/identity/{tenantId}/.well-known/jwks.json`). Remote (`http`/`sse`) and OpenAPI servers only.
         token:
           type: string
           description: Bearer token (for `token`).

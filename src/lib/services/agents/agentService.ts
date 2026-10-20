@@ -86,6 +86,7 @@ import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
 import type { AgentPlugin as AgentSdkPlugin, BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
+import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
@@ -1830,6 +1831,8 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
+    /** Who the run is for (Console identity); a referenced child acts under its own agent key. */
+    identity?: ConsoleIdentityCaller;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
@@ -1955,6 +1958,9 @@ async function buildAgentSubagents(
                 input.zod,
                 input.guard,
                 input.runtimeContext,
+                input.identity && entry.kind === 'ref' && entry.agentKey
+                    ? { ...input.identity, agentKey: entry.agentKey }
+                    : input.identity,
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
@@ -2148,12 +2154,15 @@ export async function buildBoundTools(
     zod: typeof import('zod').z,
     guard: AgentToolGuard,
     runtimeContext?: AgentRuntimeContext,
+    /** Who the run is for, as MCP servers set up for Console identity are told (default: from `runtimeContext`). */
+    identity?: ConsoleIdentityCaller,
 ): Promise<{
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
     definitions: TraceToolDefinition[];
 }> {
     if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
+    const mcpIdentity = identity ?? consoleIdentityCallerOf(runtimeContext, { projectId });
 
     const tools: AgentSdkToolInterface[] = [];
     const definitions: TraceToolDefinition[] = [];
@@ -2296,7 +2305,7 @@ export async function buildBoundTools(
                 }
 
                 const dispatch = async (args: Record<string, unknown>) => {
-                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
+                    const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders, mcpIdentity);
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
@@ -3855,6 +3864,8 @@ async function runExternalAgentTurn(input: {
     history: Array<{ role: string; content: string }>;
     userMessage: string;
     runtimeContext?: AgentRuntimeContext;
+    /** A trigger run's accountable person: a connection set up for Console identity gets a token for them. */
+    accountableUserId?: string;
     source: 'agent' | 'agent-playground';
     onTextChunk?: (text: string) => void;
     signal?: AbortSignal;
@@ -3871,7 +3882,16 @@ async function runExternalAgentTurn(input: {
     const reply = await invokeExternalAgent(
         connection,
         [...input.history, { role: 'user', content: userMessage }],
-        { tenantDbName, tenantId, projectId },
+        {
+            tenantDbName,
+            tenantId,
+            projectId,
+            identity: consoleIdentityCallerOf(input.runtimeContext, {
+                agentKey,
+                projectId,
+                accountableUserId: input.accountableUserId,
+            }),
+        },
         resolveRuntimeHeaders(input.runtimeContext, 'agent', agentKey, connection.runtimeHeaders),
         {
             ...(streamChunks ? { onTextChunk: streamChunks } : {}),
@@ -3961,8 +3981,16 @@ async function buildLocalAgentRun(input: {
     variablesInPrompt?: boolean;
     /** With `variablesInPrompt: false`: the names of `variables` that may still fill the prompt (`AgentChatRequest.literalVariables`). */
     literalVariables?: string[];
+    /** A trigger run's accountable person (its `userId` is synthetic): Console identity tokens are minted for them. */
+    accountableUserId?: string;
+    /** The person a continued pause is for (stored with the pause): replaces the runtime context's caller, who may be the approver. */
+    identity?: ConsoleIdentityPerson;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
+    // Who MCP servers and connected agents set up for Console identity are told this run is for.
+    const identity: ConsoleIdentityCaller = input.identity
+        ? { ...input.identity, agentKey, projectId }
+        : consoleIdentityCallerOf(runtimeContext, { agentKey, projectId, accountableUserId: input.accountableUserId });
     // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
     // published snapshot may still carry it).
     const config = migrateAgentReasoning(input.config);
@@ -4069,6 +4097,7 @@ async function buildLocalAgentRun(input: {
         z,
         toolGuard,
         runtimeContext,
+        identity,
     );
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
@@ -4299,6 +4328,7 @@ async function buildLocalAgentRun(input: {
         zod: z,
         guard: toolGuard,
         runtimeContext,
+        identity,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
         caller: {
@@ -4380,6 +4410,8 @@ async function buildLocalAgentRun(input: {
 
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        /** Who the run's Console identity tokens are for; a pause stores it for its continuation. */
+        identity,
         // Files of both kinds ride on the answer: what the agent left in the sandbox's /outputs/ and what it wrote with the file tools.
         collectOutputs: mergeOutputCollectors(sandboxTools.collectOutputs, ...(fileOutputs ? [fileOutputs.collectOutputs] : [])),
         tappedUsd: () => tappedUsd,
@@ -4698,16 +4730,19 @@ function outputFileEvents(conversationId: string, attachments: ReadonlyArray<IAg
     return toClientOutputFiles(conversationId, attachments).map(outputFileEventData);
 }
 
-/** What a continuation must apply again: the turn's own structured output and variables. */
+/** What a continuation must apply again: the turn's own structured output and variables, and who the turn is for. */
 function pausedTurnOptions(
     request: Pick<AgentChatRequest, 'responseFormat' | 'variables' | 'variablesInPrompt' | 'literalVariables'>,
+    identity?: ConsoleIdentityCaller,
 ): PausedTurnOptions | undefined {
-    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false) return undefined;
+    const person = consoleIdentityPersonOf(identity);
+    if (!request.responseFormat && !request.variables && request.variablesInPrompt !== false && !person) return undefined;
     return {
         ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
         ...(request.variables ? { variables: request.variables } : {}),
         ...(request.variablesInPrompt === false ? { variablesInPrompt: false } : {}),
         ...(request.variablesInPrompt === false && request.literalVariables?.length ? { literalVariables: request.literalVariables } : {}),
+        ...(person ? { identity: person } : {}),
     };
 }
 
@@ -4966,6 +5001,7 @@ async function runAgentChatTurn(
             history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
             userMessage,
             runtimeContext: turnRuntimeContext,
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
             source: 'agent',
             onTextChunk,
             signal: request.signal,
@@ -5011,7 +5047,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5024,6 +5060,7 @@ async function runAgentChatTurn(
         source: 'agent',
         route: 'agent.chat',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
         version: resolvedVersion,
         conversation,
         memoryConversationId: conversationId,
@@ -5199,7 +5236,7 @@ async function runAgentChatTurn(
                 hitl,
                 agentVersion: resolvedVersion,
                 usePublished: Boolean(request.usePublished || request.version !== undefined),
-                turn: pausedTurnOptions(request),
+                turn: pausedTurnOptions(request, identity),
                 createdBy: request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
@@ -5747,7 +5784,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5944,6 +5981,7 @@ async function runPlaygroundChatTurn(
             // The run stopped for a person: keep what it needs to continue.
             let pause: OpenedPause | null = null;
             if (outcome.stopReason === 'paused') {
+                const pausedFor = consoleIdentityPersonOf(identity);
                 pause = await openPause(db, {
                     state: result.state,
                     source: 'agent-playground',
@@ -5954,6 +5992,7 @@ async function runPlaygroundChatTurn(
                     hitl,
                     agentVersion: ranVersion,
                     usePublished: ranVersion !== null,
+                    ...(pausedFor ? { turn: { identity: pausedFor } } : {}),
                     createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
                 });
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
@@ -6400,8 +6439,17 @@ async function runAgentResumeTurn(
 
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+    // A continued pause calls MCP servers and connected agents for the person whose turn it is, never for whoever answered it.
+    const pausedFor = paused
+        ? consoleIdentityOfPausedTurn({
+            stored: paused.turn?.identity,
+            ...(anchorAction?.createdBy ? { startedBy: anchorAction.createdBy } : {}),
+            ...(runtimeContext?.source ? { source: runtimeContext.source } : {}),
+            ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        })
+        : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6417,6 +6465,8 @@ async function runAgentResumeTurn(
         source,
         route: source === 'agent' ? 'agent.chat' : 'agent.playground',
         userId: request.userId,
+        ...(request.accountableUserId ? { accountableUserId: request.accountableUserId } : {}),
+        ...(pausedFor ? { identity: pausedFor } : {}),
         version,
         conversation,
         memoryConversationId: conversationId,
@@ -6608,6 +6658,8 @@ async function runAgentResumeTurn(
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !superseded) {
             const firstAction = anchorAction;
+            const repausedFor = consoleIdentityPersonOf(identity);
+            const repauseTurn: PausedTurnOptions = { ...turnOptions, ...(repausedFor ? { identity: repausedFor } : {}) };
             pause = await openPause(db, {
                 state: result.state,
                 source,
@@ -6619,7 +6671,7 @@ async function runAgentResumeTurn(
                 hitl,
                 agentVersion: version,
                 usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
-                ...(Object.keys(turnOptions).length > 0 ? { turn: turnOptions } : {}),
+                ...(Object.keys(repauseTurn).length > 0 ? { turn: repauseTurn } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);

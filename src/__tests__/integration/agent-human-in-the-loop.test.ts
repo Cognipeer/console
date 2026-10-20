@@ -67,6 +67,7 @@ import {
 } from '@/lib/services/agents/agentActionResolution';
 import { RESUME_TIMEOUT_ACTOR, runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTruncate';
+import { parsePausedState } from '@/lib/services/agents/agentPendingActions';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
@@ -1776,5 +1777,42 @@ describe('a paused run follows its pause', () => {
     expect(await statusOf(runId)).toMatchObject({ status: 'succeeded' });
     const running = (await db.listAgentSessionEvents(id, { runId })).filter((event) => event.type === 'session.status_running');
     expect(running.at(-1)?.data).toMatchObject({ trigger: 'timeout' });
+  });
+});
+
+describe('(i) who a continued turn is for', () => {
+  it('stays the person whose turn it is when somebody else approves (Console identity tokens follow it)', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel((call, messages) => {
+      if (call === 0) {
+        return {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall('c1', 'sandbox_exec', { command: 'one' }), toolCall('c2', 'sandbox_exec', { command: 'two' })],
+        };
+      }
+      return { role: 'assistant', content: `ran ${messages.filter((m) => m.role === 'tool').length}` };
+    });
+    const id = String((await newConversation())._id);
+    const pausedFor = async () => parsePausedState((await db.findAgentConversationState(id))!.pausedSnapshot!)!.turn?.identity;
+
+    const first = await chat(id, 'do both', { runtimeContext: { userId: OWNER, source: 'portal' } });
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
+
+    const after = await resolveAgentPendingAction({
+      tenantDbName: DB_NAME,
+      tenantId,
+      projectId: PROJECT_ID,
+      conversationId: id,
+      actionId: first.required_action!.actions[0].id,
+      body: { decision: 'allow' },
+      actor: { userId: 'approver-9', channel: 'dashboard' },
+      authorize: allow,
+      mode: 'sync',
+      runtimeContext: { userId: 'approver-9', tokenId: 'tok-9', source: 'playground' },
+    });
+    expect(after.kind).toBe('resumed');
+    // It paused again, on the second call, and the turn is still the owner's, not the approver's.
+    expect(await pausedFor()).toEqual({ userId: OWNER, source: 'portal' });
   });
 });

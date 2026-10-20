@@ -2319,6 +2319,12 @@ export interface IExternalAgentConnection {
   apiKeyEnc?: string;
   /** Provider key holding encrypted credentials for the endpoint (alternative to inline key). */
   credentialProviderKey?: string;
+  /**
+   * `console_identity`: no stored credential. Every call carries a short-lived token Console signs
+   * for the person behind it, for this `url` (lib/iam/consoleIdentity.ts). Absent: `apiKeyEnc` /
+   * `credentialProviderKey`, as before.
+   */
+  authType?: 'console_identity';
   /** Dot-path used to pull the assistant text out of a non-standard JSON response. */
   responsePath?: string;
   /**

@@ -254,6 +254,7 @@ export default function AgentDetailPage() {
   const searchParams = useSearchParams()!;
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
+  const tIdentity = useTranslations('consoleIdentity');
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -936,11 +937,13 @@ export default function AgentDetailPage() {
         <div>
           <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
           <Text size="sm">
-            {connection?.hasApiKey
-              ? t('connectModal.apiKey')
-              : connection?.credentialProviderKey
-                ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                : '—'}
+            {connection?.authType === 'console_identity'
+              ? tIdentity('optionLabel')
+              : connection?.hasApiKey
+                ? t('connectModal.apiKey')
+                : connection?.credentialProviderKey
+                  ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                  : '—'}
           </Text>
         </div>
         {connection?.responsePath ? (

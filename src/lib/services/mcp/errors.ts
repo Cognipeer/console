@@ -32,3 +32,15 @@ export class McpUpstreamError extends Error {
 export function isMcpUpstreamError(error: unknown): error is McpUpstreamError {
   return error instanceof McpUpstreamError;
 }
+
+/** Settings a server cannot be saved with (an auth type its source does not support). Its message is safe to return. */
+export class McpServerConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpServerConfigError';
+  }
+}
+
+export function isMcpServerConfigError(error: unknown): error is McpServerConfigError {
+  return error instanceof McpServerConfigError;
+}

@@ -95,6 +95,21 @@ describe('collectManifestResources', () => {
         expect(skipped).toEqual([{ type: 'mcpServers', key: 'kb', reason: expect.stringContaining('internal') }]);
     });
 
+    it('keeps Console identity on an MCP server (no credential to ask for) and on nothing else', async () => {
+        fn(db.findMcpServerByKey).mockResolvedValue({
+            key: 'github', name: 'CRM', sourceType: 'remote',
+            remoteConfig: { url: 'https://crm.example.com/mcp', transport: 'streamable-http' },
+            upstreamAuth: { type: 'console_identity' },
+        });
+        fn(db.findToolByKey).mockResolvedValue({
+            key: 'crm', name: 'CRM', type: 'openapi', openApiSpec: '{}', upstreamAuth: { type: 'console_identity' },
+        });
+        const spec = { ...SPEC, toolBindings: SPEC.toolBindings.filter((b) => b.sourceKey === 'github' || b.source === 'tool'), subagents: [] };
+        const { resources } = await collectManifestResources('t', 'p', spec, parseResourceInclude('mcp,tools'));
+        expect(resources.mcpServers?.[0].auth).toEqual({ type: 'console_identity' });
+        expect(resources.tools?.[0].auth).toEqual({ type: 'none' });
+    });
+
     it('reports a referenced resource that no longer exists', async () => {
         const { skipped } = await collectManifestResources('t', 'p', { ...SPEC, skills: ['gone'] }, parseResourceInclude('skills'));
         expect(skipped).toEqual([{ type: 'skills', key: 'gone', reason: 'not found in this project' }]);
