@@ -135,15 +135,18 @@ export function resolveFireAt(
 ): { at: Date } | { error: string } {
   const hasDelay = args.delay_seconds !== undefined && args.delay_seconds !== null;
   const hasAt = typeof args.at === 'string' && args.at.trim() !== '';
-  if (hasDelay === hasAt) return { error: 'Give exactly one of delay_seconds or at.' };
+  if (!hasDelay && !hasAt) return { error: 'Give delay_seconds or at.' };
+  // `at` wins when both are given: strict tool calling (OpenAI, Azure) sends every argument, and a model
+  // asked for a clock time also fills delay_seconds (0, 1, 60), while one asked for a delay leaves `at` empty.
+  const atMs = hasAt ? Date.parse(String(args.at)) : Number.NaN;
   let at: number;
-  if (hasDelay) {
+  if (hasAt && (Number.isFinite(atMs) || !hasDelay)) {
+    if (!Number.isFinite(atMs)) return { error: 'at must be an ISO 8601 date-time, e.g. 2026-10-19T15:30:00Z.' };
+    at = atMs;
+  } else {
     const delay = Number(args.delay_seconds);
     if (!Number.isFinite(delay)) return { error: 'delay_seconds must be a number of seconds.' };
     at = now + Math.round(delay) * 1000;
-  } else {
-    at = Date.parse(String(args.at));
-    if (!Number.isFinite(at)) return { error: 'at must be an ISO 8601 date-time, e.g. 2026-10-19T15:30:00Z.' };
   }
   const earliest = now + settings.minDelaySeconds * 1000;
   const latest = now + settings.maxHorizonHours * 3_600_000;
@@ -172,7 +175,7 @@ export function buildReminderTools(deps: ReminderToolDeps): ReminderTools {
     name: REMINDER_SET_TOOL,
     description: [
       'Schedule a one-time reminder for yourself in this session. When it comes due, the session continues with a turn that starts with your message.',
-      `Give exactly one of delay_seconds (${settings.minDelaySeconds} to ${settings.maxHorizonHours * 3600}) or at (ISO 8601).`,
+      `Give delay_seconds (${settings.minDelaySeconds} to ${settings.maxHorizonHours * 3600}) or at (ISO 8601); when both are given, at is used.`,
       'Returns { id, fire_at, status } or a sentence saying why it was not set.',
     ].join(' '),
     schema: zod.object({

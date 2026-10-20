@@ -64,9 +64,19 @@ beforeEach(() => {
 describe('resolveFireAt', () => {
   const window = { minDelaySeconds: 60, maxHorizonHours: 2 };
 
-  it('takes exactly one of delay_seconds and at', () => {
-    expect(resolveFireAt({}, window, NOW)).toEqual({ error: expect.stringContaining('exactly one') });
-    expect(resolveFireAt({ delay_seconds: 120, at: '2026-10-19T13:00:00Z' }, window, NOW)).toEqual({ error: expect.stringContaining('exactly one') });
+  it('wants delay_seconds or at', () => {
+    expect(resolveFireAt({}, window, NOW)).toEqual({ error: 'Give delay_seconds or at.' });
+    expect(resolveFireAt({ delay_seconds: null, at: '  ' }, window, NOW)).toEqual({ error: 'Give delay_seconds or at.' });
+  });
+
+  // Strict tool calling (OpenAI, Azure) sends every argument: what gpt-5.6-terra sent for a clock time and for a delay.
+  it('with both given, a usable at wins; an empty or unparseable at leaves delay_seconds', () => {
+    expect(resolveFireAt({ delay_seconds: 1, at: '2026-10-19T13:00:00Z' }, window, NOW)).toEqual({ at: new Date('2026-10-19T13:00:00Z') });
+    expect(resolveFireAt({ delay_seconds: 60, at: '2026-10-19T13:00:00Z' }, window, NOW)).toEqual({ at: new Date('2026-10-19T13:00:00Z') });
+    expect(resolveFireAt({ delay_seconds: 600, at: '' }, window, NOW)).toEqual({ at: new Date(NOW + 600_000) });
+    expect(resolveFireAt({ delay_seconds: 600, at: 'none' }, window, NOW)).toEqual({ at: new Date(NOW + 600_000) });
+    // An at outside the window is the time asked for: it is refused, not swapped for the filler delay.
+    expect(resolveFireAt({ delay_seconds: 120, at: '2026-10-19T18:00:00Z' }, window, NOW)).toEqual({ error: expect.stringContaining('at most 2 hour') });
   });
 
   it('keeps the time inside [min delay, horizon]', () => {
