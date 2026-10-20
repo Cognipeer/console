@@ -13,6 +13,7 @@ import type {
 import type { ProviderDomain } from '@/lib/database';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderFormRenderer from './ProviderFormRenderer';
+import ProviderTestSteps from './ProviderTestSteps';
 import ProviderAssignStep, { ProjectPicker, useTenantProjects } from './ProviderAssignStep';
 import { useTranslations } from '@/lib/i18n';
 import {
@@ -21,6 +22,13 @@ import {
   testState,
   type ProviderTestResult,
 } from './providerAccessModel';
+import {
+  missingRequiredFields,
+  partitionProviderValues,
+  ProviderRequestError,
+  storedCredentialFields,
+  visibleSections,
+} from './providerFormModel';
 import {
   SERVICE_CATALOG,
   DOMAIN_LABELS,
@@ -66,6 +74,19 @@ export type ProviderConfigModalSubmitPayload = {
   projectIds: string[];
 };
 
+/** The domains the service filter of the create form offers, in its order (beside "All domains"). */
+export const CREATE_DOMAINS = [
+  'model',
+  'embedding',
+  'vector',
+  'file',
+  'datasource',
+  'stt',
+  'tts',
+  'ocr',
+  'websearch',
+] as const satisfies readonly ProviderDomain[];
+
 /** What a create `onSubmit` may hand back so the modal can offer the assign step. */
 export type CreatedProviderSummary = { id: string; name: string; domain: string; key?: string };
 
@@ -94,42 +115,6 @@ export type ProviderConfigModalProps = {
   hideProjects?: boolean;
 };
 
-type FieldBuckets = {
-  credentials: Record<string, unknown>;
-  settings: Record<string, unknown>;
-  metadata: Record<string, unknown>;
-};
-
-function partitionValues(
-  schema: ProviderFormSchema | null,
-  values: Record<string, unknown>,
-): FieldBuckets {
-  const buckets: FieldBuckets = {
-    credentials: {},
-    settings: {},
-    metadata: {},
-  };
-
-  if (!schema) return buckets;
-
-  schema.sections.forEach((section) => {
-    section.fields.forEach((field) => {
-      const scope = field.scope ?? 'credentials';
-      const value = values[field.name];
-      if (
-        value === undefined ||
-        value === null ||
-        (typeof value === 'string' && value.trim() === '')
-      ) {
-        return;
-      }
-      buckets[scope as keyof FieldBuckets][field.name] = value;
-    });
-  });
-
-  return buckets;
-}
-
 function resolveInitialFieldValue(
   field: ProviderFormField,
   provider?: ProviderConfigView,
@@ -146,6 +131,30 @@ function resolveInitialFieldValue(
     return field.defaultValue ?? '';
   }
   return field.defaultValue ?? '';
+}
+
+const INVALID_FIELD_SELECTOR = '.form-overlay [aria-invalid="true"], .form-overlay [data-invalid="true"]';
+
+/** How often, and how far apart, the form is looked at again when the message is not drawn yet. */
+const FOCUS_RETRIES = 20;
+const FOCUS_RETRY_MS = 25;
+
+/**
+ * Brings the first field that shows a message into view: the form can be taller than the screen. A password box marks
+ * itself with `data-invalid` only (its `aria-invalid` is left unset), so both marks are looked for. The message is
+ * drawn by the render that follows the state update, which can come after the first look on a busy page: the form is
+ * looked at again a few times before giving up.
+ */
+function focusFirstInvalidField(attempt = 0) {
+  setTimeout(() => {
+    const invalid = document.querySelector<HTMLElement>(INVALID_FIELD_SELECTOR);
+    if (!invalid) {
+      if (attempt < FOCUS_RETRIES) focusFirstInvalidField(attempt + 1);
+      return;
+    }
+    invalid.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    invalid.focus?.({ preventScroll: true });
+  }, attempt === 0 ? 0 : FOCUS_RETRY_MS);
 }
 
 export default function ProviderConfigModal({
@@ -320,6 +329,8 @@ export default function ProviderConfigModal({
       ...current,
       ...fieldValues,
     }));
+    // Messages of a form that is no longer on screen (another service, another provider) do not carry over.
+    form.clearErrors();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, provider, mode]);
 
@@ -328,6 +339,17 @@ export default function ProviderConfigModal({
   );
 
   const isCreate = mode === 'create';
+  // The API never returns credentials, only which fields store one. While editing, a stored credential field opens
+  // blank and a blank one keeps the stored value (the server merges it that way); one the record does not store
+  // (the secret of a way to sign in it never used) has to be filled in.
+  const storedFields = isCreate ? undefined : storedCredentialFields(schema, provider);
+  // What the record holds: a setting that only shows the field's default is not something the edit changes.
+  const storedValues = isCreate ? undefined : { settings: provider?.settings, metadata: provider?.metadata };
+  // The saved provider this form edits: its test route merges what is typed here over what is stored.
+  const savedProviderId = !isCreate && provider?._id ? String(provider._id) : null;
+  // The fields that apply to the form as it stands, and how many sections they fill (`visibleWhen` hides the rest).
+  const shownSections = visibleSections(schema, form.values);
+  const allFieldNames = new Set(shownSections.flatMap((entry) => entry.fields.map((field) => field.name)));
   const showProjects = isCreate && !hideProjects;
   const { projects: tenantProjects, loading: projectsLoading, error: projectsError } =
     useTenantProjects(opened && showProjects);
@@ -350,27 +372,42 @@ export default function ProviderConfigModal({
   ];
 
   const handleTest = async () => {
-    if (!selectedDriver || !effectiveDomain) {
+    if (!selectedDriver || (!savedProviderId && !effectiveDomain)) {
       setTestError(t('test.needService'));
       return;
     }
-    const buckets = partitionValues(schema, form.getValues());
+    const buckets = partitionProviderValues(schema, form.getValues(), storedValues);
     setTesting(true);
     setTestError(null);
     setTestResult(null);
     try {
-      const res = await fetch('/api/providers/test', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          type: effectiveDomain,
-          driver: selectedDriver,
-          credentials: buckets.credentials,
-          settings: buckets.settings,
-        }),
-      });
+      // A saved provider is tested through its own route: what is typed here is laid over what is stored (a blank
+      // secret keeps the stored one), and nothing is saved. A new provider has nothing stored to fall back on.
+      const res = savedProviderId
+        ? await fetch(`/api/providers/${encodeURIComponent(savedProviderId)}/test`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ credentials: buckets.credentials, settings: buckets.settings }),
+        })
+        : await fetch('/api/providers/test', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            type: effectiveDomain,
+            driver: selectedDriver,
+            credentials: buckets.credentials,
+            settings: buckets.settings,
+          }),
+        });
       const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(body?.error || t('test.requestFailed'));
+      if (!res.ok) {
+        // A refused setting names its form field: mark it where it was typed.
+        const field = typeof body?.field === 'string' ? body.field : null;
+        if (field && allFieldNames.has(field) && typeof body?.error === 'string') {
+          form.setFieldError(field, body.error);
+        }
+        throw new Error(body?.error || t('test.requestFailed'));
+      }
       setTestResult(body as ProviderTestResult);
     } catch (error) {
       setTestError(error instanceof Error ? error.message : t('test.requestFailed'));
@@ -388,8 +425,19 @@ export default function ProviderConfigModal({
   };
 
   const handleSubmit = async () => {
+    // Messages left from an earlier attempt describe fields that may not apply any more.
+    form.clearErrors();
     const validation = form.validate();
-    if (validation.hasErrors) return;
+    // Required fields that apply to the form as it stands (a hidden field is not asked for).
+    const missing = missingRequiredFields(schema, form.getValues(), { storedCredentialFields: storedFields });
+    if (validation.hasErrors || missing.length > 0) {
+      form.setErrors({
+        ...validation.errors,
+        ...Object.fromEntries(missing.map((field) => [field.name, t('form.required')])),
+      });
+      focusFirstInvalidField();
+      return;
+    }
 
     if (!selectedDriver) {
       notifications.show({
@@ -401,7 +449,7 @@ export default function ProviderConfigModal({
     }
 
     const values = form.getValues();
-    const buckets = partitionValues(schema, values);
+    const buckets = partitionProviderValues(schema, values, storedValues);
 
     setSubmitting(true);
     try {
@@ -437,6 +485,11 @@ export default function ProviderConfigModal({
       finish();
     } catch (error) {
       console.error(error);
+      // A refused setting names its form field: mark it where it was typed, as a refused test does.
+      if (error instanceof ProviderRequestError && error.field && allFieldNames.has(error.field)) {
+        form.setFieldError(error.field, error.message);
+        focusFirstInvalidField();
+      }
       notifications.show({
         color: 'red',
         title: 'Failed to save provider',
@@ -525,7 +578,7 @@ export default function ProviderConfigModal({
     validDriver &&
     validIdentity;
 
-  const configEnd = (isCreate ? 3 : 2) + (schema?.sections.length ?? 0);
+  const configEnd = (isCreate ? 3 : 2) + shownSections.length;
   const found = testResult ? foundCount(testResult.details) : undefined;
   const foundIsDeployments = Boolean(testResult?.details?.deployments);
   const state = testResult ? testState(testResult) : null;
@@ -585,20 +638,7 @@ export default function ProviderConfigModal({
               aria-label="Filter by domain"
               style={{ minWidth: 160 }}
             >
-              {(
-                [
-                  'all',
-                  'model',
-                  'embedding',
-                  'vector',
-                  'file',
-                  'datasource',
-                  'stt',
-                  'tts',
-                  'ocr',
-                  'websearch',
-                ] as const
-              ).map((d) => (
+              {(['all', ...CREATE_DOMAINS] as const).map((d) => (
                 <option key={d} value={d}>
                   {d === 'all' ? 'All domains' : DOMAIN_LABELS[d]}
                 </option>
@@ -696,76 +736,81 @@ export default function ProviderConfigModal({
           schema={schema}
           form={form}
           sectionStart={isCreate ? 3 : 2}
+          storedSecretPlaceholder={storedFields ? t('form.storedSecret') : undefined}
+          storedCredentialFields={storedFields}
         />
       ) : null}
 
-      {isCreate ? (
-        <FormSection
-          number={configEnd}
-          title={t('test.sectionTitle')}
-          description={t('test.sectionDescription')}
-        >
-          <div className="ds-row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Button
-              variant="default"
-              size="sm"
-              leftSection={<IconPlayerPlay size={14} stroke={1.7} />}
-              loading={testing}
-              disabled={!selectedDriver || schemaLoading || Boolean(schemaError)}
-              onClick={() => void handleTest()}
+      <FormSection
+        number={configEnd}
+        title={t('test.sectionTitle')}
+        description={
+          savedProviderId
+            ? `${t('test.sectionDescription')} ${t('test.editHint')}`
+            : t('test.sectionDescription')
+        }
+      >
+        <div className="ds-row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Button
+            variant="default"
+            size="sm"
+            leftSection={<IconPlayerPlay size={14} stroke={1.7} />}
+            loading={testing}
+            disabled={!selectedDriver || schemaLoading || Boolean(schemaError)}
+            onClick={() => void handleTest()}
+          >
+            {testing ? t('test.running') : t('test.button')}
+          </Button>
+          {testResult && state ? (
+            <div
+              className="ds-row"
+              style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
+              role="status"
             >
-              {testing ? t('test.running') : t('test.button')}
-            </Button>
-            {testResult && state ? (
-              <div
-                className="ds-row"
-                style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
-                role="status"
+              <span
+                className={`ds-badge ${
+                  state === 'ok' ? 'ds-badge-ok' : state === 'failed' ? 'ds-badge-err' : 'ds-badge-warn'
+                }`}
               >
-                <span
-                  className={`ds-badge ${
-                    state === 'ok' ? 'ds-badge-ok' : state === 'failed' ? 'ds-badge-err' : 'ds-badge-warn'
-                  }`}
-                >
-                  {state === 'ok' ? (
-                    <IconCheck size={11} stroke={2} />
-                  ) : state === 'failed' ? (
-                    <IconX size={11} stroke={2} />
-                  ) : null}{' '}
-                  {t(`test.${state}`)}
+                {state === 'ok' ? (
+                  <IconCheck size={11} stroke={2} />
+                ) : state === 'failed' ? (
+                  <IconX size={11} stroke={2} />
+                ) : null}{' '}
+                {t(`test.${state}`)}
+              </span>
+              {state !== 'unsupported' ? (
+                <span className="ds-faint" style={{ fontSize: 12 }}>
+                  {t('test.latency', { value: formatLatency(testResult.latencyMs) })}
                 </span>
-                {state !== 'unsupported' ? (
-                  <span className="ds-faint" style={{ fontSize: 12 }}>
-                    {t('test.latency', { value: formatLatency(testResult.latencyMs) })}
-                  </span>
-                ) : null}
-                {found !== undefined ? (
-                  <span className="ds-faint" style={{ fontSize: 12 }}>
-                    {t(foundIsDeployments ? 'test.foundDeployments' : 'test.foundModels', {
-                      count: found,
-                    })}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          {testResult?.message ? (
-            <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
-              {testResult.message}
+              ) : null}
+              {found !== undefined ? (
+                <span className="ds-faint" style={{ fontSize: 12 }}>
+                  {t(foundIsDeployments ? 'test.foundDeployments' : 'test.foundModels', {
+                    count: found,
+                  })}
+                </span>
+              ) : null}
             </div>
           ) : null}
-          {testError ? (
-            <Alert
-              mt="sm"
-              icon={<IconAlertCircle size={16} />}
-              color="red"
-              title={t('test.requestFailed')}
-            >
-              {testError}
-            </Alert>
-          ) : null}
-        </FormSection>
-      ) : null}
+        </div>
+        {testResult?.message ? (
+          <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+            {testResult.message}
+          </div>
+        ) : null}
+        <ProviderTestSteps steps={testResult?.details?.steps} />
+        {testError ? (
+          <Alert
+            mt="sm"
+            icon={<IconAlertCircle size={16} />}
+            color="red"
+            title={t('test.requestFailed')}
+          >
+            {testError}
+          </Alert>
+        ) : null}
+      </FormSection>
 
       {showProjects ? (
         <FormSection

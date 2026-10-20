@@ -4,6 +4,12 @@ import { alertsEn, incidentsEn } from './alerts.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
 import { directorySyncEn } from './directorySync.en';
 import { entityHealthEn } from './entityHealth.en';
+import { filesBucketEn } from './filesBucket.en';
+import { filesCommonEn } from './filesCommon.en';
+import { filesCreateEn } from './filesCreate.en';
+import { filesDetailEn } from './filesDetail.en';
+import { filesListEn } from './filesList.en';
+import { filesUploadEn } from './filesUpload.en';
 import { healthDigestEn } from './healthDigest.en';
 import { iamDirectoryEn } from './iamDirectory.en';
 import { projectTabsEn } from './projectTabs.en';
@@ -2251,7 +2257,6 @@ export const en = {
       emptyFolder: 'This folder has no files.',
       folderRow: 'Folder',
       openFolder: 'Open folder {name}',
-      uploadsTo: 'The file is saved in the folder {path}',
     },
     filter: {
       label: 'Show',
@@ -2275,9 +2280,18 @@ export const en = {
       removedAutomatically: 'Removed automatically when it expires or when the session is deleted.',
     },
     bucket: {
-      refusalTitleDelete: 'Unable to delete bucket',
+      // The bucket page and its tabs (filesBucket.en.ts).
+      ...filesBucketEn,
       refusalTitleUpdate: 'Unable to update bucket',
     },
+    // The wording every Document Store screen shares (filesCommon.en.ts).
+    common: filesCommonEn,
+    // The bucket list (filesList.en.ts) and the create-bucket screen (filesCreate.en.ts).
+    list: filesListEn,
+    create: filesCreateEn,
+    // The upload screen (filesUpload.en.ts) and the file drawer (filesDetail.en.ts).
+    upload: filesUploadEn,
+    detail: filesDetailEn,
   },
   license: {
     header: {
@@ -7382,6 +7396,20 @@ export const en = {
       foundModels: '{count} model(s) found',
       requestFailed: 'The test could not be run',
       needService: 'Pick a service and fill in its configuration first.',
+      editHint: 'Credentials you leave blank keep their stored values; the other fields are used as shown.',
+      stepsLabel: 'Test steps',
+      stepPassed: 'Passed',
+      stepFailed: 'Failed',
+      steps: {
+        list: 'List',
+        write: 'Write test object',
+        read: 'Read back',
+        delete: 'Delete',
+      },
+    },
+    form: {
+      storedSecret: 'Stored — leave blank to keep',
+      required: 'This field is required',
     },
     projects: {
       sectionTitle: 'Projects',

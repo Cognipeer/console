@@ -115,7 +115,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.targetKind !== undefined) { clauses.push('targetKind = @targetKind'); params.targetKind = filters.targetKind; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.redTeamCampaigns} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapCampaignRow(r));
@@ -281,7 +281,7 @@ export function RedTeamMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.redTeamCustomProbes} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapCustomProbeRow(r));

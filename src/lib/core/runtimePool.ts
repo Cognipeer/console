@@ -3,6 +3,9 @@
  *
  * Avoids recreating LangChain / AWS SDK clients on every request.
  * Cache is invalidated when credentials change (detected via hash).
+ * Requests that arrive while a key's first runtime is still being built share
+ * that one build, so a runtime that owns connections is never created twice
+ * and left unreleased.
  *
  * Config: PROVIDER_RUNTIME_CACHE_TTL_SECONDS (default 300)
  *
@@ -55,12 +58,20 @@ interface PendingDisposal {
   disposeAt: number;
 }
 
+/** A runtime that is being built: whoever asks for the same key and config meanwhile waits for it. */
+interface PendingCreation {
+  credentialsHash: string;
+  promise: Promise<unknown>;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Pool Implementation                                               */
 /* ------------------------------------------------------------------ */
 
 class RuntimePool {
   private pool = new Map<string, PoolEntry>();
+  /** Runtimes being built, by key. Dropping an entry marks that build as superseded (see `adopt`). */
+  private creating = new Map<string, PendingCreation>();
   private pendingDisposal: PendingDisposal[] = [];
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -74,7 +85,8 @@ class RuntimePool {
    * Get a cached runtime or create a new one.
    *
    * @param key Unique cache key (e.g. `${tenantId}:${providerKey}`)
-   * @param credentialsHash Hash of current credentials (triggers refresh when changed)
+   * @param credentialsHash Hash of current credentials (triggers refresh when changed);
+   *   `hashRuntimeConfig` when the provider's settings shape the runtime too
    * @param factory Async factory to create a new runtime
    */
   async getOrCreate<T>(
@@ -101,18 +113,53 @@ class RuntimePool {
       }
     }
 
-    // Create new runtime
-    const runtime = await factory();
+    // A build for this key and config is already under way (concurrent first use, or the first requests after
+    // a settings edit): share it. Building a second runtime would leave one of the two in nobody's hands to close.
+    const inFlight = this.creating.get(key);
+    if (inFlight && inFlight.credentialsHash === credentialsHash) {
+      return inFlight.promise as Promise<T>;
+    }
 
+    // Create new runtime. A build for the same key but ANOTHER config (the provider was edited meanwhile) is
+    // left to finish; this one replaces it as the build that counts.
+    const creation = { credentialsHash } as PendingCreation;
+    this.creating.set(key, creation);
+    creation.promise = this.build(key, creation, factory);
+    return creation.promise as Promise<T>;
+  }
+
+  private async build<T>(key: string, creation: PendingCreation, factory: () => Promise<T>): Promise<T> {
+    try {
+      const runtime = await factory();
+      this.adopt(key, creation, runtime);
+      return runtime;
+    } finally {
+      if (this.creating.get(key) === creation) this.creating.delete(key);
+    }
+  }
+
+  /**
+   * Pool a runtime that was just built, unless its build was superseded (a newer build for the key started,
+   * or the key was invalidated while this one ran). A superseded runtime still goes to the callers that
+   * asked for it - they hold it for the call in hand - but is not pooled, and is released like any retired one.
+   */
+  private adopt(key: string, creation: PendingCreation, runtime: unknown): void {
+    if (this.creating.get(key) !== creation) {
+      log.debug(`Runtime built for a superseded config, not cached: ${key}`);
+      this.retire(key, runtime);
+      return;
+    }
+
+    // Nothing else builds into the pool, but a leftover entry must not be overwritten unreleased.
+    if (this.pool.has(key)) this.evict(key);
     this.pool.set(key, {
       runtime,
-      credentialsHash,
+      credentialsHash: creation.credentialsHash,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
     });
 
     log.debug(`Runtime created and cached: ${key}`);
-    return runtime;
   }
 
   /**
@@ -120,6 +167,7 @@ class RuntimePool {
    */
   invalidate(key: string): void {
     this.evict(key);
+    this.creating.delete(key);
   }
 
   /**
@@ -129,6 +177,11 @@ class RuntimePool {
     for (const key of [...this.pool.keys()]) {
       if (key.startsWith(prefix)) {
         this.evict(key);
+      }
+    }
+    for (const key of [...this.creating.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.creating.delete(key);
       }
     }
   }
@@ -162,11 +215,17 @@ class RuntimePool {
   private evict(key: string, known?: PoolEntry): void {
     const entry = known ?? this.pool.get(key);
     this.pool.delete(key);
-    if (!entry || !asDisposable(entry.runtime)) return;
+    if (entry) this.retire(key, entry.runtime);
+  }
+
+  /** Queue a runtime that is no longer pooled (evicted, or built for a superseded config) for release. */
+  private retire(key: string, runtime: unknown): void {
+    if (!asDisposable(runtime)) return;
 
     const graceMs = getConfig().providerRuntime.disposeGraceSeconds * 1000;
-    if (graceMs <= 0) {
-      void this.closeRuntime(key, entry.runtime);
+    // After `destroy()` nothing sweeps the queue any more, and the process is on its way out.
+    if (graceMs <= 0 || this.sweepTimer === null) {
+      void this.closeRuntime(key, runtime);
       return;
     }
 
@@ -174,7 +233,7 @@ class RuntimePool {
     // closing underneath it would fail a live query to fix a slow leak.
     this.pendingDisposal.push({
       key,
-      runtime: entry.runtime,
+      runtime,
       disposeAt: Date.now() + graceMs,
     });
   }
@@ -226,6 +285,8 @@ class RuntimePool {
     for (const key of [...this.pool.keys()]) {
       this.evict(key);
     }
+    // A build still running finishes into nothing: its runtime is released as it arrives.
+    this.creating.clear();
     // Shutdown skips the grace period: the process is going away, and holding
     // sockets open past this point only delays a clean exit.
     this.drainDisposals(true);
@@ -239,6 +300,30 @@ class RuntimePool {
 export function hashCredentials(credentials: unknown): string {
   return createHash('sha256')
     .update(JSON.stringify(credentials))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/** JSON replacer that writes every object's keys in sorted order. */
+function sortObjectKeys(_key: string, value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(source).sort().map((name) => [name, source[name]]));
+}
+
+/**
+ * Hash everything that shapes a runtime — driver, credentials AND settings — for
+ * change detection. A runtime built from a bucket, an endpoint or an auth method
+ * keeps using the old one until its entry expires when only the credentials are
+ * hashed (`hashCredentials`), so a settings edit looked like it had been ignored.
+ *
+ * The key order of the config (and of anything nested in it) never matters: the
+ * same values hash the same however the record was stored or merged, so a
+ * re-saved but unchanged provider does not rebuild its runtime.
+ */
+export function hashRuntimeConfig(config: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(config, sortObjectKeys))
     .digest('hex')
     .slice(0, 16);
 }

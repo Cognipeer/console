@@ -121,7 +121,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.projectId) { conds.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { conds.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        conds.push('(name LIKE @search OR key LIKE @search)');
+        conds.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       const rows = db.prepare(
@@ -292,7 +292,7 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       if (filters?.agentId) { conds.push('agentId = @agentId'); params.agentId = filters.agentId; }
       if (filters?.status) { conds.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        conds.push('(name LIKE @search OR sessionKey LIKE @search)');
+        conds.push(this.likeAny(['name', 'sessionKey'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       // `createdAt` is stored as an ISO-8601 string, which sorts and compares
@@ -576,8 +576,8 @@ export function BrowserMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
         params.browserId = filters.browserId;
       }
       if (filters?.search) {
-        sql += ' AND (name LIKE @search OR key LIKE @search OR description LIKE @search)';
-        params.search = `%${filters.search}%`;
+        sql += ` AND ${this.likeAny(['name', 'key', 'description'], '@search')}`;
+        params.search = this.likePattern(filters.search);
       }
       sql += ' ORDER BY updatedAt DESC';
       const rows = db.prepare(sql).all(params) as SqliteRow[];

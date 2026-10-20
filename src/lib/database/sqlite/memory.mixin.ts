@@ -118,7 +118,7 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -229,8 +229,8 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
         // Match any row whose tags JSON array intersects with the provided tags
         const tagClauses = filter.tags.map((t, i) => {
           const pKey = `tag${i}`;
-          params[pKey] = `%"${t}"%`;
-          return `tags LIKE @${pKey}`;
+          params[pKey] = this.likePattern(`"${t}"`);
+          return this.likeAny(['tags'], `@${pKey}`);
         });
         clauses.push(`(${tagClauses.join(' OR ')})`);
       }
@@ -278,12 +278,12 @@ export function MemoryMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (filters?.tags?.length) {
         const tagClauses = filters.tags.map((t, i) => {
           const pKey = `tag${i}`;
-          params[pKey] = `%"${t}"%`;
-          return `tags LIKE @${pKey}`;
+          params[pKey] = this.likePattern(`"${t}"`);
+          return this.likeAny(['tags'], `@${pKey}`);
         });
         clauses.push(`(${tagClauses.join(' OR ')})`);
       }
-      if (filters?.search) { clauses.push('content LIKE @search'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['content'], '@search')); params.search = this.likePattern(filters.search); }
 
       const where = `WHERE ${clauses.join(' AND ')}`;
       const limit = filters?.limit ?? 50;

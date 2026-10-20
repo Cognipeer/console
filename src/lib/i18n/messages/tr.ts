@@ -13,6 +13,12 @@ import { alertsTr, incidentsTr } from './alerts.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
 import { directorySyncTr } from './directorySync.tr';
 import { entityHealthTr } from './entityHealth.tr';
+import { filesBucketTr } from './filesBucket.tr';
+import { filesCommonTr } from './filesCommon.tr';
+import { filesCreateTr } from './filesCreate.tr';
+import { filesDetailTr } from './filesDetail.tr';
+import { filesListTr } from './filesList.tr';
+import { filesUploadTr } from './filesUpload.tr';
 import { healthDigestTr } from './healthDigest.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 import { projectTabsTr } from './projectTabs.tr';
@@ -1005,7 +1011,6 @@ export const tr: typeof en = {
       emptyFolder: 'Bu klasörde dosya yok.',
       folderRow: 'Klasör',
       openFolder: '{name} klasörünü aç',
-      uploadsTo: 'Dosya {path} klasörüne kaydedilir',
     },
     filter: {
       label: 'Göster',
@@ -1029,9 +1034,18 @@ export const tr: typeof en = {
       removedAutomatically: 'Süresi dolduğunda ya da oturum silindiğinde otomatik olarak kaldırılır.',
     },
     bucket: {
-      refusalTitleDelete: 'Bucket silinemedi',
+      // Bucket sayfası ve sekmeleri (filesBucket.tr.ts).
+      ...filesBucketTr,
       refusalTitleUpdate: 'Bucket güncellenemedi',
     },
+    // Tüm Document Store ekranlarının ortak metinleri (filesCommon.tr.ts).
+    common: filesCommonTr,
+    // Bucket listesi (filesList.tr.ts) ve bucket oluşturma ekranı (filesCreate.tr.ts).
+    list: filesListTr,
+    create: filesCreateTr,
+    // Yükleme ekranı (filesUpload.tr.ts) ve dosya çekmecesi (filesDetail.tr.ts).
+    upload: filesUploadTr,
+    detail: filesDetailTr,
   },
   license: {
     ...en.license,
@@ -5669,6 +5683,20 @@ export const tr: typeof en = {
       foundModels: '{count} model bulundu',
       requestFailed: 'Test çalıştırılamadı',
       needService: 'Önce bir servis seçin ve yapılandırmasını doldurun.',
+      editHint: 'Boş bıraktığınız kimlik bilgileri kayıtlı değerlerini korur; diğer alanlar gösterildiği gibi kullanılır.',
+      stepsLabel: 'Test adımları',
+      stepPassed: 'Başarılı',
+      stepFailed: 'Başarısız',
+      steps: {
+        list: 'Listele',
+        write: 'Test nesnesi yaz',
+        read: 'Geri oku',
+        delete: 'Sil',
+      },
+    },
+    form: {
+      storedSecret: 'Kayıtlı — korumak için boş bırakın',
+      required: 'Bu alan zorunludur',
     },
     projects: {
       sectionTitle: 'Projeler',

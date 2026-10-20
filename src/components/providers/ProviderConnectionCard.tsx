@@ -6,11 +6,13 @@ import { notifications } from '@mantine/notifications';
 import { IconPlayerPlay } from '@tabler/icons-react';
 import { DetailCard } from '@/components/common/ui/DetailShell';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import ProviderTestSteps from './ProviderTestSteps';
 import {
   formatLatency,
   formatRelativeTime,
   testState,
   type ProviderTestResult,
+  type ProviderTestStep,
   type StoredProviderTest,
 } from './providerAccessModel';
 
@@ -34,6 +36,8 @@ export default function ProviderConnectionCard({
   const t = useTranslations('providerAccess');
   const locale = useLocale();
   const [testing, setTesting] = useState(false);
+  // The steps of the test run from this page. They are not stored with the provider, so a reload forgets them.
+  const [steps, setSteps] = useState<ProviderTestStep[] | null>(null);
 
   const retest = async () => {
     setTesting(true);
@@ -43,6 +47,7 @@ export default function ProviderConnectionCard({
       });
       const body = (await res.json().catch(() => null)) as (ProviderTestResult & { error?: string }) | null;
       if (!res.ok) throw new Error(body?.error || t('test.requestFailed'));
+      setSteps(body?.details?.steps ?? null);
       await onTested();
     } catch (error) {
       notifications.show({
@@ -106,6 +111,12 @@ export default function ProviderConnectionCard({
               ) : null}
             </tbody>
           </table>
+          {/* Only while the stored result is the one the steps belong to (a changed connection clears it). */}
+          {steps && steps.length > 0 ? (
+            <div style={{ padding: '2px 18px 6px' }}>
+              <ProviderTestSteps steps={steps} />
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="ds-empty" style={{ padding: 24 }}>

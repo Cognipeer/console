@@ -47,7 +47,7 @@ const REDACTED = '[REDACTED]';
  * Shared with the persisted-log scrubber (see `logRedaction.ts`) so app logs
  * and request-log payloads redact by the same rule.
  */
-export const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret)$/i;
+export const SENSITIVE_KEY_PATTERN = /^(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|authorization|bearer|cookie|set[_-]?cookie|token|jwt|encryption[_-]?key|private[_-]?key|x[_-]?api[_-]?key|aws[_-]?secret|secret[_-]?(access[_-]?)?key|session[_-]?token|account[_-]?key|sas[_-]?token|connection[_-]?string)$/i;
 const REDACT_MAX_DEPTH = 6;
 const CIRCULAR = '[Circular]';
 /** Characters of a failed HTTP call's response body kept in a log line. */

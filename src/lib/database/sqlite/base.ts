@@ -1472,11 +1472,22 @@ export class SQLiteProviderBase {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /** SQLite LIKE pattern ("contains" search). */
+  /**
+   * SQLite LIKE pattern ("contains" search): the text with a backslash put before %, _ and \ (they are wildcards and the
+   * escape character itself), between two %. SQLite reads that backslash as an escape only when the clause names it -
+   * build the clause with `likeAny`, or write `ESCAPE '\\'` after the LIKE.
+   */
   protected likePattern(value: string): string {
-    // Escape %, _ which are special in LIKE
-    const escaped = value.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    return `%${escaped}%`;
+    return `%${value.replace(/[\\%_]/g, '\\$&')}%`;
+  }
+
+  /**
+   * `(a LIKE @p ESCAPE '\' OR b LIKE @p ESCAPE '\')`: the search clause that goes with `likePattern`. Without the ESCAPE
+   * the backslashes of the pattern are literal characters, and a search for `my_prompt` or `100%` finds nothing.
+   * `param` is the placeholder as the statement writes it: `@search`, or `?` once for each column.
+   */
+  protected likeAny(columns: readonly string[], param: string): string {
+    return `(${columns.map((column) => `${column} LIKE ${param} ESCAPE '\\'`).join(' OR ')})`;
   }
 
   protected normalizeThreadId(value: unknown): string | undefined {

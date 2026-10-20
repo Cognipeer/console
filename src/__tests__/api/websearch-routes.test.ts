@@ -173,7 +173,15 @@ describe('GET /api/websearch/providers', () => {
     const res = await app.inject({ method: 'GET', url: '/api/websearch/providers', headers: HEADERS });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ providers: unknown[] }>(res.body).providers).toHaveLength(1);
-    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1');
+    // the page opens its edit form from these rows: they say which credential fields are stored
+    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', { credentialFields: true });
+  });
+
+  it('returns what the service returned, the names of the stored credential fields included', async () => {
+    (listWebSearchProviders as ReturnType<typeof vi.fn>).mockResolvedValue([{ ...MOCK_PROVIDER, credentialFields: ['apiKey'] }]);
+    const app = await createFastifyApiTestApp(websearchApiPlugin);
+    const res = await app.inject({ method: 'GET', url: '/api/websearch/providers', headers: HEADERS });
+    expect(parseJsonBody<{ providers: Array<{ credentialFields?: string[] }> }>(res.body).providers[0]!.credentialFields).toEqual(['apiKey']);
   });
 });
 
@@ -187,11 +195,13 @@ describe('GET /api/websearch/providers/:key (dashboard)', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ provider: { key: string } }>(res.body).provider.key).toBe('brave-main');
+    // the page opens its edit form from this instance: it says which credential fields are stored
     expect(getProviderConfigByKey).toHaveBeenCalledWith(
       'tenant_acme',
       'tenant-1',
       'brave-main',
       'proj-1',
+      { credentialFields: true },
     );
   });
 
@@ -302,6 +312,16 @@ describe('GET /api/client/v1/websearch/providers', () => {
     expect(body.providers).toEqual([
       { key: 'brave-main', driver: 'brave-search', label: 'Brave', status: 'active', aiAnswer: true },
     ]);
+  });
+
+  it('does not ask which credential fields are stored: that is for the dashboard\'s edit form', async () => {
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    await app.inject({
+      method: 'GET',
+      url: '/api/client/v1/websearch/providers',
+      headers: { authorization: 'Bearer tok_abc' },
+    });
+    expect(listWebSearchProviders).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1');
   });
 
   it('returns 401 for an invalid token', async () => {

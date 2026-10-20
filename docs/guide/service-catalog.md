@@ -37,6 +37,7 @@ Each entry describes one external service Cognipeer knows how to talk to:
 | `driver` | The backend driver this service maps to. Multiple catalog entries can share a driver (e.g. Anthropic, Groq, DeepSeek all use `openai-compatible`). |
 | `domains` | One or more of `model`, `embedding`, `vector`, `file`, `datasource`. Used by the provider picker to filter cards by what the user is creating. |
 | `color` | Brand hex for the swatch. |
+| `glyph` | Optional mark of one to three characters shown in the swatch (for example `S3`). Without it the swatch shows the first letter of the name. |
 | `tags` | Free-form filter chips: `popular`, `enterprise`, `managed`, `self-hosted`, `open-source`, `tools`, `default`, `dev`, `edge`. |
 | `aliases` | Extra search keywords — typing "claude" finds the Anthropic entry. |
 
@@ -48,6 +49,35 @@ Lookups go through `src/lib/services/serviceCatalog.ts`:
 - `filterServiceCatalog({ domain, query, tag })` — drives the picker grid.
 
 To add a new third-party service: add the entry, pick the right driver (or add a new one under `src/lib/providers/contracts/` first), and the picker will surface it on next build.
+
+### File storage entries
+
+File backends are catalogued the same way. Five entries cover the file drivers, and the aliases are what make a search for a product name land on the right card:
+
+| Catalog entry | Driver | Found by |
+|---|---|---|
+| Amazon S3 | `aws-s3-files` | `s3` |
+| S3-compatible storage | `s3-compatible-files` | `minio`, `ceph`, `rgw`, `seaweedfs`, `garage`, `r2`, `cloudflare-r2`, `wasabi`, `storagegrid`, `s3-compatible`, `object-storage` |
+| Azure Blob Storage | `azure-blob-files` | `blob`, `azure-blob`, `azure blob storage`, `azure storage`, `azurite`, `adls`, `data lake` |
+| MongoDB GridFS | `mongodb-gridfs-files` | `gridfs`, `mongo-files`, `mongodb-files` |
+| Local filesystem | `local-filesystem` | `disk`, `local`, `builtin` |
+
+The S3-compatible entry, abridged:
+
+```json
+{
+  "id": "s3-compatible-files",
+  "driver": "s3-compatible-files",
+  "name": "S3-compatible storage",
+  "glyph": "S3C",
+  "tagline": "MinIO, Ceph, SeaweedFS, Garage, R2, Wasabi and other S3 APIs",
+  "domains": ["file"],
+  "tags": ["self-hosted"],
+  "aliases": ["minio", "ceph", "rgw", "seaweedfs", "garage", "r2", "cloudflare-r2", "wasabi", "storagegrid"]
+}
+```
+
+Several products share one driver, as the model providers do: Cloudflare R2, Wasabi and MinIO are all stores with an S3 API at their own endpoint, so they are one card. See [Files](./files.md#storage-providers) for what each driver asks for.
 
 ## platform-services.json
 

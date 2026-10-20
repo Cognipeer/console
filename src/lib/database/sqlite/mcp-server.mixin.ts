@@ -179,7 +179,7 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status !== undefined) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'description', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -266,8 +266,8 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       if (options?.keyword?.trim()) {
-        clauses.push('(toolName LIKE @keyword OR errorMessage LIKE @keyword)');
-        params.keyword = `%${options.keyword.trim()}%`;
+        clauses.push(this.likeAny(['toolName', 'errorMessage'], '@keyword'));
+        params.keyword = this.likePattern(options.keyword.trim());
       }
 
       const where = `WHERE ${clauses.join(' AND ')}`;
@@ -309,8 +309,8 @@ export function McpServerMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
       if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
       if (options?.keyword?.trim()) {
-        clauses.push('(toolName LIKE @keyword OR errorMessage LIKE @keyword)');
-        params.keyword = `%${options.keyword.trim()}%`;
+        clauses.push(this.likeAny(['toolName', 'errorMessage'], '@keyword'));
+        params.keyword = this.likePattern(options.keyword.trim());
       }
 
       const where = `WHERE ${clauses.join(' AND ')}`;

@@ -45,10 +45,12 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const session = requireSessionContext(request);
       const { projectId } = await requireProjectContextForRequest(request);
+      // The page opens its edit form from these rows: they carry which credential fields are stored.
       const providers = await listWebSearchProviders(
         session.tenantDbName,
         session.tenantId,
         projectId,
+        { credentialFields: true },
       );
       return reply.code(200).send({ providers });
     } catch (error) {
@@ -62,11 +64,13 @@ export const websearchApiPlugin: FastifyPluginAsync = async (app) => {
       const session = requireSessionContext(request);
       const { projectId } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
+      // The page opens its edit form from this instance: it carries which credential fields are stored.
       const provider = await getProviderConfigByKey(
         session.tenantDbName,
         session.tenantId,
         key,
         projectId,
+        { credentialFields: true },
       );
       if (!provider || provider.type !== 'websearch') {
         return reply.code(404).send({ error: 'Web search instance not found' });

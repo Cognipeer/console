@@ -136,8 +136,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (filters?.projectId !== undefined) { conditions.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.status) { conditions.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        conditions.push('(name LIKE @search OR key LIKE @search OR description LIKE @search)');
-        params.search = `%${filters.search}%`;
+        conditions.push(this.likeAny(['name', 'key', 'description'], '@search'));
+        params.search = this.likePattern(filters.search);
       }
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

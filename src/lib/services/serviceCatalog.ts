@@ -11,6 +11,8 @@ export interface ServiceCatalogEntry {
   domains: ProviderDomain[];
   /** Hex color for the brand swatch. */
   color: string;
+  /** Optional 1-3 character mark for the swatch (e.g. "S3"); the first letter of the name when absent. */
+  glyph?: string;
   /** Free-form tags (popular, managed, self-hosted, …). */
   tags: string[];
   /** Extra search terms / brand aliases. */
@@ -166,10 +168,27 @@ export const DOMAIN_LABELS: Record<ProviderDomain, string> = {
   telephony: 'Telephony',
 };
 
-/** First letter of the service name — used as the badge glyph when no icon is provided. */
+/** The longest mark a catalog entry may declare (`glyph` in service-catalog.schema.json). */
+export const MAX_SERVICE_GLYPH_LENGTH = 3;
+
+/**
+ * The mark of the service's swatch: the entry's own `glyph` (at most three characters) when it has one, otherwise
+ * the first letter of its name.
+ */
 export function serviceGlyph(service: ServiceCatalogEntry): string {
+  const declared = Array.from(service.glyph?.trim() ?? '')
+    .slice(0, MAX_SERVICE_GLYPH_LENGTH)
+    .join('');
+  if (declared) return declared;
   return service.name
     .replace(/[^A-Za-z0-9]/g, '')
     .charAt(0)
     .toUpperCase();
+}
+
+/** A swatch sized for one letter, scaled down so a two or three character mark still fits it. */
+export function serviceGlyphFontSize(glyph: string, baseSize: number): number {
+  const length = Array.from(glyph).length;
+  if (length <= 1) return baseSize;
+  return Math.round(baseSize * (length === 2 ? 0.85 : 0.7) * 10) / 10;
 }

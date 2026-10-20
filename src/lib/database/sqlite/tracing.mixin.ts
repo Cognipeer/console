@@ -475,8 +475,8 @@ export function TracingMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       const freeText =
         typeof filters?.query === 'string' ? filters.query.trim() : '';
       if (freeText) {
-        clauses.push('(sessionId LIKE @freeText OR threadId LIKE @freeText OR agentName LIKE @freeText)');
-        params.freeText = `%${freeText}%`;
+        clauses.push(this.likeAny(['sessionId', 'threadId', 'agentName'], '@freeText'));
+        params.freeText = this.likePattern(freeText);
       }
 
       // Same key charset the ingest sanitizer enforces (client-tracing.ts) —

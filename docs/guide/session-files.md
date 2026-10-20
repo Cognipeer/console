@@ -34,7 +34,7 @@ An agent saved before files had a bucket setting, or with files switched on but 
 
 ### Where the files are
 
-They are normal Document Store files (**Files** in the sidebar): same drivers (S3 and compatible, or local disk), same markdown conversion, same project file quotas. In the bucket, **Session files** are told apart from the rest, and a session file shows the session it belongs to, when it expires and who uploaded it. Open the bucket's folders to see `agent-sessions/<agent>/<session>/…`.
+They are normal files of the [Document Store](/guide/files) (**Data → Document Store** in the sidebar): same drivers (S3, S3-compatible storage, Azure Blob, MongoDB GridFS or local disk), same markdown conversion, same project file quotas. In the bucket, **Session files** are told apart from the rest, and a session file shows the session it belongs to, when it expires and who uploaded it. Open the bucket's folders to see `agent-sessions/<agent>/<session>/…`.
 
 A bucket an agent keeps session files in **cannot be deleted or disabled** (409) until you choose another bucket for that agent — whether its draft or its *published* version still names it (the version API callers and portals run keeps writing there even after you moved the draft). If the bucket or its provider stops working later, an upload is refused with `409 storage_unavailable`, naming the bucket; the retention cleanup drops the record of an expired file whose bucket is gone for good (and logs `session_file_orphaned` for the object left behind) instead of retrying it every hour. Changing the agent's bucket affects new files only; earlier files stay readable in the bucket they were stored in.
 

@@ -1,0 +1,335 @@
+/**
+ * Document Store bucket sayfası: başlık ile Files, Settings ve API sekmeleri. `tr.ts`, bucket listesinin kullandığı iki ret başlığını bu modülün yanında tutar.
+ * `tr.ts` içinde `files.bucket` olarak kayıtlıdır; ortak metinler (dosya türleri, sağlık,
+ * API hataları, kopyalama) `filesCommon.tr.ts` içindedir.
+ *
+ * Çoğul mekanizması yoktur: sayıya göre değişen cümle bir `…One` / `…Many` çiftidir, seçimi
+ * ekran yapar. "API" sekmesinin adı her dilde aynı yazılır, olduğu gibi çizilir; anahtar değildir.
+ */
+import type { filesBucketEn } from './filesBucket.en';
+
+export const filesBucketTr: typeof filesBucketEn = {
+  header: {
+    back: 'Doküman Deposu’na dön',
+    statsOne: '1 dosya · {size}',
+    statsMany: '{count} dosya · {size}',
+  },
+  tabs: {
+    files: 'Dosyalar',
+    settings: 'Ayarlar',
+  },
+  actions: {
+    refresh: 'Yenile',
+    upload: 'Yükle',
+    more: 'Diğer işlemler',
+    enable: 'Etkinleştir',
+    disable: 'Devre dışı bırak',
+    // İçe aktarma penceresini açar (konsolun dışından doldurulan bir bucket, içe aktarılana kadar hiçbir şey listelemez).
+    import: 'Depolamadan içe aktar…',
+    // Dosyalar hakkındaki seçimin yapıldığı silme penceresini açar.
+    delete: 'Bucket’ı sil…',
+    enabled: '{name} yeniden yükleme kabul ediyor.',
+    disabledDone: '{name} dosyalarını okunabilir tutar, yeni bir şey kabul etmez.',
+    kept: '{name} tutuldu ve yeniden etkinleştirildi.',
+  },
+  banner: {
+    disabled:
+      'Bu bucket devre dışı. Dosyalarına göz atılabilir ve dosyalar indirilebilir, ancak siz etkinleştirene kadar dosya yüklenemez, içe aktarılamaz ya da silinemez.',
+    enable: 'Bucket’ı etkinleştir',
+    deleting: 'Bu bucket siliniyor. Dosyaları depolama sağlayıcısından kaldırılıyor; bu bitene kadar hiçbir şey değiştirilemez.',
+    // Silme o kadar uzun süredir sessiz ki arka plan çalışması büyük olasılıkla kayboldu (sunucu yeniden başladı).
+    deletingStalled:
+      'Silme bir süredir tamamlanmadı. Bu sırada sunucu yeniden başlatıldıysa arka plan çalışması kaybolmuş olabilir. Kaldığı yerden devam etmek için yeniden silin; kaldırılmış dosyalar kaldırılmış kalır.',
+    deleteAgain: 'Yeniden sil',
+    // Son "dosyalarıyla birlikte sil" çalışması bucket kalkmadan durdu; neden başlığın altında gösterilir.
+    deleteFailedTitle: 'Bu bucket’ın silinmesi tamamlanmadı',
+    deleteFailedHint: 'Önceden kaldırılan dosyalar kaldırılmış kalır. Nedeni giderdikten sonra yeniden deneyin ya da bucket’ı tutun.',
+    deleteRetry: 'Yeniden dene',
+    keep: 'Bucket’ı tut',
+  },
+  toolbar: {
+    search: 'Dosyaları ada göre ara…',
+    typeLabel: 'Dosya türüne göre filtrele',
+    // {folder} aranan klasördür (ya da "Bucket kökü"): arama ve tür filtresi tüm alt klasörlere bakar.
+    flatHint: '{folder} ve alt klasörlerindeki eşleşmeler tek bir liste olarak gösteriliyor.',
+  },
+  columns: {
+    name: 'Ad',
+    size: 'Boyut',
+    type: 'Tür',
+    markdown: 'Markdown kopyası',
+    modified: 'Değiştirildi',
+    actions: 'İşlemler',
+    selectAll: 'Bu listedeki tüm dosyaları seç',
+  },
+  row: {
+    select: '{name} dosyasını seç',
+    // Satır menüsü düğmesinin adı: menünün hangi dosya için olduğunu söyler.
+    menuFor: '{name} için işlemler',
+    downloadOriginal: 'Orijinali indir',
+    downloadMarkdown: 'Markdown’ı indir',
+    copyKey: 'Anahtarı kopyala',
+    delete: 'Sil…',
+    keyCopied: 'Anahtar kopyalandı',
+    copyFailed: 'Anahtar panoya kopyalanamadı.',
+  },
+  bulk: {
+    label: 'Seçili dosyalar için işlemler',
+    selected: '{count} seçildi',
+    download: '.zip olarak indir',
+    downloadLimit: 'En fazla {max} dosya birlikte indirilebilir. Daha az dosya seçin.',
+    delete: 'Sil…',
+    clear: 'Seçimi temizle',
+  },
+  empty: {
+    noMatches: 'Eşleşen dosya yok',
+    noMatchesHint: 'Geçerli arama ve filtrelerle eşleşen dosya yok. Bunları değiştirin ya da filtreleri temizleyin.',
+    clearFilters: 'Filtreleri temizle',
+    uploadHere: 'Buraya yükle',
+  },
+  emptyBucket: {
+    title: 'Bu bucket’ta henüz dosya yok',
+    hint: 'Başlamak için dosya yükleyin ya da depolama sağlayıcısında zaten bulunan nesneleri içe aktarın.',
+    hintReadOnly: 'Bu bucket’a yüklenen dosyalar burada görünür.',
+    upload: 'Dosya yükle',
+    import: 'Depolamadan içe aktar…',
+  },
+  error: {
+    title: 'Dosyalar yüklenemedi',
+    retry: 'Yeniden dene',
+  },
+  footer: {
+    showingOne: '1 dosya gösteriliyor',
+    showingMany: '{count} dosya gösteriliyor',
+    loadMore: 'Daha fazla yükle',
+  },
+  errors: {
+    downloadFailed: 'İndirme başarısız oldu',
+  },
+  state: {
+    loading: 'Bucket yükleniyor…',
+    notFoundTitle: 'Bucket bulunamadı',
+    notFoundBody: 'Bu bucket yok ya da silinmiş.',
+    errorTitle: 'Bucket yüklenemedi',
+    retry: 'Yeniden dene',
+    backToList: 'Doküman Deposu’na dön',
+  },
+  general: {
+    title: 'Genel',
+    description: 'İnsanların gördüğü ad ve açıklama; ayrıca bucket’ın değişiklik kabul edip etmediği.',
+    name: 'Ad',
+    nameRequired: 'Bucket için bir ad girin.',
+    nameTooLong: 'Ad en fazla {max} karakter olabilir.',
+    descriptionLabel: 'Açıklama',
+    descriptionTooLong: 'Açıklama en fazla {max} karakter olabilir.',
+    status: 'Durum',
+    statusActive: 'Aktif',
+    statusActiveHint: 'Bucket yükleme ve içe aktarma kabul eder.',
+    statusDisabled: 'Devre dışı',
+    statusDisabledHint: 'Dosyalar okunabilir ve indirilebilir kalır, ancak yeni bir şey kabul edilmez.',
+    save: 'Değişiklikleri kaydet',
+    saved: 'Bucket kaydedildi',
+  },
+  storage: {
+    title: 'Depolama',
+    description: 'Bu bucket’ın dosyalarını nerede tuttuğu. Sağlayıcının kendisi Sağlayıcılar bölümünden yönetilir.',
+    provider: 'Sağlayıcı',
+    providerMissing: 'Bu bucket’ın sağlayıcısı kullanılamıyor.',
+    openProvider: 'Sağlayıcıyı aç',
+    testNow: 'Şimdi test et',
+    testOk: 'Bağlantı çalışıyor ({latency})',
+    testFailed: 'Bağlantı testi başarısız oldu',
+    testNone: 'Test bir sonuç döndürmedi.',
+    prefix: 'Sağlayıcı içindeki prefix',
+    prefixPlaceholder: 'örneğin ekip/belgeler',
+    prefixRoot: 'Depolamanın kökü (prefix yok)',
+    prefixHint:
+      'Bu bucket’ın dosyaları bu prefix’in altında saklanır. Boş prefix dosyaları kökte saklar. Bucket’ta dosya olana kadar değiştirilebilir.',
+    prefixLocked: 'Bu bucket’ta dosya olduğu için prefix sabit; değiştirmek dosyaları eski konumda bırakırdı.',
+    prefixSave: 'Prefix’i kaydet',
+    prefixSaved: 'Prefix kaydedildi',
+    prefixDots: 'Prefix “..” içeremez ve “.” klasör adı olarak kullanılamaz.',
+    prefixControl: 'Prefix ters eğik çizgi veya denetim karakteri içeremez.',
+    prefixTooLong: 'Prefix en fazla {max} karakter olabilir.',
+    location: 'Depolamadaki konum',
+    key: 'Bucket anahtarı',
+    copyKey: 'Bucket anahtarını kopyala',
+  },
+  usage: {
+    title: 'Kullanım',
+    description: 'Bu bucket’ın tuttukları ve projenin sınırlarının ne kadarının kullanıldığı.',
+    files: 'Dosya',
+    stored: 'Saklanan boyut',
+    maxFile: 'En büyük dosya boyutu',
+    projectStorage: 'Proje depolaması',
+    projectFiles: 'Proje dosyaları',
+    of: '{used} / {limit}',
+    noStorageLimit: 'Bu proje için depolama sınırı yok.',
+    noFilesLimit: 'Bu proje için dosya sayısı sınırı yok.',
+    limitsFailed: 'Proje sınırları yüklenemedi: {reason}',
+    retry: 'Yeniden dene',
+  },
+  danger: {
+    title: 'Tehlikeli bölge',
+    descriptionEmpty: 'Bu bucket’ta dosya yok. Silmek yalnızca bucket’ı kaldırır ve geri alınamaz.',
+    descriptionOne: 'Bu bucket’ın {provider} üzerinde 1 dosyası var. Bucket’ı silerken dosyanın da silinip silinmeyeceğini seçersiniz. Bu işlem geri alınamaz.',
+    descriptionMany:
+      'Bu bucket’ın {provider} üzerinde {count} dosyası var. Bucket’ı silerken dosyaların da silinip silinmeyeceğini seçersiniz. Bu işlem geri alınamaz.',
+    button: 'Bucket’ı sil…',
+    buttonAgain: 'Yeniden sil…',
+    usedBy: 'Şu ajanlar oturum dosyalarını bu bucket’ta tuttuğu sürece bucket silinemez:',
+    chooseAnother: 'Her ajanın Dosyalar ayarlarını açıp başka bir bucket seçin, sonra bunu silin.',
+    inProgress: 'Bu bucket siliniyor. Dosyaları depolama sağlayıcısından kaldırılıyor.',
+    stalled:
+      'Silme bir süredir tamamlanmadı; arka plan çalışması kaybolmuş olabilir. Kaldığı yerden devam etmek için yeniden silin.',
+    lastFailed: 'Bu bucket’ı silme girişimi başarısız oldu: {reason}',
+  },
+  // Bucket’ı silme (üst menüden ve tehlikeli bölgeden açılan pencere).
+  delete: {
+    title: 'Bucket’ı sil',
+    question: '“{name}” bucket’ı silinsin mi?',
+    noFiles: 'Bucket boş; yalnızca bucket’ın kendisi kaldırılır. Bu işlem geri alınamaz.',
+    filesIntroOne: 'Bu bucket’ta {provider} üzerinde saklanan 1 dosya var. Ona ne olacağını seçin.',
+    filesIntroMany: 'Bu bucket’ta {provider} üzerinde saklanan {count} dosya var. Onlara ne olacağını seçin.',
+    // Sayılar bucket’ın boş olduğunu söylüyordu, sunucu dosya buldu: söylenecek bir sayı yok.
+    filesIntroSome: 'Bu bucket’ta {provider} üzerinde saklanan dosyalar var. Onlara ne olacağını seçin.',
+    choiceLabel: 'Dosyalara ne olsun',
+    withFilesOne: 'Bucket’ı ve dosyasını sil',
+    withFilesMany: 'Bucket’ı ve {count} dosyasını sil',
+    withFilesSome: 'Bucket’ı ve dosyalarını sil',
+    withFilesNoteOne: 'Dosya arka planda {provider} üzerinden kaldırılır. Bu işlem geri alınamaz.',
+    withFilesNoteMany: 'Dosyalar arka planda {provider} üzerinden kaldırılır. Bu işlem geri alınamaz.',
+    bucketOnly: 'Yalnızca bucket’ı sil',
+    bucketOnlyNoteOne: 'Dosya {provider} üzerinde kalır ve projenin depolama kullanımına saymaya devam eder.',
+    bucketOnlyNoteMany: 'Dosyalar {provider} üzerinde kalır ve projenin depolama kullanımına saymaya devam eder.',
+    previousFailure: 'Bu bucket’ı dosyalarıyla birlikte silme girişimi yarıda kaldı: {reason}',
+    previousFailureHint: 'Önceden kaldırılan dosyalar kaldırılmış kalır.',
+    blockedOne: 'Bir ajan oturum dosyalarını bu bucket’ta tutuyor; bu yüzden bucket henüz silinemez.',
+    blockedMany: '{count} ajan oturum dosyalarını bu bucket’ta tutuyor; bu yüzden bucket henüz silinemez.',
+    agentsLabel: 'Bu bucket’ı kullanan ajanlar',
+    blockedHint: 'Her ajanın Dosyalar ayarlarını açıp oturum dosyaları için başka bir bucket seçin, sonra buraya dönüp bunu silin.',
+    alreadyDeleting: 'Bu bucket zaten siliniyor. Dosyaları arka planda kaldırılıyor; bu bittiğinde bucket kaybolur.',
+    stalled:
+      'Silme bir süredir tamamlanmadı. Bu sırada sunucu yeniden başlatıldıysa arka plan çalışması kaybolmuş olabilir. Yeniden silmek kaldığı yerden devam eder; kaldırılmış dosyalar kaldırılmış kalır.',
+    deleteAgain: 'Yeniden sil',
+    cancel: 'Vazgeç',
+    confirm: 'Bucket’ı sil',
+    close: 'Kapat',
+    deleted: '“{name}” bucket’ı silindi',
+    deletedKeepingFiles: '“{name}” bucket’ı silindi. Dosyaları {provider} üzerinde kalıyor.',
+    started: '“{name}” siliniyor. Dosyaları arka planda kaldırılıyor.',
+    errors: {
+      notEmpty: 'Bucket’ta artık dosya var. Dosyalara ne olacağını seçin ya da vazgeçin.',
+    },
+  },
+  // Dosyaları silme (satır menüsünden ve toplu işlem çubuğundan açılan pencere).
+  deleteFiles: {
+    titleOne: 'Dosyayı sil',
+    titleMany: 'Dosyaları sil',
+    questionOne: '“{name}” silinsin mi?',
+    questionMany: '{count} dosya silinsin mi?',
+    consequence: 'Dosyalar, Markdown kopyalarıyla birlikte depolama sağlayıcısından kaldırılır. Bu işlem geri alınamaz.',
+    progress: 'Siliniyor… {done} / {total}',
+    cancel: 'Vazgeç',
+    confirm: 'Sil',
+    close: 'Kapat',
+    doneOne: 'Dosya silindi',
+    doneMany: '{count} dosya silindi',
+    partial: '{deleted} dosya silindi, {failed} dosya silinemedi.',
+    noneOne: 'Dosya silinemedi.',
+    noneMany: '{count} dosyanın hiçbiri silinemedi.',
+    failedList: 'Silinemeyen dosyalar',
+    more: '…ve {count} dosya daha',
+  },
+  // "Depolamadan içe aktar": sağlayıcıda zaten duran nesneleri dosya olarak kaydeder.
+  import: {
+    title: 'Depolamadan içe aktar',
+    intro:
+      'Depolama sağlayıcısında bu bucket’ın konumunun altında zaten duran nesneleri dosya olarak kaydedin. Depolama konsolun dışından doldurulduysa kullanın.',
+    scansLabel: 'Taranacak konum',
+    safe: 'Depolamadaki hiçbir şey değiştirilmez ya da silinmez. Zaten dosya kaydı olan nesneler atlanır.',
+    markdownNote: 'İçe aktarılan dosyalar Markdown kopyası olmadan gelir. Gerektiğinde dosyanın ayrıntılarından dönüştürebilirsiniz.',
+    start: 'İçe aktarmayı başlat',
+    cancel: 'Vazgeç',
+    running: 'Depolama taranıyor…',
+    scanned: 'Taranan',
+    imported: 'İçe aktarılan',
+    skipped: 'Atlanan',
+    stop: 'Durdur',
+    stopped: 'İçe aktarma durduruldu. Kaldığı yerden devam edebilirsiniz.',
+    resume: 'Devam et',
+    failedTitle: 'İçe aktarma bir hatayla durdu',
+    retry: 'Yeniden dene',
+    doneImported: 'İçe aktarma bitti. Eklenen dosya: {count}.',
+    doneNothing: 'İçe aktarma bitti. Yeni bir şey bulunamadı: her nesnenin zaten bir dosya kaydı var.',
+    close: 'Kapat',
+  },
+  // API sekmesi: bu bucket’a koddan nasıl ulaşılır.
+  api: {
+    docs: 'Dokümantasyon',
+    languageLabel: 'Dil',
+    disabledNote: 'Bu bucket devre dışı. Listeleme ve indirme çalışır, ancak etkinleştirilene kadar yükleme ve silme reddedilir.',
+    // {operation} çağrının başlığı, {language} örneğin dilidir.
+    sampleLabel: '{operation}, {language} örneği',
+    copySample: '“{operation}” örneğini kopyala',
+    connect: {
+      title: 'Koddan bağlanın',
+      description: 'Bu bucket’ın dosyalarını kendi kodunuzdan yüklemek, listelemek, indirmek ve silmek için client API’yi kullanın.',
+      baseUrl: 'Temel URL',
+      copyBaseUrl: 'Temel URL’yi kopyala',
+      bucketKey: 'Bucket anahtarı',
+      copyBucketKey: 'Bucket anahtarını kopyala',
+      auth: 'Yetkilendirme başlığı',
+      copyAuth: 'Yetkilendirme başlığını kopyala',
+      authHint: 'Bu başlıkta Doküman Deposu’nu kullanabilen bir API token’ı gönderin.',
+      createToken: 'Token oluştur',
+    },
+    examples: {
+      title: 'Örnekler',
+      description: 'Her çağrı bu bucket’ın anahtarıyla doldurulmuştur. YOUR_API_TOKEN yerine kendi token’ınızı yazın.',
+    },
+    requirements: {
+      curl: 'curl gerekir. Yükleme örnekleri ayrıca jq ve base64 kullanır.',
+      typescript: 'SDK’yı npm install @cognipeer/console-sdk ile kurun. Node.js 18 veya üstü gerekir.',
+      python: 'httpx paketini kullanır (pip install httpx).',
+    },
+    operations: {
+      list: {
+        title: 'Dosyaları listele',
+        text: 'İstek başına en fazla 50 dosya döndürür. Sonraki sayfa için yanıttaki nextCursor değerini cursor olarak geçin.',
+      },
+      listFolder: {
+        title: 'Bir klasörü listele',
+        text: 'Eğik çizgiyle biten bir prefix o klasörü listeler: doğrudan içindeki dosyalar files, alt klasörleri folders alanında döner.',
+      },
+      upload: {
+        title: 'Dosya yükle',
+        text: 'Dosyayı JSON gövdesinde base64 data URL olarak gönderin. Yanıttaki anahtarı saklayın: indirme ve silme onu ister. Markdown kopyası da saklamak için convertToMarkdown değerini true yapın.',
+      },
+      uploadToFolder: {
+        title: 'Klasöre yükle',
+        text: 'Eğik çizgiyle biten bir keyHint dosyayı o klasöre koyar. Dosya klasörün içinde üretilmiş benzersiz adını korur.',
+      },
+      download: {
+        title: 'Dosya indir',
+        text: 'Dosyanın anahtarını kullanın. Anahtar tek bir yol parçasıdır; bu yüzden içindeki eğik çizgiler kodlanır. Markdown kopyası için variant=markdown ekleyin.',
+      },
+      delete: {
+        title: 'Dosya sil',
+        text: 'Dosyayı Markdown kopyasıyla birlikte siler. Dosyanın anahtarını kullanın.',
+      },
+    },
+    keys: {
+      title: 'Dosya anahtarları',
+      // {example} sunucunun ürettiği biçimde bir anahtardır.
+      description:
+        'Dosyanın anahtarı yüklenirken üretilir (örneğin {example}); gönderdiğiniz addan oluşturulmaz. Anahtarı bir yüklemenin ya da liste çağrısının yanıtından okuyun.',
+      uploadAnswer: 'Bir yükleme, saklanan dosyayı yanıt olarak döndürür:',
+      uploadAnswerLabel: 'Bir yüklemenin örnek yanıtı',
+      copyUploadAnswer: 'Yükleme örnek yanıtını kopyala',
+      listAnswer: 'Bir liste çağrısı dosyaları, klasörleri ve sonraki sayfanın cursor değerini döndürür:',
+      listAnswerLabel: 'Bir liste çağrısının örnek yanıtı',
+      copyListAnswer: 'Liste örnek yanıtını kopyala',
+    },
+  },
+};

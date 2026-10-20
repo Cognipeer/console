@@ -2,6 +2,7 @@ import { getConfig, validateConfig } from '@/lib/core/config';
 import { validateServiceSwitchConfig } from '@/lib/services/availability/serviceAvailability';
 import { createLogger } from '@/lib/core/logger';
 import { configureOutboundProxy } from '@/lib/core/outboundProxyBootstrap';
+import { logProviderPrivateNetworks } from '@/lib/security/providerPrivateNetworks';
 import { initLifecycle, registerShutdownHandler } from '@/lib/core/lifecycle';
 import { getCache, destroyCache } from '@/lib/core/cache';
 import { runtimePool } from '@/lib/core/runtimePool';
@@ -24,6 +25,7 @@ import {
   reconcileOrphanedCrawlJobs,
 } from '@/lib/services/crawler';
 import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
+import { startFilesQueueConsumer } from '@/lib/services/files/jobs/filesConsumer';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
 import { startSnapshotQueueConsumer } from '@/lib/services/snapshots/snapshotConsumer';
@@ -55,6 +57,7 @@ import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/r
 import { ensureBootstrapOrganization } from '@/lib/services/auth/bootstrapOrganization';
 import { markBootstrapStarted } from './bootstrapMarker';
 import { ensureServerEnvLoaded } from './env';
+import { resumeDeletingFileBuckets } from './resumeDeletingFileBuckets';
 
 const logger = createLogger('startup');
 
@@ -177,6 +180,9 @@ async function runBootstrap(): Promise<void> {
       `${errors.length} config validation error(s). Some features may not work.`,
     );
   }
+
+  // The private networks the operator opened for provider endpoints: one line of counts, and what opens nothing.
+  await bestEffort(() => logProviderPrivateNetworks(logger), 'Provider private networks could not be read during startup');
 
   await verifyAuthorizationEngine();
 
@@ -371,6 +377,7 @@ async function runBootstrap(): Promise<void> {
     startBrowserQueueConsumer(),
     startCrawlerQueueConsumer(),
     startOcrJobQueueConsumer(),
+    startFilesQueueConsumer(),
     startBatchQueueConsumer(),
     startDatasetGenerationConsumer(),
     startSnapshotQueueConsumer(),
@@ -396,6 +403,10 @@ async function runBootstrap(): Promise<void> {
   // Documents left `pending` by a restart: the memory queue driver drops
   // in-flight jobs, so without this sweep a deferred ingest would never run.
   await bestEffort(resumePendingRagIngests, 'Knowledge Engine ingest resume failed during startup');
+
+  // Buckets a restart left "being deleted": the memory queue driver drops the deletion job with the process, and
+  // without this sweep the bucket would stay switched off and marked for good. After the files consumer above.
+  await bestEffort(resumeDeletingFileBuckets, 'File bucket deletion resume failed during startup');
 
   applicationReady = true;
 

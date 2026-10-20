@@ -239,7 +239,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.kind !== undefined) { clauses.push('kind = @kind'); params.kind = filters.kind; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.evaluationTargets} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapTargetRow(r));
@@ -352,7 +352,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       const params: Record<string, unknown> = {};
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.source !== undefined) { clauses.push('source = @source'); params.source = filters.source; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.evaluationDatasets} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapDatasetRow(r));
@@ -731,7 +731,7 @@ export function EvaluationMixin<TBase extends Constructor<SQLiteProviderBase>>(B
       if (filters?.projectId !== undefined) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.targetKey !== undefined) { clauses.push('targetKey = @targetKey'); params.targetKey = filters.targetKey; }
       if (filters?.datasetKey !== undefined) { clauses.push('datasetKey = @datasetKey'); params.datasetKey = filters.datasetKey; }
-      if (filters?.search) { clauses.push('(name LIKE @search OR description LIKE @search OR key LIKE @search)'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['name', 'description', 'key'], '@search')); params.search = this.likePattern(filters.search); }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = db.prepare(`SELECT * FROM ${TABLES.evaluationSuites} ${where} ORDER BY createdAt DESC`).all(params) as SqliteRow[];
       return rows.map((r) => this.mapSuiteRow(r));

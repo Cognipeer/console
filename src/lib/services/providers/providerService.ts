@@ -6,7 +6,10 @@ import {
 } from '@/lib/database';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
+import { ProviderKeyExistsError, ProviderSettingsError } from '@/lib/providers/errors';
+import { isSafePathSegment } from '@/lib/providers/pathSegments';
 import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
+import { settingsValidatorOf, validateProviderSettings } from './providerSettingsValidation';
 
 const logger = createLogger('provider-service');
 
@@ -80,6 +83,12 @@ export interface CreateProviderConfigInput {
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
   createdBy: string;
+  /**
+   * The caller administers providers (an owner or an admin) and may name directories of this server, which the local
+   * disk driver takes as its base directory. Set by the route from the caller's role; it is never read from a request
+   * body and never stored. Left out, such a setting is refused.
+   */
+  allowHostPaths?: boolean;
 }
 
 export interface UpdateProviderConfigInput {
@@ -92,6 +101,8 @@ export interface UpdateProviderConfigInput {
   capabilitiesOverride?: string[];
   metadata?: Record<string, unknown>;
   updatedBy?: string;
+  /** As in {@link CreateProviderConfigInput.allowHostPaths}. */
+  allowHostPaths?: boolean;
 }
 
 /**
@@ -113,13 +124,28 @@ async function validateWebSearchSettings(
 export interface ProviderConfigView
   extends Omit<IProviderRecord, 'credentialsEnc'> {
   hasCredentials: boolean;
+  /**
+   * The names - never the values - of the credential fields the record stores a value for. Only the dashboard reads
+   * that open an edit form ask for it (`ProviderViewOptions.credentialFields`); every other reply leaves it out.
+   */
+  credentialFields?: string[];
 }
 
-function sanitize(record: IProviderRecord): ProviderConfigView {
+/** What a read of a provider adds to the plain view. */
+export interface ProviderViewOptions {
+  /**
+   * Add `credentialFields`. It needs the stored credentials opened, so it is asked for where it is used: an edit form
+   * must tell a secret it may leave blank (one that is stored) from one it has to fill in.
+   */
+  credentialFields?: boolean;
+}
+
+function sanitize(record: IProviderRecord, options?: ProviderViewOptions): ProviderConfigView {
   const { credentialsEnc, ...rest } = record;
   return {
     ...rest,
     hasCredentials: Boolean(credentialsEnc),
+    ...(options?.credentialFields ? { credentialFields: storedCredentialNames(record) } : {}),
   };
 }
 
@@ -170,12 +196,31 @@ export async function resolveTenantProjectIds(
   };
 }
 
+/**
+ * A provider key names the provider's folder on the disk drivers (`<base>/<organization id>/<key>`), so it has to be
+ * one name that stays inside the folder it is joined to: not `.` or `..`, and no separator or control character. Any
+ * other text is a key.
+ */
+function assertKeyIsAFolderName(key: unknown): void {
+  if (isSafePathSegment(key)) return;
+  throw new ProviderSettingsError(
+    'key',
+    'The provider key is used as a folder name: it cannot be empty, "." or "..", and it cannot hold "/", "\\" or a control character.',
+  );
+}
+
 export async function createProviderConfig(
   tenantDbName: string,
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
-  await assertProviderEndpointsAllowed(payload.type, payload.credentials, payload.settings);
+  assertKeyIsAFolderName(payload.key);
+  // The driver's own checks first: a setting it cannot work with is a better answer than what the endpoint guard
+  // would say about the same value.
+  await validateProviderSettings(payload.driver, payload.credentials, payload.settings, { tenantId }, {
+    allowHostPaths: payload.allowHostPaths,
+  });
+  await assertProviderEndpointsAllowed(payload.type, { tenantId }, payload.credentials, payload.settings);
   const settings = payload.type === 'websearch'
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
     : payload.settings;
@@ -185,7 +230,7 @@ export async function createProviderConfig(
   // Provider keys are tenant-level; project assignment is handled via projectIds.
   const existing = await db.findProviderByKey(tenantId, payload.key);
   if (existing) {
-    throw new Error(`Provider with key "${payload.key}" already exists.`);
+    throw new ProviderKeyExistsError(payload.key);
   }
 
   let record: IProviderRecord;
@@ -210,7 +255,7 @@ export async function createProviderConfig(
     // Lost the create race: another request inserted the same key between the
     // findProviderByKey check above and this insert. Surface it as a conflict.
     if (isDuplicateKeyError(error)) {
-      throw new Error(`Provider with key "${payload.key}" already exists.`);
+      throw new ProviderKeyExistsError(payload.key);
     }
     throw error;
   }
@@ -231,6 +276,117 @@ function sameJson(a: unknown, b: unknown): boolean {
   );
 }
 
+/**
+ * The credentials a record holds, decrypted; `{}` when it has none and `undefined` when none of the configured
+ * secrets opens them (see `ProviderCredentialDecryptError`).
+ */
+function readStoredCredentials(
+  record: IProviderRecord | null,
+  replacing: boolean,
+): Record<string, unknown> | undefined {
+  if (!record?.credentialsEnc) return {};
+  try {
+    return decryptObject(record.credentialsEnc) as Record<string, unknown>;
+  } catch (error) {
+    // Undecryptable existing credentials must not block the save — that made
+    // the one action that repairs the record (re-entering the key) the one
+    // action guaranteed to fail. Whatever the operator supplies now is
+    // re-sealed under the current key.
+    logger.warn(
+      replacing
+        ? 'Existing provider credentials could not be decrypted; replacing them'
+        : 'Existing provider credentials could not be decrypted; their settings are saved without the driver check',
+      {
+        driver: record.driver,
+        providerKey: record.key,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    return undefined;
+  }
+}
+
+/** An incoming credential value that says "leave this field as stored". */
+function isBlankCredentialValue(value: unknown): boolean {
+  return value === '' || value === undefined || value === null;
+}
+
+/**
+ * The names of the credential fields a record stores a value for: what an update that leaves a field blank keeps. The
+ * values are opened here and go no further. Credentials that cannot be opened store nothing an update would keep (it
+ * treats them as empty), so the list is empty and the form asks for the secrets again.
+ */
+function storedCredentialNames(record: IProviderRecord): string[] {
+  if (!record.credentialsEnc) return [];
+  let stored: unknown;
+  try {
+    stored = decryptObject(record.credentialsEnc);
+  } catch (error) {
+    logger.warn('Stored provider credentials could not be decrypted; none are reported as stored', {
+      driver: record.driver,
+      providerKey: record.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+  if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return [];
+  return Object.entries(stored as Record<string, unknown>)
+    .filter(([, value]) => !isBlankCredentialValue(value))
+    .map(([name]) => name)
+    .sort();
+}
+
+/** An update of a record's credentials: the stored set with the incoming values laid over it. */
+interface CredentialMerge {
+  /** The stored set (empty when there is none, or when it cannot be opened). */
+  current: Record<string, unknown>;
+  merged: Record<string, unknown>;
+  /** A record that had no credentials gets them from this update, which is a change of its connection. */
+  hadStored: boolean;
+}
+
+/**
+ * Merge incoming credentials over the existing decrypted set instead of
+ * replacing wholesale. A blank/undefined value means "leave this field
+ * unchanged" — the edit UI re-initialises secret fields (e.g. apiKey) to
+ * '' because the backend never returns the secret, so a wholesale replace
+ * would silently wipe the API key whenever an unrelated field (baseUrl,
+ * region, …) is edited.
+ */
+function mergeCredentials(
+  existing: IProviderRecord | null,
+  incoming: Record<string, unknown>,
+): CredentialMerge {
+  // Undecryptable existing credentials are treated as empty.
+  const current = readStoredCredentials(existing, true) ?? {};
+  const merged: Record<string, unknown> = { ...current };
+  for (const [field, value] of Object.entries(incoming)) {
+    if (isBlankCredentialValue(value)) {
+      continue;
+    }
+    merged[field] = value;
+  }
+  return { current, merged, hadStored: Boolean(existing?.credentialsEnc) };
+}
+
+/**
+ * The driver's own check of an update, on what the update will store rather than on the patch: the settings replace
+ * the stored ones wholesale, the credentials are the merged set (or the stored one when the update leaves them alone).
+ */
+async function validateUpdatedProvider(
+  target: IProviderRecord | null,
+  payload: UpdateProviderConfigInput,
+  mergedCredentials: Record<string, unknown> | undefined,
+): Promise<void> {
+  const validate = settingsValidatorOf(target?.driver, { tenantId: target?.tenantId }, { allowHostPaths: payload.allowHostPaths });
+  if (!target || !validate) return;
+  const credentials = mergedCredentials ?? readStoredCredentials(target, false);
+  // Credentials that cannot be opened say nothing about the settings: such a record still saves a settings-only edit,
+  // and the credentials are repaired by entering them again.
+  if (!credentials) return;
+  await validate(credentials, payload.settings ?? target.settings);
+}
+
 export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
@@ -244,11 +400,17 @@ export async function updateProviderConfig(
   // the credentials actually change it no longer says anything, so it is dropped (a re-test writes a new one).
   let connectionChanged = false;
   let hadLastTest = false;
+  // Set when the update changes the credentials.
+  let credentialMerge: CredentialMerge | undefined;
 
   if (payload.settings !== undefined || payload.credentials !== undefined) {
     const target = await db.findProviderById(providerId);
     hadLastTest = Boolean(target?.lastTest);
-    await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
+    if (payload.credentials !== undefined) {
+      credentialMerge = mergeCredentials(target, payload.credentials);
+    }
+    await validateUpdatedProvider(target, payload, credentialMerge?.merged);
+    await assertProviderEndpointsAllowed(target?.type, { tenantId: target?.tenantId }, payload.credentials, payload.settings);
     if (payload.settings !== undefined && !sameJson(payload.settings, target?.settings ?? {})) {
       connectionChanged = true;
     }
@@ -299,41 +461,11 @@ export async function updateProviderConfig(
     updates.metadata = payload.metadata;
   }
 
-  if (payload.credentials !== undefined) {
-    // Merge incoming credentials over the existing decrypted set instead of
-    // replacing wholesale. A blank/undefined value means "leave this field
-    // unchanged" — the edit UI re-initialises secret fields (e.g. apiKey) to
-    // '' because the backend never returns the secret, so a wholesale replace
-    // would silently wipe the API key whenever an unrelated field (baseUrl,
-    // region, …) is edited.
-    const existing = await db.findProviderById(providerId);
-    let current: Record<string, unknown> = {};
-    if (existing?.credentialsEnc) {
-      try {
-        current = decryptObject(existing.credentialsEnc) as Record<string, unknown>;
-      } catch (error) {
-        // Undecryptable existing credentials must not block the save — that made
-        // the one action that repairs the record (re-entering the key) the one
-        // action guaranteed to fail. Treat the old blob as empty; whatever the
-        // operator supplies now is re-sealed under the current key.
-        logger.warn('Existing provider credentials could not be decrypted; replacing them', {
-          driver: existing.driver,
-          providerKey: existing.key,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    const merged: Record<string, unknown> = { ...current };
-    for (const [field, value] of Object.entries(payload.credentials)) {
-      if (value === '' || value === undefined || value === null) {
-        continue;
-      }
-      merged[field] = value;
-    }
-    if (!existing?.credentialsEnc || !sameJson(merged, current)) {
+  if (credentialMerge) {
+    if (!credentialMerge.hadStored || !sameJson(credentialMerge.merged, credentialMerge.current)) {
       connectionChanged = true;
     }
-    updates.credentialsEnc = encryptObject(merged);
+    updates.credentialsEnc = encryptObject(credentialMerge.merged);
   }
 
   if (connectionChanged && hadLastTest) {
@@ -346,6 +478,66 @@ export async function updateProviderConfig(
 
   const updated = await db.updateProvider(providerId, updates);
   return updated ? sanitize(updated) : null;
+}
+
+/** Values a "Test connection" of a saved provider may carry instead of what is stored (the edit form's unsaved edits). */
+export interface ProviderTestOverrides {
+  /** Credential values; a blank one keeps the stored value, as in an update. */
+  credentials?: Record<string, unknown>;
+  /** The settings the form would save; they replace the stored ones wholesale, as in an update. */
+  settings?: Record<string, unknown>;
+}
+
+/** What a "Test connection" of a saved provider runs against. */
+export interface ProviderTestTarget {
+  record: IProviderRecord;
+  credentials: Record<string, unknown>;
+  settings: Record<string, unknown>;
+}
+
+/**
+ * Whether a test carries values that change what is tested. Then the outcome describes a connection that is not
+ * stored, and must not be kept on the record as its "last test".
+ */
+export function hasProviderTestOverrides(overrides: ProviderTestOverrides): boolean {
+  return (
+    overrides.settings !== undefined
+    || Object.values(overrides.credentials ?? {}).some((value) => !isBlankCredentialValue(value))
+  );
+}
+
+/**
+ * The credentials and settings a "Test connection" of a saved provider runs against when it carries overrides: what an
+ * update with the same values would store. Credentials are the stored set with the non-blank incoming values laid over
+ * it (a stored set that cannot be decrypted counts as empty, so re-entered credentials can still be tried); settings are
+ * the incoming ones when given, otherwise the stored ones. Without credential overrides the stored credentials are used,
+ * and ones that cannot be opened are a `ProviderCredentialDecryptError`. The driver's `validateSettings` runs afterwards,
+ * inside the test.
+ */
+export async function resolveProviderTestTarget(
+  tenantDbName: string,
+  provider: { id: string; tenantId: string },
+  overrides: ProviderTestOverrides,
+): Promise<ProviderTestTarget> {
+  const hasCredentialOverride = Object.values(overrides.credentials ?? {}).some(
+    (value) => !isBlankCredentialValue(value),
+  );
+
+  if (!hasCredentialOverride) {
+    const { record, credentials } = await loadProviderRuntimeData(tenantDbName, provider);
+    if (record.tenantId !== provider.tenantId) {
+      throw new Error(`Provider configuration "${provider.id}" not found.`);
+    }
+    return { record, credentials, settings: overrides.settings ?? record.settings ?? {} };
+  }
+
+  const db = await withTenantDb(tenantDbName);
+  const record = await db.findProviderById(provider.id);
+  if (!record || record.tenantId !== provider.tenantId) {
+    throw new Error(`Provider configuration "${provider.id}" not found.`);
+  }
+  const { merged } = mergeCredentials(record, overrides.credentials ?? {});
+  return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
 }
 
 /** Stores the outcome of a "Test connection" on the provider record. */
@@ -367,19 +559,21 @@ export async function listProviderConfigs(
     status?: ProviderStatus;
     projectId?: string;
   },
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView[]> {
   const db = await withTenantDb(tenantDbName);
   const records = await db.listProviders(tenantId, filters);
-  return records.map(sanitize);
+  return records.map((record) => sanitize(record, options));
 }
 
 export async function getProviderConfigById(
   tenantDbName: string,
   providerId: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const record = await db.findProviderById(providerId);
-  return record ? sanitize(record) : null;
+  return record ? sanitize(record, options) : null;
 }
 
 export async function getProviderConfigByKey(
@@ -387,10 +581,11 @@ export async function getProviderConfigByKey(
   tenantId: string,
   key: string,
   projectId?: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const record = await db.findProviderByKey(tenantId, key, projectId);
-  return record ? sanitize(record) : null;
+  return record ? sanitize(record, options) : null;
 }
 
 export async function deleteProviderConfig(

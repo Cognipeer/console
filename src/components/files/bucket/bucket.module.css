@@ -1,0 +1,337 @@
+/* The bucket page: the Files tab's name cell and bulk bar, the Settings cards (label / value rows, gauges) and the
+   API tab's code blocks. Colours come from the --ds tokens, so both colour schemes follow. Nothing here is wider
+   than its container: rows stack on a narrow screen and code scrolls inside its own box. */
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+/* The shared detail header keeps back, icon, title and actions on one line. With three actions that leaves a
+   phone-wide title a few pixels, one letter per line: here the title keeps room to read and the actions drop to
+   their own line once they no longer fit beside it. */
+.page :global(.detail-header) {
+  flex-wrap: wrap;
+}
+
+.page :global(.detail-header) > :global(.detail-icon) + div {
+  flex: 1 1 180px;
+}
+
+.page :global(.detail-header) > :global(.ds-row) {
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .page :global(.detail-header) {
+    align-items: flex-start;
+  }
+}
+
+/* The facts under the title (key, provider, health, size) are told apart by a dot. The dot belongs to the fact after it
+   and sits in a strip on that fact's left, and the row is pulled left by the width of the strip inside a box that clips
+   whatever leaves it: a fact that starts a line has its dot clipped away, so a dot never ends a line or stands alone
+   at the start of one, whatever the width. */
+.facts {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.factsRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin-left: -20px;
+}
+
+.fact {
+  position: relative;
+  padding-left: 20px;
+}
+
+.fact::before {
+  content: '·';
+  position: absolute;
+  left: 8px;
+  color: var(--ds-text-faint);
+}
+
+/* The health chip is a pill of its own: no dot before it. */
+.factBare::before {
+  content: none;
+}
+
+/* ── Files tab ──────────────────────────────────────────────────────────── */
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.nameCell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.nameStack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nameLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nameButton {
+  min-width: 0;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ds-text);
+}
+
+.nameButton:hover {
+  color: var(--ds-link-text);
+  text-decoration: underline;
+}
+
+.nameMeta {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--ds-text-faint);
+}
+
+.bulkBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bulkCount {
+  font-size: 13px;
+  color: var(--ds-text-muted);
+}
+
+.inlineAlert {
+  margin-bottom: 12px;
+}
+
+/* ── Settings ───────────────────────────────────────────────────────────── */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.rows {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  gap: 16px 20px;
+  align-items: start;
+  margin: 0;
+}
+
+.rowLabel {
+  margin: 0;
+  padding-top: 2px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ds-text-muted);
+}
+
+.rowValue {
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ds-text);
+  overflow-wrap: anywhere;
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .rows {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .rowLabel {
+    padding-top: 10px;
+  }
+}
+
+.testResult {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ds-border-soft);
+  border-radius: var(--ds-r-sm);
+  background: var(--ds-surface-1);
+  font-size: 13px;
+}
+
+.testHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.lockNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--ds-text-muted);
+}
+
+.gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.gaugeHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.gaugeTrack {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ds-border-soft);
+  overflow: hidden;
+}
+
+.gaugeFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ds-accent);
+  transition: width var(--ds-m-base);
+}
+
+.gaugeWarn {
+  background: var(--ds-warn);
+}
+
+.gaugeErr {
+  background: var(--ds-err);
+}
+
+.agentList {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+/* ── API tab ────────────────────────────────────────────────────────────── */
+
+.codeWrap {
+  position: relative;
+}
+
+.codeCopy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+}
+
+.code {
+  margin: 0;
+  max-height: 380px;
+  overflow: auto;
+  padding: 16px 52px 16px 18px;
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-code);
+  color: var(--ds-surface-code-text);
+  font: 12.5px/1.65 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: pre;
+  tab-size: 2;
+}
+
+.code:focus-visible {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
+}
+
+.operation + .operation {
+  margin-top: 22px;
+}
+
+.operationHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-bottom: 4px;
+}
+
+.operationTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ds-text);
+}
+
+.operationRoute {
+  font-size: 12px;
+  color: var(--ds-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.operationText {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ds-text-soft);
+}
+
+.langBar {
+  margin-bottom: 18px;
+}
+
+.twoCol {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 860px) {
+  .twoCol {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

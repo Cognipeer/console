@@ -19,6 +19,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { providerRequestError } from '@/components/providers/providerFormModel';
 import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 
@@ -299,7 +300,8 @@ export default function WebSearchListPage() {
               },
             );
             const body = await res.json().catch(() => null);
-            if (!res.ok) throw new Error(body?.error || 'Failed to update instance');
+            // The refusal names the form field it is about: the edit form marks it.
+            if (!res.ok) throw providerRequestError(body, 'Failed to update instance');
             notifications.show({
               color: 'teal',
               title: 'Web Search',
@@ -323,7 +325,8 @@ export default function WebSearchListPage() {
               body: JSON.stringify(payload),
             });
             const body = await res.json().catch(() => null);
-            if (!res.ok) throw new Error(body?.error || 'Failed to create instance');
+            // The refusal names the form field it is about: the form marks it, as it does for an edit.
+            if (!res.ok) throw providerRequestError(body, 'Failed to create instance');
             notifications.show({
               color: 'teal',
               title: 'Web Search',

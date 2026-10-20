@@ -5,7 +5,9 @@ import { AzureAiSearchVectorProviderContract } from './azureAiSearchVector.contr
 import { SqliteVectorProviderContract } from './sqliteVector.contract';
 import { LocalFileProviderContract } from './localFile.contract';
 import { AwsS3FileProviderContract } from './awsS3Files.contract';
+import { S3CompatibleFileProviderContract } from './s3Compatible.contract';
 import { MongoGridFsFileProviderContract } from './mongoGridFsFiles.contract';
+import { AzureBlobFileProviderContract } from './azureBlobFiles.contract';
 import { MODEL_PROVIDER_CONTRACTS } from './modelContracts';
 import { WEBSEARCH_PROVIDER_CONTRACTS } from './webSearchContracts';
 import { MistralOcrProviderContract } from './mistralOcr.contract';
@@ -34,7 +36,9 @@ export const CORE_PROVIDER_CONTRACTS = [
   SqliteVectorProviderContract,
   LocalFileProviderContract,
   AwsS3FileProviderContract,
+  S3CompatibleFileProviderContract,
   MongoGridFsFileProviderContract,
+  AzureBlobFileProviderContract,
   ChromaVectorProviderContract,
   ChromaCloudVectorProviderContract,
   ChromaLocalVectorProviderContract,

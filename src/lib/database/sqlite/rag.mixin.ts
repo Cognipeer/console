@@ -185,7 +185,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) {
-        clauses.push('(name LIKE @search OR key LIKE @search)');
+        clauses.push(this.likeAny(['name', 'key'], '@search'));
         params.search = this.likePattern(filters.search);
       }
 
@@ -333,7 +333,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
         Object.assign(params, scopeFilter.params);
       }
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
-      if (filters?.search) { clauses.push('fileName LIKE @search'); params.search = this.likePattern(filters.search); }
+      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
 
       const rows = db.prepare(
         `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC`,

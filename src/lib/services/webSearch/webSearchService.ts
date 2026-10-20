@@ -16,6 +16,7 @@ import {
   listProviderConfigs,
   loadProviderRuntimeData,
   type ProviderConfigView,
+  type ProviderViewOptions,
 } from '@/lib/services/providers/providerService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
@@ -47,11 +48,12 @@ export async function listWebSearchProviders(
   tenantDbName: string,
   tenantId: string,
   projectId?: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView[]> {
   return listProviderConfigs(tenantDbName, tenantId, {
     type: 'websearch',
     projectId,
-  });
+  }, options);
 }
 
 async function withTenantDb(tenantDbName: string) {

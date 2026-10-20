@@ -118,8 +118,8 @@ export function ConfigMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
 
       if (filters?.projectId) { conditions.push('projectId = @projectId'); params.projectId = filters.projectId; }
       if (filters?.search) {
-        conditions.push('(name LIKE @search OR key LIKE @search OR description LIKE @search)');
-        params.search = `%${filters.search}%`;
+        conditions.push(this.likeAny(['name', 'key', 'description'], '@search'));
+        params.search = this.likePattern(filters.search);
       }
 
       let sql = `SELECT * FROM ${TABLES.configGroups}`;
@@ -277,8 +277,8 @@ export function ConfigMixin<TBase extends Constructor<SQLiteProviderBase>>(Base:
       if (filters?.groupId) { conditions.push('groupId = @groupId'); params.groupId = filters.groupId; }
       if (filters?.isSecret !== undefined) { conditions.push('isSecret = @isSecret'); params.isSecret = filters.isSecret ? 1 : 0; }
       if (filters?.search) {
-        conditions.push('(name LIKE @search OR key LIKE @search OR description LIKE @search)');
-        params.search = `%${filters.search}%`;
+        conditions.push(this.likeAny(['name', 'key', 'description'], '@search'));
+        params.search = this.likePattern(filters.search);
       }
 
       let sql = `SELECT * FROM ${TABLES.configItems}`;
