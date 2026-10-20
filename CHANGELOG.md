@@ -69,6 +69,13 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   folder, are applied again whenever a stored local provider is used, so a provider saved with a subdirectory such as
   `/files` answers `502 storage_failure` (`field: "subdirectory"`) until it is edited. See
   [Local filesystem](docs/guide/files.md#local-filesystem).
+- Agents get one `read` tool instead of `sandbox_read_file`, `session_files_read` and `session_files_view_image`. The
+  name `read` is reserved: a custom or MCP tool with that name is left out, with a warning. Stored approval policies that
+  name the old tools apply to `read` at run time.
+- The per-browser MCP endpoint (`/api/client/v1/browser/:browserKey/mcp/sse` and `/mcp/message`) and the browser page's
+  **Get MCP URL** are removed: publish a browser as an internal MCP server instead (see
+  [Browsers through the MCP module](#browsers-through-the-mcp-module)). `@cognipeer/console-sdk` 4 drops
+  `client.browserMcp`.
 
 ### Agent runs and run classes
 
@@ -307,6 +314,56 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   next to no URL is accepted and dropped). The field is gone from the saved config: a callback sent as `{}`, with an
   empty `url` or as `null` is no longer stored as an empty object (or as a secret with nothing to sign), and the agent
   reads back without `callback`.
+- An agent's sandbox environment variables and secrets can come from Config items (Config references) instead of
+  values typed into the agent. Instances record how their environment was delivered (`envDelivery`), and snapshots
+  record their environment fields. Secret values a sandbox launch carries are masked in tool output.
+
+### Reminders and sessions
+
+- **Reminders** (off by default; `AGENT_REMINDERS_ENABLED`, then per agent under Build → Advanced → Reminders). An
+  agent sets a reminder for itself with `reminder_set`; the reminder wakes the same session later as a scheduled run on
+  the `reminder` channel. The session page shows the wake turn live, and its Reminders tab fires a reminder now or
+  cancels it. The client API lists and cancels reminders, `AGENT_REMINDER_MIN_DELAY_SECONDS`,
+  `AGENT_REMINDER_MAX_HORIZON_HOURS`, `AGENT_REMINDER_MAX_ACTIVE_PER_SESSION` and
+  `AGENT_REMINDER_MAX_FIRES_PER_SESSION` bound them, and an inactive agent cannot set one.
+- **Agents → Sessions → Active / All** lists the sessions of every agent in the project: Active shows the sessions that
+  are running or waiting for an approval, an answer or a budget raise (it refreshes on its own), All shows every session,
+  most recent activity first. A row opens the session inspector on the agent page.
+- A sub-agent that paused for an approval and resumed is one trace group (`@cognipeer/agent-sdk` 0.18 OTLP export).
+  Sub-agent tool events carry a stamp, and a pending action names the delegating call (`delegationToolCallId`).
+
+### Service switches
+
+- An operator can switch services off for the whole deployment with `CONSOLE_DISABLED_SERVICES` or
+  `CONSOLE_ENABLED_SERVICES`, or for one organization with the license `services` claim. Dependent services follow:
+  switching off models also switches off agents, RAG and evaluations; switching off agents also switches off portals.
+- The switch holds on every entry point: a dashboard or client API route of an off service answers
+  `403 service_disabled` (or `402 service_not_licensed`), and realtime, schedulers and runtime paths skip it. Pages that
+  read several services leave the off one out, and scheduled runs that fall due while agents are off stay scheduled.
+  The License page lists each service as on or off, with the reason.
+
+### Browsers through the MCP module
+
+- A browser is published from **MCP Servers → New MCP server → Internal service → Browser** and gets the MCP module's
+  endpoints, tool toggles and renames, guardrail binding, logs and hubs. The `browser` provider exposes the browser
+  agent tools plus `browser_open_session`, which returns the `sessionKey` every page tool takes; a session is driven only
+  through the MCP server that opened it. Flow tools need no session.
+- A browser server, and a composite server that includes one, is called with an API token only: creating or updating
+  one with `accessMode: "public"` answers `400`, and the public MCP endpoint does not serve one.
+- The browser's network rules (`BROWSER_BLOCK_PRIVATE_NETWORK`, the session allow and block lists) also apply to every
+  redirect hop and to WebSockets. A redirect hop to a refused host closes the session and the action fails with the
+  reason; a WebSocket to a refused host is closed with code `1008` before it connects.
+- The browser forms pick the **Artifact bucket** from the project's file buckets.
+
+### Media from tools
+
+- The `read` tool reads text, images, PDFs (text and page images) and videos (one contact sheet). A model that sends
+  every argument (strict tool calling) can fill both `path` and `fileId`: the `fileId` is read when it names a tool
+  image or a conversation file, otherwise the `path`.
+- Images from tools, MCP servers and browser screenshots reach the model in a message after the tool results; text-only
+  results are unchanged. The MCP endpoints pass image, audio and resource blocks through, by protocol version, and a
+  browser screenshot can return the image inline (REST and MCP).
+- New **web-e2e** sandbox template (Playwright, Chromium, ffmpeg); the sandbox base image adds `poppler-utils`.
 
 ### Configuration
 
