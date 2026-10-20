@@ -51,7 +51,8 @@ const noop = () => undefined;
 const photo = { fileId: 'f-photo', name: 'photo.png', mimeType: 'image/png', size: 2048 };
 const report = { fileId: 'f-report', name: 'report.pdf', mimeType: 'application/pdf', size: 4096 };
 const now = new Date('2026-10-11T12:00:00Z');
-const listed = (...ids: string[]): SessionFileItem[] => ids.map((id) => ({ id, name: id, mimeType: 'x/y', size: 1, expiresAt: '2026-10-20T00:00:00Z' }));
+// Far in the future: some calls below read the real clock, so a near date turns these files expired once it passes.
+const listed = (...ids: string[]): SessionFileItem[] => ids.map((id) => ({ id, name: id, mimeType: 'x/y', size: 1, expiresAt: '2099-01-01T00:00:00Z' }));
 
 describe('the content route addresses', () => {
   it('builds /files/:fileId/content with the variant and disposition asked for', () => {
