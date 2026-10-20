@@ -38,7 +38,7 @@ vi.mock('@/lib/core/logger', () => ({
 import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 import { hashCredentials, hashRuntimeConfig, runtimePool } from '@/lib/core/runtimePool';
 import { getDatabase } from '@/lib/database';
-import { listFiles } from '@/lib/services/files/fileService';
+import { downloadFile } from '@/lib/services/files/fileService';
 import { createMockDb } from '../helpers/db.mock';
 
 interface FakeRuntime {
@@ -46,6 +46,7 @@ interface FakeRuntime {
   driver: string;
   settings: Record<string, unknown>;
   close: ReturnType<typeof vi.fn>;
+  downloadFile: ReturnType<typeof vi.fn>;
 }
 
 interface StoredProvider {
@@ -70,9 +71,12 @@ function setProvider(tenantId: string, provider: Partial<StoredProvider> = {}) {
   });
 }
 
-/** One service call that builds (or reuses) the tenant's file runtime. */
+/**
+ * One service call that builds (or reuses) the tenant's file runtime. A download does; listing and reading a
+ * file's metadata do not (they read the database, so they work while the provider is down).
+ */
 async function touch(tenantId: string) {
-  await listFiles('tenant_db', tenantId, PROJECT, { bucketKey: 'docs' });
+  await downloadFile('tenant_db', tenantId, PROJECT, 'docs', 'a.txt');
 }
 
 /** Let the pool's queued close() calls run. */
@@ -99,7 +103,13 @@ beforeEach(() => {
   });
   mocks.createRuntime.mockReset();
   mocks.createRuntime.mockImplementation(async (driver: string, context: { settings: Record<string, unknown> }) => {
-    const runtime: FakeRuntime = { id: created.length + 1, driver, settings: context.settings, close: vi.fn() };
+    const runtime: FakeRuntime = {
+      id: created.length + 1,
+      driver,
+      settings: context.settings,
+      close: vi.fn(),
+      downloadFile: vi.fn(async () => ({ data: Buffer.from('x'), size: 1 })),
+    };
     created.push(runtime);
     return runtime;
   });
@@ -109,7 +119,9 @@ beforeEach(() => {
   db.findFileBucketByKey.mockImplementation((async (tenantId: string) => ({
     _id: 'b1', tenantId, projectId: PROJECT, key: 'docs', name: 'Docs', providerKey: 'store', status: 'active', createdBy: 'u1',
   })) as never);
-  db.listFileRecords.mockResolvedValue({ items: [] } as never);
+  db.findFileRecordByKey.mockResolvedValue({
+    _id: 'f1', tenantId: 't1', projectId: PROJECT, providerKey: 'store', bucketKey: 'docs', key: 'a.txt', name: 'a.txt', size: 1, markdownStatus: 'skipped', createdBy: 'u1',
+  } as never);
 });
 
 afterEach(async () => {

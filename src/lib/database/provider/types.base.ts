@@ -977,13 +977,25 @@ export interface IFileRecord {
   expiresAt?: Date | null;
   /** Who uploaded it (session files); `createdBy` stays the principal the file service was called as. */
   uploadedBy?: string;
-  /** `agent_output`: a file the agent wrote to its sandbox's `/outputs/` and the platform collected after a turn. Absent = an upload. */
-  origin?: 'agent_output';
+  /**
+   * `agent_output`: a file the agent wrote to its sandbox's `/outputs/` and the platform collected after a turn.
+   * `import`: an object that was already in the storage provider and was registered as a record afterwards.
+   * Absent = an upload.
+   */
+  origin?: 'agent_output' | 'import';
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/**
+ * What `updateFileRecord` can change. `markdownError` also takes `null`: it clears an error a finished
+ * conversion left behind (a field that is left out stays as it is).
+ */
+export type FileRecordPatch =
+  Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy' | 'markdownError'>>
+  & { markdownError?: string | null };
 
 /** Which files a listing keeps: only session files, or only the ones uploaded some other way. */
 export type FileListPurpose = 'conversation' | 'other';
@@ -995,6 +1007,21 @@ export interface IFileEntriesPage {
   items: IFileRecord[];
   /** Pass back as `cursor` for the next page; absent on the last page. */
   nextCursor?: string;
+}
+
+/**
+ * What a file listing can be narrowed to by kind. A file's kind comes from its content type, with the
+ * extension of its name as the fallback (`fileTypeFilter.ts` holds the rules both database providers apply).
+ */
+export type FileTypeFilter = 'pdf' | 'image' | 'text' | 'office' | 'other';
+
+/** One bucket's files added up: the aggregate behind a bucket list's file count and size. */
+export interface IFileBucketStats {
+  providerKey: string;
+  bucketKey: string;
+  fileCount: number;
+  /** Σ(size + markdownSize): the original and its Markdown copy both take room in the provider. */
+  totalBytes: number;
 }
 
 export interface ISemanticCacheConfig {

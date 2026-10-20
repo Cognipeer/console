@@ -86,13 +86,28 @@ async function validateWebSearchSettings(
 export interface ProviderConfigView
   extends Omit<IProviderRecord, 'credentialsEnc'> {
   hasCredentials: boolean;
+  /**
+   * The names - never the values - of the credential fields the record stores a value for. Only the dashboard reads
+   * that open an edit form ask for it (`ProviderViewOptions.credentialFields`); every other reply leaves it out.
+   */
+  credentialFields?: string[];
 }
 
-function sanitize(record: IProviderRecord): ProviderConfigView {
+/** What a read of a provider adds to the plain view. */
+export interface ProviderViewOptions {
+  /**
+   * Add `credentialFields`. It needs the stored credentials opened, so it is asked for where it is used: an edit form
+   * must tell a secret it may leave blank (one that is stored) from one it has to fill in.
+   */
+  credentialFields?: boolean;
+}
+
+function sanitize(record: IProviderRecord, options?: ProviderViewOptions): ProviderConfigView {
   const { credentialsEnc, ...rest } = record;
   return {
     ...rest,
     hasCredentials: Boolean(credentialsEnc),
+    ...(options?.credentialFields ? { credentialFields: storedCredentialNames(record) } : {}),
   };
 }
 
@@ -237,6 +252,36 @@ function readStoredCredentials(
   }
 }
 
+/** An incoming credential value that says "leave this field as stored". */
+function isBlankCredentialValue(value: unknown): boolean {
+  return value === '' || value === undefined || value === null;
+}
+
+/**
+ * The names of the credential fields a record stores a value for: what an update that leaves a field blank keeps. The
+ * values are opened here and go no further. Credentials that cannot be opened store nothing an update would keep (it
+ * treats them as empty), so the list is empty and the form asks for the secrets again.
+ */
+function storedCredentialNames(record: IProviderRecord): string[] {
+  if (!record.credentialsEnc) return [];
+  let stored: unknown;
+  try {
+    stored = decryptObject(record.credentialsEnc);
+  } catch (error) {
+    logger.warn('Stored provider credentials could not be decrypted; none are reported as stored', {
+      driver: record.driver,
+      providerKey: record.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+  if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return [];
+  return Object.entries(stored as Record<string, unknown>)
+    .filter(([, value]) => !isBlankCredentialValue(value))
+    .map(([name]) => name)
+    .sort();
+}
+
 /** An update of a record's credentials: the stored set with the incoming values laid over it. */
 interface CredentialMerge {
   /** The stored set (empty when there is none, or when it cannot be opened). */
@@ -262,7 +307,7 @@ function mergeCredentials(
   const current = readStoredCredentials(existing, true) ?? {};
   const merged: Record<string, unknown> = { ...current };
   for (const [field, value] of Object.entries(incoming)) {
-    if (value === '' || value === undefined || value === null) {
+    if (isBlankCredentialValue(value)) {
       continue;
     }
     merged[field] = value;
@@ -381,6 +426,66 @@ export async function updateProviderConfig(
   return updated ? sanitize(updated) : null;
 }
 
+/** Values a "Test connection" of a saved provider may carry instead of what is stored (the edit form's unsaved edits). */
+export interface ProviderTestOverrides {
+  /** Credential values; a blank one keeps the stored value, as in an update. */
+  credentials?: Record<string, unknown>;
+  /** The settings the form would save; they replace the stored ones wholesale, as in an update. */
+  settings?: Record<string, unknown>;
+}
+
+/** What a "Test connection" of a saved provider runs against. */
+export interface ProviderTestTarget {
+  record: IProviderRecord;
+  credentials: Record<string, unknown>;
+  settings: Record<string, unknown>;
+}
+
+/**
+ * Whether a test carries values that change what is tested. Then the outcome describes a connection that is not
+ * stored, and must not be kept on the record as its "last test".
+ */
+export function hasProviderTestOverrides(overrides: ProviderTestOverrides): boolean {
+  return (
+    overrides.settings !== undefined
+    || Object.values(overrides.credentials ?? {}).some((value) => !isBlankCredentialValue(value))
+  );
+}
+
+/**
+ * The credentials and settings a "Test connection" of a saved provider runs against when it carries overrides: what an
+ * update with the same values would store. Credentials are the stored set with the non-blank incoming values laid over
+ * it (a stored set that cannot be decrypted counts as empty, so re-entered credentials can still be tried); settings are
+ * the incoming ones when given, otherwise the stored ones. Without credential overrides the stored credentials are used,
+ * and ones that cannot be opened are a `ProviderCredentialDecryptError`. The driver's `validateSettings` runs afterwards,
+ * inside the test.
+ */
+export async function resolveProviderTestTarget(
+  tenantDbName: string,
+  provider: { id: string; tenantId: string },
+  overrides: ProviderTestOverrides,
+): Promise<ProviderTestTarget> {
+  const hasCredentialOverride = Object.values(overrides.credentials ?? {}).some(
+    (value) => !isBlankCredentialValue(value),
+  );
+
+  if (!hasCredentialOverride) {
+    const { record, credentials } = await loadProviderRuntimeData(tenantDbName, provider);
+    if (record.tenantId !== provider.tenantId) {
+      throw new Error(`Provider configuration "${provider.id}" not found.`);
+    }
+    return { record, credentials, settings: overrides.settings ?? record.settings ?? {} };
+  }
+
+  const db = await withTenantDb(tenantDbName);
+  const record = await db.findProviderById(provider.id);
+  if (!record || record.tenantId !== provider.tenantId) {
+    throw new Error(`Provider configuration "${provider.id}" not found.`);
+  }
+  const { merged } = mergeCredentials(record, overrides.credentials ?? {});
+  return { record, credentials: merged, settings: overrides.settings ?? record.settings ?? {} };
+}
+
 /** Stores the outcome of a "Test connection" on the provider record. */
 export async function recordProviderTest(
   tenantDbName: string,
@@ -400,19 +505,21 @@ export async function listProviderConfigs(
     status?: ProviderStatus;
     projectId?: string;
   },
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView[]> {
   const db = await withTenantDb(tenantDbName);
   const records = await db.listProviders(tenantId, filters);
-  return records.map(sanitize);
+  return records.map((record) => sanitize(record, options));
 }
 
 export async function getProviderConfigById(
   tenantDbName: string,
   providerId: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const record = await db.findProviderById(providerId);
-  return record ? sanitize(record) : null;
+  return record ? sanitize(record, options) : null;
 }
 
 export async function getProviderConfigByKey(
@@ -420,10 +527,11 @@ export async function getProviderConfigByKey(
   tenantId: string,
   key: string,
   projectId?: string,
+  options?: ProviderViewOptions,
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const record = await db.findProviderByKey(tenantId, key, projectId);
-  return record ? sanitize(record) : null;
+  return record ? sanitize(record, options) : null;
 }
 
 export async function deleteProviderConfig(

@@ -5,7 +5,7 @@
  *        loadProviderRuntimeData
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -339,6 +339,121 @@ describe('getProviderConfigById', () => {
     db.findProviderById.mockResolvedValue(null);
     const result = await getProviderConfigById(TENANT_DB, 'not-found');
     expect(result).toBeNull();
+  });
+});
+
+// ── the names of the stored credential fields (the edit form's read) ───────────
+
+describe('credentialFields - which credential fields store a value', () => {
+  let db: ReturnType<typeof createMockDb>;
+  const decrypt = decryptObject as unknown as ReturnType<typeof vi.fn>;
+  // Not in alphabetical order, so that an answer in the order the credentials were stored in would show.
+  const SECRETS = { sessionToken: 'tok-secret-2', note: '', accountKey: 'AZ-KEY-SECRET-1', emptyToo: null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+    decrypt.mockReturnValue(SECRETS);
+  });
+
+  // The module's other tests expect the default credentials back.
+  afterEach(() => {
+    decrypt.mockReset();
+    decrypt.mockReturnValue({ apiKey: 'secret-key-123' });
+  });
+
+  it('is left out of every read that does not ask for it - the plain view says only whether some are stored', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    db.findProviderByKey.mockResolvedValue(makeProviderRecord());
+    db.listProviders.mockResolvedValue([makeProviderRecord()]);
+
+    const views = [
+      await getProviderConfigById(TENANT_DB, 'prov-1'),
+      await getProviderConfigByKey(TENANT_DB, TENANT_ID, 'openai-main'),
+      (await listProviderConfigs(TENANT_DB, TENANT_ID))[0],
+      await getProviderConfigById(TENANT_DB, 'prov-1', {}),
+      await getProviderConfigById(TENANT_DB, 'prov-1', { credentialFields: false }),
+    ];
+    for (const view of views) {
+      expect(view).not.toHaveProperty('credentialFields');
+      expect(view!.hasCredentials).toBe(true);
+    }
+    // nothing was opened to answer them
+    expect(decrypt).not.toHaveBeenCalled();
+  });
+
+  it('names the fields that hold a value - sorted, never the values, and not the blank ones', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+
+    const view = await getProviderConfigById(TENANT_DB, 'prov-1', { credentialFields: true });
+
+    expect(view!.credentialFields).toEqual(['accountKey', 'sessionToken']);
+    expect(view!.hasCredentials).toBe(true);
+    const json = JSON.stringify(view);
+    expect(json).not.toContain('AZ-KEY-SECRET-1');
+    expect(json).not.toContain('tok-secret-2');
+    expect(json).not.toContain('credentialsEnc');
+  });
+
+  it('is asked for by key and by list too, one answer per record', async () => {
+    db.findProviderByKey.mockResolvedValue(makeProviderRecord());
+    db.listProviders.mockResolvedValue([makeProviderRecord({ _id: 'a' }), makeProviderRecord({ _id: 'b', credentialsEnc: '' })]);
+
+    expect((await getProviderConfigByKey(TENANT_DB, TENANT_ID, 'openai-main', 'proj-1', { credentialFields: true }))!.credentialFields)
+      .toEqual(['accountKey', 'sessionToken']);
+    expect(db.findProviderByKey).toHaveBeenCalledWith(TENANT_ID, 'openai-main', 'proj-1');
+
+    const listed = await listProviderConfigs(TENANT_DB, TENANT_ID, { type: 'model' }, { credentialFields: true });
+    expect(listed.map((view) => view.credentialFields)).toEqual([['accountKey', 'sessionToken'], []]);
+    expect(db.listProviders).toHaveBeenCalledWith(TENANT_ID, { type: 'model' });
+  });
+
+  it('a record without credentials stores none, and nothing is opened for it', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord({ credentialsEnc: '' }));
+
+    const view = await getProviderConfigById(TENANT_DB, 'prov-1', { credentialFields: true });
+
+    expect(view!.credentialFields).toEqual([]);
+    expect(view!.hasCredentials).toBe(false);
+    expect(decrypt).not.toHaveBeenCalled();
+  });
+
+  it('credentials that cannot be opened store nothing an update would keep: an empty list, and the read still answers', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    decrypt.mockImplementation(() => {
+      throw new Error('Unsupported state or unable to authenticate data');
+    });
+
+    const view = await getProviderConfigById(TENANT_DB, 'prov-1', { credentialFields: true });
+
+    expect(view!.credentialFields).toEqual([]);
+    expect(view!.hasCredentials).toBe(true);
+    expect(view!.key).toBe('openai-main');
+  });
+
+  it('anything that is not a set of named values stores none', async () => {
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    for (const odd of [null, 'text', 42, ['a', 'b']]) {
+      decrypt.mockReturnValue(odd);
+      const view = await getProviderConfigById(TENANT_DB, 'prov-1', { credentialFields: true });
+      expect(view!.credentialFields, JSON.stringify(odd)).toEqual([]);
+    }
+  });
+
+  it('is not in what a create or an update answers', async () => {
+    db.findProviderByKey.mockResolvedValue(null);
+    db.createProvider.mockResolvedValue(makeProviderRecord());
+    db.findProviderById.mockResolvedValue(makeProviderRecord());
+    db.updateProvider.mockResolvedValue(makeProviderRecord());
+
+    const created = await createProviderConfig(TENANT_DB, TENANT_ID, {
+      key: 'openai-main', type: 'model', driver: 'openai', label: 'OpenAI', credentials: { apiKey: 'k' }, createdBy: USER_ID,
+    });
+    const updated = await updateProviderConfig(TENANT_DB, 'prov-1', { label: 'Renamed' });
+
+    expect(created).not.toHaveProperty('credentialFields');
+    expect(updated).not.toHaveProperty('credentialFields');
   });
 });
 

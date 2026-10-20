@@ -59,7 +59,7 @@ vi.mock('@/lib/services/files', async () => {
 
 import { getDatabase } from '@/lib/database';
 import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
-import { getFileRecord, listFiles, uploadFile } from '@/lib/services/files';
+import { getFileBucket, getFileRecord, listFiles, uploadFile } from '@/lib/services/files';
 import { filesApiPlugin } from '@/server/api/plugins/files';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -79,6 +79,7 @@ let findAgentByKey: ReturnType<typeof vi.fn>;
 beforeEach(async () => {
   vi.clearAllMocks();
   mockFn(requireProjectContextForRequest).mockResolvedValue(CTX);
+  mockFn(getFileBucket).mockResolvedValue({ id: 'b1', key: 'docs', status: 'active', providerKey: 'disk' });
   findAgentByKey = vi.fn(async (key: string) => (key === 'support' ? { _id: 'agent-77', key } : null));
   mockFn(getDatabase).mockResolvedValue(createMockDb({ switchToTenant: vi.fn(), findAgentByKey, countFileRecords: vi.fn(async () => 0), sumFileRecordBytes: vi.fn(async () => 0) } as never));
   app = await createFastifyApiTestApp(filesApiPlugin);

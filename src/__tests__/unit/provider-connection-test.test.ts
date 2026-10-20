@@ -238,7 +238,13 @@ describe('runtime probes (vector, file)', () => {
   it('file: lists one object', async () => {
     const listFiles = vi.fn(async () => ({ items: [] }));
     const result = await testProviderConnection(
-      base({ type: 'file', driver: 'aws-s3-files', credentials: { accessKeyId: 'AKIA', secretAccessKey: 'secret-abc-123' } }),
+      base({
+        type: 'file',
+        driver: 'aws-s3-files',
+        credentials: { accessKeyId: 'AKIA', secretAccessKey: 'secret-abc-123' },
+        // The driver's own check runs first: Amazon S3 needs a region and a bucket.
+        settings: { region: 'eu-central-1', bucket: 'archive-bucket' },
+      }),
       { createRuntime: (async () => ({ listFiles })) as never },
     );
     expect(result.ok).toBe(true);

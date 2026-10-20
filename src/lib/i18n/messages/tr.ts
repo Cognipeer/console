@@ -5544,6 +5544,20 @@ export const tr: typeof en = {
       foundModels: '{count} model bulundu',
       requestFailed: 'Test çalıştırılamadı',
       needService: 'Önce bir servis seçin ve yapılandırmasını doldurun.',
+      editHint: 'Boş bıraktığınız kimlik bilgileri kayıtlı değerlerini korur; diğer alanlar gösterildiği gibi kullanılır.',
+      stepsLabel: 'Test adımları',
+      stepPassed: 'Başarılı',
+      stepFailed: 'Başarısız',
+      steps: {
+        list: 'Listele',
+        write: 'Test nesnesi yaz',
+        read: 'Geri oku',
+        delete: 'Sil',
+      },
+    },
+    form: {
+      storedSecret: 'Kayıtlı — korumak için boş bırakın',
+      required: 'Bu alan zorunludur',
     },
     projects: {
       sectionTitle: 'Projeler',

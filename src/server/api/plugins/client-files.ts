@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
@@ -21,13 +21,17 @@ import {
   checkRateLimit,
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
+import { bucketInactiveError, isFileServiceError } from '@/lib/services/files/errors';
+import { uploadBodyLimit } from '@/lib/services/files/uploadLimits';
 import { toHeaderSafeJson } from '@/lib/utils/headerSafeJson';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
+  readJsonObjectBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { sendProviderConfigError } from '../providerConfigErrors';
+import { sendFileError, setFileDownloadHeaders, uploadRouteErrorHandler, type FileErrorOptions } from '../fileHttp';
 import { refuseSessionLinked, sendClientListUnavailable, sendClientSessionRefusal, type SessionActor } from './agent-session-access';
 import { listVisibleFiles, sessionOfFile } from './session-linked-files';
 
@@ -57,7 +61,16 @@ function estimateBase64Bytes(input: unknown): number | undefined {
   return bytes > 0 ? bytes : 0;
 }
 
+/** A failed call, answered the way the Document Store answers it (status, code and a safe message). */
+function fail(reply: FastifyReply, error: unknown, action: string, options: FileErrorOptions = {}) {
+  return sendFileError(reply, error, { logger, action, ...options });
+}
+
 export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
+  // A file travels base64-encoded in a JSON body, so an upload request is a third larger than the file: the route
+  // takes a body up to the configured file limit plus that, and answers a larger one as a file that is too large.
+  const uploadRoute = { bodyLimit: uploadBodyLimit(), errorHandler: uploadRouteErrorHandler };
+
   app.get('/client/v1/files/providers', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
@@ -69,10 +82,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ providers });
     } catch (error) {
-      logger.error('List client file providers error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Internal server error',
-      });
+      return fail(reply, error, 'list providers');
     }
   }));
 
@@ -118,10 +128,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         count: buckets.length,
       });
     } catch (error) {
-      logger.error('List client file buckets error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to list buckets',
-      });
+      return fail(reply, error, 'list buckets');
     }
   }));
 
@@ -137,10 +144,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ bucket });
     } catch (error) {
-      logger.error('Get client file bucket error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to get bucket',
-      });
+      return fail(reply, error, 'read bucket');
     }
   }));
 
@@ -176,18 +180,15 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       const unavailable = sendClientListUnavailable(reply, request, error);
       if (unavailable) return unavailable;
-      logger.error('List client file objects error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to list files',
-      });
+      return fail(reply, error, 'list objects');
     }
   }));
 
-  app.post('/client/v1/files/buckets/:bucketKey/objects', withClientApiRequestContext(async (request, reply) => {
+  app.post('/client/v1/files/buckets/:bucketKey/objects', uploadRoute, withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { bucketKey } = request.params as { bucketKey: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      const body = readJsonObjectBody(request);
 
       if (typeof body.fileName !== 'string') {
         return reply.code(400).send({ error: 'fileName is required' });
@@ -199,12 +200,18 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const destination = composeUploadKeyHint({ keyHint: body.keyHint });
       if ('error' in destination) return reply.code(400).send({ error: destination.error });
 
+      // The bucket first: the quotas below are those of its provider, and a bucket that is missing or switched
+      // off is refused before any of them is spent.
+      const bucket = await getFileBucket(ctx.tenantDbName, ctx.tenantId, ctx.projectId, bucketKey);
+      if (bucket.status !== 'active') throw bucketInactiveError();
+
       const tokenId = ctx.tokenRecord._id?.toString() ?? ctx.token;
       const estimatedFileBytes = estimateBase64Bytes(body.data);
       const quotaContext = {
         domain: 'file' as const,
         licenseType: ctx.tenant.licenseType as LicenseType,
         projectId: ctx.projectId,
+        providerKey: bucket.providerKey,
         resourceKey: bucketKey,
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
@@ -264,10 +271,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         message: 'File uploaded successfully',
       });
     } catch (error) {
-      logger.error('Upload client file error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to upload file',
-      });
+      return fail(reply, error, 'upload', { storage: true, body: true });
     }
   }));
 
@@ -286,10 +290,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ file });
     } catch (error) {
-      logger.error('Get client file error', { error });
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to get file',
-      });
+      return fail(reply, error, 'read object');
     }
   }));
 
@@ -317,13 +318,7 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
         objectKey,
       });
     } catch (error) {
-      logger.error('Delete client file error', { error });
-      if (error instanceof Error && error.message.includes('not found')) {
-        return reply.code(404).send({ error: 'File not found' });
-      }
-      return reply.code(500).send({
-        error: error instanceof Error ? error.message : 'Failed to delete file',
-      });
+      return fail(reply, error, 'delete object', { storage: true });
     }
   }));
 
@@ -354,8 +349,8 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       reply
         .header('Content-Type', result.contentType ?? 'application/octet-stream')
-        .header('Content-Length', String(result.size ?? result.data.length))
-        .header('Content-Disposition', `attachment; filename="${encodeURIComponent(result.fileName)}"`);
+        .header('Content-Length', String(result.size ?? result.data.length));
+      setFileDownloadHeaders(reply, result.fileName, 'attachment');
 
       if (result.etag) {
         reply.header('ETag', result.etag);
@@ -372,15 +367,11 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(Buffer.from(result.data));
     } catch (error) {
-      logger.error('Download client file error', { error });
-      const message = error instanceof Error ? error.message : 'Failed to download file';
-      if (message.includes('not found') || message.includes('does not exist')) {
-        return reply.code(404).send({ error: 'File not found' });
+      // The client API has always answered a Markdown copy that does not exist with 400 (the Document Store: 409).
+      if (isFileServiceError(error) && error.code === 'markdown_unavailable') {
+        return reply.code(400).send({ error: error.message, code: error.code });
       }
-      if (message.includes('markdown not available') || message.includes('conversion')) {
-        return reply.code(400).send({ error: message });
-      }
-      return reply.code(500).send({ error: message });
+      return fail(reply, error, 'download', { storage: true });
     }
   }));
 };

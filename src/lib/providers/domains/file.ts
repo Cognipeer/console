@@ -50,7 +50,11 @@ export interface ListFilesResult {
 export interface FileConnectionCheck {
   ok: boolean;
   message: string;
-  /** The steps that ran, in order; a step after a failed one did not run and is left out. */
+  /**
+   * The steps that ran, in order; a step after a failed one did not run and is left out. The exception is a
+   * list that failed only because listing is not permitted (a container SAS without the list permission): write,
+   * read and delete are still tried, so the result says which of them work.
+   */
   steps?: Array<{ step: 'list' | 'write' | 'read' | 'delete'; ok: boolean; message?: string }>;
 }
 

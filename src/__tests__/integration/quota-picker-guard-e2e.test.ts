@@ -425,14 +425,17 @@ describeForEachProvider('a limit made from the pickers applies to the calls it n
     expect(statuses.slice(1)).toContain(429);
   });
 
-  it('file upload through the API reports no provider, so a FILE PROVIDER limit reaches dashboard uploads only', async () => {
-    // Documents the current contract the editor can not see: the client route puts the bucket key in the
-    // quota context but not the bucket's provider (the dashboard route puts both).
+  it('file upload through the API reports the bucket’s provider, so a FILE PROVIDER limit reaches client uploads too', async () => {
+    // Both upload routes read the bucket first and put its provider key in the quota context next to the bucket
+    // key, so the limit an editor picks for a provider holds whichever way a file arrives.
     const provider = await pick('file', 'provider', 'file', 'File provider alpha');
+    expect(provider.value).toBe('file-prov');
     await saveLimit('file', 'provider', provider);
     const upload = () =>
       clientPost('/api/client/v1/files/buckets/bucket-alpha/objects', { fileName: 'a.txt', data: Buffer.from('hello').toString('base64') });
-    for (let call = 0; call < 3; call += 1) expect((await upload()).statusCode).not.toBe(429);
+    const statuses = [(await upload()).statusCode, (await upload()).statusCode, (await upload()).statusCode];
+    expect(statuses[0]).not.toBe(429);
+    expect(statuses.slice(1)).toContain(429);
   });
 
   it('tracing: a limit on the picked agent NAME is enforced on the stream start, the agent KEY is not limited', async () => {

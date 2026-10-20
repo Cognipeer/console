@@ -5,6 +5,7 @@ import slugify from 'slugify';
 import { getConfig } from '@/lib/core/config';
 import type { Stats } from 'node:fs';
 import type { ProviderContract } from '../types';
+import { maxStorageDownloadBytes, StorageObjectTooLargeError } from './storageLimits';
 import type {
   FileProviderRuntime,
   FileObjectHandle,
@@ -141,11 +142,17 @@ async function listFileEntries(
 
   const maxResults = options.limit + 1;
   const items: FileObjectHandle[] = [];
-  let lastKey: string | undefined;
 
   async function walk(currentDir: string, relativePrefix: string) {
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
-    const sorted = entries.sort((a, b) => a.name.localeCompare(b.name));
+    // In the order of the keys themselves (a folder's keys all start with "<name>/"): the cursor below is compared
+    // with the keys as text, so the walk has to visit them in that same order.
+    const walkKey = (entry: (typeof entries)[number]) => (entry.isDirectory() ? `${entry.name}/` : entry.name);
+    const sorted = entries.sort((a, b) => {
+      const left = walkKey(a);
+      const right = walkKey(b);
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
 
     for (const entry of sorted) {
       const entryRelativeKey = relativePrefix
@@ -169,7 +176,6 @@ async function listFileEntries(
 
       const stats = await fs.stat(entryPath);
       items.push(buildHandle(entryRelativeKey, entry.name, stats));
-      lastKey = entryRelativeKey;
 
       if (items.length >= maxResults) {
         return;
@@ -181,8 +187,9 @@ async function listFileEntries(
 
   let nextCursor: string | undefined;
   if (items.length > options.limit) {
-    const overflow = items.pop();
-    nextCursor = overflow?.key ?? lastKey;
+    // The extra item only proves there is more. The next page continues AFTER the last one returned, so it starts with it.
+    items.pop();
+    nextCursor = items[items.length - 1]?.key;
   }
 
   return {
@@ -238,6 +245,8 @@ export const LocalFileProviderContract: ProviderContract<
       },
     ],
   },
+  // The files sit in a directory of this server: its path is not something to show.
+  describeStorageLocation: () => null,
   async createRuntime({ tenantId, providerKey, settings, logger }) {
     const tenantRoot = buildTenantRoot(settings, tenantId, providerKey);
     await ensureDirectory(tenantRoot);
@@ -308,8 +317,11 @@ export const LocalFileProviderContract: ProviderContract<
         const sanitizedKey = sanitizeKey(key);
         const filePath = path.join(tenantRoot, sanitizedKey);
         ensureWithin(tenantRoot, filePath);
-        const data = await fs.readFile(filePath);
+        // The size first: an object put here by another tool is not read whole when it is larger than the server holds.
         const stats = await fs.stat(filePath);
+        const ceiling = maxStorageDownloadBytes();
+        if (stats.size > ceiling) throw new StorageObjectTooLargeError(ceiling);
+        const data = await fs.readFile(filePath);
         const metadata = await readMetadata(filePath);
 
         return {

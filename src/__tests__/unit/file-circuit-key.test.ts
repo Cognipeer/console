@@ -64,6 +64,7 @@ interface FakeRuntime {
   uploadFile: ReturnType<typeof vi.fn>;
   downloadFile: ReturnType<typeof vi.fn>;
   deleteFile: ReturnType<typeof vi.fn>;
+  getFileMetadata: ReturnType<typeof vi.fn>;
 }
 
 /** One runtime per tenant, so a test can make one tenant's storage fail and leave the other's healthy. */
@@ -77,6 +78,8 @@ function makeRuntime(): FakeRuntime {
     })),
     downloadFile: vi.fn(async () => ({ data: Buffer.from('abc'), contentType: 'text/plain', size: 3 })),
     deleteFile: vi.fn(async () => undefined),
+    // The text copy is not written over an object that is already there: nothing is.
+    getFileMetadata: vi.fn(async () => null),
   };
 }
 
@@ -128,6 +131,8 @@ beforeEach(() => {
     _id: 'f1', tenantId: 'tenant', providerKey: 'store', bucketKey: 'docs', key: 'a.txt', name: 'a.txt', size: 3, markdownStatus: 'skipped', createdBy: 'u1',
   })) as never);
   db.createFileRecord.mockImplementation((async (input: Record<string, unknown>) => ({ _id: 'f1', ...input })) as never);
+  db.updateFileRecord.mockImplementation((async (id: string, patch: Record<string, unknown>) => ({ _id: id, ...patch })) as never);
+  db.listFileRecordsByKeys.mockResolvedValue([] as never);
 });
 
 afterEach(() => {

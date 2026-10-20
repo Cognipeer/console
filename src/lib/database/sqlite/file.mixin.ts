@@ -2,10 +2,17 @@
  * SQLite Provider – File record + bucket operations mixin
  */
 
-import type { IFileRecord, IFileBucketRecord, IFileEntriesPage, FileListPurpose } from '../provider.interface';
+import type { IFileRecord, IFileBucketRecord, IFileBucketStats, IFileEntriesPage, FileListPurpose, FileRecordPatch, FileTypeFilter } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
+import { FILE_KIND_RULES, type FileKindRule } from '../fileTypeFilter';
+
+/** SQLite refuses an expression tree deeper than 1000 terms, and every bucket asked for adds one: a longer list is asked in slices. */
+const STATS_BUCKETS_PER_QUERY = 400;
+
+/** Keys asked for in one `IN (...)`: well under the limit on bound variables of older SQLite builds. */
+const KEYS_PER_QUERY = 400;
 
 export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
@@ -60,10 +67,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return { ...record, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
     }
 
-    async updateFileRecord(
-      id: string,
-      data: Partial<Omit<IFileRecord, 'tenantId' | 'providerKey' | 'key' | 'createdBy'>>,
-    ): Promise<IFileRecord | null> {
+    async updateFileRecord(id: string, data: FileRecordPatch): Promise<IFileRecord | null> {
       const db = this.getTenantDb();
       const now = this.now();
       const sets: string[] = ['updatedAt = @updatedAt'];
@@ -107,6 +111,26 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return row ? this.mapFileRow(row) : null;
     }
 
+    async listFileRecordsByKeys(filters: {
+      providerKey: string; bucketKey: string; projectId?: string; keys: string[]; field?: 'key' | 'markdownKey';
+    }): Promise<IFileRecord[]> {
+      const db = this.getTenantDb();
+      // The column is picked from this list, never from the caller's text.
+      const column = filters.field === 'markdownKey' ? 'markdownKey' : 'key';
+      const keys = [...new Set(filters.keys)];
+      const records: IFileRecord[] = [];
+      for (let at = 0; at < keys.length; at += KEYS_PER_QUERY) {
+        const slice = keys.slice(at, at + KEYS_PER_QUERY);
+        const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
+        const params: Record<string, unknown> = { providerKey: filters.providerKey, bucketKey: filters.bucketKey };
+        if (filters.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+        clauses.push(`${column} IN (${slice.map((key, index) => { params[`k${index}`] = key; return `@k${index}`; }).join(', ')})`);
+        const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE ${clauses.join(' AND ')}`).all(params) as SqliteRow[];
+        records.push(...rows.map((row) => this.mapFileRow(row)));
+      }
+      return records;
+    }
+
     /** `purpose` as a SQL condition: session files, or everything that is not one. */
     protected filePurposeClause(purpose: FileListPurpose | undefined): string | null {
       if (purpose === 'conversation') return "purpose = 'conversation'";
@@ -114,9 +138,36 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return null;
     }
 
+    /**
+     * A kind of file (`fileTypeFilter.ts`) as a SQL condition: the content type with its parameters dropped,
+     * and the extension of the name only when no kind claims the content type. The rule values are constants
+     * of that module, quoted here rather than bound because there are many and they never come from a caller.
+     */
+    protected fileTypeClause(type: FileTypeFilter): string {
+      const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+      const escapeLike = (value: string) => value.replace(/[\\%_]/g, '\\$&');
+      const startsWith = (column: string, prefix: string) => `${column} LIKE ${quote(`${escapeLike(prefix)}%`)} ESCAPE '\\'`;
+      const endsWith = (column: string, suffix: string) => `${column} LIKE ${quote(`%${escapeLike(suffix)}`)} ESCAPE '\\'`;
+      const mime = "lower(trim(CASE WHEN instr(coalesce(contentType, ''), ';') > 0 THEN substr(contentType, 1, instr(contentType, ';') - 1) ELSE coalesce(contentType, '') END))";
+      const name = "lower(coalesce(name, ''))";
+      const byContentType = (rule: FileKindRule) => [
+        ...rule.mimeTypes.map((value) => `${mime} = ${quote(value)}`),
+        ...rule.mimePrefixes.map((prefix) => startsWith(mime, prefix)),
+      ];
+      const byExtension = (rule: FileKindRule) => rule.extensions.map((extension) => endsWith(name, extension));
+      const rules = Object.values(FILE_KIND_RULES);
+      const claimed = `(${rules.flatMap(byContentType).join(' OR ')})`;
+      if (type === 'other') {
+        return `(NOT ${claimed} AND NOT (${rules.flatMap(byExtension).join(' OR ')}))`;
+      }
+      const rule = FILE_KIND_RULES[type];
+      const typed = byContentType(rule);
+      return `(${typed.length > 0 ? `${typed.join(' OR ')} OR ` : ''}(NOT ${claimed} AND (${byExtension(rule).join(' OR ')})))`;
+    }
+
     async listFileRecords(filters: {
       providerKey: string; bucketKey: string; projectId?: string;
-      search?: string; prefix?: string; purpose?: FileListPurpose; limit?: number; cursor?: string;
+      search?: string; prefix?: string; purpose?: FileListPurpose; type?: FileTypeFilter; limit?: number; cursor?: string;
     }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
       const db = this.getTenantDb();
       const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
@@ -132,6 +183,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       }
       const purposeClause = this.filePurposeClause(filters.purpose);
       if (purposeClause) clauses.push(purposeClause);
+      if (filters.type) clauses.push(this.fileTypeClause(filters.type));
       if (filters.search) { clauses.push('name LIKE @search'); params.search = this.likePattern(filters.search.trim()); }
       if (filters.cursor) { clauses.push('id > @cursor'); params.cursor = filters.cursor; }
 
@@ -144,8 +196,10 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       const items = rows.map((r) => this.mapFileRow(r));
       let nextCursor: string | undefined;
       if (items.length > (filters.limit ?? 50)) {
-        const overflow = items.pop();
-        nextCursor = overflow?._id as string;
+        // One row past the page proves there is more. The cursor is the last row the page returns: the next
+        // read continues after it (`id > cursor`), so the row that proved it is not skipped.
+        items.pop();
+        nextCursor = items[items.length - 1]?._id as string | undefined;
       }
 
       return { items, nextCursor };
@@ -204,11 +258,53 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
 
     async sumFileRecordBytes(filters?: { projectId?: string }): Promise<number> {
       const db = this.getTenantDb();
-      let sql = `SELECT COALESCE(SUM(size), 0) as total FROM ${TABLES.files}`;
+      // The Markdown copy of a file is an object in the provider too; MongoDB counts it, so does this.
+      let sql = `SELECT COALESCE(SUM(size + COALESCE(markdownSize, 0)), 0) as total FROM ${TABLES.files}`;
       const params: Record<string, unknown> = {};
       if (filters?.projectId) { sql += ' WHERE projectId = @projectId'; params.projectId = filters.projectId; }
       const row = db.prepare(sql).get(params) as SqliteRow;
       return (row?.total as number) ?? 0;
+    }
+
+    async listFileBucketStats(filters?: {
+      projectId?: string;
+      buckets?: Array<{ providerKey: string; bucketKey: string }>;
+    }): Promise<IFileBucketStats[]> {
+      if (filters?.buckets && filters.buckets.length === 0) return [];
+      if (filters?.buckets && filters.buckets.length > STATS_BUCKETS_PER_QUERY) {
+        // Each bucket once, so a bucket asked for twice is not reported by two slices.
+        const unique = [...new Map(filters.buckets.map((bucket) => [`${bucket.providerKey}\u0000${bucket.bucketKey}`, bucket])).values()];
+        const rows: IFileBucketStats[] = [];
+        for (let at = 0; at < unique.length; at += STATS_BUCKETS_PER_QUERY) {
+          rows.push(...await this.listFileBucketStats({ ...filters, buckets: unique.slice(at, at + STATS_BUCKETS_PER_QUERY) }));
+        }
+        return rows;
+      }
+      const db = this.getTenantDb();
+      const clauses: string[] = [];
+      const params: Record<string, unknown> = {};
+      if (filters?.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters?.buckets) {
+        // One equality pair per bucket: each term is an index range on (providerKey, bucketKey, key).
+        const pairs = filters.buckets.map((bucket, index) => {
+          params[`providerKey${index}`] = bucket.providerKey;
+          params[`bucketKey${index}`] = bucket.bucketKey;
+          return `(providerKey = @providerKey${index} AND bucketKey = @bucketKey${index})`;
+        });
+        clauses.push(`(${pairs.join(' OR ')})`);
+      }
+      const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+      const rows = db.prepare(`
+        SELECT providerKey, bucketKey, COUNT(*) AS fileCount, COALESCE(SUM(size + COALESCE(markdownSize, 0)), 0) AS totalBytes
+        FROM ${TABLES.files}${where}
+        GROUP BY providerKey, bucketKey
+      `).all(params) as SqliteRow[];
+      return rows.map((row) => ({
+        providerKey: row.providerKey as string,
+        bucketKey: row.bucketKey as string,
+        fileCount: (row.fileCount as number) ?? 0,
+        totalBytes: (row.totalBytes as number) ?? 0,
+      }));
     }
 
     async getProjectVectorCountApprox(projectId: string): Promise<number> {
@@ -336,7 +432,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         ...(r.agentKey ? { agentKey: r.agentKey as string } : {}),
         ...(r.expiresAt ? { expiresAt: this.toDate(r.expiresAt) } : {}),
         ...(r.uploadedBy ? { uploadedBy: r.uploadedBy as string } : {}),
-        ...(r.origin ? { origin: r.origin as 'agent_output' } : {}),
+        ...(r.origin ? { origin: r.origin as NonNullable<IFileRecord['origin']> } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

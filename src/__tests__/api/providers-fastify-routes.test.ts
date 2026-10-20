@@ -4,6 +4,7 @@
  *   POST /api/providers/test                connection test of an unsaved provider (nothing persisted)
  *   POST /api/providers/:id/test            connection test of a stored provider (outcome kept on the record)
  *   GET  /api/providers/:id/usage           models and agents per assigned project
+ *   GET  /api/providers/:id                 the edit form's read: also names the credential fields that store a value
  * and how those routes are authorized (they ride the `/api/providers` prefix: providers service).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +13,7 @@ const hoisted = vi.hoisted(() => ({
   session: { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', userId: 'user-1', userRole: 'owner' } as Record<string, string>,
   createProviderConfig: vi.fn(),
   getProviderConfigById: vi.fn(),
+  listProviderConfigs: vi.fn(),
   loadProviderRuntimeData: vi.fn(),
   recordProviderTest: vi.fn(),
   resolveTenantProjectIds: vi.fn(),
@@ -42,7 +44,7 @@ vi.mock('@/lib/services/providers/providerService', async (importOriginal) => {
     recordProviderTest: hoisted.recordProviderTest,
     resolveTenantProjectIds: hoisted.resolveTenantProjectIds,
     updateProviderConfig: hoisted.updateProviderConfig,
-    listProviderConfigs: vi.fn(),
+    listProviderConfigs: hoisted.listProviderConfigs,
   };
 });
 vi.mock('@/lib/services/providers/providerConnectionTest', async (importOriginal) => {
@@ -237,6 +239,47 @@ describe('GET /api/providers/:id/usage', () => {
     hoisted.session.userRole = 'user';
     expect((await app.inject({ method: 'GET', url: '/api/providers/prov-1/usage' })).statusCode).toBe(403);
     expect(hoisted.getProviderUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/providers/:id - the read an edit form opens from', () => {
+  const STORED = { _id: 'prov-1', tenantId: 'tenant-1', key: 'azure-eu', projectIds: ['proj-ctx'], hasCredentials: true, credentialFields: ['accountKey'] };
+
+  it('asks for the names of the credential fields that store a value, in both scopes, and passes the answer on', async () => {
+    hoisted.getProviderConfigById.mockResolvedValue(STORED);
+
+    const tenant = await app.inject({ method: 'GET', url: '/api/providers/prov-1?scope=tenant' });
+    expect(tenant.statusCode).toBe(200);
+    expect(parseJsonBody<{ provider: typeof STORED }>(tenant.body).provider.credentialFields).toEqual(['accountKey']);
+    expect(hoisted.getProviderConfigById).toHaveBeenLastCalledWith('tenant_acme', 'prov-1', { credentialFields: true });
+
+    const project = await app.inject({ method: 'GET', url: '/api/providers/prov-1' });
+    expect(project.statusCode).toBe(200);
+    expect(parseJsonBody<{ provider: typeof STORED }>(project.body).provider.credentialFields).toEqual(['accountKey']);
+    expect(hoisted.getProviderConfigById).toHaveBeenLastCalledWith('tenant_acme', 'prov-1', { credentialFields: true });
+  });
+
+  it('keeps its refusals: another tenant\'s provider and a project it is not assigned to are 404, a non-admin tenant read is 403', async () => {
+    hoisted.getProviderConfigById.mockResolvedValueOnce({ ...STORED, tenantId: 'someone-else' });
+    expect((await app.inject({ method: 'GET', url: '/api/providers/prov-1?scope=tenant' })).statusCode).toBe(404);
+    hoisted.getProviderConfigById.mockResolvedValueOnce({ ...STORED, projectIds: ['another-project'] });
+    expect((await app.inject({ method: 'GET', url: '/api/providers/prov-1' })).statusCode).toBe(404);
+    hoisted.session.userRole = 'user';
+    expect((await app.inject({ method: 'GET', url: '/api/providers/prov-1?scope=tenant' })).statusCode).toBe(403);
+  });
+});
+
+describe('GET /api/providers - the list', () => {
+  it('does not open the stored credentials of every provider: the names are for the edit form\'s own read', async () => {
+    hoisted.listProviderConfigs.mockResolvedValue([{ _id: 'prov-1', key: 'azure-eu', hasCredentials: true }]);
+
+    const tenant = await app.inject({ method: 'GET', url: '/api/providers?scope=tenant&type=model' });
+    expect(tenant.statusCode).toBe(200);
+    const project = await app.inject({ method: 'GET', url: '/api/providers' });
+    expect(project.statusCode).toBe(200);
+
+    expect(hoisted.listProviderConfigs).toHaveBeenCalledTimes(2);
+    for (const call of hoisted.listProviderConfigs.mock.calls) expect(call).toHaveLength(3);
   });
 });
 

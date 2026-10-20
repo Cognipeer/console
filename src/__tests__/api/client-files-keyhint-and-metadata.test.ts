@@ -56,7 +56,7 @@ vi.mock('@/lib/services/files', async () => {
 
 import { getDatabase } from '@/lib/database';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
-import { downloadFile, getFileRecord, uploadFile } from '@/lib/services/files';
+import { downloadFile, getFileBucket, getFileRecord, uploadFile } from '@/lib/services/files';
 import { clientFilesApiPlugin } from '@/server/api/plugins/client-files';
 import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -75,6 +75,7 @@ beforeEach(async () => {
     countFileRecords: vi.fn(async () => 0),
     sumFileRecordBytes: vi.fn(async () => 0),
   } as never));
+  mockFn(getFileBucket).mockResolvedValue({ id: 'b1', key: 'docs', status: 'active', providerKey: 'disk' });
   mockFn(uploadFile).mockResolvedValue({ record: { id: 'f1', key: 'stored.txt' } });
   app = await createFastifyApiTestApp(clientFilesApiPlugin);
 });

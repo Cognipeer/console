@@ -5,10 +5,11 @@
  */
 
 import { ObjectId, type Db } from 'mongodb';
-import type { IFileRecord, IFileBucketRecord, IFileEntriesPage, FileListPurpose } from '../provider.interface';
+import type { IFileRecord, IFileBucketRecord, IFileBucketStats, IFileEntriesPage, FileListPurpose, FileRecordPatch, FileTypeFilter } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
+import { FILE_KIND_RULES, type FileKindRule } from '../fileTypeFilter';
 
 export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
@@ -61,12 +62,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       };
     }
 
-    async updateFileRecord(
-      id: string,
-      data: Partial<
-        Omit<IFileRecord, 'tenantId' | 'providerKey' | 'bucketKey' | 'key' | 'createdBy'>
-      >,
-    ): Promise<IFileRecord | null> {
+    async updateFileRecord(id: string, data: FileRecordPatch): Promise<IFileRecord | null> {
       const db = this.getTenantDb();
       const objectId = new ObjectId(id);
 
@@ -153,11 +149,53 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       };
     }
 
+    async listFileRecordsByKeys(filters: {
+      providerKey: string;
+      bucketKey: string;
+      projectId?: string;
+      keys: string[];
+      field?: 'key' | 'markdownKey';
+    }): Promise<IFileRecord[]> {
+      const keys = [...new Set(filters.keys)];
+      if (keys.length === 0) return [];
+      const db = this.getTenantDb();
+      const documents = await db
+        .collection<IFileRecord>(COLLECTIONS.files)
+        .find({
+          providerKey: filters.providerKey,
+          bucketKey: filters.bucketKey,
+          ...(filters.projectId ? { projectId: filters.projectId } : {}),
+          [filters.field === 'markdownKey' ? 'markdownKey' : 'key']: { $in: keys },
+        })
+        .toArray();
+      return documents.map((record) => ({ ...record, _id: record._id?.toString() }));
+    }
+
     /** `purpose` as a filter: session files, or everything that is not one (a missing field counts as "other"). */
     protected filePurposeFilter(purpose: FileListPurpose | undefined): Record<string, unknown> {
       if (purpose === 'conversation') return { purpose: 'conversation' };
       if (purpose === 'other') return { purpose: { $ne: 'conversation' } };
       return {};
+    }
+
+    /**
+     * A kind of file (`fileTypeFilter.ts`) as a filter: the content type (parameters allowed after it), and
+     * the extension of the name only when no kind claims the content type.
+     */
+    protected fileTypeCondition(type: FileTypeFilter): Record<string, unknown> {
+      const byContentType = (rule: FileKindRule): Array<Record<string, unknown>> => [
+        ...rule.mimeTypes.map((value) => ({ contentType: new RegExp(`^\\s*${this.escapeRegex(value)}\\s*(?:;|$)`, 'i') })),
+        ...rule.mimePrefixes.map((prefix) => ({ contentType: new RegExp(`^\\s*${this.escapeRegex(prefix)}`, 'i') })),
+      ];
+      const byExtension = (rule: FileKindRule): Array<Record<string, unknown>> => rule.extensions
+        .map((extension) => ({ name: new RegExp(`${this.escapeRegex(extension)}$`, 'i') }));
+      const rules = Object.values(FILE_KIND_RULES);
+      const claimed = rules.flatMap(byContentType);
+      if (type === 'other') {
+        return { $nor: [...claimed, ...rules.flatMap(byExtension)] };
+      }
+      const rule = FILE_KIND_RULES[type];
+      return { $or: [...byContentType(rule), { $and: [{ $nor: claimed }, { $or: byExtension(rule) }] }] };
     }
 
     async listFileRecords(filters: {
@@ -167,6 +205,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       search?: string;
       prefix?: string;
       purpose?: FileListPurpose;
+      type?: FileTypeFilter;
       limit?: number;
       cursor?: string;
     }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
@@ -187,6 +226,8 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         const upper = keyPrefixUpperBound(filters.prefix);
         conditions.push({ key: { $gte: filters.prefix, ...(upper !== undefined ? { $lt: upper } : {}) } });
       }
+
+      if (filters.type) conditions.push(this.fileTypeCondition(filters.type));
 
       if (filters.search) {
         const regex = new RegExp(this.escapeRegex(filters.search), 'i');
@@ -216,8 +257,9 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         _id: record._id?.toString(),
       }));
 
-      const next = documents.length > limit ? documents[limit] : undefined;
-      const nextCursor = next?._id ? next._id.toString() : undefined;
+      // One document past the page proves there is more. The cursor is the last document the page returns: the
+      // next read continues after it (`_id > cursor`), so the document that proved it is not skipped.
+      const nextCursor = documents.length > limit ? items[items.length - 1]?._id as string | undefined : undefined;
 
       return {
         items,
@@ -323,6 +365,39 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
 
       const total = (result[0] as { total?: number } | undefined)?.total;
       return typeof total === 'number' ? total : 0;
+    }
+
+    async listFileBucketStats(filters?: {
+      projectId?: string;
+      buckets?: Array<{ providerKey: string; bucketKey: string }>;
+    }): Promise<IFileBucketStats[]> {
+      if (filters?.buckets && filters.buckets.length === 0) return [];
+      const db = this.getTenantDb();
+      const match: Record<string, unknown> = {};
+      if (filters?.projectId) match.projectId = filters.projectId;
+      // One equality pair per bucket: each branch is an index range on (providerKey, bucketKey, key).
+      if (filters?.buckets) match.$or = filters.buckets.map((bucket) => ({ providerKey: bucket.providerKey, bucketKey: bucket.bucketKey }));
+
+      const groups = await db
+        .collection<IFileRecord>(COLLECTIONS.files)
+        .aggregate<{ _id: { providerKey: string; bucketKey: string }; fileCount: number; totalBytes: number }>([
+          { $match: match },
+          {
+            $group: {
+              _id: { providerKey: '$providerKey', bucketKey: '$bucketKey' },
+              fileCount: { $sum: 1 },
+              totalBytes: { $sum: { $add: [{ $ifNull: ['$size', 0] }, { $ifNull: ['$markdownSize', 0] }] } },
+            },
+          },
+        ])
+        .toArray();
+
+      return groups.map((group) => ({
+        providerKey: group._id.providerKey,
+        bucketKey: group._id.bucketKey,
+        fileCount: group.fileCount,
+        totalBytes: typeof group.totalBytes === 'number' ? group.totalBytes : 0,
+      }));
     }
 
     // ── Vector counters ──────────────────────────────────────────────

@@ -32,6 +32,9 @@ vi.mock('@/lib/providers', () => ({
         hoisted.objects.set(input.key, Buffer.from(input.data));
         return { handle: { key: input.key, name: input.name, contentType: input.contentType, size: input.data.length } };
       },
+      // The copy is not written over an object that is already there: the store is asked first.
+      getFileMetadata: async (key: string) => (hoisted.objects.has(key) ? { key, name: key, size: hoisted.objects.get(key)!.length } : null),
+      deleteFile: async (key: string) => { hoisted.objects.delete(key); },
     })),
   },
 }));
@@ -60,6 +63,7 @@ beforeEach(() => {
     return record;
   }) as never);
   db.findFileRecordById.mockImplementation((async (id: string) => hoisted.records.get(id)) as never);
+  db.listFileRecordsByKeys.mockResolvedValue([] as never);
   db.findFileRecordByKey.mockImplementation((async () => hoisted.records.get('f1')) as never);
   db.updateFileRecord.mockImplementation((async (id: string, patch: Record<string, unknown>) => {
     const next = { ...hoisted.records.get(id), ...patch };

@@ -7191,6 +7191,20 @@ export const en = {
       foundModels: '{count} model(s) found',
       requestFailed: 'The test could not be run',
       needService: 'Pick a service and fill in its configuration first.',
+      editHint: 'Credentials you leave blank keep their stored values; the other fields are used as shown.',
+      stepsLabel: 'Test steps',
+      stepPassed: 'Passed',
+      stepFailed: 'Failed',
+      steps: {
+        list: 'List',
+        write: 'Write test object',
+        read: 'Read back',
+        delete: 'Delete',
+      },
+    },
+    form: {
+      storedSecret: 'Stored — leave blank to keep',
+      required: 'This field is required',
     },
     projects: {
       sectionTitle: 'Projects',

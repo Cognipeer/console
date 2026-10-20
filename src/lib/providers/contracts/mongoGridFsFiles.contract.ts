@@ -18,6 +18,7 @@ import {
 } from '@/lib/services/providers/providerEndpointGuard';
 import { ProviderSettingsError } from '../errors';
 import type { ProviderContract } from '../types';
+import { maxStorageDownloadBytes, StorageObjectTooLargeError } from './storageLimits';
 import type {
   FileObjectHandle,
   FileProviderRuntime,
@@ -44,6 +45,11 @@ interface GridFsSettings {
 
 const DEFAULT_BUCKET = 'files';
 const DEFAULT_DB = 'cognipeer_files';
+
+/** The GridFS bucket a provider writes to: its setting, cleaned the way the runtime uses it. */
+function gridFsBucketName(settings: GridFsSettings | undefined): string {
+  return (settings?.bucketName?.trim() || DEFAULT_BUCKET).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
 
 const logger = createLogger('mongodb-gridfs-files');
 
@@ -280,6 +286,12 @@ export const MongoGridFsFileProviderContract: ProviderContract<
     if (raw?.trim()) await assertUriAllowed(raw.trim(), isOnPrem);
   },
 
+  describeStorageLocation({ settings, tenantId, providerKey }) {
+    // The filename prefix the runtime puts in front of every key (`<tenant>/<provider>/`); the database and the
+    // connection stay out of it.
+    return `MongoDB GridFS \u00b7 ${gridFsBucketName(settings)}/${tenantId}/${providerKey}/`;
+  },
+
   async createRuntime({ tenantId, providerKey, credentials, settings, logger }) {
     const uri = resolveUri(credentials);
     const usingAppConnection = !credentials?.uri?.trim();
@@ -292,7 +304,7 @@ export const MongoGridFsFileProviderContract: ProviderContract<
         : DEFAULT_DB;
 
     const dbName = settings.database?.trim() || defaultDbName;
-    const bucketName = (settings.bucketName?.trim() || DEFAULT_BUCKET).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const bucketName = gridFsBucketName(settings);
     const chunk = Number(settings.chunkSizeBytes);
     const chunkSizeBytes = Number.isFinite(chunk) && chunk > 0 ? Math.floor(chunk) : undefined;
 
@@ -368,9 +380,16 @@ export const MongoGridFsFileProviderContract: ProviderContract<
           // a missing key is the caller's to hear about, not a storage failure (the file circuit breaker reads the status)
           throw Object.assign(new Error(`File not found: ${relativeKey}`), { statusCode: 404 });
         }
+        const ceiling = maxStorageDownloadBytes();
+        if (file.length > ceiling) throw new StorageObjectTooLargeError(ceiling);
         const chunks: Buffer[] = [];
+        let received = 0;
         for await (const part of bucket.openDownloadStream(file._id)) {
-          chunks.push(Buffer.from(part as Uint8Array));
+          const chunk = Buffer.from(part as Uint8Array);
+          received += chunk.length;
+          // The file document is the writer's claim; the chunks are what is really held.
+          if (received > ceiling) throw new StorageObjectTooLargeError(ceiling);
+          chunks.push(chunk);
         }
         const handle = toHandle(relativeKey, file);
         return {

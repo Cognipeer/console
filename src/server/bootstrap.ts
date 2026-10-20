@@ -23,6 +23,7 @@ import {
   reconcileOrphanedCrawlJobs,
 } from '@/lib/services/crawler';
 import { startOcrJobQueueConsumer } from '@/lib/services/ocrJobs';
+import { startFilesQueueConsumer } from '@/lib/services/files/jobs/filesConsumer';
 import { startBatchQueueConsumer } from '@/lib/services/batch';
 import { startDatasetGenerationConsumer } from '@/lib/services/evaluation/datasetGenerationConsumer';
 import { startSnapshotQueueConsumer } from '@/lib/services/snapshots/snapshotConsumer';
@@ -370,6 +371,7 @@ async function runBootstrap(): Promise<void> {
     startBrowserQueueConsumer(),
     startCrawlerQueueConsumer(),
     startOcrJobQueueConsumer(),
+    startFilesQueueConsumer(),
     startBatchQueueConsumer(),
     startDatasetGenerationConsumer(),
     startSnapshotQueueConsumer(),

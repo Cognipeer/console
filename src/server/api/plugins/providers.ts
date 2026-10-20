@@ -1,20 +1,24 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
 import type {
   CreateProviderConfigInput,
   ProviderStatus,
+  ProviderTestOverrides,
+  ProviderTestTarget,
   UpdateProviderConfigInput,
 } from '@/lib/services/providers/providerService';
 import {
   createProviderConfig,
   deleteProviderConfig,
   getProviderConfigById,
+  hasProviderTestOverrides,
   listProviderConfigs,
   loadProviderRuntimeData,
   ProviderCredentialDecryptError,
   recordProviderTest,
+  resolveProviderTestTarget,
   resolveTenantProjectIds,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
@@ -177,6 +181,30 @@ function readTestPayload(body: unknown): {
   };
 }
 
+/** The stored connection of a provider, decrypted here for a test: nothing typed on top of it. */
+async function loadStoredTestTarget(tenantDbName: string, id: string, tenantId: string): Promise<ProviderTestTarget> {
+  const { record, credentials } = await loadProviderRuntimeData(tenantDbName, { id, tenantId });
+  return { record, credentials, settings: record.settings ?? {} };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The optional body of `POST /providers/:id/test`: the form's unsaved edits, to test instead of what is stored. No body
+ * (or `{}`) is a plain re-test of the stored connection. Throws a message fit for a 400.
+ */
+function readSavedTestOverrides(request: FastifyRequest): ProviderTestOverrides {
+  // An empty body is the plain re-test, not a malformed one (`readJsonBody` refuses both).
+  if (request.body === undefined || request.body === null || request.body === '') return {};
+  const body = readJsonBody<unknown>(request);
+  if (!isPlainObject(body)) throw new Error('Invalid payload');
+  if (body.credentials !== undefined && !isPlainObject(body.credentials)) throw new Error('credentials must be an object');
+  if (body.settings !== undefined && !isPlainObject(body.settings)) throw new Error('settings must be an object');
+  return { credentials: body.credentials, settings: body.settings };
+}
+
 export const providersApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/providers/drivers', withApiRequestContext(async (request, reply) => {
     try {
@@ -335,7 +363,11 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  // "Test connection" of a stored provider: its credentials are decrypted here and never leave. The outcome is kept on the record.
+  // "Test connection" of a stored provider: its credentials are decrypted here and never leave. Without a body it re-tests
+  // the stored connection and keeps the outcome on the record. With `{ credentials?, settings? }` (the edit form's unsaved
+  // values) it tests what an update with those values would store - a blank credential keeps the stored one, settings
+  // replace the stored ones - and keeps nothing: the outcome describes a connection that is not saved. Same admin gate as
+  // updating the provider.
   app.post('/providers/:id/test', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
@@ -349,28 +381,37 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
 
-      const { record, credentials } = await loadProviderRuntimeData(session.tenantDbName, {
-        id,
-        tenantId: session.tenantId,
-      });
+      let overrides: ProviderTestOverrides;
+      try {
+        overrides = readSavedTestOverrides(request);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'Invalid payload' });
+      }
+
+      const overridden = hasProviderTestOverrides(overrides);
+      const { record, credentials, settings } = overridden
+        ? await resolveProviderTestTarget(session.tenantDbName, { id, tenantId: session.tenantId }, overrides)
+        : await loadStoredTestTarget(session.tenantDbName, id, session.tenantId);
 
       const result = await testProviderConnection({
         type: record.type,
         driver: record.driver,
         credentials,
-        settings: record.settings ?? {},
+        settings,
         tenantId: session.tenantId,
         providerKey: record.key,
       });
 
-      const deployments = foundCount(result);
-      await recordProviderTest(session.tenantDbName, id, {
-        ok: result.ok,
-        at: new Date(),
-        latencyMs: result.latencyMs,
-        message: result.message,
-        ...(deployments !== undefined ? { deployments } : {}),
-      });
+      if (!overridden) {
+        const deployments = foundCount(result);
+        await recordProviderTest(session.tenantDbName, id, {
+          ok: result.ok,
+          at: new Date(),
+          latencyMs: result.latencyMs,
+          message: result.message,
+          ...(deployments !== undefined ? { deployments } : {}),
+        });
+      }
       return reply.code(200).send(result);
     } catch (error) {
       return sendProviderError(reply, error);
@@ -409,7 +450,8 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(403).send({ error: 'Forbidden' });
         }
 
-        const provider = await getProviderConfigById(session.tenantDbName, id);
+        // The edit form opens from this read: it carries which credential fields are stored (names, never values).
+        const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
         if (!provider || provider.tenantId !== session.tenantId) {
           return reply.code(404).send({ error: 'Not found' });
         }
@@ -418,7 +460,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId } = await requireProjectContextForRequest(request);
-      const provider = await getProviderConfigById(session.tenantDbName, id);
+      const provider = await getProviderConfigById(session.tenantDbName, id, { credentialFields: true });
       const assigned = provider && (
         String(provider.projectId) === String(projectId)
         || (

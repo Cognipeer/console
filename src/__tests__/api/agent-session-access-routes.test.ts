@@ -10,7 +10,7 @@
  * caller's own sessions off it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -628,7 +628,7 @@ describe('tracing: a thread of an agent is its session', () => {
 });
 
 describe('the Document Store, for the files a session holds', () => {
-  async function sessionFile(conversation: keyof typeof sessions, key: string) {
+  async function sessionFile(conversation: keyof typeof sessions, key: string, over: Record<string, unknown> = {}) {
     if (!(await db.findProviderByKey(tenantId, 'local', p1))) {
       await db.createProvider({ tenantId, projectId: p1, key: 'local', type: 'file', driver: 'local-filesystem', label: 'Local', status: 'active', credentialsEnc: encryptObject({}), settings: { basePath: tmpDir }, createdBy: 'x' });
       await db.createFileBucket({ tenantId, projectId: p1, key: 'docs', name: 'Docs', providerKey: 'local', status: 'active', createdBy: 'x' } as never);
@@ -636,6 +636,7 @@ describe('the Document Store, for the files a session holds', () => {
     await db.createFileRecord({
       tenantId, projectId: p1, providerKey: 'local', bucketKey: 'docs', key, name: key, size: 3, markdownStatus: 'none',
       purpose: 'conversation', conversationId: idOf(conversation), agentKey: 'support', createdBy: 'x', uploadedBy: 'x',
+      ...over,
     } as never);
   }
 
@@ -649,6 +650,34 @@ describe('the Document Store, for the files a session holds', () => {
     expect((await dash('other', 'DELETE', '/files/buckets/docs/objects/agent-sessions/support/s1/notes.txt')).statusCode).toBe(403);
     // a person the rules leave alone reads it
     expect((await dash('padmin', 'GET', '/files/buckets/docs/objects/agent-sessions/support/s1/notes.txt')).statusCode).toBe(200);
+  });
+
+  it('a preview is a read like the others: refused for somebody else\'s session before the object is touched, shown to whoever may view it', async () => {
+    await sessionFile('starters', 'agent-sessions/support/s1/p.txt', { contentType: 'text/plain', size: 5 });
+    // The object itself, where the local disk provider keeps it: <base>/<tenant>/<provider>/<bucket prefix>/<key>.
+    const stored = path.join(tmpDir, tenantId, 'local', 'docs', 'agent-sessions', 'support', 's1', 'p.txt');
+    mkdirSync(path.dirname(stored), { recursive: true });
+    writeFileSync(stored, 'hello');
+    await deny('agent.session_view_others', 'other');
+    const url = '/files/buckets/docs/objects/agent-sessions/support/s1/p.txt';
+
+    for (const query of ['preview=1', 'preview=1&variant=markdown', 'preview=true', 'download=1', 'download=markdown']) {
+      const refused = await dash('other', 'GET', `${url}?${query}`);
+      expect(refused.statusCode, query).toBe(403);
+      expect(json(refused), query).toMatchObject({ code: 'forbidden' });
+      // Nothing of the file leaks into the refusal.
+      expect(refused.body, query).not.toContain('hello');
+    }
+
+    for (const who of ['padmin', 'starter'] as const) {
+      const shown = await dash(who, 'GET', `${url}?preview=1`);
+      expect(shown.statusCode, who).toBe(200);
+      expect(shown.body, who).toBe('hello');
+      expect(shown.headers['content-type'], who).toBe('text/plain; charset=utf-8');
+      expect(String(shown.headers['content-disposition']), who).toMatch(/^inline;/);
+      expect(shown.headers['x-content-type-options'], who).toBe('nosniff');
+      expect(shown.headers['content-security-policy'], who).toBe('sandbox');
+    }
   });
 
   it('a listing leaves out the files of sessions the caller may not view, and shows ordinary files to everybody', async () => {

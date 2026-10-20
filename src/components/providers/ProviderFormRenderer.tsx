@@ -15,6 +15,12 @@ import {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
+import {
+  allFields,
+  showsStoredSecretCue,
+  visibilitySourceNames,
+  visibleSections,
+} from './providerFormModel';
 
 type ProviderFormRendererProps = {
   schema: ProviderFormSchema;
@@ -23,14 +29,28 @@ type ProviderFormRendererProps = {
   disabled?: boolean;
   /** Section numbering offset — use to continue numbering across multiple renderers. */
   sectionStart?: number;
+  /**
+   * Set when the provider being edited already stores credentials: the credential fields named in
+   * `storedCredentialFields` show this text as their placeholder (a blank one keeps the stored value).
+   */
+  storedSecretPlaceholder?: string;
+  /** The credential fields the provider being edited stores a value for (see `storedCredentialFields`). */
+  storedCredentialFields?: ReadonlySet<string>;
 };
 
 function renderField(
   field: ProviderFormField,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   form: UseFormReturnType<any>,
-  disabled?: boolean,
+  options: {
+    disabled?: boolean;
+    storedSecretPlaceholder?: string;
+    storedCredentialFields?: ReadonlySet<string>;
+    /** Another field's condition reads this one, so it must always hold a value. */
+    isConditionSource: boolean;
+  },
 ) {
+  const { disabled, storedSecretPlaceholder, storedCredentialFields, isConditionSource } = options;
   if (field.type === 'switch') {
     const inputProps = form.getInputProps(field.name, { type: 'checkbox' });
     return (
@@ -46,9 +66,10 @@ function renderField(
     );
   }
 
+  const storedCue = storedSecretPlaceholder !== undefined && showsStoredSecretCue(field, storedCredentialFields);
   const commonProps = {
     disabled,
-    placeholder: field.placeholder,
+    placeholder: storedCue ? storedSecretPlaceholder : field.placeholder,
     ...form.getInputProps(field.name),
   } as const;
 
@@ -64,6 +85,9 @@ function renderField(
         return (
           <Select
             {...commonProps}
+            // Clicking the chosen option again would clear it; a required choice, or one that decides which
+            // other fields apply, always keeps a value.
+            allowDeselect={!field.required && !isConditionSource}
             data={
               field.options?.map((option) => ({
                 label: option.label,
@@ -95,19 +119,33 @@ export function ProviderFormRenderer({
   form,
   disabled,
   sectionStart = 1,
+  storedSecretPlaceholder,
+  storedCredentialFields,
 }: ProviderFormRendererProps) {
   if (!schema.sections.length) return null;
 
+  // Fields that do not apply to the form as it stands (`visibleWhen`) are not drawn, and a section left with
+  // nothing to show goes with them; the numbering follows what is on screen.
+  const conditionSources = visibilitySourceNames(allFields(schema));
+  const sections = visibleSections(schema, form.values ?? {});
+
   return (
     <>
-      {schema.sections.map((section, sectionIndex) => (
+      {sections.map(({ section, fields }, sectionIndex) => (
         <FormSection
-          key={sectionIndex}
+          key={schema.sections.indexOf(section)}
           number={sectionStart + sectionIndex}
           title={section.title || `Configuration ${sectionIndex + 1}`}
           description={section.description}
         >
-          {section.fields.map((field) => renderField(field, form, disabled))}
+          {fields.map((field) =>
+            renderField(field, form, {
+              disabled,
+              storedSecretPlaceholder,
+              storedCredentialFields,
+              isConditionSource: conditionSources.has(field.name),
+            }),
+          )}
         </FormSection>
       ))}
     </>

@@ -35,6 +35,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { providerRequestError } from '@/components/providers/providerFormModel';
 import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import type {
@@ -1099,7 +1100,8 @@ export default function WebSearchInstancePage() {
             body: JSON.stringify(updatePayload),
           });
           const body = await res.json().catch(() => null);
-          if (!res.ok) throw new Error(body?.error || 'Failed to update instance');
+          // The refusal names the form field it is about: the edit form marks it.
+          if (!res.ok) throw providerRequestError(body, 'Failed to update instance');
           notifications.show({ color: 'teal', title: 'Web Search', message: 'Instance updated' });
           setEditOpen(false);
           await load();

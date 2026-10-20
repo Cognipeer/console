@@ -8,6 +8,7 @@ import type { ProviderDomain } from '@/lib/database';
 import type { ProviderDescriptor } from '@/lib/providers';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
+import { providerRequestError } from '@/components/providers/providerFormModel';
 import { AssignProviderShell } from '@/components/providers/ProviderAssignStep';
 import {
   effectiveProjectIds,
@@ -412,7 +413,8 @@ export default function TenantProviders() {
 
             const body = await res.json().catch(() => null);
             if (!res.ok) {
-              throw new Error(body?.error || 'Failed to update provider');
+              // The refusal names the form field it is about: the edit form marks it.
+              throw providerRequestError(body, 'Failed to update provider');
             }
 
             notifications.show({
