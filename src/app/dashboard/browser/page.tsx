@@ -28,6 +28,7 @@ import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
 import type {
   BrowserSessionView,
   BrowserView,
@@ -454,7 +455,11 @@ export default function BrowsersListPage() {
           </FormRow>
           <FormRow cols={2}>
             <FormField label="Artifact bucket" optional hint="Where screenshots and PDFs land. Empty uses the platform default.">
-              <TextInput placeholder="browser-artifacts" {...form.getInputProps('artifactBucketKey')} />
+              <ArtifactBucketSelect
+                value={form.values.artifactBucketKey}
+                onChange={(next) => form.setFieldValue('artifactBucketKey', next)}
+                emptyLabel="Platform default"
+              />
             </FormField>
             <FormField label="Default model key" optional hint="Used by agents bound to this browser.">
               <TextInput placeholder="gpt-5.6" {...form.getInputProps('defaultModelKey')} />

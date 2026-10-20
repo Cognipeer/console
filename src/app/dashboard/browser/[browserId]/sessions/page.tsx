@@ -41,6 +41,7 @@ import {
 } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
 import type { BrowserSessionEventView, BrowserSessionView } from '@/lib/services/browser';
 
 interface CreateForm {
@@ -307,9 +308,13 @@ export default function BrowserSessionsPage() {
             <FormField
               label="Artifact bucket"
               optional
-              hint="Existing files bucket for screenshots and PDFs. Defaults to the configured fallback."
+              hint="Where screenshots and PDFs land. Empty uses the browser's bucket."
             >
-              <TextInput {...form.getInputProps('artifactBucketKey')} />
+              <ArtifactBucketSelect
+                value={form.values.artifactBucketKey}
+                onChange={(next) => form.setFieldValue('artifactBucketKey', next)}
+                emptyLabel="The browser's bucket"
+              />
             </FormField>
           </FormRow>
           <FormRow cols={2}>

@@ -56,6 +56,7 @@ import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import BrowserOverview from '@/components/browser/BrowserOverview';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import ArtifactBucketSelect from '@/components/browser/ArtifactBucketSelect';
 import type { BrowserSessionView, BrowserView } from '@/lib/services/browser';
 
 interface CreateSessionForm {
@@ -693,8 +694,13 @@ export default function BrowserDetailPage() {
             </FormField>
           </FormRow>
           <FormRow cols={2}>
-            <FormField label="Artifact bucket" optional>
-              <TextInput {...editForm.getInputProps('artifactBucketKey')} />
+            <FormField label="Artifact bucket" optional hint="Where screenshots and PDFs land. Empty uses the platform default.">
+              <ArtifactBucketSelect
+                value={editForm.values.artifactBucketKey}
+                onChange={(next) => editForm.setFieldValue('artifactBucketKey', next)}
+                emptyLabel="Platform default"
+                clearable={false}
+              />
             </FormField>
             <FormField label="Default model key" optional>
               <TextInput {...editForm.getInputProps('defaultModelKey')} />
@@ -752,7 +758,11 @@ export default function BrowserDetailPage() {
         >
           <FormRow cols={1}>
             <FormField label="Artifact bucket" optional>
-              <TextInput {...sessionForm.getInputProps('artifactBucketKey')} />
+              <ArtifactBucketSelect
+                value={sessionForm.values.artifactBucketKey}
+                onChange={(next) => sessionForm.setFieldValue('artifactBucketKey', next)}
+                emptyLabel="The browser's bucket"
+              />
             </FormField>
           </FormRow>
           <FormRow cols={2}>
