@@ -2244,7 +2244,7 @@ export async function executeMcpToolLocal(
         throw new Error('Could not resolve tenant database for internal MCP execution');
       }
       result = await provider.execute(
-        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId },
+        { tenantDbName: tenant.dbName, tenantId: server.tenantId, projectId: server.projectId, serverKey: server.key },
         internal.instanceKey,
         internal.config ?? {},
         realToolName,

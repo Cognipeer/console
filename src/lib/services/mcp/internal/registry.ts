@@ -8,11 +8,13 @@
 
 import { knowledgeBaseProvider } from './knowledgeBaseProvider';
 import { agentObservabilityProvider } from './agentObservabilityProvider';
+import { browserProvider } from './browserProvider';
 import type { InternalMcpProvider } from './types';
 
 export const INTERNAL_MCP_PROVIDERS: InternalMcpProvider[] = [
   knowledgeBaseProvider,
   agentObservabilityProvider,
+  browserProvider,
 ];
 
 export function getInternalMcpProvider(id: string): InternalMcpProvider | undefined {

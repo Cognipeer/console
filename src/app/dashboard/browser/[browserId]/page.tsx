@@ -15,8 +15,6 @@ import {
   Group,
   Image,
   Loader,
-  Menu,
-  Modal,
   Paper,
   ScrollArea,
   SimpleGrid,
@@ -41,13 +39,10 @@ import {
   IconCamera,
   IconCode,
   IconCookie,
-  IconCopy,
-  IconDots,
   IconEdit,
   IconHistory,
   IconInfoCircle,
   IconPlayerPlay,
-  IconPlug,
   IconPlus,
   IconRefresh,
   IconRoute,
@@ -138,7 +133,6 @@ export default function BrowserDetailPage() {
   const [creating, setCreating] = useState(false);
   const [drawerSession, setDrawerSession] = useState<BrowserSessionView | null>(null);
   const [drawerOpened, drawerHandlers] = useDisclosure(false);
-  const [mcpOpened, mcpHandlers] = useDisclosure(false);
 
   const sessionForm = useForm<CreateSessionForm>({
     initialValues: { name: '', url: '', artifactBucketKey: '', allowList: '', blockList: '' },
@@ -450,18 +444,6 @@ export default function BrowserDetailPage() {
       >
         Edit
       </Button>
-      <Menu withinPortal position="bottom-end" withArrow>
-        <Menu.Target>
-          <ActionIcon variant="default" radius="md" size="lg" aria-label="More">
-            <IconDots size={15} stroke={1.7} />
-          </ActionIcon>
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item leftSection={<IconPlug size={14} />} onClick={mcpHandlers.open}>
-            Get MCP URL
-          </Menu.Item>
-        </Menu.Dropdown>
-      </Menu>
     </>
   );
 
@@ -538,7 +520,6 @@ export default function BrowserDetailPage() {
             browser={browser}
             sessions={sessions}
             onUpdated={setBrowser}
-            onOpenMcp={mcpHandlers.open}
             onNewSession={createHandlers.open}
           />
         </Tabs.Panel>
@@ -791,81 +772,10 @@ export default function BrowserDetailPage() {
         onClose={() => { drawerHandlers.close(); setDrawerSession(null); }}
       />
 
-      <McpUrlModal
-        opened={mcpOpened}
-        onClose={mcpHandlers.close}
-        browserKey={browser?.key ?? ''}
-      />
-
       <Paper withBorder p="md" radius="lg" mt="md">
         <ResourceUsageSection type="browser" id={browser.id} />
       </Paper>
     </DetailShell>
-  );
-}
-
-function McpUrlModal({ opened, onClose, browserKey }: { opened: boolean; onClose: () => void; browserKey: string }) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const sseUrl = `${origin}/api/client/v1/browser/${browserKey}/mcp/sse`;
-  const messageUrl = `${origin}/api/client/v1/browser/${browserKey}/mcp/message?sessionId=<sessionId>`;
-
-  const copy = async (value: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      notifications.show({ color: 'teal', title: 'Copied', message: `${label} copied to clipboard` });
-    } catch {
-      notifications.show({ color: 'red', title: 'Copy failed', message: 'Clipboard not available' });
-    }
-  };
-
-  return (
-    <Modal opened={opened} onClose={onClose} title="Browser MCP endpoint" size="lg">
-      <Stack gap="md">
-        <Text size="sm" c="dimmed">
-          Connect any MCP-compatible client (e.g. an external agent runtime) to this browser using
-          the URLs below. Authenticate with an API token from this project as
-          <Text component="span" ff="monospace" size="xs"> Authorization: Bearer &lt;API_TOKEN&gt;</Text>.
-          Each SSE connection owns its own browser session for its lifetime.
-        </Text>
-
-        <Stack gap={4}>
-          <Group justify="space-between">
-            <Text size="xs" fw={600} c="dimmed" tt="uppercase">SSE endpoint</Text>
-            <Tooltip label="Copy">
-              <ActionIcon variant="subtle" size="sm" onClick={() => copy(sseUrl, 'SSE URL')}>
-                <IconCopy size={14} />
-              </ActionIcon>
-            </Tooltip>
-          </Group>
-          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{sseUrl}</Code>
-        </Stack>
-
-        <Stack gap={4}>
-          <Group justify="space-between">
-            <Text size="xs" fw={600} c="dimmed" tt="uppercase">JSON-RPC message endpoint</Text>
-            <Tooltip label="Copy">
-              <ActionIcon variant="subtle" size="sm" onClick={() => copy(messageUrl, 'Message URL')}>
-                <IconCopy size={14} />
-              </ActionIcon>
-            </Tooltip>
-          </Group>
-          <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{messageUrl}</Code>
-          <Text size="xs" c="dimmed">
-            The <Text component="span" ff="monospace" size="xs">sessionId</Text> is provided by
-            the SSE <Text component="span" ff="monospace" size="xs">endpoint</Text> event.
-          </Text>
-        </Stack>
-
-        <Alert color="grape" variant="light" icon={<IconPlug size={16} />}>
-          Tools exposed: <Text component="span" ff="monospace" size="xs">browser_navigate, browser_click, browser_hover, browser_type, browser_press, browser_wait, browser_snapshot, browser_extract, browser_screenshot, browser_close</Text>.
-          All calls are scoped to this browser and logged under its sessions.
-        </Alert>
-
-        <Group justify="flex-end">
-          <Button onClick={onClose}>Close</Button>
-        </Group>
-      </Stack>
-    </Modal>
   );
 }
 

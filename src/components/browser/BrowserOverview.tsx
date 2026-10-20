@@ -29,7 +29,6 @@ import {
   IconClockPause,
   IconExternalLink,
   IconPlayerPlay,
-  IconPlug,
   IconWorld,
 } from '@tabler/icons-react';
 import StatTile from '@/components/common/ui/StatTile';
@@ -41,7 +40,6 @@ interface Props {
   browser: BrowserView;
   sessions: BrowserSessionView[];
   onUpdated: (browser: BrowserView) => void;
-  onOpenMcp: () => void;
   onNewSession: () => void;
 }
 
@@ -79,7 +77,6 @@ export default function BrowserOverview({
   browser,
   sessions,
   onUpdated,
-  onOpenMcp,
   onNewSession,
 }: Props) {
   const router = useRouter();
@@ -309,9 +306,6 @@ export default function BrowserOverview({
             </Tooltip>
             <Button size="xs" variant="light" leftSection={<IconExternalLink size={13} />} onClick={onNewSession}>
               New session
-            </Button>
-            <Button size="xs" variant="light" color="grape" leftSection={<IconPlug size={13} />} onClick={onOpenMcp}>
-              MCP URL
             </Button>
           </Group>
         </Group>
