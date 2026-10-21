@@ -194,8 +194,8 @@ describe('built-in console MCP server — tools need the tracing permission', ()
     it('reports an unknown tool as unknown, not as forbidden', async () => {
       expect((await executeRest('no_such_tool')).status).toBe(400);
       const { body } = await rpc('tools/call', { name: 'no_such_tool' });
-      expect(body.error.code).toBe(-32602);
-      expect(body.error.message).toMatch(/unknown tool/i);
+      expect(body.error?.code).toBe(-32602);
+      expect(body.error?.message).toMatch(/unknown tool/i);
     });
   });
 
