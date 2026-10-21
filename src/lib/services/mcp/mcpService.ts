@@ -26,6 +26,7 @@ import type {
   OpenApiOperation,
 } from './types';
 import { getConfig } from '@/lib/core/config';
+import { untilTurnStops } from '@/lib/core/turnSignal';
 import { createLogger } from '@/lib/core/logger';
 import {
   authConfigSecretValues,
@@ -2322,7 +2323,9 @@ export async function executeMcpTool(
         runtimeHeaders,
         ...(identity ? { identity } : {}),
       };
-      outcome = await routeInstanceCall(
+      // On this node the call itself is aborted with the turn; a call routed
+      // to another node cannot be, so the turn just stops waiting for it.
+      outcome = await untilTurnStops(routeInstanceCall(
         {
           entityType: 'mcp',
           entityId: mcpEntityId(server.tenantId, server.key),
@@ -2330,7 +2333,7 @@ export async function executeMcpTool(
         },
         job as unknown as QueuePayload,
         () => executeMcpToolLocal(server, toolName, args, runtimeHeaders, identity),
-      );
+      ));
     }
     recordMcpServerMetric(server, 'ok', Date.now() - startedAt);
     return outcome;

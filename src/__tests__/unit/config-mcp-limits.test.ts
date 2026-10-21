@@ -38,6 +38,7 @@ describe('MCP gateway limits', () => {
       lastErrorThrottleMs: 60_000,
       logToolNameMaxChars: 200,
       logUserAgentMaxChars: 300,
+      callTimeoutMs: 120_000,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,
@@ -51,6 +52,7 @@ describe('MCP gateway limits', () => {
       MCP_LAST_ERROR_THROTTLE_MS: '5000',
       MCP_LOG_TOOL_NAME_MAX_CHARS: '120',
       MCP_LOG_USER_AGENT_MAX_CHARS: '150',
+      MCP_CALL_TIMEOUT_MS: '30000',
     }));
     expect(getConfig().mcp).toEqual({
       errorMessageMaxChars: 4000,
@@ -58,6 +60,7 @@ describe('MCP gateway limits', () => {
       lastErrorThrottleMs: 5000,
       logToolNameMaxChars: 120,
       logUserAgentMaxChars: 150,
+      callTimeoutMs: 30_000,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,
@@ -71,6 +74,7 @@ describe('MCP gateway limits', () => {
       MCP_LAST_ERROR_THROTTLE_MS: '-1',
       MCP_LOG_TOOL_NAME_MAX_CHARS: '0',
       MCP_LOG_USER_AGENT_MAX_CHARS: 'abc',
+      MCP_CALL_TIMEOUT_MS: '5',
     }));
     expect(getConfig().mcp).toEqual({
       errorMessageMaxChars: 256,
@@ -78,6 +82,7 @@ describe('MCP gateway limits', () => {
       lastErrorThrottleMs: 0,
       logToolNameMaxChars: 16,
       logUserAgentMaxChars: 300,
+      callTimeoutMs: 1_000,
       sse: DEFAULT_SSE,
       stdio: DEFAULT_STDIO,
       public: DEFAULT_PUBLIC,

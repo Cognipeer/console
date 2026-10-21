@@ -38,6 +38,7 @@ export {
 export type { McpServerMonitorEntry, McpRequestClientInfo } from './mcpService';
 
 export { MCP_INSTRUCTIONS_MAX_CHARS, mcpInstructionsInputError } from './discovery';
+export { mcpProtocolVersionOf, negotiateMcpProtocolVersion } from './protocolVersion';
 export { McpServerConfigError, McpToolInputError, McpUnknownToolError, McpUpstreamError, isMcpServerConfigError, isMcpToolInputError, isMcpUnknownToolError, isMcpUpstreamError } from './errors';
 
 export {

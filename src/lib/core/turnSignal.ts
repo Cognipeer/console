@@ -21,3 +21,31 @@ export function runWithTurnSignal<T>(signal: AbortSignal | undefined, fn: () => 
 export function currentTurnSignal(): AbortSignal | undefined {
   return storage.getStore();
 }
+
+/**
+ * Waits for `promise` until the current turn is stopped, then rejects instead.
+ * For work this process cannot abort itself (a call handed to another node):
+ * the turn stops waiting, the work finishes where it runs.
+ */
+export function untilTurnStops<T>(promise: Promise<T>): Promise<T> {
+  const signal = currentTurnSignal();
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason instanceof Error ? signal.reason : new Error('The call was cancelled'));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}

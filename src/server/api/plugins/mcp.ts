@@ -52,6 +52,7 @@ import {
 } from '@/lib/services/runtimeContext';
 import { mcpSandboxRunner, IS_ENTERPRISE_BUILD } from '@/enterprise/registry';
 import { ensureMcpGuardrailHook } from '@/lib/services/guardrail/hooks/mcpHook';
+import { restToolResult } from '@/lib/services/tools/toolOutput';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
 import {
   type ApiSessionContext,
@@ -914,7 +915,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
           sourceType: resolveSourceType(server),
         }, secretValues);
 
-        return reply.code(200).send({ result, latencyMs });
+        return reply.code(200).send({ result: restToolResult(result), latencyMs });
       } catch (execError) {
         const message = execError instanceof Error ? execError.message : 'Execution failed';
         void logMcpRequest(session.tenantDbName, {

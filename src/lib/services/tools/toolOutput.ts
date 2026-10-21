@@ -268,6 +268,16 @@ export function toMcpCallResult(
     return result;
 }
 
+/**
+ * The shape a REST caller gets: a ToolOutput only when it carries media. One
+ * that holds just text and a JSON object is answered with the object, the
+ * shape REST callers always got for a structured result.
+ */
+export function restToolResult(result: unknown): unknown {
+    if (!isToolOutput(result) || hasMedia(result)) return result;
+    return result.structuredContent ?? toolOutputToText(result);
+}
+
 export function toolOutputToText(output: ToolOutput, opts?: { maxResourceChars?: number }): string {
     const maxResource = opts?.maxResourceChars ?? DEFAULT_MAX_RESOURCE_CHARS;
     const parts: string[] = [];

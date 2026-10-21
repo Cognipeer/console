@@ -487,6 +487,11 @@ export interface AppConfig {
     logToolNameMaxChars: number;
     /** Longest caller user-agent (chars) stored with an MCP request-log row. Min 16. */
     logUserAgentMaxChars: number;
+    /**
+     * How long (ms) one `tools/call` to a remote MCP server may take, reading
+     * a streamed (SSE) answer included. Min 1000.
+     */
+    callTimeoutMs: number;
 
     /** The SSE transport: `GET .../sse` opens a stream, `POST .../message?sessionId=` feeds it. */
     sse: {
@@ -971,6 +976,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       lastErrorThrottleMs: Math.max(int(source, 'MCP_LAST_ERROR_THROTTLE_MS', 60_000), 0),
       logToolNameMaxChars: Math.max(int(source, 'MCP_LOG_TOOL_NAME_MAX_CHARS', 200), 16),
       logUserAgentMaxChars: Math.max(int(source, 'MCP_LOG_USER_AGENT_MAX_CHARS', 300), 16),
+      callTimeoutMs: Math.max(int(source, 'MCP_CALL_TIMEOUT_MS', 120_000), 1_000),
       sse: {
         maxSessions: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS', 2000), 0),
         maxSessionsPerIp: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS_PER_IP', 50), 0),

@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { isToolOutput, toMcpCallResult } from '@/lib/services/tools/toolOutput';
+import { isToolOutput, restToolResult, toMcpCallResult } from '@/lib/services/tools/toolOutput';
 import type {
   IMcpAuthConfig,
   IMcpExposureConfig,
@@ -37,6 +37,8 @@ import {
   resolveSourceType,
   serializeMcpServer,
   updateMcpServer,
+  mcpProtocolVersionOf,
+  negotiateMcpProtocolVersion,
 } from '@/lib/services/mcp';
 import type { McpAuditContext, UpdateMcpServerInput } from '@/lib/services/mcp';
 import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
@@ -213,7 +215,6 @@ function resolveMcpRuntimeHeaders(
 }
 
 const JSONRPC_VERSION = '2.0';
-const MCP_PROTOCOL_VERSION = '2025-03-26';
 const SERVER_INFO = {
   name: 'cognipeer-mcp-gateway',
   version: '1.0.0',
@@ -406,7 +407,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
       capabilities: {
         tools: { listChanged: false },
       },
-      protocolVersion: MCP_PROTOCOL_VERSION,
+      protocolVersion: negotiateMcpProtocolVersion(body.params?.protocolVersion),
       serverInfo: SERVER_INFO,
       ...(instructions ? { instructions } : {}),
     }));
@@ -476,7 +477,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
 
     if (outcome.ok) {
       if (isToolOutput(outcome.result)) {
-        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, MCP_PROTOCOL_VERSION)));
+        return respond(jsonRpcOk(id, toMcpCallResult(outcome.result, mcpProtocolVersionOf(request.headers))));
       }
       return respond(jsonRpcOk(id, {
         content: [
@@ -564,7 +565,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
           server: server.key,
           tool: body.tool,
         },
-        result: outcome.result,
+        result: restToolResult(outcome.result),
       });
     } catch (error) {
       logger.error('Client MCP execute error', { error });

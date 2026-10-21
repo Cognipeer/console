@@ -8,29 +8,41 @@
  * accept both), and fails with a clear error otherwise.
  */
 
+import { getConfig } from '@/lib/core/config';
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { McpUpstreamError } from './errors';
 import {
   MAX_TOOL_LIST_PAGES,
   readInitializeInstructions,
+  readToolCallResult,
   readToolListPage,
   type McpDiscovery,
 } from './discovery';
-import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
-import type { IMcpAuthConfig, IMcpTool } from '@/lib/database';
+import type { IMcpTool } from '@/lib/database';
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
 
+/** The credential fields both MCP servers and Tools-module MCP tools store. */
+export interface UpstreamAuth {
+  type: string;
+  token?: string;
+  headerName?: string;
+  headerValue?: string;
+  username?: string;
+  password?: string;
+}
+
 export interface RemoteMcpTarget {
   url: string;
   transport?: 'streamable-http' | 'sse';
-  auth?: IMcpAuthConfig;
+  auth?: UpstreamAuth;
   /** Caller-supplied, policy-filtered runtime headers; merged after static auth. */
   extraHeaders?: Record<string, string>;
 }
 
-export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Record<string, string> {
+export function buildUpstreamAuthHeaders(auth: UpstreamAuth | undefined): Record<string, string> {
   const headers: Record<string, string> = {};
   if (!auth) return headers;
   if (auth.type === 'token' && auth.token) {
@@ -110,10 +122,23 @@ async function readSseResponse(response: Response, id: number): Promise<JsonRpcM
   throw new Error('MCP server closed the SSE stream without answering the request');
 }
 
+class McpCallTimeoutError extends Error {
+  constructor(method: string, timeoutMs: number) {
+    super(`MCP server did not answer ${method} within ${timeoutMs} ms`);
+    this.name = 'McpCallTimeoutError';
+  }
+}
+
+/**
+ * One JSON-RPC call. `timeoutMs` bounds the whole call, reading a streamed
+ * answer included (the fetch timeout alone stops at the headers). The turn's
+ * signal aborts it too, so a stopped agent run does not wait on the upstream.
+ */
 async function rpcCall(
   target: RemoteMcpTarget,
   method: string,
   params?: Record<string, unknown>,
+  timeoutMs: number = getConfig().outboundHttp.defaultTimeoutMs,
 ): Promise<unknown> {
   const id = ++rpcId;
   const authHeaders = buildUpstreamAuthHeaders(target.auth);
@@ -125,35 +150,56 @@ async function rpcCall(
     ...(target.extraHeaders ?? {}),
   };
 
-  const response = await safeFetch(target.url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      jsonrpc: JSONRPC_VERSION,
-      id,
-      method,
-      ...(params !== undefined ? { params } : {}),
-    }),
-  }, {
-    // Credentials injected for this upstream do not follow a redirect to
-    // another origin.
-    sensitiveHeaders: [...Object.keys(authHeaders), ...Object.keys(target.extraHeaders ?? {})],
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new McpCallTimeoutError(method, timeoutMs)), timeoutMs);
+  const turnSignal = currentTurnSignal();
+  const onTurnAbort = () => controller.abort(turnSignal?.reason);
+  if (turnSignal?.aborted) onTurnAbort();
+  else turnSignal?.addEventListener('abort', onTurnAbort, { once: true });
 
-  if (!response.ok) {
-    const errText = await response.text().catch(() => 'Unknown error');
-    throw new McpUpstreamError(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`, response.status);
+  try {
+    const response = await safeFetch(target.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: JSONRPC_VERSION,
+        id,
+        method,
+        ...(params !== undefined ? { params } : {}),
+      }),
+      signal: controller.signal,
+    }, {
+      timeoutMs,
+      // The deadline above must also end a body read on a silent stream.
+      keepAbortLinked: true,
+      // Credentials injected for this upstream do not follow a redirect to
+      // another origin.
+      sensitiveHeaders: [...Object.keys(authHeaders), ...Object.keys(target.extraHeaders ?? {})],
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => 'Unknown error');
+      throw new McpUpstreamError(`MCP server responded with ${response.status}: ${errText.slice(0, 500)}`, response.status);
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    const payload: JsonRpcMessage = contentType.includes('text/event-stream')
+      ? await readSseResponse(response, id)
+      : await response.json();
+
+    if (payload.error) {
+      throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);
+    }
+    return payload.result;
+  } catch (error) {
+    // Whatever the abort surfaced as (an AbortError, a stream error), the
+    // deadline is the reason worth reporting.
+    if (controller.signal.reason instanceof McpCallTimeoutError) throw controller.signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    turnSignal?.removeEventListener('abort', onTurnAbort);
   }
-
-  const contentType = response.headers.get('content-type') ?? '';
-  const payload: JsonRpcMessage = contentType.includes('text/event-stream')
-    ? await readSseResponse(response, id)
-    : await response.json();
-
-  if (payload.error) {
-    throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);
-  }
-  return payload.result;
 }
 
 /** List tools on a remote MCP server, following `nextCursor` across pages. */
@@ -192,47 +238,20 @@ export async function remoteDiscover(target: RemoteMcpTarget): Promise<McpDiscov
   return { tools: await remoteListTools(target), instructions };
 }
 
-/** Call a tool on a remote MCP server and unwrap the content payload. */
+/** The raw `tools/call` result of a remote MCP server, `isError` results included. */
+export async function remoteCallToolResult(
+  target: RemoteMcpTarget,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  return rpcCall(target, 'tools/call', { name: toolName, arguments: args }, getConfig().mcp.callTimeoutMs);
+}
+
+/** Call a tool on a remote MCP server and unwrap the content payload (see `readToolCallResult`). */
 export async function remoteCallTool(
   target: RemoteMcpTarget,
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const result = (await rpcCall(target, 'tools/call', {
-    name: toolName,
-    arguments: args,
-  })) as {
-    content?: Array<{ type: string; text?: string }>;
-    isError?: boolean;
-    structuredContent?: unknown;
-  } | undefined;
-
-  if (result?.isError) {
-    const text = (result.content ?? [])
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text)
-      .join('\n');
-    throw new Error(text || 'MCP tool call failed');
-  }
-
-  // Images/audio/resources survive as a ToolOutput; text-only results keep the legacy unwrap.
-  if (contentHasMedia(result?.content)) return mcpResultToToolOutput(result);
-
-  if (result?.structuredContent !== undefined) return result.structuredContent;
-
-  const content = result?.content;
-  if (Array.isArray(content)) {
-    const textParts = content.filter((c) => c.type === 'text');
-    if (textParts.length === 1) {
-      // Return parsed JSON when the single text part is JSON, else raw text.
-      const text = textParts[0].text ?? '';
-      try {
-        return JSON.parse(text);
-      } catch {
-        return text;
-      }
-    }
-    return textParts.map((c) => c.text).join('\n');
-  }
-  return result;
+  return readToolCallResult(await remoteCallToolResult(target, toolName, args));
 }

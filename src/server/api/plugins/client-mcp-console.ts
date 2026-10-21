@@ -30,6 +30,7 @@ import {
   type ConsoleToolContext,
 } from '@/lib/services/mcp/builtin/consoleTools';
 import { isMcpUnknownToolError, McpUnknownToolError } from '@/lib/services/mcp/errors';
+import { mcpProtocolVersionOf, negotiateMcpProtocolVersion } from '@/lib/services/mcp/protocolVersion';
 import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import {
   RbacAuthorizationError,
@@ -48,7 +49,6 @@ import {
 const logger = createLogger('api:client-mcp-console');
 
 const JSONRPC_VERSION = '2.0';
-const MCP_PROTOCOL_VERSION = '2024-11-05';
 const SERVER_KEY = 'console';
 const SERVER_INFO = {
   name: 'cognipeer-console',
@@ -233,7 +233,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
       if (method === 'initialize') {
         return respond(jsonRpcOk(id, {
           capabilities: { tools: { listChanged: false } },
-          protocolVersion: MCP_PROTOCOL_VERSION,
+          protocolVersion: negotiateMcpProtocolVersion(body.params?.protocolVersion),
           serverInfo: SERVER_INFO,
           instructions: CONSOLE_MCP_INSTRUCTIONS,
         }));
@@ -270,7 +270,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
             projectId: ctx.projectId,
           }, isServiceAllowed);
           if (isToolOutput(result)) {
-            return respond(jsonRpcOk(id, toMcpCallResult(result, MCP_PROTOCOL_VERSION)));
+            return respond(jsonRpcOk(id, toMcpCallResult(result, mcpProtocolVersionOf(request.headers))));
           }
           return respond(jsonRpcOk(id, {
             content: [

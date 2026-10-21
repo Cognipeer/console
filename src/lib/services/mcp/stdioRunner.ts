@@ -22,17 +22,18 @@
 
 import { spawn } from 'node:child_process';
 import { getConfig } from '@/lib/core/config';
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import { createLogger } from '@/lib/core/logger';
 import type { IMcpStdioConfig, IMcpTool } from '@/lib/database';
 import { maskSecretValues } from '@/lib/services/logRedaction';
 import {
   MAX_TOOL_LIST_PAGES,
   readInitializeInstructions,
+  readToolCallResult,
   readToolListPage,
   type McpDiscovery,
 } from './discovery';
 import { openStdioEnv } from './secretVault';
-import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 
 const logger = createLogger('mcp-stdio-runner');
 
@@ -276,11 +277,15 @@ async function runStdioSession(
   let stdoutBytes = 0;
   let settled = false;
 
+  // A stopped agent turn ends the process instead of waiting for its answer.
+  const turnSignal = currentTurnSignal();
+
   return await new Promise<JsonRpcResponse[]>((resolve, reject) => {
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      turnSignal?.removeEventListener('abort', onTurnAbort);
       releaseSlot();
       try {
         child.kill('SIGTERM');
@@ -305,6 +310,12 @@ async function runStdioSession(
         + (stderrTail ? ` — stderr: ${stderrExcerpt(stderrTail)}` : ''),
       ));
     }, timeoutMs);
+
+    function onTurnAbort() {
+      finish(new Error('The MCP call was cancelled'));
+    }
+    if (turnSignal?.aborted) onTurnAbort();
+    else turnSignal?.addEventListener('abort', onTurnAbort, { once: true });
 
     child.on('error', (err) => {
       finish(new Error(`Failed to launch ${command}: ${err.message}`));
@@ -491,39 +502,7 @@ export async function stdioCallTool(
     throw new Error(`MCP tool error: ${callRes.error.message ?? 'unknown error'}`);
   }
 
-  const result = callRes.result as {
-    content?: Array<{ type: string; text?: string }>;
-    isError?: boolean;
-    structuredContent?: unknown;
-  } | undefined;
-
-  if (result?.isError) {
-    const text = (result.content ?? [])
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text)
-      .join('\n');
-    throw new Error(text || 'MCP tool call failed');
-  }
-
-  // Images/audio/resources survive as a ToolOutput; text-only results keep the legacy unwrap.
-  if (contentHasMedia(result?.content)) return mcpResultToToolOutput(result);
-
-  if (result?.structuredContent !== undefined) return result.structuredContent;
-
-  const content = result?.content;
-  if (Array.isArray(content)) {
-    const textParts = content.filter((c) => c.type === 'text');
-    if (textParts.length === 1) {
-      const text = textParts[0].text ?? '';
-      try {
-        return JSON.parse(text);
-      } catch {
-        return text;
-      }
-    }
-    return textParts.map((c) => c.text).join('\n');
-  }
-  return result;
+  return readToolCallResult(callRes.result);
 }
 
 /** Quick availability probe for the create-screen preflight. */
