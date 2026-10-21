@@ -32,12 +32,14 @@ import { createLogger } from '@/lib/core/logger';
 import {
   executeMcpTool,
   isMcpToolInputError,
+  isMcpUnknownToolError,
   isMcpUpstreamError,
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
   reachesBrowser,
   resolveExposure,
+  resolveMcpInstructions,
   resolveSourceType,
   type McpRequestClientInfo,
 } from '@/lib/services/mcp';
@@ -133,8 +135,11 @@ function clientInfoOf(request: FastifyRequest): McpRequestClientInfo {
 
 type PublicToolOutcome =
   | { ok: true; result: unknown }
-  /** `inputError`: the call itself was wrong (unknown tool, bad argument); `message` is safe to show. */
-  | { ok: false; inputError: boolean; message: string };
+  /**
+   * `inputError`: the call itself was wrong (unknown tool, bad argument); `message` is safe to show.
+   * `unknownTool`: the input error is a tool name the server does not advertise.
+   */
+  | { ok: false; inputError: boolean; unknownTool: boolean; message: string };
 
 /**
  * What an anonymous caller is told about a failed call. The tool-input errors
@@ -143,12 +148,14 @@ type PublicToolOutcome =
  * caller learns only that it failed, and with what status when the upstream
  * answered one.
  */
-function describePublicFailure(error: unknown): { inputError: boolean; message: string } {
-  if (isMcpToolInputError(error)) return { inputError: true, message: error.message };
-  if (isMcpUpstreamError(error)) {
-    return { inputError: false, message: `Upstream request failed (status ${error.status})` };
+function describePublicFailure(error: unknown): { inputError: boolean; unknownTool: boolean; message: string } {
+  if (isMcpToolInputError(error)) {
+    return { inputError: true, unknownTool: isMcpUnknownToolError(error), message: error.message };
   }
-  return { inputError: false, message: 'Tool execution failed' };
+  if (isMcpUpstreamError(error)) {
+    return { inputError: false, unknownTool: false, message: `Upstream request failed (status ${error.status})` };
+  }
+  return { inputError: false, unknownTool: false, message: 'Tool execution failed' };
 }
 
 async function runPublicToolCall(
@@ -210,6 +217,7 @@ async function runPublicToolCall(
     return {
       ok: false,
       inputError: failure.inputError,
+      unknownTool: failure.unknownTool,
       message: failure.inputError || !logId ? failure.message : `${failure.message} (ref: ${logId})`,
     };
   }
@@ -289,10 +297,12 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
   };
 
   if (method === 'initialize') {
+    const instructions = resolveMcpInstructions(server);
     return respond(jsonRpcOk(id, {
       capabilities: { tools: { listChanged: false } },
       protocolVersion: MCP_PROTOCOL_VERSION,
       serverInfo: SERVER_INFO,
+      ...(instructions ? { instructions } : {}),
     }));
   }
   if (method === 'notifications/initialized') {
@@ -352,7 +362,9 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
         isError: false,
       }));
     }
-    if (outcome.inputError) {
+    // An unknown tool is a malformed call. Anything else — a bad argument
+    // included — is a failed call whose message the model reads and can act on.
+    if (outcome.unknownTool) {
       return respond(jsonRpcError(id, -32602, outcome.message));
     }
     return respond(jsonRpcOk(id, {

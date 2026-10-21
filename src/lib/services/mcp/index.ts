@@ -23,6 +23,7 @@ export {
   getToolAnnotationOverrides,
   getToolDescriptionOverrides,
   getToolNameOverrides,
+  resolveMcpInstructions,
   resolveMcpToolName,
   serializeMcpServer,
   serializeMcpServerFull,
@@ -36,7 +37,8 @@ export {
 
 export type { McpServerMonitorEntry, McpRequestClientInfo } from './mcpService';
 
-export { McpServerConfigError, McpToolInputError, McpUpstreamError, isMcpServerConfigError, isMcpToolInputError, isMcpUpstreamError } from './errors';
+export { MCP_INSTRUCTIONS_MAX_CHARS, mcpInstructionsInputError } from './discovery';
+export { McpServerConfigError, McpToolInputError, McpUnknownToolError, McpUpstreamError, isMcpServerConfigError, isMcpToolInputError, isMcpUnknownToolError, isMcpUpstreamError } from './errors';
 
 export {
   defaultAnnotationsForSource,

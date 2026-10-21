@@ -40,6 +40,8 @@ export interface InternalMcpBuiltTools {
   /** Suggested server name when the user leaves the name blank. */
   suggestedName: string;
   suggestedDescription?: string;
+  /** MCP `instructions`: how the tools fit together, served unless the operator writes their own. */
+  instructions?: string;
 }
 
 export interface InternalMcpProvider {

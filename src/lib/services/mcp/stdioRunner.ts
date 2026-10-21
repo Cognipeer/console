@@ -23,8 +23,14 @@
 import { spawn } from 'node:child_process';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import type { IMcpStdioConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
+import type { IMcpStdioConfig, IMcpTool } from '@/lib/database';
 import { maskSecretValues } from '@/lib/services/logRedaction';
+import {
+  MAX_TOOL_LIST_PAGES,
+  readInitializeInstructions,
+  readToolListPage,
+  type McpDiscovery,
+} from './discovery';
 import { openStdioEnv } from './secretVault';
 import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 
@@ -215,15 +221,26 @@ function buildCommand(config: IMcpStdioConfig): { command: string; args: string[
   throw new Error(`Unsupported stdio runtime: ${String(config.runtime)}`);
 }
 
+interface StdioRequest {
+  method: string;
+  params?: Record<string, unknown>;
+  notification?: boolean;
+}
+
 /**
  * Spawn the configured MCP server, run `requests` sequentially over stdio and
  * resolve with the matching responses. The process is always terminated.
+ *
+ * `followUp` sees the response to the last request sent and may return one
+ * more request to send in the same process (a `tools/list` page cursor);
+ * its responses are appended in order.
  */
 async function runStdioSession(
   config: IMcpStdioConfig,
-  requests: Array<{ method: string; params?: Record<string, unknown>; notification?: boolean }>,
+  requests: StdioRequest[],
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
   options: StdioRunOptions = {},
+  followUp?: (response: JsonRpcResponse) => StdioRequest | null,
 ): Promise<JsonRpcResponse[]> {
   if (!isStdioRunnerEnabled()) {
     throw new Error('Stdio MCP execution is disabled on this deployment (MCP_STDIO_ENABLED=false)');
@@ -327,11 +344,12 @@ async function runStdioSession(
         } catch {
           // Some servers log human text to stdout; ignore non-JSON lines.
         }
+        // Pump first: a follow-up request it queues keeps the session open.
+        pump();
         if (expectedIds.every((id) => responses.has(id))) {
           finish();
           return;
         }
-        pump();
       }
     });
 
@@ -351,7 +369,7 @@ async function runStdioSession(
     // drop) requests that arrive before `initialize` has completed.
     let nextId = 1;
     const frames: Array<{ payload: string; id?: number }> = [];
-    for (const req of requests) {
+    const enqueue = (req: StdioRequest) => {
       if (req.notification) {
         frames.push({
           payload: JSON.stringify({ jsonrpc: JSONRPC_VERSION, method: req.method, ...(req.params ? { params: req.params } : {}) }),
@@ -364,13 +382,18 @@ async function runStdioSession(
           id,
         });
       }
-    }
+    };
+    for (const req of requests) enqueue(req);
 
     let cursor = 0;
     let awaitingId: number | null = null;
     function pump(): void {
       if (settled) return;
       if (awaitingId !== null && !responses.has(awaitingId)) return;
+      if (awaitingId !== null && cursor >= frames.length && followUp) {
+        const next = followUp(responses.get(awaitingId)!);
+        if (next) enqueue(next);
+      }
       awaitingId = null;
       while (cursor < frames.length) {
         const frame = frames[cursor];
@@ -398,45 +421,54 @@ const INITIALIZE_REQUEST = {
 };
 const INITIALIZED_NOTIFICATION = { method: 'notifications/initialized', notification: true };
 
-/** Discover tools by spawning the stdio server once. */
-export async function stdioListTools(
+/**
+ * Discover a stdio server by spawning it once: its `instructions` (from the
+ * initialize result) and every `tools/list` page, followed in the same process.
+ */
+export async function stdioDiscover(
   config: IMcpStdioConfig,
   options: StdioRunOptions = {},
-): Promise<IMcpTool[]> {
-  const [initRes, listRes] = await runStdioSession(config, [
+): Promise<McpDiscovery> {
+  const seenCursors = new Set<string>();
+  const [initRes, ...listResponses] = await runStdioSession(config, [
     INITIALIZE_REQUEST,
     INITIALIZED_NOTIFICATION,
     { method: 'tools/list', params: {} },
-  ], DEFAULT_TIMEOUT_MS, options);
+  ], DEFAULT_TIMEOUT_MS, options, (response) => {
+    const { nextCursor } = readToolListPage(response.result);
+    if (nextCursor === undefined || seenCursors.has(nextCursor) || seenCursors.size + 1 >= MAX_TOOL_LIST_PAGES) {
+      return null;
+    }
+    seenCursors.add(nextCursor);
+    return { method: 'tools/list', params: { cursor: nextCursor } };
+  });
 
   if (initRes.error) {
     throw new Error(`MCP initialize failed: ${initRes.error.message ?? 'unknown error'}`);
   }
-  if (listRes.error) {
-    throw new Error(`tools/list failed: ${listRes.error.message ?? 'unknown error'}`);
+  const listError = listResponses.find((res) => res.error)?.error;
+  if (listError) {
+    throw new Error(`tools/list failed: ${listError.message ?? 'unknown error'}`);
   }
 
-  const tools = (listRes.result as {
-    tools?: Array<{
-      name: string;
-      description?: string;
-      inputSchema?: Record<string, unknown>;
-      annotations?: IMcpToolAnnotations;
-    }>;
-  })?.tools ?? [];
+  const tools = listResponses.flatMap((res) => readToolListPage(res.result).tools);
 
   logger.info('Discovered stdio MCP tools', {
     package: config.packageName,
     runtime: config.runtime,
     toolCount: tools.length,
+    pages: listResponses.length,
   });
 
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description || t.name,
-    inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-    ...(t.annotations ? { annotations: t.annotations } : {}),
-  }));
+  return { tools, instructions: readInitializeInstructions(initRes.result) };
+}
+
+/** Discover tools by spawning the stdio server once. */
+export async function stdioListTools(
+  config: IMcpStdioConfig,
+  options: StdioRunOptions = {},
+): Promise<IMcpTool[]> {
+  return (await stdioDiscover(config, options)).tools;
 }
 
 /** Execute one tool call by spawning the stdio server once. */

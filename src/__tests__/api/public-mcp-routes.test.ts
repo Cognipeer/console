@@ -28,6 +28,7 @@ import {
   executeMcpTool,
   logMcpRequest,
   McpToolInputError,
+  McpUnknownToolError,
   McpUpstreamError,
 } from '@/lib/services/mcp';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
@@ -464,13 +465,35 @@ describe('public MCP routes', () => {
       }
     });
 
-    it('passes a tool-input error through as invalid params (-32602)', async () => {
+    it('passes an unknown tool through as invalid params (-32602)', async () => {
       await start();
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpUnknownToolError());
       const response = await post(callTool('nope'));
       expect(response.statusCode).toBe(200);
       expect(json(response).error).toEqual({ code: -32602, message: 'Unknown tool' });
       expect(json(response).id).toBe(1);
+    });
+
+    it('returns a bad argument as a tool result with isError and its message, without a reference', async () => {
+      await start();
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Missing required path parameter "id"'));
+      const response = await post(callTool());
+      expect(json(response).error).toBeUndefined();
+      expect(json(response).result).toEqual({
+        content: [{ type: 'text', text: 'Missing required path parameter "id"' }],
+        isError: true,
+      });
+    });
+
+    it('carries the server\'s instructions in initialize', async () => {
+      await start();
+      current = server({ metadata: { discoveredInstructions: 'Call echo with text.' } });
+      const withText = json(await post(rpc('initialize', {}))).result as Record<string, unknown>;
+      expect(withText.instructions).toBe('Call echo with text.');
+
+      current = server();
+      const without = json(await post(rpc('initialize', {}))).result as Record<string, unknown>;
+      expect(without).not.toHaveProperty('instructions');
     });
 
     it('omits the reference when the request log could not be written', async () => {

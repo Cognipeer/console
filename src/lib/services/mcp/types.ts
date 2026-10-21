@@ -32,6 +32,10 @@ export interface McpServerView {
   toolDescriptions?: Record<string, string>;
   /** Operator-set exposed names, keyed by the real (discovered) tool name. */
   toolNames?: Record<string, string>;
+  /** Operator-authored MCP `instructions`; served instead of `discoveredInstructions` when set. */
+  instructions?: string;
+  /** The instructions the source supplied at its last discovery (upstream, provider or composite members). */
+  discoveredInstructions?: string;
   /** sourceType 'composite' only: cached display summary of each member. */
   members?: IMcpCompositeMemberSummary[];
   toolsDiscoveredAt?: Date;
@@ -79,6 +83,8 @@ export interface CreateMcpServerInput {
   /** Custom identifier for the token-authed API path (default: slugified from `name`). */
   key?: string;
   description?: string;
+  /** MCP `instructions` served in `initialize` (default: whatever the source supplies). */
+  instructions?: string;
   /** Tool source (default 'openapi' for backward compatibility). */
   sourceType?: McpSourceType;
   /** OpenAPI JSON/YAML or a Postman collection (sourceType 'openapi'). */
@@ -167,6 +173,8 @@ export interface UpdateMcpServerInput {
   toolDescriptions?: Record<string, string | null>;
   /** Partial patch of per-tool name overrides, keyed by real tool name (null/empty restores the discovered name). */
   toolNames?: Record<string, string | null>;
+  /** Operator-authored MCP `instructions` (null/empty falls back to what the source supplies). */
+  instructions?: string | null;
 }
 
 /** Request-scoped context threaded into audit writes. */

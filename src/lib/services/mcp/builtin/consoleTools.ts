@@ -46,6 +46,13 @@ const optionalPositiveInt = (
   return String(Math.min(Math.floor(n), max));
 };
 
+/** MCP `instructions` of the built-in console server. */
+export const CONSOLE_MCP_INSTRUCTIONS =
+  'Read-only reports over the agent tracing data of the project this API token belongs to. '
+  + '"get_dashboard_overview" gives totals and trends; "list_recent_sessions" finds sessions by status, '
+  + 'agent name or text; "get_session" takes a sessionId from that list and returns one session\'s summary. '
+  + 'Time ranges are ISO 8601 timestamps. A tool appears only when the token may read the data behind it.';
+
 export const CONSOLE_MCP_TOOLS: ConsoleToolDefinition[] = [
   {
     name: 'list_recent_sessions',

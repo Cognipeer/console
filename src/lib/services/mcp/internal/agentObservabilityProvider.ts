@@ -127,6 +127,11 @@ export const agentObservabilityProvider: InternalMcpProvider = {
       ],
       suggestedName: 'Agent Observability',
       suggestedDescription: 'Read-only reporting over this project\'s agent tracing sessions.',
+      instructions:
+        `Read-only reports over this project's agent tracing sessions. "${TOOL_LIST_AGENTS}" shows which `
+        + `agents ran; "${TOOL_LIST_SESSIONS}" finds sessions by agent, status, time range or text; `
+        + `"${TOOL_GET_SESSION_DETAIL}" takes a sessionId from that list and returns one session's timing, `
+        + 'token usage and errors. Time ranges are ISO 8601 timestamps.',
     };
   },
 

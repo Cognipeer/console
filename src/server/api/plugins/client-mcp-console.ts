@@ -23,11 +23,13 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getRequiredPermissionLevel, type PermissionService } from '@/lib/security/rbac';
 import {
+  CONSOLE_MCP_INSTRUCTIONS,
   consoleToolServices,
   getConsoleTool,
   listConsoleToolDescriptors,
   type ConsoleToolContext,
 } from '@/lib/services/mcp/builtin/consoleTools';
+import { isMcpUnknownToolError, McpUnknownToolError } from '@/lib/services/mcp/errors';
 import { sendSseResponse, tokenSsePrincipal } from '@/lib/services/mcp/sseSessionManager';
 import {
   RbacAuthorizationError,
@@ -99,7 +101,7 @@ async function runTool(
 ) {
   const tool = getConsoleTool(toolName);
   if (!tool) {
-    throw new Error(`Unknown tool: ${toolName}`);
+    throw new McpUnknownToolError(`Unknown tool: ${toolName.slice(0, 100)}`);
   }
   if (!isServiceAllowed(tool.service)) {
     throw new ConsoleToolForbiddenError(
@@ -233,6 +235,7 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
           capabilities: { tools: { listChanged: false } },
           protocolVersion: MCP_PROTOCOL_VERSION,
           serverInfo: SERVER_INFO,
+          instructions: CONSOLE_MCP_INSTRUCTIONS,
         }));
       }
 
@@ -279,6 +282,9 @@ export const clientMcpConsoleApiPlugin: FastifyPluginAsync = async (app) => {
             isError: false,
           }));
         } catch (error) {
+          if (isMcpUnknownToolError(error)) {
+            return respond(jsonRpcError(id, -32602, error.message));
+          }
           const message = error instanceof Error ? error.message : 'Tool execution failed';
           return respond(jsonRpcOk(id, {
             content: [{ text: message, type: 'text' }],

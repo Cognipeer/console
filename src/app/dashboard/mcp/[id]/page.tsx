@@ -217,6 +217,7 @@ export default function McpDetailPage() {
     initialValues: {
       name: '',
       description: '',
+      instructions: '',
       upstreamBaseUrl: '',
       authType: 'none' as string,
       authToken: '',
@@ -262,6 +263,7 @@ export default function McpDetailPage() {
       form.setValues({
         name: data.server.name || '',
         description: data.server.description || '',
+        instructions: data.server.instructions || '',
         upstreamBaseUrl: data.server.upstreamBaseUrl || '',
         authType: data.server.upstreamAuth?.type || 'none',
         // Secrets come back masked (••••••) when present. Prefill the masked
@@ -574,6 +576,10 @@ export default function McpDetailPage() {
         name: values.name,
         description: values.description || undefined,
       };
+      // Blank clears the operator's text, so the source's own instructions apply again.
+      if (values.instructions.trim() !== (server?.instructions ?? '')) {
+        update.instructions = values.instructions.trim() || null;
+      }
 
       // Upstream auth applies to openapi/remote sources; stdio talks over
       // stdin/stdout and authenticates via env vars instead.
@@ -2100,6 +2106,35 @@ async with sse_client(
                 minRows={2}
                 autosize
                 {...form.getInputProps('description')}
+              />
+            </FormField>
+          </FormRow>
+          <FormRow cols={1}>
+            <FormField
+              label="Instructions"
+              optional
+              hint={server.discoveredInstructions
+                ? 'Sent to MCP clients when they connect; clients may add it to the model\'s system prompt. '
+                  + 'Leave empty to send the instructions this server\'s source provides.'
+                : 'Sent to MCP clients when they connect; clients may add it to the model\'s system prompt. '
+                  + 'Say how the tools fit together — which to call first, limits, scope.'}
+              action={server.discoveredInstructions && !form.values.instructions.trim() ? (
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => form.setFieldValue('instructions', server.discoveredInstructions ?? '')}
+                >
+                  Edit source text
+                </Button>
+              ) : undefined}
+            >
+              <Textarea
+                placeholder={server.discoveredInstructions ?? 'e.g. Call search first; pass the documentId it returns to read_document.'}
+                minRows={3}
+                maxRows={12}
+                autosize
+                maxLength={8000}
+                {...form.getInputProps('instructions')}
               />
             </FormField>
           </FormRow>
