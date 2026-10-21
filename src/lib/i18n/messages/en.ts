@@ -5457,6 +5457,7 @@ export const en = {
       limit: 'Stopped by a run limit',
       cancelled: 'Run cancelled',
       paused: 'Run paused',
+      error: 'Run failed',
       budget: 'Stopped by the session budget',
       partialText: 'The text below is how far the agent got before it stopped, not a final answer.',
       noText: 'The agent stopped before writing an answer.',

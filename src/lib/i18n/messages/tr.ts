@@ -3966,6 +3966,7 @@ export const tr: typeof en = {
       limit: 'Bir çalışma sınırında durdu',
       cancelled: 'Çalışma iptal edildi',
       paused: 'Çalışma duraklatıldı',
+      error: 'Çalışma başarısız oldu',
       budget: 'Oturum bütçesinde durdu',
       partialText: 'Aşağıdaki metin, agent’ın durmadan önce vardığı noktadır; nihai bir yanıt değildir.',
       noText: 'Agent bir yanıt yazmadan durdu.',
