@@ -25,7 +25,10 @@ import {
   getMcpServerByKey,
   isMcpServerConfigError,
   isMcpToolInputError,
+  isMcpUnknownToolError,
   listEnabledMcpTools,
+  mcpInstructionsInputError,
+  resolveMcpInstructions,
   listMcpToolDescriptors,
   logMcpRequest,
   mcpRequestSecretValues,
@@ -254,9 +257,10 @@ async function runToolCall(
   | { ok: true; result: unknown; latencyMs: number }
   /**
    * `inputError`: the call itself was wrong (unknown tool, bad argument), as opposed to failing.
+   * `unknownTool`: the input error is a tool name the server does not advertise.
    * `refused`: the server takes Console identity and there was no person to mint a token for.
    */
-  | { ok: false; error: string; inputError: boolean; refused: boolean }
+  | { ok: false; error: string; inputError: boolean; unknownTool: boolean; refused: boolean }
 > {
   const runtimeHeaders = resolveMcpRuntimeHeaders(server, log.runtimeContext);
   // Header names only — values never reach the log payload.
@@ -325,6 +329,7 @@ async function runToolCall(
       // the way out, for errors that did not come through them.
       error: maskSecretValues(errorMessage, secretValues, { maxChars: getConfig().mcp.errorMessageMaxChars }),
       inputError: isMcpToolInputError(error),
+      unknownTool: isMcpUnknownToolError(error),
       refused: isConsoleIdentityRefusal(error),
     };
   }
@@ -396,12 +401,14 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
     if (!protocolEnabled(server, requiredProtocol)) {
       return respond(jsonRpcError(id, -32003, `${requiredProtocol} access is disabled for this MCP server`));
     }
+    const instructions = resolveMcpInstructions(server);
     return respond(jsonRpcOk(id, {
       capabilities: {
         tools: { listChanged: false },
       },
       protocolVersion: MCP_PROTOCOL_VERSION,
       serverInfo: SERVER_INFO,
+      ...(instructions ? { instructions } : {}),
     }));
   }
 
@@ -481,8 +488,9 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         isError: false,
       }));
     }
-    // An unknown tool or a bad argument is a malformed call, not a failed one.
-    if (outcome.inputError) {
+    // An unknown tool is a malformed call. Anything else — a bad argument
+    // included — is a failed call whose message the model reads and can act on.
+    if (outcome.unknownTool) {
       return respond(jsonRpcError(id, -32602, outcome.error));
     }
     return respond(jsonRpcOk(id, {
@@ -719,6 +727,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
       }
 
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
+
       const server = await createMcpServer(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -726,6 +737,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.projectId,
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
+          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
           name: body.name.trim(),
           key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio',
@@ -810,6 +822,9 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
+
       const updated = await updateMcpServer(ctx.tenantDbName, String(existing._id), ctx.tokenRecord.userId, {
         key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
         description: body.description as string | undefined,
@@ -828,6 +843,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         disabledTools: body.disabledTools as string[] | undefined,
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
+        instructions: body.instructions as string | null | undefined,
       }, auditContextFor(request, ctx.tokenRecord.userId));
 
       if (!updated) {

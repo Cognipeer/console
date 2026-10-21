@@ -35,7 +35,7 @@ vi.mock('@/lib/services/mcp', async (importActual) => ({
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase, type IMcpServer } from '@/lib/database';
 import { getConfigSource, setConfigSource } from '@/lib/core/config';
-import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpServerConfigError, McpToolInputError, McpUpstreamError, updateMcpServer } from '@/lib/services/mcp';
+import { executeMcpTool, getMcpServerByKey, logMcpRequest, McpServerConfigError, McpToolInputError, McpUnknownToolError, McpUpstreamError, updateMcpServer } from '@/lib/services/mcp';
 import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
 import { clientMcpConsoleApiPlugin } from '@/server/api/plugins/client-mcp-console';
 import { createMockDb } from '../helpers/db.mock';
@@ -143,6 +143,49 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('instructions', () => {
+    const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
+
+    it('carries the operator\'s text over the one the source supplied', async () => {
+      vi.mocked(getMcpServerByKey).mockResolvedValue({
+        ...server(),
+        metadata: { instructions: 'Operator text', discoveredInstructions: 'Upstream text' },
+      } as IMcpServer);
+      const body = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(body.result.instructions).toBe('Operator text');
+    });
+
+    it('falls back to the source\'s text, and leaves the field out when there is none', async () => {
+      vi.mocked(getMcpServerByKey).mockResolvedValueOnce({
+        ...server(),
+        metadata: { discoveredInstructions: 'Upstream text' },
+      } as IMcpServer);
+      const withSource = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(withSource.result.instructions).toBe('Upstream text');
+
+      const without = JSON.parse((await post('/api/client/v1/mcp/crm/message', initialize)).body);
+      expect(without.result).not.toHaveProperty('instructions');
+    });
+
+    it('gives the console server its own text', async () => {
+      const body = JSON.parse((await post('/api/client/v1/mcp/console/message', initialize)).body);
+      expect(body.result.instructions).toContain('get_session');
+    });
+
+    it('turns down instructions that are not text, or too long, with 400', async () => {
+      for (const instructions of [42, 'x'.repeat(8001)]) {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: '/api/client/v1/mcp/crm',
+          headers,
+          payload: JSON.stringify({ instructions }),
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(updateMcpServer).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updating a server', () => {
     it('answers settings the server cannot take with 400, not 500', async () => {
       vi.mocked(updateMcpServer).mockRejectedValue(new McpServerConfigError('Console identity is available for remote MCP and OpenAPI servers only'));
@@ -226,13 +269,23 @@ describe('token MCP routes', () => {
       expect(text).not.toContain(SECRET);
     });
 
-    it('reports a rejected call as invalid params (-32602), not as a failed one', async () => {
-      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Unknown tool'));
+    it('reports an unknown tool as invalid params (-32602), not as a failed call', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpUnknownToolError());
       const response = await post('/api/client/v1/mcp/crm/message', callTool('nope'));
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as Rpc & { id: number };
       expect(body.error).toEqual({ code: -32602, message: 'Unknown tool' });
       expect(body.id).toBe(9);
+    });
+
+    it('returns a bad argument as a tool result with isError, so the model can correct it', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new McpToolInputError('Missing required path parameter "id"'));
+      const body = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body) as Rpc;
+      expect(body.error).toBeUndefined();
+      expect(body.result).toEqual({
+        content: [{ type: 'text', text: 'Missing required path parameter "id"' }],
+        isError: true,
+      });
     });
 
     it('logs the failure with its full text', async () => {

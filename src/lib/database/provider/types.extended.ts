@@ -382,6 +382,8 @@ export interface IMcpToolOrigin {
 
 export interface IMcpTool {
   name: string;
+  /** Human-readable display name (MCP `Tool.title`): an upstream's own, or an OpenAPI operation's summary. */
+  title?: string;
   description: string;
   /** JSON Schema for tool input parameters */
   inputSchema: Record<string, unknown>;

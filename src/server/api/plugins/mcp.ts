@@ -21,6 +21,7 @@ import {
   getMcpMonitorSnapshot,
   getMcpServer,
   isMcpServerConfigError,
+  mcpInstructionsInputError,
   listMcpAuditLogs,
   listMcpRequestLogs,
   listMcpServers,
@@ -499,6 +500,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Console identity is available for remote MCP and OpenAPI servers only' });
       }
 
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
+
       const server = await createMcpServer(
         session.tenantDbName,
         session.tenantId,
@@ -506,6 +510,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         {
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
+          instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
           name: body.name.trim(),
           key: typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined,
           sourceType: sourceType as 'openapi' | 'remote' | 'stdio' | 'internal' | 'composite',
@@ -641,6 +646,9 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         }
       }
 
+      const instructionsError = mcpInstructionsInputError(body.instructions);
+      if (instructionsError) return reply.code(400).send({ error: instructionsError });
+
       // Enterprise sub-feature gate (mirrors POST): a non-enterprise tenant may
       // not turn on persistent sandbox execution via edit. The guardrail
       // binding is ungated, on every plan, to match create behaviour.
@@ -684,6 +692,7 @@ export const mcpApiPlugin: FastifyPluginAsync = async (app) => {
         toolAnnotations: body.toolAnnotations as UpdateMcpServerInput['toolAnnotations'],
         toolDescriptions: body.toolDescriptions as UpdateMcpServerInput['toolDescriptions'],
         toolNames: body.toolNames as UpdateMcpServerInput['toolNames'],
+        instructions: body.instructions as string | null | undefined,
       }, auditContextFor(request, session.userId));
 
       if (!updated) {

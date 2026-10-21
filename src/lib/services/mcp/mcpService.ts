@@ -42,7 +42,8 @@ import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { resolveTenantDbName } from '@/lib/services/guardrail/hooks/recordCache';
-import { isMcpToolInputError, McpServerConfigError, McpToolInputError, McpUpstreamError } from './errors';
+import { normalizeMcpInstructions, type McpDiscovery } from './discovery';
+import { isMcpToolInputError, McpServerConfigError, McpUnknownToolError, McpUpstreamError } from './errors';
 import { buildOpenApiRequest } from './openApiRequest';
 import { specDeclaredParameters } from './openApiSpecParameters';
 import {
@@ -60,7 +61,7 @@ import {
   sealAuthConfig,
   sealStdioEnv,
 } from './secretVault';
-import { remoteCallTool, remoteListTools } from './remoteMcpClient';
+import { remoteCallTool, remoteDiscover } from './remoteMcpClient';
 import {
   CONSOLE_IDENTITY_AUTH_TYPE,
   consoleIdentityHeaders,
@@ -68,7 +69,7 @@ import {
   isConsoleIdentityRefusal,
   type ConsoleIdentityCaller,
 } from '@/lib/iam/consoleIdentity';
-import { isStdioRunnerEnabled, stdioCallTool, stdioListTools } from './stdioRunner';
+import { isStdioRunnerEnabled, stdioCallTool, stdioDiscover } from './stdioRunner';
 import { mcpSandboxRunner } from '@/enterprise/registry';
 import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
 import {
@@ -413,6 +414,42 @@ export function resolveMcpToolName(server: Pick<IMcpServer, 'metadata'>, calledN
   return calledName;
 }
 
+// ── Server instructions ───────────────────────────────────────────────────
+// The MCP `instructions` an initialize result carries — how the server's tools
+// fit together, which a client may add to the model's system prompt. Same
+// metadata-backed pattern: the operator's text (metadata.instructions) wins
+// over what the source supplied at discovery (metadata.discoveredInstructions:
+// an upstream's initialize result, an internal provider's text, a composite's
+// members), which every rediscovery replaces.
+
+export function getMcpInstructionsOverride(server: Pick<IMcpServer, 'metadata'>): string | undefined {
+  return normalizeMcpInstructions((server.metadata as Record<string, unknown> | undefined)?.instructions);
+}
+
+export function getDiscoveredMcpInstructions(server: Pick<IMcpServer, 'metadata'>): string | undefined {
+  return normalizeMcpInstructions(
+    (server.metadata as Record<string, unknown> | undefined)?.discoveredInstructions,
+  );
+}
+
+/** The `instructions` this server's `initialize` result carries, if any. */
+export function resolveMcpInstructions(server: Pick<IMcpServer, 'metadata'>): string | undefined {
+  return getMcpInstructionsOverride(server) ?? getDiscoveredMcpInstructions(server);
+}
+
+/** Set one instructions key in a metadata blob; `null` (or blank text) removes it. */
+function metadataWithInstructions(
+  metadata: Record<string, unknown> | undefined,
+  key: 'instructions' | 'discoveredInstructions',
+  value: string | null,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  const text = normalizeMcpInstructions(value);
+  if (text) next[key] = text;
+  else delete next[key];
+  return next;
+}
+
 /** Overlay the operator's name/description/annotation overrides on discovered tools. */
 function applyToolOverrides(server: Pick<IMcpServer, 'metadata'>, tools: IMcpTool[]): IMcpTool[] {
   const annotationOverrides = getToolAnnotationOverrides(server);
@@ -431,6 +468,7 @@ function applyToolOverrides(server: Pick<IMcpServer, 'metadata'>, tools: IMcpToo
     return {
       ...tool,
       ...(name ? { name } : {}),
+      ...(annotations?.title ? { title: annotations.title } : {}),
       ...(description ? { description } : {}),
       ...(annotations ? { annotations: { ...(tool.annotations ?? {}), ...annotations } } : {}),
     };
@@ -462,6 +500,8 @@ export function serializeMcpServer(record: IMcpServer): McpServerView {
     toolAnnotations: getToolAnnotationOverrides(record),
     toolDescriptions: getToolDescriptionOverrides(record),
     toolNames: getToolNameOverrides(record),
+    instructions: getMcpInstructionsOverride(record),
+    discoveredInstructions: getDiscoveredMcpInstructions(record),
     members: getCompositeMemberSummaries(record),
   } as McpServerView;
 }
@@ -478,6 +518,8 @@ export function serializeMcpServerFull(record: IMcpServer): McpServerView & { op
     toolAnnotations: getToolAnnotationOverrides(record),
     toolDescriptions: getToolDescriptionOverrides(record),
     toolNames: getToolNameOverrides(record),
+    instructions: getMcpInstructionsOverride(record),
+    discoveredInstructions: getDiscoveredMcpInstructions(record),
     members: getCompositeMemberSummaries(record),
   } as McpServerView & { openApiSpec?: string };
 }
@@ -635,6 +677,7 @@ export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'a
 
       tools.push({
         name: toolName,
+        ...(operation.summary?.trim() ? { title: operation.summary.trim() } : {}),
         description,
         inputSchema,
         httpMethod: method.toUpperCase(),
@@ -653,21 +696,22 @@ export function parseOpenApiSpec(specString: string, format: SpecFormatHint = 'a
 // ── Source-specific discovery ────────────────────────────────────────────
 
 /**
- * Discover the tool list for a server config. For 'stdio' + 'sandbox' the
- * sandbox must already be provisioned (pass the ensured base URL).
+ * Discover the tool list (and the instructions, where the source reports
+ * them) for a server config. For 'stdio' + 'sandbox' the sandbox must already
+ * be provisioned (pass the ensured base URL).
  */
-async function discoverToolsForServer(server: IMcpServer, identity?: ConsoleIdentityCaller): Promise<IMcpTool[]> {
+async function discoverToolsForServer(server: IMcpServer, identity?: ConsoleIdentityCaller): Promise<McpDiscovery> {
   const sourceType = resolveSourceType(server);
 
   if (sourceType === 'openapi') {
     if (!server.openApiSpec) throw new Error('Server has no OpenAPI spec');
-    return parseOpenApiSpec(server.openApiSpec).tools;
+    return { tools: parseOpenApiSpec(server.openApiSpec).tools };
   }
 
   if (sourceType === 'remote') {
     if (!server.remoteConfig?.url) throw new Error('Server has no remote MCP URL');
     const identityAuth = await serverConsoleIdentityAuth(server, sourceType, identity);
-    return withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
+    return withConsoleIdentityScrubbed(identityAuth, () => remoteDiscover({
       url: server.remoteConfig!.url,
       transport: server.remoteConfig!.transport,
       auth: openAuthConfig(server.upstreamAuth),
@@ -693,7 +737,7 @@ async function discoverToolsForServer(server: IMcpServer, identity?: ConsoleIden
       internal.instanceKey,
       internal.config ?? {},
     );
-    return built.tools;
+    return { tools: built.tools, instructions: built.instructions ?? null };
   }
 
   // stdio
@@ -703,10 +747,11 @@ async function discoverToolsForServer(server: IMcpServer, identity?: ConsoleIden
   if (config.executionMode === 'sandbox') {
     const { runner, ref, runnerConfig } = await resolveSandboxRunner(server);
     await ensureSandboxInstance(server, runner, ref, runnerConfig);
-    return runner.listTools(ref, runnerConfig);
+    // The sandbox bridge reports tools only; instructions stay as they are.
+    return { tools: await runner.listTools(ref, runnerConfig) };
   }
 
-  return stdioListTools(config, { tenantId: server.tenantId });
+  return stdioDiscover(config, { tenantId: server.tenantId });
 }
 
 async function resolveSandboxRunner(server: IMcpServer) {
@@ -838,6 +883,8 @@ interface BuiltCompositeTools {
   memberSummaries: IMcpCompositeMemberSummary[];
   hasInternalMember: boolean;
   hasBrowserMember: boolean;
+  /** The active members' instructions, one headed section each; `null` when none has any. */
+  instructions: string | null;
 }
 
 async function buildCompositeTools(
@@ -854,6 +901,7 @@ async function buildCompositeTools(
   const entryTools: IMcpTool[] = [];
   const members: IMcpCompositeMemberConfig[] = [];
   const memberSummaries: IMcpCompositeMemberSummary[] = [];
+  const memberInstructions: string[] = [];
   let hasInternalMember = false;
   let hasBrowserMember = false;
 
@@ -884,6 +932,9 @@ async function buildCompositeTools(
     // re-enabling them on the member's own page brings their tools back on
     // the next reconcile, no need to re-add them here.
     if (m.status !== 'active') continue;
+
+    const instructions = resolveMcpInstructions(m);
+    if (instructions) memberInstructions.push(`## ${m.name}\n${instructions}`);
 
     const prefixBase = cfg.toolPrefix || defaultMemberPrefix(m.key);
     const fallbackAnnotations = defaultAnnotationsForSource(memberSourceType);
@@ -916,7 +967,14 @@ async function buildCompositeTools(
     origin: { serverId: entries[i].serverId, serverKey: entries[i].serverKey, realName: entries[i].realName },
   }));
 
-  return { tools, members, memberSummaries, hasInternalMember, hasBrowserMember };
+  return {
+    tools,
+    members,
+    memberSummaries,
+    hasInternalMember,
+    hasBrowserMember,
+    instructions: normalizeMcpInstructions(memberInstructions.join('\n\n')) ?? null,
+  };
 }
 
 /** Rebuild + persist one composite's snapshot from its stored member config. */
@@ -932,7 +990,11 @@ async function reconcileOneComposite(
       status: 'disabled',
       tools: [],
       lastError: { message: 'All members were removed from this composite server.', at: new Date() },
-      metadata: metadataWithComposite(composite.metadata, { members: [], hasInternalMember: false }, []),
+      metadata: metadataWithInstructions(
+        metadataWithComposite(composite.metadata, { members: [], hasInternalMember: false }, []),
+        'discoveredInstructions',
+        null,
+      ),
     });
   }
   const built = await buildCompositeTools(
@@ -946,10 +1008,14 @@ async function reconcileOneComposite(
     tools: built.tools,
     toolsDiscoveredAt: new Date(),
     lastError: null,
-    metadata: metadataWithComposite(
-      composite.metadata,
-      { members: built.members, hasInternalMember: built.hasInternalMember },
-      built.memberSummaries,
+    metadata: metadataWithInstructions(
+      metadataWithComposite(
+        composite.metadata,
+        { members: built.members, hasInternalMember: built.hasInternalMember },
+        built.memberSummaries,
+      ),
+      'discoveredInstructions',
+      built.instructions,
     ),
   });
 }
@@ -1011,6 +1077,7 @@ export async function createMcpServer(
   const endpointSlug = await resolveEndpointSlug(tenantDbName, input.endpointSlug);
 
   let tools: IMcpTool[] = [];
+  let discoveredInstructions: string | null | undefined;
   let normalizedSpec: string | undefined;
   let upstreamBaseUrl = input.upstreamBaseUrl;
   const openedAuth: IMcpAuthConfig = { ...(input.upstreamAuth as IMcpAuthConfig) };
@@ -1033,15 +1100,15 @@ export async function createMcpServer(
       audience: input.remoteConfig!.url,
       identity: { userId, source: 'console' },
     });
-    tools = await withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
+    ({ tools, instructions: discoveredInstructions } = await withConsoleIdentityScrubbed(identityAuth, () => remoteDiscover({
       url: input.remoteConfig!.url,
       transport: input.remoteConfig!.transport,
       auth: openedAuth,
       ...(identityAuth ? { extraHeaders: identityAuth.headers } : {}),
-    }));
+    })));
   } else if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'subprocess') {
     // Discover eagerly so the create screen fails fast on a broken package.
-    tools = await stdioListTools(input.stdioConfig!, { tenantId });
+    ({ tools, instructions: discoveredInstructions } = await stdioDiscover(input.stdioConfig!, { tenantId }));
   }
 
   const db = await getDatabase();
@@ -1063,6 +1130,7 @@ export async function createMcpServer(
     await provider.validateInstance(ctx, instanceKey, config);
     const built = await provider.buildTools(ctx, instanceKey, config);
     tools = built.tools;
+    discoveredInstructions = built.instructions;
     description = description || built.suggestedDescription;
     internalMetadata = { provider: provider.id, instanceKey, config };
   }
@@ -1077,12 +1145,17 @@ export async function createMcpServer(
       throw new McpServerConfigError(BROWSER_TOKEN_ONLY_MESSAGE);
     }
     tools = built.tools;
+    discoveredInstructions = built.instructions;
     compositeMetadata = metadataWithComposite(
       undefined,
       { members: built.members, hasInternalMember: built.hasInternalMember },
       built.memberSummaries,
     );
   }
+
+  let metadata: Record<string, unknown> | undefined = internalMetadata ? { internal: internalMetadata } : compositeMetadata;
+  if (discoveredInstructions) metadata = metadataWithInstructions(metadata, 'discoveredInstructions', discoveredInstructions);
+  if (input.instructions) metadata = metadataWithInstructions(metadata, 'instructions', input.instructions);
 
   const server = await db.createMcpServer({
     tenantId,
@@ -1105,7 +1178,7 @@ export async function createMcpServer(
     status: 'active',
     endpointSlug,
     totalRequests: 0,
-    metadata: internalMetadata ? { internal: internalMetadata } : compositeMetadata,
+    metadata,
     createdBy: userId,
   });
 
@@ -1114,7 +1187,7 @@ export async function createMcpServer(
   // the record instead of failing the create.
   if (sourceType === 'stdio' && input.stdioConfig!.executionMode === 'sandbox') {
     try {
-      const discovered = await discoverToolsForServer({ ...server, stdioConfig });
+      const { tools: discovered } = await discoverToolsForServer({ ...server, stdioConfig });
       await db.switchToTenant(tenantDbName);
       forgetLastErrorWrite(server);
       await db.updateMcpServer(String(server._id), {
@@ -1201,6 +1274,12 @@ function diffForAudit(before: IMcpServer, after: Partial<IMcpServer>): Record<st
     const toList = getDisabledToolNames({ metadata: after.metadata });
     if (JSON.stringify(fromList) !== JSON.stringify(toList)) {
       changes.disabledTools = { from: `${fromList.length} disabled`, to: `${toList.length} disabled` };
+    }
+    // Lengths only — the text itself can run to thousands of characters.
+    const fromInstructions = getMcpInstructionsOverride(before) ?? '';
+    const toInstructions = getMcpInstructionsOverride({ metadata: after.metadata }) ?? '';
+    if (fromInstructions !== toInstructions) {
+      changes.instructions = { from: `${fromInstructions.length} chars`, to: `${toInstructions.length} chars` };
     }
   }
   return changes;
@@ -1308,6 +1387,8 @@ export async function updateMcpServer(
   }
 
   // Re-discover tools when the remote/stdio source configuration changed.
+  // `undefined` = the source said nothing about instructions this time.
+  let discoveredInstructions: string | null | undefined;
   const sourceType = resolveSourceType(existing);
   if (sourceType === 'remote' && input.remoteConfig !== undefined) {
     const auth = updateData.upstreamAuth
@@ -1323,17 +1404,21 @@ export async function updateMcpServer(
       audience: remoteConfig.url,
       identity: { userId, source: 'console' },
     });
-    updateData.tools = await withConsoleIdentityScrubbed(identityAuth, () => remoteListTools({
+    const discovered = await withConsoleIdentityScrubbed(identityAuth, () => remoteDiscover({
       url: remoteConfig.url,
       transport: remoteConfig.transport,
       auth,
       ...(identityAuth ? { extraHeaders: identityAuth.headers } : {}),
     }));
+    updateData.tools = discovered.tools;
+    discoveredInstructions = discovered.instructions;
     updateData.toolsDiscoveredAt = new Date();
   }
   if (sourceType === 'stdio' && input.stdioConfig !== undefined
     && (updateData.stdioConfig as IMcpStdioConfig).executionMode === 'subprocess') {
-    updateData.tools = await stdioListTools(updateData.stdioConfig as IMcpStdioConfig, { tenantId: existing.tenantId });
+    const discovered = await stdioDiscover(updateData.stdioConfig as IMcpStdioConfig, { tenantId: existing.tenantId });
+    updateData.tools = discovered.tools;
+    discoveredInstructions = discovered.instructions;
     updateData.toolsDiscoveredAt = new Date();
   }
   if (sourceType === 'internal' && input.internalConfig !== undefined) {
@@ -1351,6 +1436,7 @@ export async function updateMcpServer(
     await provider.validateInstance(ctx, instanceKey, config);
     const built = await provider.buildTools(ctx, instanceKey, config);
     updateData.tools = built.tools;
+    discoveredInstructions = built.instructions ?? null;
     updateData.toolsDiscoveredAt = new Date();
     updateData.metadata = {
       ...((updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata),
@@ -1379,11 +1465,28 @@ export async function updateMcpServer(
       existing.tools,
     );
     updateData.tools = built.tools;
+    discoveredInstructions = built.instructions;
     updateData.toolsDiscoveredAt = new Date();
     updateData.metadata = metadataWithComposite(
       (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
       { members: built.members, hasInternalMember: built.hasInternalMember },
       built.memberSummaries,
+    );
+  }
+
+  // What the source said about its tools at rediscovery, and the operator's own text.
+  if (discoveredInstructions !== undefined) {
+    updateData.metadata = metadataWithInstructions(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      'discoveredInstructions',
+      discoveredInstructions,
+    );
+  }
+  if (input.instructions !== undefined) {
+    updateData.metadata = metadataWithInstructions(
+      (updateData.metadata as Record<string, unknown> | undefined) ?? existing.metadata,
+      'instructions',
+      input.instructions,
     );
   }
 
@@ -1549,7 +1652,7 @@ export async function refreshMcpServerTools(
       // triggered by a member's own update).
       updated = await reconcileOneComposite(db, server);
     } else {
-      const tools = await discoverToolsForServer(server, { userId, source: 'console' });
+      const { tools, instructions } = await discoverToolsForServer(server, { userId, source: 'console' });
       forgetLastErrorWrite(server);
       const refreshUpdate: Partial<IMcpServer> = {
         tools,
@@ -1562,6 +1665,13 @@ export async function refreshMcpServerTools(
       const disabledKept = disabledBefore.filter((n) => tools.some((t) => t.name === n));
       if (disabledKept.length !== disabledBefore.length) {
         refreshUpdate.metadata = metadataWithDisabledTools(server.metadata, disabledKept);
+      }
+      if (instructions !== undefined) {
+        refreshUpdate.metadata = metadataWithInstructions(
+          refreshUpdate.metadata ?? server.metadata,
+          'discoveredInstructions',
+          instructions,
+        );
       }
       updated = await db.updateMcpServer(serverId, refreshUpdate);
     }
@@ -2387,7 +2497,7 @@ export async function executeMcpToolLocal(
   // serve but the operator never listed is not callable through this server.
   // Checked before anything else runs — guardrail, sandbox, upstream.
   if (!(server.tools ?? []).some((tool) => tool.name === realToolName)) {
-    throw new McpToolInputError('Unknown tool');
+    throw new McpUnknownToolError();
   }
 
   if (!isMcpToolEnabled(server, realToolName)) {
@@ -2620,7 +2730,7 @@ async function executeOpenApiTool(
 ): Promise<unknown> {
   const tool = server.tools.find((t) => t.name === toolName);
   if (!tool) {
-    throw new McpToolInputError('Unknown tool');
+    throw new McpUnknownToolError();
   }
   if (!tool.httpPath || !tool.httpMethod) {
     throw new Error(`Tool "${toolName}" has no HTTP mapping`);

@@ -10,8 +10,14 @@
 
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { McpUpstreamError } from './errors';
+import {
+  MAX_TOOL_LIST_PAGES,
+  readInitializeInstructions,
+  readToolListPage,
+  type McpDiscovery,
+} from './discovery';
 import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
-import type { IMcpAuthConfig, IMcpTool, IMcpToolAnnotations } from '@/lib/database';
+import type { IMcpAuthConfig, IMcpTool } from '@/lib/database';
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -40,11 +46,76 @@ export function buildUpstreamAuthHeaders(auth: IMcpAuthConfig | undefined): Reco
 
 let rpcId = 0;
 
+interface JsonRpcMessage {
+  id?: string | number | null;
+  method?: string;
+  result?: unknown;
+  error?: { code?: number; message?: string };
+}
+
+/** The message in `data` (one JSON-RPC message or a batch) that answers request `id`, if any. */
+function findResponse(data: string, id: number): JsonRpcMessage | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  const messages = (Array.isArray(parsed) ? parsed : [parsed]) as JsonRpcMessage[];
+  return messages.find((m) => m
+    && typeof m === 'object'
+    // Some servers echo numeric ids back as strings.
+    && (m.id === id || m.id === String(id))
+    && (m.result !== undefined || m.error !== undefined));
+}
+
+/** The `data:` payload of one SSE event block (multi-line data joins with newlines). */
+function sseEventData(block: string): string {
+  return block
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(line.startsWith('data: ') ? 6 : 5))
+    .join('\n');
+}
+
+/**
+ * Streamable HTTP may answer with an SSE stream that carries notifications
+ * (progress, log messages) or server requests BEFORE the response — read
+ * events until the one answering `id` arrives, then stop: a server that keeps
+ * the stream open afterwards is not waited for.
+ */
+async function readSseResponse(response: Response, id: number): Promise<JsonRpcMessage> {
+  if (!response.body) throw new Error('MCP server returned an empty SSE response');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
+      if (done) buffer += '\n\n';
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const match = findResponse(sseEventData(block), id);
+        if (match) return match;
+        boundary = buffer.indexOf('\n\n');
+      }
+      if (done) break;
+    }
+  } finally {
+    reader.cancel().catch(() => { /* already closed */ });
+  }
+  throw new Error('MCP server closed the SSE stream without answering the request');
+}
+
 async function rpcCall(
   target: RemoteMcpTarget,
   method: string,
   params?: Record<string, unknown>,
 ): Promise<unknown> {
+  const id = ++rpcId;
   const authHeaders = buildUpstreamAuthHeaders(target.auth);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -59,7 +130,7 @@ async function rpcCall(
     headers,
     body: JSON.stringify({
       jsonrpc: JSONRPC_VERSION,
-      id: ++rpcId,
+      id,
       method,
       ...(params !== undefined ? { params } : {}),
     }),
@@ -75,21 +146,9 @@ async function rpcCall(
   }
 
   const contentType = response.headers.get('content-type') ?? '';
-  let payload: { result?: unknown; error?: { code?: number; message?: string } };
-
-  if (contentType.includes('text/event-stream')) {
-    // Streamable HTTP may deliver the response as a short SSE stream — take
-    // the first `message` event's data payload.
-    const raw = await response.text();
-    const dataLine = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.startsWith('data:'));
-    if (!dataLine) throw new Error('MCP server returned an empty SSE response');
-    payload = JSON.parse(dataLine.slice(5).trim());
-  } else {
-    payload = await response.json();
-  }
+  const payload: JsonRpcMessage = contentType.includes('text/event-stream')
+    ? await readSseResponse(response, id)
+    : await response.json();
 
   if (payload.error) {
     throw new Error(`MCP error ${payload.error.code ?? ''}: ${payload.error.message ?? 'unknown'}`);
@@ -97,37 +156,40 @@ async function rpcCall(
   return payload.result;
 }
 
-/** Run the initialize handshake (stateless servers tolerate skipping it). */
-export async function remoteInitialize(target: RemoteMcpTarget): Promise<void> {
+/** List tools on a remote MCP server, following `nextCursor` across pages. */
+export async function remoteListTools(target: RemoteMcpTarget): Promise<IMcpTool[]> {
+  const tools: IMcpTool[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
+    const result = await rpcCall(target, 'tools/list', cursor === undefined ? {} : { cursor });
+    const read = readToolListPage(result);
+    tools.push(...read.tools);
+    if (read.nextCursor === undefined || seenCursors.has(read.nextCursor)) break;
+    seenCursors.add(read.nextCursor);
+    cursor = read.nextCursor;
+  }
+  return tools;
+}
+
+/**
+ * Discover a remote server: its tools, and the `instructions` its
+ * `initialize` result carries. Stateless upstreams answer tools/list without
+ * the handshake, so a failed `initialize` leaves the instructions unknown
+ * instead of failing discovery.
+ */
+export async function remoteDiscover(target: RemoteMcpTarget): Promise<McpDiscovery> {
+  let instructions: string | null | undefined;
   try {
-    await rpcCall(target, 'initialize', {
+    instructions = readInitializeInstructions(await rpcCall(target, 'initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: 'cognipeer-mcp-gateway', version: '1.0.0' },
-    });
+    }));
   } catch {
-    // Stateless upstreams often accept tools/list without initialize.
+    instructions = undefined;
   }
-}
-
-/** List tools on a remote MCP server. */
-export async function remoteListTools(target: RemoteMcpTarget): Promise<IMcpTool[]> {
-  const result = (await rpcCall(target, 'tools/list', {})) as {
-    tools?: Array<{
-      name: string;
-      description?: string;
-      inputSchema?: Record<string, unknown>;
-      annotations?: IMcpToolAnnotations;
-    }>;
-  } | undefined;
-
-  const tools = result?.tools ?? [];
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description || t.name,
-    inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-    ...(t.annotations ? { annotations: t.annotations } : {}),
-  }));
+  return { tools: await remoteListTools(target), instructions };
 }
 
 /** Call a tool on a remote MCP server and unwrap the content payload. */

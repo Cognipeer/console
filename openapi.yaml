@@ -21923,6 +21923,11 @@ components:
           example: Tavily Search
         description:
           type: string
+        instructions:
+          type: string
+          maxLength: 8000
+          description: >-
+            MCP `instructions` returned by `initialize`: how the server's tools fit together. Omit it to serve what the source supplies (a remote or stdio server's own instructions).
         sourceType:
           type: string
           enum:
@@ -22297,6 +22302,12 @@ components:
           description: Operator-authored tool descriptions, keyed by tool name.
           additionalProperties:
             type: string
+        instructions:
+          type: string
+          description: Operator-authored MCP `instructions`; served instead of `discoveredInstructions` when set.
+        discoveredInstructions:
+          type: string
+          description: The instructions the source supplied at its last discovery.
         createdAt:
           type: string
           format: date-time
@@ -22353,6 +22364,10 @@ components:
           type: string
           description: Tool name.
           example: search
+        title:
+          type: string
+          description: Human-readable display name.
+          example: Search documents
         description:
           type: string
           nullable: true
@@ -22427,6 +22442,12 @@ components:
           additionalProperties:
             type: string
             nullable: true
+        instructions:
+          type: string
+          nullable: true
+          maxLength: 8000
+          description: >-
+            MCP `instructions` returned by `initialize`. Send `null` or an empty string to serve what the source supplies again.
     ConsoleIdentityJwks:
       type: object
       required:

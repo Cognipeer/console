@@ -169,6 +169,11 @@ export const browserProvider: InternalMcpProvider = {
       tools: buildToolList(),
       suggestedName: browser?.name ? `${browser.name} (browser)` : 'Browser',
       suggestedDescription: `Browser automation tools for the "${browser?.name ?? instanceKey}" browser.`,
+      instructions:
+        `Every page tool works inside a session: call "${TOOL_OPEN_SESSION}" first and pass the sessionKey `
+        + 'it returns to each browser_* tool, then call browser_close when the task is done (an idle '
+        + 'session closes on its own after a few minutes). browser_list_flows and browser_run_flow need no '
+        + 'session — a flow runs in one of its own.',
     };
   },
 

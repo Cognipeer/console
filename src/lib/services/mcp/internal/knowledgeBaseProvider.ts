@@ -179,6 +179,10 @@ export const knowledgeBaseProvider: InternalMcpProvider = {
       ],
       suggestedName: label,
       suggestedDescription: ragModule?.description,
+      instructions:
+        `These tools read the "${label}" knowledge base. Start with "${SEARCH_TOOL_NAME}": every match `
+        + `carries a documentId. To read past a passage, pass that documentId to "${READ_TOOL_NAME}" for `
+        + `the whole document, or to "${READ_LINES_TOOL_NAME}" to page through a long one with offset and limit.`,
     };
   },
 
