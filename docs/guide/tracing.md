@@ -103,7 +103,7 @@ An event is an error when its `status` is `error` or `failed`, or when it has no
 | Batch (`POST /tracing/sessions`) | The `status` you send is kept as is. Without one the session counts as finished: `error` when any event failed or the payload lists a non-sink error, otherwise `success`. Send `in_progress` to keep it open |
 | Streaming | `/start` sets `in_progress`; starting an id that already exists reopens it and keeps its totals. `/end` stores the `status` you send; without one it is `error` when any event so far failed or the end payload lists an error, otherwise `success` |
 | OTLP (`POST /traces`) | OTLP has no end signal except the root span (the span without a parent, or the `agent_session` span). The session stays `in_progress`, even while error spans arrive, until a request carries the root span with an end time. It then becomes `error` if any error was recorded (error spans, an exception or ERROR status on the root) and `success` otherwise |
-| Hosted agents | The runtime's own status is kept; without one the batch rule above applies |
+| Hosted agents | The session opens as `in_progress` on the run's first event and every event is stored as it happens, so a run is readable while it runs and a run that is cut off (a restart, a timeout) keeps its trace up to that point — it becomes `abandoned` like any other session that never ends. When the run ends the runtime's own status is kept; without one the batch rule above applies |
 
 **Late events.** Events are posted in the background and can arrive after the session ended.
 
