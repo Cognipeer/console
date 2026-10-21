@@ -1,10 +1,11 @@
 /**
- * What discovery reads from an upstream MCP server — shared by the remote
- * (HTTP) client and the stdio runner so both read `initialize` and
- * `tools/list` the same way.
+ * What Console reads from an upstream MCP server — shared by the remote
+ * (HTTP) client and the stdio runner so both read `initialize`, `tools/list`
+ * and `tools/call` results the same way.
  */
 
 import type { IMcpTool, IMcpToolAnnotations } from '@/lib/database';
+import { contentHasMedia, mcpResultToToolOutput } from '@/lib/services/tools/toolOutput';
 
 /** Server instructions longer than this are cut — they ride in every client's system prompt. */
 export const MCP_INSTRUCTIONS_MAX_CHARS = 8_000;
@@ -81,4 +82,50 @@ export function readToolListPage(result: unknown): { tools: IMcpTool[]; nextCurs
     tools,
     ...(typeof page.nextCursor === 'string' ? { nextCursor: page.nextCursor } : {}),
   };
+}
+
+interface RawCallResult {
+  content?: Array<{ type?: string; text?: string }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * What a `tools/call` result hands its caller. A failed call (`isError`)
+ * throws with the server's text. Media, and a JSON object that comes with text
+ * of its own, stay a ToolOutput so neither part is lost: the model reads the
+ * text, an MCP caller also gets the object. Otherwise the object alone, or the
+ * text (parsed when it is JSON).
+ */
+export function readToolCallResult(raw: unknown): unknown {
+  const result = raw as RawCallResult | undefined;
+  const textParts = Array.isArray(result?.content)
+    ? result.content.filter((c) => c?.type === 'text')
+    : [];
+
+  if (result?.isError) {
+    throw new Error(textParts.map((c) => c.text).join('\n') || 'MCP tool call failed');
+  }
+  if (contentHasMedia(result?.content)) return mcpResultToToolOutput(result);
+  if (isPlainObject(result?.structuredContent) && textParts.some((c) => c.text)) {
+    return mcpResultToToolOutput(result);
+  }
+  if (result?.structuredContent !== undefined) return result.structuredContent;
+
+  if (Array.isArray(result?.content)) {
+    if (textParts.length === 1) {
+      const text = textParts[0].text ?? '';
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
+    return textParts.map((c) => c.text).join('\n');
+  }
+  return result;
 }

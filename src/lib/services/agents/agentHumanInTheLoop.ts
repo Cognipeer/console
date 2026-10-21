@@ -140,11 +140,19 @@ export function resolveHitlConfig(
 
 /**
  * The effective policy for one tool: an explicit per-tool setting wins, then
- * the read-only exemption, then the agent's default.
+ * the read-only exemption, then the agent's default. `policyNames` are the
+ * names a renamed bound tool was set up under (see `boundToolNames.ts`): a
+ * setting stored for one still applies, the read-only exemption never does.
  */
-export function toolApprovalPolicy(resolved: ResolvedHitlConfig, toolName: string): AgentToolApprovalPolicy {
-    const explicit = resolved.toolPolicies[toolName];
-    if (explicit === 'always' || explicit === 'never') return explicit;
+export function toolApprovalPolicy(
+    resolved: ResolvedHitlConfig,
+    toolName: string,
+    policyNames: readonly string[] = [],
+): AgentToolApprovalPolicy {
+    for (const name of [toolName, ...policyNames]) {
+        const explicit = resolved.toolPolicies[name];
+        if (explicit === 'always' || explicit === 'never') return explicit;
+    }
     if (isReadOnlyTool(toolName)) return 'never';
     return resolved.defaultPolicy;
 }
@@ -155,7 +163,7 @@ export function sessionAllowedTools(metadata: Record<string, unknown> | undefine
     return new Set(Array.isArray(raw) ? raw.filter((name): name is string => typeof name === 'string') : []);
 }
 
-type ToolRecord = { name?: string; needsApproval?: unknown };
+type ToolRecord = { name?: string; needsApproval?: unknown; policyNames?: readonly string[] };
 
 /**
  * Returns the tools with `needsApproval` set per the agent's policy; the input
@@ -174,7 +182,7 @@ export function applyToolApprovals<T extends ToolRecord>(
     if (!resolved.toolApprovalEnabled) return tools;
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
-        if (!name || toolApprovalPolicy(resolved, name) !== 'always') return tool;
+        if (!name || toolApprovalPolicy(resolved, name, tool.policyNames) !== 'always') return tool;
         return { ...tool, needsApproval: () => !allowedTools.has(name) };
     });
 }
@@ -236,7 +244,7 @@ export function denyUnattendedTools<T extends ToolRecord>(
     };
     return tools.map((tool) => {
         const name = typeof tool.name === 'string' ? tool.name : '';
-        if (!name || toolApprovalPolicy(resolved, name) !== 'always' || allowedTools.has(name)) return tool;
+        if (!name || toolApprovalPolicy(resolved, name, tool.policyNames) !== 'always' || allowedTools.has(name)) return tool;
         const denied: Record<string, unknown> = { ...tool };
         for (const key of TOOL_CALLABLE_KEYS) {
             if (typeof denied[key] === 'function') denied[key] = refuse;

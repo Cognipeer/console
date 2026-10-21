@@ -13,6 +13,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { IMcpStdioConfig } from '@/lib/database';
 
 process.env.OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK = 'false';
+// The shortest call deadline there is, so a silent upstream fails the test fast.
+process.env.MCP_CALL_TIMEOUT_MS = '1000';
 
 const state = vi.hoisted(() => ({ script: '' }));
 
@@ -26,6 +28,7 @@ vi.mock('node:child_process', async (importActual) => {
   };
 });
 
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { remoteCallTool, remoteDiscover, remoteListTools } from '@/lib/services/mcp/remoteMcpClient';
 
 // ── HTTP upstream ─────────────────────────────────────────────────────────
@@ -95,6 +98,23 @@ beforeAll(async () => {
         json(res, { jsonrpc: '2.0', id: msg.id, result: page });
         return;
       }
+      if (msg.method === 'tools/call' && msg.params?.name === 'silent') {
+        // Starts the stream, then never answers.
+        sseOpen(res, [{ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: 1, progress: 0 } }]);
+        return;
+      }
+      if (msg.method === 'tools/call' && msg.params?.name === 'structured') {
+        json(res, {
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: { content: [{ type: 'text', text: '2 open orders' }], structuredContent: { count: 2 } },
+        });
+        return;
+      }
+      if (msg.method === 'tools/call' && msg.params?.name === 'structured-only') {
+        json(res, { jsonrpc: '2.0', id: msg.id, result: { content: [], structuredContent: { count: 2 } } });
+        return;
+      }
       if (msg.method === 'tools/call') {
         sseOpen(res, [
           { jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: 1, progress: 1 } },
@@ -148,6 +168,30 @@ describe('remote MCP client', () => {
     expect(discovered.tools).toHaveLength(2);
   });
 
+  it('gives up on a stream that never answers once the call deadline passes', async () => {
+    const started = Date.now();
+    await expect(remoteCallTool({ url }, 'silent', {})).rejects.toThrow('did not answer tools/call within 1000 ms');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('stops waiting as soon as the agent turn is stopped', async () => {
+    const turn = new AbortController();
+    const started = Date.now();
+    const call = runWithTurnSignal(turn.signal, () => remoteCallTool({ url }, 'silent', {}));
+    setTimeout(() => turn.abort(new Error('Stopped by the user')), 50);
+    await expect(call).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(900);
+  });
+
+  it('keeps both the text and the JSON object of a structured result', async () => {
+    await expect(remoteCallTool({ url }, 'structured', {})).resolves.toEqual({
+      kind: 'tool_output',
+      content: [{ type: 'text', text: '2 open orders' }],
+      structuredContent: { count: 2 },
+    });
+    await expect(remoteCallTool({ url }, 'structured-only', {})).resolves.toEqual({ count: 2 });
+  });
+
   it('leaves the instructions unknown, not empty, when initialize fails — and still lists tools', async () => {
     mode = 'no-initialize';
     const discovered = await remoteDiscover({ url });
@@ -164,6 +208,8 @@ const mode = process.env.LIST_MODE;
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.id === undefined) return;
+  // A call that never finishes.
+  if (msg.method === 'tools/call' && msg.params.name === 'hang') return;
   // A log notification before every response: not a response, must be skipped.
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { data: 'x' } }) + '\\n');
   let result = {};
@@ -219,6 +265,18 @@ describe('stdio MCP discovery', () => {
     const { stdioDiscover } = await loadRunner();
     const discovered = await stdioDiscover(stdioConfig('loop'));
     expect(discovered.tools).toHaveLength(2);
+  }, 20_000);
+
+  it('ends the process when the agent turn is stopped mid-call', async () => {
+    const { stdioCallTool } = await loadRunner();
+    // The runner was loaded afresh: the turn must be bound in ITS copy of the module.
+    const turnSignal = await import('@/lib/core/turnSignal');
+    const turn = new AbortController();
+    const started = Date.now();
+    const call = turnSignal.runWithTurnSignal(turn.signal, () => stdioCallTool(stdioConfig('pages'), 'hang', {}));
+    setTimeout(() => turn.abort(), 300);
+    await expect(call).rejects.toThrow('The MCP call was cancelled');
+    expect(Date.now() - started).toBeLessThan(10_000);
   }, 20_000);
 
   it('reports no instructions as null when initialize carried none', async () => {

@@ -14,20 +14,23 @@ const tool = {
   actions: [{ key: 'do', name: 'do', executionType: 'mcp_call', mcpToolName: 'do' }],
 } as unknown as ITool;
 
-const reply = (result: unknown) => ({ ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result }) });
+const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+});
 
 beforeEach(() => vi.clearAllMocks());
 
 describe('MCP tool results flagged isError', () => {
   it('are reported as errors and keep the text for the model', async () => {
-    hoisted.safeFetch.mockResolvedValue(reply({ isError: true, content: [{ type: 'text', text: 'ticket not found' }] }));
+    hoisted.safeFetch.mockImplementation(async () => reply({ isError: true, content: [{ type: 'text', text: 'ticket not found' }] }));
     const out = await executeToolAction(tool, 'do', {});
     expect(out.isError).toBe(true);
     expect(out.result).toBe('ticket not found');
   });
 
   it('a normal result carries no isError', async () => {
-    hoisted.safeFetch.mockResolvedValue(reply({ content: [{ type: 'text', text: 'ok' }] }));
+    hoisted.safeFetch.mockImplementation(async () => reply({ content: [{ type: 'text', text: 'ok' }] }));
     const out = await executeToolAction(tool, 'do', {});
     expect(out.isError).toBeUndefined();
   });

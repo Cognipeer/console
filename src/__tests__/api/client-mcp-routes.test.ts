@@ -167,6 +167,15 @@ describe('token MCP routes', () => {
       expect(without.result).not.toHaveProperty('instructions');
     });
 
+    it('answers initialize in the revision the client asked for when it is one we speak', async () => {
+      for (const url of ['/api/client/v1/mcp/crm/message', '/api/client/v1/mcp/console/message']) {
+        const asked = JSON.parse((await post(url, { ...initialize, params: { protocolVersion: '2025-06-18' } })).body);
+        expect(asked.result.protocolVersion).toBe('2025-06-18');
+        const unknown = JSON.parse((await post(url, { ...initialize, params: { protocolVersion: '2099-01-01' } })).body);
+        expect(unknown.result.protocolVersion).toBe('2025-11-25');
+      }
+    });
+
     it('gives the console server its own text', async () => {
       const body = JSON.parse((await post('/api/client/v1/mcp/console/message', initialize)).body);
       expect(body.result.instructions).toContain('get_session');
@@ -315,6 +324,31 @@ describe('token MCP routes', () => {
         { type: 'image', data: 'AAAA', mimeType: 'image/png' },
         { type: 'audio', data: 'BBBB', mimeType: 'audio/wav' },
       ]);
+    });
+
+    it('hands a structured result its JSON object only when the client speaks 2025-06-18 or later', async () => {
+      const structured = { kind: 'tool_output', content: [{ type: 'text', text: '1 found' }], structuredContent: { found: 1 } };
+      vi.mocked(executeMcpTool).mockResolvedValue({ result: structured, latencyMs: 4 } as never);
+
+      const legacy = JSON.parse((await post('/api/client/v1/mcp/crm/message', callTool())).body).result;
+      expect(legacy).toEqual({ content: [{ type: 'text', text: '1 found' }] });
+
+      const current = JSON.parse((await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/mcp/crm/message',
+        headers: { ...headers, 'mcp-protocol-version': '2025-06-18' },
+        payload: JSON.stringify(callTool()),
+      })).body).result;
+      expect(current).toEqual({ content: [{ type: 'text', text: '1 found' }], structuredContent: { found: 1 } });
+
+      // REST callers keep getting the object, as they always did for a structured result.
+      const rest = await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/mcp/crm/execute',
+        headers,
+        payload: JSON.stringify({ tool: 'lookup', arguments: {} }),
+      });
+      expect(JSON.parse(rest.body).result).toEqual({ found: 1 });
     });
 
     it('keeps a text-only result as one text block', async () => {

@@ -11,6 +11,7 @@ import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
 import { buildOpenApiRequest } from '@/lib/services/mcp/openApiRequest';
+import { remoteCallToolResult, remoteListTools } from '@/lib/services/mcp/remoteMcpClient';
 import { specDeclaredParameters } from '@/lib/services/mcp/openApiSpecParameters';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -190,47 +191,9 @@ export async function discoverMcpTools(
   transport: 'sse' | 'streamable-http',
   auth?: IToolAuthConfig,
 ): Promise<IToolAction[]> {
-  // Build headers
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-  };
-  if (auth?.type === 'token' && auth.token) {
-    headers['Authorization'] = `Bearer ${auth.token}`;
-  } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
-    headers[auth.headerName] = auth.headerValue;
-  } else if (auth?.type === 'basic' && auth.username && auth.password) {
-    const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
-    headers['Authorization'] = `Basic ${encoded}`;
-  }
-
-  // For streamable-http, use JSON-RPC to list tools
-  const listToolsBody = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/list',
-    params: {},
-  });
-
   try {
-    const response = await safeFetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: listToolsBody,
-    }, { sensitiveHeaders: credentialHeaderNames(auth) });
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`MCP server responded with ${response.status}: ${errText}`);
-    }
-
-    const data = await response.json();
-    const mcpTools: Array<{
-      name: string;
-      description?: string;
-      inputSchema?: Record<string, unknown>;
-    }> = data?.result?.tools || data?.tools || [];
-
+    // The shared MCP client: it accepts a streamed (SSE) answer and follows every `tools/list` page.
+    const mcpTools = await remoteListTools({ url: endpoint, transport, auth });
     return mcpTools.map((t) => ({
       key: slugify(t.name, SLUG_OPTIONS),
       name: t.name,
@@ -583,73 +546,39 @@ async function executeMcpAction(
     throw new Error('Tool has no MCP endpoint configured');
   }
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
-
-  const auth = openAuthConfig(tool.upstreamAuth);
-  if (auth?.type === 'token' && auth.token) {
-    headers['Authorization'] = `Bearer ${auth.token}`;
-  } else if (auth?.type === 'header' && auth.headerName && auth.headerValue) {
-    headers[auth.headerName] = auth.headerValue;
-  } else if (auth?.type === 'basic' && auth.username && auth.password) {
-    const encoded = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
-    headers['Authorization'] = `Basic ${encoded}`;
-  }
-
-  // Caller-supplied runtime headers (already policy-filtered) win over static auth.
-  Object.assign(headers, runtimeHeaders);
-
-  const callBody = JSON.stringify({
-    jsonrpc: '2.0',
-    id: Date.now(),
-    method: 'tools/call',
-    params: {
-      name: action.mcpToolName || action.name,
-      arguments: args,
+  // The shared MCP client: a streamed (SSE) answer is read, the call has a
+  // deadline, and a stopped turn aborts it. Caller-supplied runtime headers
+  // (already policy-filtered) win over static auth.
+  const callResult = await remoteCallToolResult(
+    {
+      url: tool.mcpEndpoint,
+      transport: tool.mcpTransport,
+      auth: openAuthConfig(tool.upstreamAuth),
+      extraHeaders: runtimeHeaders,
     },
-  });
-
-  const turnSignal = currentTurnSignal();
-  const response = await safeFetch(tool.mcpEndpoint, {
-    method: 'POST',
-    headers,
-    body: callBody,
-    ...(turnSignal ? { signal: turnSignal } : {}),
-  }, { sensitiveHeaders: credentialHeaderNames(auth, runtimeHeaders) });
+    action.mcpToolName || action.name,
+    args,
+  ) as { content?: unknown; isError?: boolean } | undefined;
 
   const latencyMs = Date.now() - start;
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => 'Unknown error');
-    throw new Error(`MCP server error (${response.status}): ${errorText}`);
-  }
-
-  const data = await response.json();
-
-  if (data.error) {
-    throw new Error(`MCP tool error: ${data.error.message || JSON.stringify(data.error)}`);
-  }
-
-  // MCP tools/call returns result in data.result.content
-  const content = data?.result?.content;
+  const content = callResult?.content;
   let result: unknown;
   if (contentHasMedia(content)) {
     // Keep images/audio/resources as a ToolOutput; text-only results keep the legacy unwrap.
-    result = mcpResultToToolOutput(data.result);
+    result = mcpResultToToolOutput(callResult);
   } else if (Array.isArray(content)) {
     const textParts = content.filter((c: { type: string }) => c.type === 'text');
     result = textParts.length === 1
       ? textParts[0].text
       : textParts.map((c: { text: string }) => c.text).join('\n');
   } else {
-    result = data.result;
+    result = callResult;
   }
 
   // A tool that failed on the server's side answers 200 with `isError: true`. The text still goes to the
   // caller (the model reads it), but the call is a failure for logs and metrics.
-  const isError = data?.result?.isError === true;
+  const isError = callResult?.isError === true;
   return { result, latencyMs, ...(isError ? { isError: true } : {}) };
 }
 

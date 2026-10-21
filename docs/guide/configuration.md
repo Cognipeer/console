@@ -226,6 +226,7 @@ credential, stdio environment values, runtime headers) are masked as
 | `MCP_LAST_ERROR_THROTTLE_MS` | An identical `lastError` is not written again within this window. `0` writes every time. | `60000` |
 | `MCP_LOG_TOOL_NAME_MAX_CHARS` | Longest tool name stored in an MCP request-log row (minimum `16`). | `200` |
 | `MCP_LOG_USER_AGENT_MAX_CHARS` | Longest caller user-agent stored with an MCP request-log row (minimum `16`). | `300` |
+| `MCP_CALL_TIMEOUT_MS` | Longest one tool call to a remote MCP server may take, reading a streamed answer included (minimum `1000`). | `120000` |
 | `MCP_INVOKE_CONCURRENCY` | Concurrent MCP tool invocations per node when calls are routed through the job queue. | `4` |
 | `MCP_STDIO_MAX_CONCURRENT` | Stdio (npx/uvx) MCP subprocesses running at once, all tenants together. | `8` |
 | `MCP_STDIO_MAX_CONCURRENT_PER_TENANT` | One tenant's share of them; a call over it is refused with an error saying so. `0` leaves only the process-wide limit, which suits an installation with a single tenant. | half of `MCP_STDIO_MAX_CONCURRENT`, at least `1` |

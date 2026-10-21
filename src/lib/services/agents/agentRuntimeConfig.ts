@@ -195,13 +195,105 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
 // ── JSON Schema → zod ────────────────────────────────────────────────────
 
 /**
- * Converts the draft-07 subset the structured-output editor can produce into a
- * zod schema. Anything unrecognised degrades to `z.any()` rather than throwing:
- * a half-written schema in the editor must not break the playground.
+ * Converts a JSON Schema into a zod schema: the draft-07 subset the
+ * structured-output editor produces, and what MCP and OpenAPI tools declare
+ * (local `$ref`s, `allOf`, `const`, literal enums, bounds, patterns). Anything
+ * unrecognised degrades to `z.any()` rather than throwing: a half-written
+ * schema in the editor must not break the playground.
  */
 export function jsonSchemaToZod(schema: unknown, strict = false, permissive = false): ZodTypeAny {
-    if (!schema || typeof schema !== 'object') return z.any();
-    const node = schema as Record<string, any>;
+    return convertSchema(schema, { strict, permissive, root: schema, refs: [] });
+}
+
+interface SchemaContext {
+    strict: boolean;
+    permissive: boolean;
+    /** The document a local `$ref` points into. */
+    root: unknown;
+    /** The `$ref`s being expanded on the way down — one met again is a cycle. */
+    refs: string[];
+}
+
+/** How deep `$ref`s may nest before the rest is taken as `any`. */
+const MAX_REF_DEPTH = 16;
+
+/** The node a local `$ref` (`#/$defs/Pet`, `#/definitions/Pet`) names, or undefined. */
+function resolveLocalRef(ref: string, root: unknown): unknown {
+    if (ref === '#') return root;
+    if (!ref.startsWith('#/')) return undefined;
+    let node: unknown = root;
+    for (const raw of ref.slice(2).split('/')) {
+        const key = decodeURIComponent(raw).replace(/~1/g, '/').replace(/~0/g, '~');
+        if (!node || typeof node !== 'object') return undefined;
+        node = (node as Record<string, unknown>)[key];
+    }
+    return node;
+}
+
+/** One object node from `allOf` members: their properties and required lists together. */
+function mergeAllOf(node: Record<string, any>, ctx: SchemaContext): Record<string, any> {
+    const merged: Record<string, any> = { ...node };
+    delete merged.allOf;
+    const properties: Record<string, unknown> = { ...(node.properties ?? {}) };
+    const required = new Set<string>(Array.isArray(node.required) ? node.required : []);
+    for (const member of node.allOf as unknown[]) {
+        let part = member as Record<string, any> | undefined;
+        if (part && typeof part.$ref === 'string') part = resolveLocalRef(part.$ref, ctx.root) as Record<string, any> | undefined;
+        if (!part || typeof part !== 'object') continue;
+        if (Array.isArray(part.allOf)) part = mergeAllOf(part, ctx);
+        Object.assign(properties, part.properties ?? {});
+        for (const key of Array.isArray(part.required) ? part.required : []) required.add(key);
+        if (merged.type === undefined && part.type !== undefined) merged.type = part.type;
+        if (merged.description === undefined && typeof part.description === 'string') merged.description = part.description;
+        if (merged.additionalProperties === undefined && part.additionalProperties !== undefined) {
+            merged.additionalProperties = part.additionalProperties;
+        }
+    }
+    if (Object.keys(properties).length > 0) {
+        merged.properties = properties;
+        if (merged.type === undefined) merged.type = 'object';
+    }
+    if (required.size > 0) merged.required = [...required];
+    return merged;
+}
+
+function isLiteral(value: unknown): value is string | number | boolean | null {
+    return value === null || ['string', 'number', 'boolean'].includes(typeof value);
+}
+
+function literalUnion(values: Array<string | number | boolean | null>): ZodTypeAny {
+    const literals = values.map((v) => z.literal(v));
+    return literals.length === 1
+        ? literals[0]!
+        : z.union(literals as unknown as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]);
+}
+
+function convertSchema(schema: unknown, ctx: SchemaContext): ZodTypeAny {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return z.any();
+    let node = schema as Record<string, any>;
+    const { strict, permissive } = ctx;
+
+    if (typeof node.$ref === 'string') {
+        const ref = node.$ref;
+        if (ctx.refs.includes(ref) || ctx.refs.length >= MAX_REF_DEPTH) return withDescription(z.any(), node);
+        const target = resolveLocalRef(ref, ctx.root);
+        if (!target || typeof target !== 'object') return withDescription(z.any(), node);
+        // A description next to the `$ref` describes this use of the definition.
+        const described = typeof node.description === 'string'
+            ? { ...(target as Record<string, unknown>), description: node.description }
+            : target;
+        return convertSchema(described, { ...ctx, refs: [...ctx.refs, ref] });
+    }
+    if (Array.isArray(node.allOf) && node.allOf.length > 0) node = mergeAllOf(node, ctx);
+
+    // OpenAPI 3.0 marks an optional null with `nullable: true`.
+    if (node.nullable === true) {
+        const rest = { ...node };
+        delete rest.nullable;
+        return convertSchema(rest, ctx).nullable();
+    }
+
+    if (node.const !== undefined && isLiteral(node.const)) return withDescription(z.literal(node.const), node);
 
     if (Array.isArray(node.enum) && node.enum.length > 0) {
         const values = node.enum.filter((v: unknown) => typeof v === 'string') as string[];
@@ -213,9 +305,11 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         if (values.length > 0 && nullCount > 0 && node.enum.filter((v: unknown) => v === null).length === nullCount) {
             return withDescription(z.enum(values as [string, ...string[]]).nullable(), node);
         }
+        // Numbers, booleans, or a mix: each value is a literal.
+        if (node.enum.every(isLiteral)) return withDescription(literalUnion(node.enum), node);
     }
     if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
-        const variants = (node.anyOf ?? node.oneOf).map((v: unknown) => jsonSchemaToZod(v, strict, permissive));
+        const variants = (node.anyOf ?? node.oneOf).map((v: unknown) => convertSchema(v, ctx));
         if (variants.length >= 2) {
             return withDescription(z.union(variants as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]), node);
         }
@@ -232,7 +326,7 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         const nonNull = types.filter((t) => t !== 'null');
         const allowsNull = nonNull.length < types.length;
         if (nonNull.length === 0) return allowsNull ? withDescription(z.null(), node) : z.any();
-        const variants = nonNull.map((t) => jsonSchemaToZod({ ...rest, type: t }, strict, permissive));
+        const variants = nonNull.map((t) => convertSchema({ ...rest, type: t }, ctx));
         // An unrecognised member degrades the whole node, as an unknown scalar `type` does.
         if (variants.some((v) => v._def?.typeName === 'ZodAny')) return z.any();
         const union = variants.length === 1
@@ -241,7 +335,10 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         return withDescription(allowsNull ? union.nullable() : union, node);
     }
 
-    switch (node.type) {
+    // A node that leaves `type` out but declares properties or items says what it is.
+    const type = node.type ?? (node.properties ? 'object' : node.items ? 'array' : undefined);
+
+    switch (type) {
         case 'null':
             return withDescription(z.null(), node);
         case 'string': {
@@ -250,25 +347,39 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
             if (typeof node.maxLength === 'number') out = out.max(node.maxLength);
             if (node.format === 'email') out = out.email();
             if (node.format === 'uri' || node.format === 'url') out = out.url();
+            if (typeof node.pattern === 'string') {
+                try {
+                    out = out.regex(new RegExp(node.pattern));
+                } catch {
+                    // A pattern JavaScript cannot compile is left to the upstream to enforce.
+                }
+            }
             return withDescription(out, node);
         }
         case 'number':
         case 'integer': {
-            let out = node.type === 'integer' ? z.number().int() : z.number();
+            let out = type === 'integer' ? z.number().int() : z.number();
             if (typeof node.minimum === 'number') out = out.min(node.minimum);
             if (typeof node.maximum === 'number') out = out.max(node.maximum);
+            if (typeof node.exclusiveMinimum === 'number') out = out.gt(node.exclusiveMinimum);
+            if (typeof node.exclusiveMaximum === 'number') out = out.lt(node.exclusiveMaximum);
+            if (typeof node.multipleOf === 'number' && node.multipleOf > 0) out = out.multipleOf(node.multipleOf);
             return withDescription(out, node);
         }
         case 'boolean':
             return withDescription(z.boolean(), node);
-        case 'array':
-            return withDescription(z.array(jsonSchemaToZod(node.items, strict, permissive)), node);
+        case 'array': {
+            let out = z.array(convertSchema(node.items, ctx));
+            if (typeof node.minItems === 'number') out = out.min(node.minItems);
+            if (typeof node.maxItems === 'number') out = out.max(node.maxItems);
+            return withDescription(out, node);
+        }
         case 'object': {
             const properties: Record<string, any> = node.properties ?? {};
             const required: string[] = Array.isArray(node.required) ? node.required : [];
             const shape: Record<string, ZodTypeAny> = {};
             for (const [key, value] of Object.entries(properties)) {
-                const child = jsonSchemaToZod(value, strict, permissive);
+                const child = convertSchema(value, ctx);
                 // `strict` promotes every declared property to required, which is
                 // what providers with strict JSON mode expect.
                 shape[key] = strict || required.includes(key) ? child : child.optional();
@@ -278,18 +389,26 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
             // `permissive` keeps keys the schema did not declare instead of
             // stripping them — for TOOL arguments, where the upstream API is
             // the judge and a property-less `body: { type: object }` would
-            // otherwise arrive empty.
+            // otherwise arrive empty. A schema for those keys checks them.
+            if (permissive && node.additionalProperties && typeof node.additionalProperties === 'object') {
+                return withDescription(object.catchall(convertSchema(node.additionalProperties, ctx)), node);
+            }
             return withDescription(permissive ? object.passthrough() : object, node);
         }
         default:
-            return z.any();
+            return withDescription(z.any(), node);
     }
 }
 
+/** The node's description, and its `default` said in words — a default is the upstream's to apply. */
 function withDescription<T extends ZodTypeAny>(schema: T, node: Record<string, any>): T {
-    return typeof node.description === 'string' && node.description.length > 0
-        ? (schema.describe(node.description) as T)
-        : schema;
+    const parts: string[] = [];
+    if (typeof node.description === 'string' && node.description.length > 0) parts.push(node.description);
+    if (node.default !== undefined) {
+        const shown = JSON.stringify(node.default);
+        if (shown !== undefined && shown.length <= 200) parts.push(`Default: ${shown}.`);
+    }
+    return parts.length > 0 ? (schema.describe(parts.join(' ')) as T) : schema;
 }
 
 /**
