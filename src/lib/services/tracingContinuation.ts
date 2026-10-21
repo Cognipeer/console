@@ -45,6 +45,19 @@ export function mergeContinuedSessionDoc(
     doc.totalReasoningTokens = (existing.totalReasoningTokens ?? 0) + (doc.totalReasoningTokens ?? 0);
     doc.truncatedEvents = (existing.truncatedEvents ?? 0) + (doc.truncatedEvents ?? 0);
     doc.totalEvents = counts.storedEvents + counts.newEvents;
+    mergeContinuedSessionIdentity(doc, existing);
+}
+
+/**
+ * The identity half of `mergeContinuedSessionDoc`: attribution tags, the agent
+ * and its model, and the start time are kept from the stored session when a
+ * later save lacks them. For a caller that recomputes the counters from every
+ * stored event (the hosted sink, which streams events as they happen).
+ */
+export function mergeContinuedSessionIdentity(
+    doc: Omit<IAgentTracingSession, '_id' | 'createdAt' | 'updatedAt'>,
+    existing: IAgentTracingSession,
+): void {
     doc.metadata = { ...(existing.metadata ?? {}), ...(doc.metadata ?? {}) };
     doc.agentModel = doc.agentModel && doc.agentModel !== 'unknown-model' ? doc.agentModel : existing.agentModel;
     doc.agent = { ...(existing.agent ?? {}), ...(doc.agent ?? {}) };
