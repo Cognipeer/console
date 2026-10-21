@@ -355,6 +355,20 @@ describe('caller attribution', () => {
     expect(rows()[0]).toMatchObject({ route: 'agent.chat', attribution: { userId: 'u1', apiTokenId: 't1' }, status: 'success' });
   });
 
+  it('stamps the caller\'s channel and run on the usage row, as known when the call settled', async () => {
+    stubModel(model());
+    stubUpstream(() => json(completion()));
+    const run = { conversationId: 'conv-1', turnId: 'turn-1' };
+    await executeModelCall({
+      ...BASE,
+      request: ASK,
+      context: { route: 'agent.chat', callerContext: { channel: 'dashboard', agentKey: 'helper', run } },
+    });
+    await flush();
+    run.turnId = 'turn-2'; // the snapshot on the row does not follow later changes
+    expect(rows()[0]).toMatchObject({ agentKey: 'helper', channel: 'dashboard', run: { conversationId: 'conv-1', turnId: 'turn-1' } });
+  });
+
   it('keeps the gateway\'s own route and no attribution key for an ordinary call', async () => {
     stubModel(model());
     stubUpstream(() => json(completion()));

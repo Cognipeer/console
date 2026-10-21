@@ -5,7 +5,7 @@
  * Uses agent-sdk for runtime execution with automatic tracing.
  */
 
-import { channelFromSource, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
+import { channelFromSource, getRoutingCaller, noteRoutingRun, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
 
 import { createLogger } from '@/lib/core/logger';
@@ -4606,6 +4606,8 @@ async function buildLocalAgentRun(input: {
     // own rules are the gateway's business, not this layer's.
     const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
     let traceSessionId: string | undefined;
+    // The run's usage rows name the trace session once it is open (its first streamed event).
+    const callerRun = getRoutingCaller()?.run;
     const approvalSubagents = new Map<string, string>();
 
     const { subagents, cleanupTasks: subagentCleanupTasks, models: subagentModels } = await buildAgentSubagents({
@@ -4649,7 +4651,7 @@ async function buildLocalAgentRun(input: {
     // The sink opens the trace session on the run's first event, so it is told what the SDK's session
     // file will say about the run: the session shows the agent, version and thread while the run is going.
     const tracingSink = await createInternalTracingSink(
-        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; }, approvalSubagents,
+        tenantDbName, tenantId, projectId, toolDefinitions, agentKey, (id) => { traceSessionId = id; if (callerRun) callerRun.traceSessionId = id; }, approvalSubagents,
         {
             ...(input.threadId ? { threadId: input.threadId } : {}),
             agent: {
@@ -5150,6 +5152,22 @@ export function routingCallerOf(request: AgentChatRequest): RoutingCallerContext
         ...(synthetic ? {} : { userId: request.userId }),
         ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
         ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+        // The run's attribution, stamped on every usage row; the turn and trace ids are noted once known.
+        run: { conversationId: request.conversationId, ...(request.runId ? { runId: request.runId } : {}) },
+    };
+}
+
+/** The resumed leg of a run: the same scope as the turn that paused (see `routingCallerOf`). */
+function resumeCallerOf(request: AgentResumeRequest): RoutingCallerContext {
+    const synthetic = !request.userId || request.userId.startsWith('system:') || request.userId === 'a2a-public';
+    const runtime = request.runtimeContext;
+    return {
+        channel: channelFromSource(runtime?.source) ?? (request.unattended ? 'api' : 'dashboard'),
+        agentKey: request.agentKey,
+        projectId: request.projectId,
+        ...(synthetic ? {} : { userId: request.userId }),
+        ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
+        run: { conversationId: request.conversationId, ...(request.runId ? { runId: request.runId } : {}) },
     };
 }
 
@@ -5293,6 +5311,7 @@ async function runAgentChatTurn(
         superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
+    noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending' && conversation.runtimeStatus === 'requires_action') {
         conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
         await endRunsOfDroppedPause(db, { tenantId, projectId, conversationId });
@@ -5955,6 +5974,7 @@ export async function executePlaygroundChatLocal(
             ...(runtime?.userId ? { userId: runtime.userId } : {}),
             ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
             ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+            run: {},
         };
         return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
     } catch (error) {
@@ -6056,6 +6076,7 @@ async function runPlaygroundChatTurn(
         })
         : undefined;
     scope.events = turnEvents;
+    if (turnEvents && sessionConversation) noteRoutingRun({ conversationId: String(sessionConversation._id), turnId: turnEvents.turnId });
     if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending'
         && sessionConversation.runtimeStatus === 'requires_action') {
         sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
@@ -6678,7 +6699,7 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
     await assertAgentsEnabled(request);
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runAgentResumeTurn(request, scope);
+        return await runWithRoutingCaller(resumeCallerOf(request), () => runAgentResumeTurn(request, scope));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -6838,6 +6859,7 @@ async function runAgentResumeTurn(
             superseded: () => request.cancellationCell?.abandoned === true,
         });
         scope.events = turnEvents;
+        noteRoutingRun({ conversationId, turnId: turnEvents.turnId });
         const onTextChunk = request.onTextChunk
             ? (text: string) => {
                 turnEvents.onText(text);

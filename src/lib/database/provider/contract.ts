@@ -86,6 +86,7 @@ import type {
   McpLogServerScope,
   IMcpServer,
   IModel,
+  IAgentTurnUsageSummary,
   IModelUsageAggregate,
   IModelUsageLog,
   IUsageDaily,
@@ -578,6 +579,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },
     projectId?: string,
   ): Promise<IModelUsageAggregate>;
+  /** The ledger of one agent turn: its model calls' tokens and cost summed from their usage rows. */
+  summarizeModelUsageForTurn(
+    conversationId: string,
+    turnId: string,
+    projectId?: string,
+  ): Promise<IAgentTurnUsageSummary>;
 
   // Cross-service daily usage rollup (tenant-specific)
   /** Additive bulk upsert — one call per rollup flush, safe under concurrency. */
