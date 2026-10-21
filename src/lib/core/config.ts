@@ -403,6 +403,13 @@ export interface AppConfig {
     runRetentionDays: number;
     /** Retention TTL for `agent_session_events` (the append-only session event log). */
     sessionEventRetentionDays: number;
+    /**
+     * Cap on one stored conversation state document (the turn snapshot plus, while a run is paused, the
+     * paused copy) AS STORED: compressed and base64. The default suits Cosmos DB for MongoDB (RU, 2 MB
+     * document limit); MongoDB and Cosmos vCore (16 MB) can go up to 15 MB. A state over the cap is
+     * trimmed, and a pause that still does not fit fails the run.
+     */
+    stateMaxBytes: number;
     /** How often a background worker writes heartbeatAt while a run is `running`. */
     runHeartbeatIntervalMs: number;
     /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
@@ -954,6 +961,7 @@ function buildConfig(source: ConfigSource): AppConfig {
       backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
       runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
       sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
+      stateMaxBytes: Math.min(Math.max(int(source, 'AGENT_STATE_MAX_BYTES', DEFAULT_AGENT_STATE_MAX_BYTES), 100_000), 15_000_000),
       ...boundedAgentRunConfig(source),
     },
 
@@ -1118,6 +1126,9 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
 
   return errors;
 }
+
+/** Default of `AGENT_STATE_MAX_BYTES` (see `agent.stateMaxBytes`). */
+export const DEFAULT_AGENT_STATE_MAX_BYTES = 1_500_000;
 
 /* ------------------------------------------------------------------ */
 /*  Singleton                                                         */

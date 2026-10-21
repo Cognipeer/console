@@ -34,7 +34,7 @@ import type {
 import { AgentPendingActionError } from './agentErrors';
 import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientTools';
 import {
-    MAX_STATE_BYTES,
+    maxStateBytes,
     decodeStoredState,
     encodeStoredState,
     serializeCarriedState,
@@ -181,12 +181,12 @@ const PAUSED_STATE_FIELDS = [
  * Serializes the state of a paused run, or null when it does not fit in
  * `maxBytes` — the caller then does not pause (see `openPause`). The paused
  * copy shares a document with the normal snapshot, so `openPause` passes what
- * is left of `MAX_STATE_BYTES` after that one.
+ * is left of the cap (`maxStateBytes`) after that one.
  */
 export function serializePausedState(
     state: AgentSdkSmartState | undefined,
     source: PauseSource,
-    maxBytes: number = MAX_STATE_BYTES,
+    maxBytes: number = maxStateBytes(),
     turn?: PausedTurnOptions,
 ): string | null {
     if (!state) return null;
@@ -347,19 +347,20 @@ export function pauseUnavailableOutcome(outcome: AgentTurnOutcome): AgentTurnOut
 export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<OpenedPause | null> {
     const entries = collectPauseEntries(input.state);
     if (entries.length === 0) return null;
-    // Both copies are stored in one document capped at MAX_STATE_BYTES. A normal
+    // Both copies are stored in one document capped at `maxStateBytes()`. A normal
     // snapshot that does not fit is deleted on save, which would drop the paused
     // copy too — so neither case may leave approval cards that cannot be resumed.
+    const cap = maxStateBytes();
     const normal = serializeCarriedState(input.state);
     const snapshot = normal === null
         ? null
-        : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length, input.turn);
+        : serializePausedState(input.state, input.source, cap - normal.length, input.turn);
     if (!snapshot) {
         logger.warn('Paused run state is too large to store; not pausing', {
             conversationId: input.conversationId,
             normalSnapshotBytes: normal?.length ?? null,
-            pausedBudgetBytes: normal === null ? 0 : MAX_STATE_BYTES - normal.length,
-            maxStateBytes: MAX_STATE_BYTES,
+            pausedBudgetBytes: normal === null ? 0 : cap - normal.length,
+            maxStateBytes: cap,
         });
         return null;
     }

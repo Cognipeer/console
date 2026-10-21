@@ -10,13 +10,15 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import { reloadConfig } from '@/lib/core/config';
 import {
     MAX_STATE_BYTES,
     decodeStoredState,
     encodeStoredState,
     loadConversationState,
+    maxStateBytes,
     saveConversationState,
     serializeCarriedState,
     serializeForStorage,
@@ -137,6 +139,36 @@ describe('stored state encoding', () => {
         const carried = await loadConversationState(store, { _id: 'conv-1', messages: new Array(2) as never });
         expect(carried?.toolHistory).toHaveLength(37);
         expect(carried?.messages?.length).toBeGreaterThan(70);
+    });
+});
+
+describe('the cap is a deployment setting', () => {
+    afterEach(() => {
+        delete process.env.AGENT_STATE_MAX_BYTES;
+        reloadConfig();
+    });
+
+    it('AGENT_STATE_MAX_BYTES raises it where the database allows (MongoDB, Cosmos vCore), within what any supported database stores', () => {
+        expect(maxStateBytes()).toBe(MAX_STATE_BYTES);
+        const large = {
+            messages: [{ role: 'user', content: 'q' }],
+            toolHistory: [{ executionId: 'e1', toolName: 't', output: 'small', rawOutput: incompressible(2_200_000) }],
+        };
+        expect(decodeStoredState(serializeForStorage(large as never)!)).not.toContain('rawOutput');
+
+        process.env.AGENT_STATE_MAX_BYTES = '4000000';
+        reloadConfig();
+        expect(maxStateBytes()).toBe(4_000_000);
+        // What the default had to trim is now stored whole.
+        expect(decodeStoredState(serializeForStorage(large as never)!)).toContain('rawOutput');
+        expect(serializePausedState(large as never, 'agent')).not.toBeNull();
+
+        process.env.AGENT_STATE_MAX_BYTES = '99999999';
+        reloadConfig();
+        expect(maxStateBytes()).toBe(15_000_000);
+        process.env.AGENT_STATE_MAX_BYTES = '1';
+        reloadConfig();
+        expect(maxStateBytes()).toBe(100_000);
     });
 });
 
