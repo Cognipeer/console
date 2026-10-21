@@ -87,7 +87,7 @@ import {
 import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
 import type { AgentPlugin as AgentSdkPlugin, BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
-import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
+import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled, resolveMcpInstructions } from '@/lib/services/mcp';
 import { consoleIdentityCallerOf, consoleIdentityOfPausedTurn, consoleIdentityPersonOf, type ConsoleIdentityCaller, type ConsoleIdentityPerson } from '@/lib/iam/consoleIdentity';
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
@@ -223,10 +223,13 @@ import {
     type EmbeddedRunContext,
 } from './agentClientTools';
 import { messageIdOf } from './messageIds';
+import { assignBoundToolNames } from './boundToolNames';
+import { mcpInstructionsPrompt } from './mcpServerInstructions';
 import {
     applyToolApprovals,
     denyUnattendedTools,
     gateChildTools,
+    isReadOnlyTool,
     resolveHitlConfig,
     resolveHitlRunMode,
     sessionAllowedTools,
@@ -1995,6 +1998,9 @@ export async function buildAgentSubagents(
             );
             childTools.push(...bound.tools);
             cleanupTasks.push(...bound.cleanupTasks);
+            if (bound.naming.length > 0) finalizeBoundToolNames(childTools, bound.naming, await sdkToolNames());
+            const mcpNote = boundMcpInstructionsPrompt(bound.mcpInstructions);
+            if (mcpNote) systemPrompt = `${systemPrompt}\n\n${mcpNote}`;
         }
 
         if (input.approvals && childTools.length > 0) {
@@ -2197,13 +2203,19 @@ export async function buildBoundTools(
     cleanupTasks: Array<() => Promise<void>>;
     tools: AgentSdkToolInterface[];
     definitions: TraceToolDefinition[];
+    /** The MCP and Tools-module tools, for `finalizeBoundToolNames` once every tool of the run is known. */
+    naming: BoundToolNaming[];
+    /** The `instructions` of the MCP servers that gave the run tools, for `boundMcpInstructionsPrompt`. */
+    mcpInstructions: BoundMcpInstructions[];
 }> {
-    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [] };
+    if (!bindings || bindings.length === 0) return { cleanupTasks: [], tools: [], definitions: [], naming: [], mcpInstructions: [] };
     const mcpIdentity = identity ?? consoleIdentityCallerOf(runtimeContext, { projectId });
 
     const tools: AgentSdkToolInterface[] = [];
     const definitions: TraceToolDefinition[] = [];
     const cleanupTasks: Array<() => Promise<void>> = [];
+    const naming: BoundToolNaming[] = [];
+    const mcpInstructions: BoundMcpInstructions[] = [];
 
     for (const binding of bindings) {
         if (binding.source === 'tool') {
@@ -2248,8 +2260,8 @@ export async function buildBoundTools(
                     status, latencyMs, args, response, error,
                     'agent', runtimeContext?.tokenId, toolRuntimeAuth, toolSecretValues,
                 );
-                const tool = createToolFn({
-                    name: action.name,
+                const make = (exposedName: string) => createToolFn({
+                    name: exposedName,
                     description,
                     // The action's real input schema, not an empty passthrough —
                     // see toolInputSchemaToZod.
@@ -2268,7 +2280,7 @@ export async function buildBoundTools(
                     func: guard.protect(
                         {
                             name: agentToolPolicyName('tool', toolRecord.key, action.key),
-                            requestedName: action.name,
+                            requestedName: exposedName,
                         },
                         async (args: Record<string, unknown>) => {
                             try {
@@ -2292,8 +2304,11 @@ export async function buildBoundTools(
                         },
                     ),
                 });
+                const definition: TraceToolDefinition = { name: action.name, description, parameters: action.inputSchema };
+                const tool = make(action.name);
                 tools.push(tool);
-                definitions.push({ name: action.name, description, parameters: action.inputSchema });
+                definitions.push(definition);
+                naming.push({ tool, definition, name: action.name, source: toolRecord.key, make });
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
@@ -2325,6 +2340,7 @@ export async function buildBoundTools(
             // either layer. `guard` is the no-op when the agent binds nothing.
             const mcpBinding = resolveMcpGuardrailBinding(server);
             const guardAtAgent = mcpBinding.mode === 'off';
+            const serverDefinitions: TraceToolDefinition[] = [];
 
             for (const toolName of binding.toolNames) {
                 const mcpToolDef = server.tools.find((t) => t.name === toolName);
@@ -2349,9 +2365,10 @@ export async function buildBoundTools(
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
                 const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
-                const tool = createToolFn({
-                    name: mcpToolDef.name,
-                    description,
+                const make = (exposedName: string) => createToolFn({
+                    name: exposedName,
+                    // A renamed tool says which server it is from: two servers' `search` read alike otherwise.
+                    description: exposedName === mcpToolDef.name ? description : `[${server.name}] ${description}`,
                     schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
                     // Wrapped in `guard` ONLY when the server has no binding of
                     // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
@@ -2359,13 +2376,21 @@ export async function buildBoundTools(
                     // and a second wrap would double-evaluate. See `guardAtAgent`.
                     func: guardAtAgent
                         ? guard.protect(
-                            { name: `${server.key}/${toolName}`, requestedName: mcpToolDef.name },
+                            { name: `${server.key}/${toolName}`, requestedName: exposedName },
                             dispatch,
                         )
                         : dispatch,
                 });
+                const definition: TraceToolDefinition = { name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema };
+                const tool = make(mcpToolDef.name);
                 tools.push(tool);
-                definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
+                definitions.push(definition);
+                naming.push({ tool, definition, name: mcpToolDef.name, source: server.key, make });
+                serverDefinitions.push(definition);
+            }
+            const instructions = resolveMcpInstructions(server);
+            if (instructions && serverDefinitions.length > 0) {
+                mcpInstructions.push({ server: server.name, text: instructions, definitions: serverDefinitions });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
             // ── System tool: Browser Use ───────────────────────
@@ -2451,7 +2476,83 @@ export async function buildBoundTools(
         }
     }
 
-    return { cleanupTasks, tools, definitions };
+    return { cleanupTasks, tools, definitions, naming, mcpInstructions };
+}
+
+/** One bound MCP server's `instructions`, with the definitions of the tools it gave the run. */
+export interface BoundMcpInstructions {
+    server: string;
+    text: string;
+    definitions: TraceToolDefinition[];
+}
+
+/**
+ * The system prompt section with the bound servers' instructions — read after
+ * `finalizeBoundToolNames`, so it names the tools as the model sees them. A
+ * server bound twice speaks once.
+ */
+export function boundMcpInstructionsPrompt(entries: readonly BoundMcpInstructions[]): string | undefined {
+    const merged = new Map<string, { server: string; text: string; toolNames: string[] }>();
+    for (const entry of entries) {
+        const key = `${entry.server}\u0000${entry.text}`;
+        const current = merged.get(key) ?? { server: entry.server, text: entry.text, toolNames: [] };
+        for (const definition of entry.definitions) {
+            if (!current.toolNames.includes(definition.name)) current.toolNames.push(definition.name);
+        }
+        merged.set(key, current);
+    }
+    return mcpInstructionsPrompt([...merged.values()]);
+}
+
+/** The names of the tools the SDK adds to a run itself (todo, delegation, ask-user…). */
+/** The names the SDK's own tools (control plane, delegation, ask-user) take. */
+async function sdkToolNames(): Promise<string[]> {
+    const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
+    return [...(CONTROL_PLANE_TOOL_NAMES as readonly string[]), ...(DELEGATION_TOOL_NAMES as readonly string[]), ASK_USER_TOOL_NAME];
+}
+
+/** A tool built from a binding, and how to build it again under another name. */
+export interface BoundToolNaming {
+    tool: AgentSdkToolInterface;
+    definition: TraceToolDefinition;
+    /** Its own name (the MCP tool, the action). */
+    name: string;
+    /** What it is bound from (the MCP server key, the Tools-module tool key). */
+    source: string;
+    make: (exposedName: string) => AgentSdkToolInterface;
+}
+
+/**
+ * Gives every bound tool the name it is offered under (see `boundToolNames.ts`),
+ * in place in `tools` and `definitions`, once every other tool of the run is
+ * known. `reserved` adds names that are not in `tools` but belong to the run
+ * (the SDK's own tools). A renamed tool keeps answering to approval settings
+ * stored under its own name — unless that name is a built-in's.
+ */
+export function finalizeBoundToolNames(
+    tools: AgentSdkToolInterface[],
+    naming: readonly BoundToolNaming[],
+    reserved: readonly string[] = [],
+): void {
+    if (naming.length === 0) return;
+    const bound = new Set(naming.map((entry) => entry.tool));
+    const taken = new Set<string>([
+        ...tools.filter((tool) => !bound.has(tool)).map((tool) => tool.name),
+        ...reserved,
+    ]);
+    // `read` and the other read-only built-ins included: their approval exemption goes by name.
+    const builtIn = (name: string) => taken.has(name) || isReadOnlyTool(name);
+    const names = assignBoundToolNames(naming, taken, builtIn);
+    naming.forEach((entry, index) => {
+        const name = names[index]!;
+        if (name === entry.name) return;
+        const position = tools.indexOf(entry.tool);
+        if (position === -1) return;
+        const renamed = entry.make(name) as AgentSdkToolInterface & { policyNames?: string[] };
+        if (!builtIn(entry.name)) renamed.policyNames = [entry.name];
+        tools[position] = renamed;
+        entry.definition.name = name;
+    });
 }
 
 /**
@@ -4184,7 +4285,13 @@ async function buildLocalAgentRun(input: {
     }
 
     // Bound tools from toolBindings (MCP, future sources)
-    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = await buildBoundTools(
+    const {
+        cleanupTasks,
+        tools: boundTools,
+        definitions: boundToolDefinitions,
+        naming: boundToolNaming,
+        mcpInstructions,
+    } = await buildBoundTools(
         tenantDbName,
         tenantId,
         projectId,
@@ -4398,6 +4505,13 @@ async function buildLocalAgentRun(input: {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${note}` : note;
     }
 
+    // Every tool Console builds is known now: a bound tool whose name is not
+    // one providers accept, is shared with another, or belongs to a built-in
+    // (the SDK's own included) is offered as `<source>__<name>`.
+    if (boundToolNaming.length > 0) finalizeBoundToolNames(tools, boundToolNaming, await sdkToolNames());
+    const mcpNote = boundMcpInstructionsPrompt(mcpInstructions);
+    if (mcpNote) systemPrompt = systemPrompt ? `${systemPrompt}\n\n${mcpNote}` : mcpNote;
+
     // Tools the CALLER runs. Two sources: the ones the agent declares itself
     // (`config.clientTools` — any channel: a portal page, an API client answering on the
     // actions endpoint, or a backend answering the agent's callback) and the ones a portal
@@ -4427,13 +4541,7 @@ async function buildLocalAgentRun(input: {
                 warnings.add('Client tools were not offered: this call has no session to pause (use a session) or nobody to answer.');
             }
         } else {
-            const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
-            const taken = new Set<string>([
-                ...tools.map((tool) => tool.name),
-                ...(CONTROL_PLANE_TOOL_NAMES as readonly string[]),
-                ...(DELEGATION_TOOL_NAMES as readonly string[]),
-                ASK_USER_TOOL_NAME,
-            ]);
+            const taken = new Set<string>([...tools.map((tool) => tool.name), ...await sdkToolNames()]);
             // The agent's own declaration wins over a portal's tool of the same name.
             const seen = new Set<string>();
             // An unattended caller that runs client tools (the chat completions bridge) cannot answer

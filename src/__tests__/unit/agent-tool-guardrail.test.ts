@@ -84,6 +84,7 @@ vi.mock('@/lib/services/mcp', () => ({
   getMcpServerByKey: hoisted.getMcpServerByKey,
   executeMcpTool: hoisted.executeMcpTool,
   isMcpToolEnabled: () => true,
+  resolveMcpInstructions: () => undefined,
 }));
 
 // The ONE reader of a server's guardrail binding, imported by path in
