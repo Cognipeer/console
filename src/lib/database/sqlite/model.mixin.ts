@@ -5,7 +5,7 @@
 import type {
   IModelReplica,
   IGuardrailBinding,
-  IModel, IModelUsageLog, IModelUsageAggregate,
+  IModel, IModelUsageLog, IModelUsageAggregate, IAgentTurnUsageSummary,
   ModelCategory, ModelProviderType,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
@@ -153,13 +153,19 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         (id, tenantId, projectId, modelKey, modelId, requestId, route, status,
          providerRequest, providerResponse, errorMessage, latencyMs,
          inputTokens, outputTokens, cachedInputTokens, totalTokens, finishReason, reasoningTokens, toolCalls, cacheHit, pricingSnapshot, routing,
-         userId, apiTokenId, actorType, createdAt)
+         userId, apiTokenId, actorType, agentKey, channel, conversationId, turnId, runId, traceSessionId, createdAt)
         VALUES (@id, @tenantId, @projectId, @modelKey, @modelId, @requestId, @route, @status,
          @providerRequest, @providerResponse, @errorMessage, @latencyMs,
          @inputTokens, @outputTokens, @cachedInputTokens, @totalTokens, @finishReason, @reasoningTokens, @toolCalls, @cacheHit, @pricingSnapshot, @routing,
-         @userId, @apiTokenId, @actorType, @createdAt)
+         @userId, @apiTokenId, @actorType, @agentKey, @channel, @conversationId, @turnId, @runId, @traceSessionId, @createdAt)
       `).run({
         id,
+        agentKey: log.agentKey ?? null,
+        channel: log.channel ?? null,
+        conversationId: log.conversationId ?? null,
+        turnId: log.turnId ?? null,
+        runId: log.runId ?? null,
+        traceSessionId: log.traceSessionId ?? null,
         tenantId: log.tenantId,
         projectId: log.projectId ?? null,
         userId: log.userId ?? null,
@@ -233,6 +239,42 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         `SELECT * FROM ${TABLES.modelUsageLogs} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC LIMIT @limit`,
       ).all({ ...params, limit }) as SqliteRow[];
       return rows.map((r) => ({ ...this.mapUsageRow(r), providerRequest: {}, providerResponse: {} }));
+    }
+
+    async summarizeModelUsageForTurn(
+      conversationId: string,
+      turnId: string,
+      projectId?: string,
+    ): Promise<IAgentTurnUsageSummary> {
+      const db = this.getTenantDb();
+      const clauses = ['conversationId = @conversationId', 'turnId = @turnId'];
+      const params: Record<string, unknown> = { conversationId, turnId };
+      if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      const row = db.prepare(`
+        SELECT
+          COUNT(*) as calls,
+          SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCalls,
+          SUM(inputTokens) as inputTokens,
+          SUM(outputTokens) as outputTokens,
+          SUM(COALESCE(cachedInputTokens, 0)) as cachedInputTokens,
+          SUM(COALESCE(reasoningTokens, 0)) as reasoningTokens,
+          SUM(totalTokens) as totalTokens,
+          SUM(COALESCE(json_extract(pricingSnapshot, '$.totalCost'), 0)) as costUsd,
+          MAX(createdAt) as lastAt
+        FROM ${TABLES.modelUsageLogs} WHERE ${clauses.join(' AND ')}
+      `).get(params) as SqliteRow;
+      const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+      return {
+        calls: num(row.calls),
+        errorCalls: num(row.errorCalls),
+        inputTokens: num(row.inputTokens),
+        outputTokens: num(row.outputTokens),
+        cachedInputTokens: num(row.cachedInputTokens),
+        reasoningTokens: num(row.reasoningTokens),
+        totalTokens: num(row.totalTokens),
+        costUsd: num(row.costUsd),
+        ...(row.lastAt ? { lastAt: new Date(row.lastAt as string) } : {}),
+      };
     }
 
     async aggregateModelUsage(
@@ -429,6 +471,12 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         userId: (r.userId as string | null) ?? undefined,
         apiTokenId: (r.apiTokenId as string | null) ?? undefined,
         actorType: (r.actorType as IModelUsageLog['actorType'] | null) ?? undefined,
+        agentKey: (r.agentKey as string | null) ?? undefined,
+        channel: (r.channel as string | null) ?? undefined,
+        conversationId: (r.conversationId as string | null) ?? undefined,
+        turnId: (r.turnId as string | null) ?? undefined,
+        runId: (r.runId as string | null) ?? undefined,
+        traceSessionId: (r.traceSessionId as string | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
       };
     }

@@ -23,6 +23,7 @@
  */
 
 import crypto from 'crypto';
+import { mergeRoutingCaller } from './routingCallerContext';
 import type { ChatCompletionChunk, ChatCompletionResponse, ProviderResponseFields, UnifiedMessage } from '@cognipeer/agent-sdk';
 import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning, withReasoningVisibility } from '@/lib/services/models/reasoning';
 import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
@@ -397,6 +398,9 @@ function usageRow(state: CallState, label: string, payload: Parameters<typeof lo
       ...state.routedByLog,
       ...(state.attribution ? { attribution: state.attribution } : {}),
       ...(callerAgentKey(state) ? { agentKey: callerAgentKey(state) } : {}),
+      ...(state.context.callerContext?.channel ? { channel: state.context.callerContext.channel } : {}),
+      // A snapshot: the run fills its attribution in as it goes, and the row says what was known when the call settled.
+      ...(state.context.callerContext?.run ? { run: { ...state.context.callerContext.run } } : {}),
     } as Parameters<typeof logModelUsage>[2]),
   );
 }
@@ -495,7 +499,10 @@ function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRe
 
 export async function executeModelCall(input: ModelCallInput): Promise<ModelCallOutcome> {
   const { tenantDbName, tenantId, modelKey, projectId, stream } = input;
-  const context = input.context ?? {};
+  // The caller context is the explicit one merged over the ambient scope an agent run opens, so the usage row of a
+  // top-level call (not only a routed child) carries the run's channel and attribution.
+  const callerContext = mergeRoutingCaller(input.context?.callerContext);
+  const context = { ...(input.context ?? {}), ...(callerContext ? { callerContext } : {}) };
   let { request } = input;
 
   if (!Array.isArray(request?.messages)) {

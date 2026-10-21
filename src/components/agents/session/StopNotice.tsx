@@ -42,7 +42,7 @@ export default function StopNotice({
     return (
         <Alert
             variant="light"
-            color={message.stopReason === 'limit' ? 'orange' : 'gray'}
+            color={message.stopReason === 'limit' ? 'orange' : message.stopReason === 'error' ? 'red' : 'gray'}
             icon={<IconHandStop size={14} />}
             mb="xs"
             p="xs"

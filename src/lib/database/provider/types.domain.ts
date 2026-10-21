@@ -3305,7 +3305,7 @@ export interface IAgentMessageAttachment {
 export interface IAgentMessageVersion {
   content: string;
   timestamp: Date;
-  stopReason?: 'limit' | 'cancelled' | 'paused';
+  stopReason?: 'limit' | 'cancelled' | 'paused' | 'error';
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
 }
 
@@ -3366,10 +3366,11 @@ export interface IAgentConversationMessage {
   latencyMs?: number;
   /**
    * Set when the run ended WITHOUT a final answer: a `limits` budget, a
-   * cancellation, or a pause no channel can resume. `content` is then the
-   * last text the agent wrote, if any. Absent on a normal answer.
+   * cancellation, a pause no channel can resume, or a pause the console could
+   * not keep (`error`). `content` is then the last text the agent wrote, if
+   * any. Absent on a normal answer.
    */
-  stopReason?: 'limit' | 'cancelled' | 'paused';
+  stopReason?: 'limit' | 'cancelled' | 'paused' | 'error';
   /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
   stopDetail?: string;
   /**

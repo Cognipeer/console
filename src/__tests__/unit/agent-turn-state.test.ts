@@ -15,6 +15,7 @@
  *  9. summarization was invisible.
  */
 
+import { randomBytes } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import { ASK_USER_TOOL_NAME, createSmartAgent, createTool, type Message, type SmartAgentEvent } from '@cognipeer/agent-sdk';
@@ -25,6 +26,7 @@ import {
     buildTurnInputState,
     compactedToolResults,
     compactionFromEvent,
+    decodeStoredState,
     describeTurnOutcome,
     loadConversationState,
     repairToolAdjacency,
@@ -346,18 +348,19 @@ describe('state persistence helpers', () => {
     });
 
     it('trims a state that is too large, cheapest loss first, and gives up rather than exceed the cap', () => {
-        const huge = 'x'.repeat(MAX_STATE_BYTES);
+        // The cap is on the STORED (compressed) form, so only text Brotli cannot shrink can hit it.
+        const huge = randomBytes(1_650_000).toString('base64');
         const fits = serializeForStorage({
             messages: [{ role: 'user', content: 'q' }] as never,
             toolHistory: [{ executionId: 'e1', toolName: 't', output: 'small', rawOutput: huge }] as never,
         });
         expect(fits).not.toBeNull();
         expect(fits!.length).toBeLessThanOrEqual(MAX_STATE_BYTES);
-        expect(fits).toContain('small');
-        expect(fits).not.toContain('rawOutput');
+        expect(decodeStoredState(fits!)).toContain('small');
+        expect(decodeStoredState(fits!)).not.toContain('rawOutput');
 
         const hopeless = serializeForStorage({
-            messages: Array.from({ length: 400 }, () => ({ role: 'user', content: 'y'.repeat(10_000) })) as never,
+            messages: Array.from({ length: 400 }, () => ({ role: 'user', content: randomBytes(7_500).toString('base64') })) as never,
         });
         expect(hopeless).toBeNull();
     });

@@ -1323,6 +1323,26 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     expect(child?.providerRequest).toEqual({});
   });
 
+  it('persists the run attribution on usage rows and sums a turn\'s ledger', async () => {
+    const db = getDb();
+    const base = {
+      tenantId, projectId: 'proj-ledger', modelKey: 'gpt-4o', route: 'agent.chat', status: 'success' as const,
+      providerRequest: {}, providerResponse: {}, agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', runId: 'run-L',
+    };
+    await db.createModelUsageLog({ ...base, requestId: 'L1', turnId: 'turn-1', traceSessionId: 'sess-L', inputTokens: 100, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 130, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.25 } });
+    await db.createModelUsageLog({ ...base, requestId: 'L2', turnId: 'turn-1', status: 'error', inputTokens: 50, outputTokens: 0, totalTokens: 50, pricingSnapshot: { currency: 'USD', inputTokenPer1M: 1, outputTokenPer1M: 2, totalCost: 0.05 } });
+    await db.createModelUsageLog({ ...base, requestId: 'L3', turnId: 'turn-2', inputTokens: 1, outputTokens: 1, totalTokens: 2 });
+
+    const stored = (await db.listModelUsageLogs('gpt-4o', {}, 'proj-ledger')).find((row) => row.requestId === 'L1');
+    expect(stored).toMatchObject({ agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-L', turnId: 'turn-1', runId: 'run-L', traceSessionId: 'sess-L' });
+
+    const turn = await db.summarizeModelUsageForTurn('conv-L', 'turn-1', 'proj-ledger');
+    expect(turn).toMatchObject({ calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 10, reasoningTokens: 5, totalTokens: 180 });
+    expect(turn.costUsd).toBeCloseTo(0.3, 6);
+    expect(turn.lastAt).toBeInstanceOf(Date);
+    expect((await db.summarizeModelUsageForTurn('conv-L', 'turn-none')).calls).toBe(0);
+  });
+
   // Regression: the SQLite provider used to omit every cost field from
   // aggregateModelUsage, so the Model Hub Spend column was permanently empty
   // on SQLite deployments (including the docker-compose quickstart) while the

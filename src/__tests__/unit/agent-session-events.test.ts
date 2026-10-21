@@ -384,6 +384,30 @@ describe('followSessionEvents (SSE replay de-dupe)', () => {
 });
 
 describe('session turn recorder', () => {
+  it('a turn that throws, or ends without a usage of its own, reports what its ledger says it spent', async () => {
+    const ledger = { calls: 2, errorCalls: 1, inputTokens: 150, outputTokens: 20, cachedInputTokens: 0, reasoningTokens: 0, totalTokens: 170, costUsd: 0.3 };
+    const db = Object.assign(fakeDb(), { summarizeModelUsageForTurn: vi.fn(async () => ledger) });
+    const { bus } = recordingBus();
+    const failed = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await failed.fail(new Error('provider down'));
+    expect(db.summarizeModelUsageForTurn).toHaveBeenCalledWith(ids.conversationId, failed.turnId, ids.projectId);
+    const error = db.rows.find((r) => r.type === 'session.error');
+    expect(error?.data).toMatchObject({ usage: { totalTokens: 170, costUsd: 0.3, calls: 2, source: 'ledger' } });
+    // The turn's id is the one the conversation's runtime fields carry.
+    expect(db.updateAgentConversationRuntime.mock.calls[0][1]).toMatchObject({ runtimeTurnId: failed.turnId });
+
+    db.rows.length = 0;
+    const cancelled = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await cancelled.finish({ stopReason: 'cancelled', content: 'partial' });
+    expect(db.rows.find((r) => r.type === 'session.status_idle')?.data).toMatchObject({ stopReason: 'cancelled', usage: { totalTokens: 170 } });
+
+    // A turn with a usage of its own does not read the ledger.
+    db.summarizeModelUsageForTurn.mockClear();
+    const done = startSessionTurnEvents({ db, ...ids, bus, trigger: 'message', userMessage: 'hi' });
+    await done.finish({ stopReason: 'end_turn', content: 'answer', usage: { totalTokens: 3 } });
+    expect(db.summarizeModelUsageForTurn).not.toHaveBeenCalled();
+  });
+
   it('writes the turn in order, holds the user message until the model call is out, and stamps the conversation', async () => {
     const db = fakeDb();
     const { bus, frames } = recordingBus();

@@ -11,6 +11,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { executeModelCall, handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { noteRoutingRun, runWithRoutingCaller } from '@/lib/services/models/routingCallerContext';
 import type { GatewayChatRequest, ModelStreamEvent } from '@/lib/services/models/gatewayTypes';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import {
@@ -353,6 +354,32 @@ describe('caller attribution', () => {
 
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({ route: 'agent.chat', attribution: { userId: 'u1', apiTokenId: 't1' }, status: 'success' });
+  });
+
+  it('stamps the caller\'s channel and run on the usage row, as known when the call settled', async () => {
+    stubModel(model());
+    stubUpstream(() => json(completion()));
+    const run = { conversationId: 'conv-1', turnId: 'turn-1' };
+    await executeModelCall({
+      ...BASE,
+      request: ASK,
+      context: { route: 'agent.chat', callerContext: { channel: 'dashboard', agentKey: 'helper', run } },
+    });
+    await flush();
+    run.turnId = 'turn-2'; // the snapshot on the row does not follow later changes
+    expect(rows()[0]).toMatchObject({ agentKey: 'helper', channel: 'dashboard', run: { conversationId: 'conv-1', turnId: 'turn-1' } });
+  });
+
+  it('stamps the AMBIENT caller (an agent run\'s scope) when the call passes no explicit callerContext', async () => {
+    stubModel(model());
+    stubUpstream(() => json(completion()));
+    const run = { conversationId: 'conv-9' };
+    await runWithRoutingCaller({ channel: 'playground', agentKey: 'helper', run }, async () => {
+      noteRoutingRun({ turnId: 'turn-9', traceSessionId: 'sess-9' });
+      await executeModelCall({ ...BASE, request: ASK, context: { route: 'agent.chat' } });
+    });
+    await flush();
+    expect(rows()[0]).toMatchObject({ agentKey: 'helper', channel: 'playground', run: { conversationId: 'conv-9', turnId: 'turn-9', traceSessionId: 'sess-9' } });
   });
 
   it('keeps the gateway\'s own route and no attribution key for an ordinary call', async () => {

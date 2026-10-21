@@ -57,8 +57,8 @@ Each event:
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
 | `session.usage` | `turn_cost_usd`, `spent_usd`, `budget` (sessions with a [budget](/guide/agent-session-budgets)) |
 | `budget.reached` | `spent_usd`, `max_cost_usd` |
-| `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?` |
-| `session.error` | `message`, `code?` |
+| `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?`, `usage?` (only when the turn ended without a usage of its own — cancelled, timed out: what its model calls cost by the usage ledger, `source: ledger`) |
+| `session.error` | `message`, `code?`, `usage?` (what the failed turn's model calls had cost, from the usage ledger; absent when it made none) |
 | `session.work_done` | none; right after an idle with `stop_reason: end_turn` |
 | `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback)) |
 
@@ -68,7 +68,7 @@ Each event:
 
 Context summarization compresses **tool results**. An agent that has no tools (no tool bindings, knowledge, sub-agents, skills, memory, sandbox or client tools) never summarizes, so no `agent.compaction` event is emitted for it. With the default `hybrid` context policy such an agent keeps only the last `lastTurnsToKeep` turns once the context grows, and older turns are dropped without a summary: facts from them are lost. Saving an agent configured this way returns a warning. Give the agent a tool, raise `lastTurnsToKeep`, or use the `raw` policy if older turns must stay.
 
-A turn is bracketed by `session.status_running` and `session.status_idle`. A new event type can appear in a future version: ignore the ones you do not know.
+A turn is bracketed by `session.status_running` and `session.status_idle`. Every model call a turn makes writes its own usage row the moment it settles (`model_usage_logs`, stamped with the agent, conversation, turn, run and trace session), so what a turn spent is known even when the turn failed or was cut off; the `usage` on `session.error` / `session.status_idle` is the sum of those rows. A new event type can appear in a future version: ignore the ones you do not know.
 
 ## Following a turn live
 
