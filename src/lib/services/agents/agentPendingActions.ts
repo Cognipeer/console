@@ -33,7 +33,14 @@ import type {
 } from '@/lib/database';
 import { AgentPendingActionError } from './agentErrors';
 import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientTools';
-import { MAX_STATE_BYTES, serializeCarriedState, toPlainMessage } from './agentTurnState';
+import {
+    MAX_STATE_BYTES,
+    decodeStoredState,
+    encodeStoredState,
+    serializeCarriedState,
+    toPlainMessage,
+    type AgentTurnOutcome,
+} from './agentTurnState';
 import type { ResolvedHitlConfig } from './agentHumanInTheLoop';
 import type { SessionEventWriter } from './sessionEvents';
 import { closePausedTrace, type PausedTraceClosure, type PausedTraceDb } from './pausedTraceClosure';
@@ -201,13 +208,14 @@ export function serializePausedState(
     stored.ctx = resumeCtx;
 
     const hasTurn = Boolean(turn && (turn.responseFormat || turn.variables || turn.variablesInPrompt === false || turn.identity));
-    const text = JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope);
+    // Stored compressed like the normal snapshot; `maxBytes` is a budget on the stored form.
+    const text = encodeStoredState(JSON.stringify({ v: 1, source, state: stored, ...(hasTurn ? { turn } : {}) } satisfies PausedEnvelope));
     return text.length <= maxBytes ? text : null;
 }
 
 export function parsePausedState(text: string): { source: PauseSource; state: AgentSdkSmartState; turn?: PausedTurnOptions } | null {
     try {
-        const parsed = JSON.parse(text) as PausedEnvelope;
+        const parsed = JSON.parse(decodeStoredState(text)) as PausedEnvelope;
         if (!parsed || parsed.v !== 1 || typeof parsed.state !== 'object' || !parsed.state) return null;
         return {
             source: parsed.source === 'agent-playground' ? 'agent-playground' : 'agent',
@@ -320,6 +328,16 @@ export const PAUSE_UNAVAILABLE_WARNING =
     'The run stopped for a human but its state is too large to keep, so it cannot be continued.';
 
 /**
+ * The outcome of a turn whose pause could not be opened: the run is over, not
+ * "waiting" and not a quiet end of turn — the message, the session and the API
+ * response all say it failed, and why. A paused run with no action to answer
+ * used to end as `end_turn` with the reason buried in a warning line.
+ */
+export function pauseUnavailableOutcome(outcome: AgentTurnOutcome): AgentTurnOutcome & { stopReason: 'error'; stopDetail: string } {
+    return { ...outcome, stopReason: 'error', stopDetail: PAUSE_UNAVAILABLE_WARNING, partial: true };
+}
+
+/**
  * Creates one `agent_pending_actions` row per pending SDK approval / question
  * and returns them with the paused state to store. Null — nothing is created —
  * when the run cannot be continued: the state does not fit, or the SDK stopped
@@ -337,7 +355,12 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         ? null
         : serializePausedState(input.state, input.source, MAX_STATE_BYTES - normal.length, input.turn);
     if (!snapshot) {
-        logger.warn('Paused run state is too large to store; not pausing', { conversationId: input.conversationId });
+        logger.warn('Paused run state is too large to store; not pausing', {
+            conversationId: input.conversationId,
+            normalSnapshotBytes: normal?.length ?? null,
+            pausedBudgetBytes: normal === null ? 0 : MAX_STATE_BYTES - normal.length,
+            maxStateBytes: MAX_STATE_BYTES,
+        });
         return null;
     }
     const now = new Date();

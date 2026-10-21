@@ -247,6 +247,7 @@ import { mergeContinuedSessionDoc, readTraceContinuationMarker } from '@/lib/ser
 import {
     AgentResumeError,
     PAUSE_UNAVAILABLE_WARNING,
+    pauseUnavailableOutcome,
     actionRequiredEventData,
     assertNoBlockingPending,
     cancelPendingForNewMessage,
@@ -2535,6 +2536,37 @@ export async function reconcileTraceTotals(
 }
 
 /**
+ * Marks a trace session failed for a reason the SDK could not know: it closed
+ * the session as `paused`, but the console could not keep what the pause needs
+ * (the state was too large to store), so the run is over. Without this the
+ * session stays `paused` forever in the tracing views. Best-effort.
+ */
+export async function markTraceSessionFailed(
+    tenantDbName: string,
+    projectId: string,
+    sessionId: string | undefined,
+    detail: string,
+): Promise<void> {
+    if (!sessionId) return;
+    try {
+        const db = await getDatabase();
+        await db.switchToTenant(tenantDbName);
+        const session = await db.findAgentTracingSessionById(sessionId, projectId);
+        if (!session) return;
+        await db.updateAgentTracingSession(sessionId, {
+            status: 'error',
+            statusExplicit: true,
+            errors: [
+                ...(session.errors ?? []),
+                { eventId: 'console', type: 'session', message: detail, timestamp: new Date().toISOString() },
+            ],
+        }, projectId);
+    } catch (error) {
+        logger.warn('Could not mark the trace session failed', { sessionId, error: String(error) });
+    }
+}
+
+/**
  * Creates a customSink that saves trace sessions directly to the database,
  * bypassing the HTTP tracing endpoint and its API-token authentication.
  * This is used for internal agent executions (dashboard playground & client API chat).
@@ -3744,6 +3776,8 @@ export interface AgentChatResponse {
     status: 'completed' | 'failed' | 'incomplete' | 'requires_action';
     /** OpenAI Responses convention: why the response is `incomplete`. */
     incomplete_details?: { reason: string } | null;
+    /** OpenAI Responses convention: present when `status` is `failed` — the run is over and cannot be continued. */
+    error?: { code: string; message: string } | null;
     /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
     stop_reason?: AgentStopReason | 'requires_action' | 'budget_reached';
     /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
@@ -4598,6 +4632,8 @@ async function buildLocalAgentRun(input: {
             }
         },
         reconcileTrace: (usage: Parameters<typeof reconcileTraceTotals>[3]) => reconcileTraceTotals(tenantDbName, projectId, traceSessionId, usage),
+        /** The SDK closed the trace as `paused`, but the console cannot continue the run: the trace says it failed, and why. */
+        failTrace: (detail: string) => markTraceSessionFailed(tenantDbName, projectId, traceSessionId, detail),
     };
 }
 
@@ -4890,7 +4926,9 @@ function sessionStopReason(
     settlement?: SessionBudgetSettlement,
 ): SessionStopReason {
     if (settlement?.reached) return 'budget_reached';
-    if (outcome === 'paused') return pause ? 'requires_action' : 'end_turn';
+    // A pause that could not be opened is reported as `error` by the outcome itself
+    // (`pauseUnavailableOutcome`); this fallback only guards a caller that did not.
+    if (outcome === 'paused') return pause ? 'requires_action' : 'error';
     return toSessionStopReason(outcome);
 }
 
@@ -4958,7 +4996,7 @@ function toAgentChatResponse(input: {
                 : []),
             { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content, ...(outputFiles.length > 0 ? { annotations: toFileAnnotations(outputFiles) } : {}) }] },
         ],
-        status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
+        status: requiresAction ? 'requires_action' : stopped ? (stopped.stopReason === 'error' ? 'failed' : 'incomplete') : 'completed',
         ...(requiresAction
             ? {
                 stop_reason: 'requires_action' as const,
@@ -4966,7 +5004,10 @@ function toAgentChatResponse(input: {
             }
             : stopped
             ? {
-                incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) },
+                // OpenAI Responses convention: a `failed` response carries `error`, an `incomplete` one `incomplete_details`.
+                ...(stopped.stopReason === 'error'
+                    ? { error: { code: 'run_failed', message: stopped.stopDetail ?? 'The run failed.' } }
+                    : { incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) } }),
                 stop_reason: stopped.stopReason,
                 ...(stopped.stopDetail ? { stop_detail: stopped.stopDetail } : {}),
             }
@@ -5233,7 +5274,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5395,7 +5436,7 @@ async function runAgentChatTurn(
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
-        const outcome = budgetAwareOutcome(turnOutcome, budget);
+        let outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
         const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
         const compactedTools = compactions.length > 0
@@ -5433,7 +5474,12 @@ async function runAgentChatTurn(
                 turn: pausedTurnOptions(request, identity),
                 createdBy: request.userId,
             });
-            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+            if (!pause) {
+                // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                warnings.add(PAUSE_UNAVAILABLE_WARNING);
+                outcome = pauseUnavailableOutcome(outcome);
+                await failTrace(PAUSE_UNAVAILABLE_WARNING);
+            }
         }
 
         // 6. Update conversation with new messages — the REWRITTEN user turn,
@@ -5983,7 +6029,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6191,7 +6237,15 @@ async function runPlaygroundChatTurn(
                     createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
                 });
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
-                else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+                else {
+                    // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                    playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+                    const failed = pauseUnavailableOutcome(outcome);
+                    outcome = failed;
+                    playgroundResult.stopReason = failed.stopReason;
+                    playgroundResult.stopDetail = failed.stopDetail;
+                    await failTrace(PAUSE_UNAVAILABLE_WARNING);
+                }
             }
             // The operator's playground view always gets the thinking text; what is STORED on the
             // session (and read back through the session API) follows the agent's setting.
@@ -6645,7 +6699,7 @@ async function runAgentResumeTurn(
         })
         : undefined;
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel, collectOutputs, reconcileTrace, failTrace, noteSdkEvent, identity } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -6851,7 +6905,7 @@ async function runAgentResumeTurn(
         const budget = budgetPlan
             ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
-        const outcome = budgetAwareOutcome(turnOutcome, budget);
+        let outcome = budgetAwareOutcome(turnOutcome, budget);
 
         const superseded = isCancellationCellTripped(request.cancellationCell);
         let pause: OpenedPause | null = null;
@@ -6873,7 +6927,12 @@ async function runAgentResumeTurn(
                 ...(Object.keys(repauseTurn).length > 0 ? { turn: repauseTurn } : {}),
                 createdBy: firstAction?.createdBy ?? request.userId,
             });
-            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+            if (!pause) {
+                // The run cannot be continued: it failed, and says so — not a quiet end of turn.
+                warnings.add(PAUSE_UNAVAILABLE_WARNING);
+                outcome = pauseUnavailableOutcome(outcome);
+                await failTrace(PAUSE_UNAVAILABLE_WARNING);
+            }
         }
 
         // Files the agent left in /outputs/ while the run continued (never fails the turn).
