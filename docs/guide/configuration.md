@@ -334,6 +334,7 @@ Every agent call is a run. A synchronous call waits up to `AGENT_SYNC_TIMEOUT_MS
 | `AGENT_RUN_RETENTION_DAYS` | How long run records (`userMessage`, result) are kept, counted from when the run finished (a scheduled or deferred run is also kept until it was due) | `30` |
 | `AGENT_RUN_HEARTBEAT_INTERVAL_MS` | How often a worker stamps the heartbeat of a running run (minimum `1000`) | `15000` |
 | `AGENT_RUN_HEARTBEAT_STALE_MS` | A running run whose heartbeat is older than this is failed as `worker_lost` (at least three heartbeat intervals) | `45000` |
+| `AGENT_STATE_MAX_BYTES` | Cap on one stored conversation state document (the turn snapshot plus, while a run waits for an approval or an answer, the paused copy), as stored: compressed and base64 (`100000`..`15000000`). The default suits Cosmos DB for MongoDB RU (2 MB document limit); MongoDB and Cosmos vCore (16 MB) can go up to 15 MB. A state over the cap is trimmed (tool outputs first); a pause that still does not fit fails the run with the reason | `1500000` |
 | `AGENT_RUN_REQUEUE_AFTER_MS` | A queued run that no worker picked up after this long is republished (minimum `10000`); the republish uses a job id of its own for each window, so a job that failed before it claimed its run is tried again | `120000` |
 
 `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT` and `AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT` are replaced by `AGENT_RUN_MAX_ACTIVE_PER_TENANT` and `AGENT_RUN_MAX_ACTIVE_PER_PROJECT`; the new caps also count synchronous calls.

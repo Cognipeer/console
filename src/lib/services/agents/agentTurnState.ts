@@ -36,6 +36,7 @@ import type {
     SummarizationEvent as AgentSdkSummarizationEvent,
 } from '@cognipeer/agent-sdk';
 
+import { DEFAULT_AGENT_STATE_MAX_BYTES, getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import type {
     DatabaseProvider,
@@ -59,11 +60,18 @@ const logger = createLogger('agent-turn-state');
 // ── Persistence ─────────────────────────────────────────────────────────────
 
 /**
- * Upper bound for a stored state AS STORED (see `encodeStoredState`). Cosmos DB
- * (Mongo API) caps a document at 2 MB; staying well under it leaves room for
- * the envelope and for UTF-8 multi-byte text measured as characters.
+ * Default upper bound for a stored state AS STORED (see `encodeStoredState`).
+ * Cosmos DB for MongoDB (RU) caps a document at 2 MB; staying well under it
+ * leaves room for the envelope and for UTF-8 multi-byte text measured as
+ * characters. `AGENT_STATE_MAX_BYTES` raises it where the database allows
+ * (MongoDB, Cosmos vCore: 16 MB) — see `maxStateBytes`.
  */
-export const MAX_STATE_BYTES = 1_500_000;
+export const MAX_STATE_BYTES = DEFAULT_AGENT_STATE_MAX_BYTES;
+
+/** The cap in force for this deployment (`AGENT_STATE_MAX_BYTES`, `MAX_STATE_BYTES` unless set). */
+export function maxStateBytes(): number {
+    return getConfig().agent.stateMaxBytes;
+}
 
 /** Tool payloads above this are cut when a state has to shrink to fit. */
 const TRIMMED_TOOL_TEXT_CHARS = 8_000;
@@ -283,7 +291,7 @@ function dropDuplicateRawOutput(carried: CarriedState): CarriedState {
 
 /**
  * The stored form of a state (see `encodeStoredState`), shrunk to fit
- * `MAX_STATE_BYTES` when it must, cheapest loss first:
+ * the cap (`maxStateBytes`) when it must, cheapest loss first:
  *  0. a `rawOutput` that only repeats `output` (lossless, always);
  *  1. the remaining `rawOutput` copies (the model worked from `output`);
  *  2. long tool outputs in the tool history;
@@ -296,9 +304,10 @@ function dropDuplicateRawOutput(carried: CarriedState): CarriedState {
  * characters each and cannot be what makes a state too large.
  */
 export function serializeForStorage(carried: CarriedState): string | null {
+    const cap = maxStateBytes();
     const deduped = dropDuplicateRawOutput(carried);
     let stored = encodeStoredState(JSON.stringify(deduped));
-    if (stored.length <= MAX_STATE_BYTES) return stored;
+    if (stored.length <= cap) return stored;
 
     const shrunk: CarriedState = { ...deduped };
     const eachToolEntry = (fn: (entry: Record<string, unknown>) => Record<string, unknown>) => {
@@ -316,17 +325,17 @@ export function serializeForStorage(carried: CarriedState): string | null {
         return entry;
     });
     stored = encodeStoredState(JSON.stringify(shrunk));
-    if (stored.length <= MAX_STATE_BYTES) return stored;
+    if (stored.length <= cap) return stored;
 
     eachToolEntry((entry) => ({ ...entry, output: truncateText(entry.output, TRIMMED_TOOL_TEXT_CHARS) }));
     stored = encodeStoredState(JSON.stringify(shrunk));
-    if (stored.length <= MAX_STATE_BYTES) return stored;
+    if (stored.length <= cap) return stored;
 
     shrunk.messages = (shrunk.messages ?? []).map((message) => message.role === 'tool'
         ? { ...message, content: truncateText(message.content, TRIMMED_TOOL_TEXT_CHARS) as string }
         : message);
     stored = encodeStoredState(JSON.stringify(shrunk));
-    return stored.length <= MAX_STATE_BYTES ? stored : null;
+    return stored.length <= cap ? stored : null;
 }
 
 type StateStore = Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState' | 'deleteAgentConversationState'>;
