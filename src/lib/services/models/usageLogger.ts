@@ -2,9 +2,11 @@ import {
   getDatabase,
   IModel,
   IModelPricing,
+  IModelUsageLog,
   IModelUsageRouting,
   ModelUsageStatus,
 } from '@/lib/database';
+import type { RoutingRunAttribution } from './routingCallerContext';
 import {
   recordUsageEvent,
   type UsageAttribution,
@@ -134,8 +136,12 @@ export async function logModelUsage(
     routingBaselinePricing?: IModelPricing;
     /** Explicit attribution for call sites outside the request ALS scope. */
     attribution?: Partial<UsageAttribution>;
-    /** Agent the call runs for; the usage rollup's `agent` dimension. */
+    /** Agent the call runs for; the usage rollup's `agent` dimension, and a column of the row. */
     agentKey?: string;
+    /** The door the call came through (`RoutingCallerContext.channel`); a column of the row. */
+    channel?: string;
+    /** The agent run the call belongs to, as known when it settled; columns of the row (the per-turn ledger). */
+    run?: RoutingRunAttribution;
     /** Raw provider finish reason for this call (e.g. `stop`, `length`,
      *  `tool_calls`) — a property of the call, not of token usage. Normalized
      *  via `normalizeFinishReason` before persisting. */
@@ -264,5 +270,19 @@ export async function logModelUsage(
     pricingSnapshot,
     routing,
     finishReason: normalizeFinishReason(payload.finishReason),
+    ...(payload.agentKey ? { agentKey: payload.agentKey } : {}),
+    ...(payload.channel ? { channel: payload.channel } : {}),
+    ...runColumns(payload.run),
   });
+}
+
+/** The run attribution's string fields, as row columns. */
+function runColumns(run: RoutingRunAttribution | undefined): Pick<IModelUsageLog, 'conversationId' | 'turnId' | 'runId' | 'traceSessionId'> {
+  const columns: Pick<IModelUsageLog, 'conversationId' | 'turnId' | 'runId' | 'traceSessionId'> = {};
+  if (!run) return columns;
+  for (const key of ['conversationId', 'turnId', 'runId', 'traceSessionId'] as const) {
+    const value = run[key];
+    if (typeof value === 'string' && value) columns[key] = value;
+  }
+  return columns;
 }

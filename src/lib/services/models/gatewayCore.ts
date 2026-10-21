@@ -397,6 +397,9 @@ function usageRow(state: CallState, label: string, payload: Parameters<typeof lo
       ...state.routedByLog,
       ...(state.attribution ? { attribution: state.attribution } : {}),
       ...(callerAgentKey(state) ? { agentKey: callerAgentKey(state) } : {}),
+      ...(state.context.callerContext?.channel ? { channel: state.context.callerContext.channel } : {}),
+      // A snapshot: the run fills its attribution in as it goes, and the row says what was known when the call settled.
+      ...(state.context.callerContext?.run ? { run: { ...state.context.callerContext.run } } : {}),
     } as Parameters<typeof logModelUsage>[2]),
   );
 }

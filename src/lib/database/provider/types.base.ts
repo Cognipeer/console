@@ -1176,7 +1176,36 @@ export interface IModelUsageLog extends IUsageAttributionFields {
   pricingSnapshot?: IModelPricing & IModelUsageCostSnapshot;
   /** Present on Dynamic LLM router rows (route 'chat.completions.router'). */
   routing?: IModelUsageRouting;
+  /** The agent the call ran for, and the door it came through (`RoutingCallerContext`). */
+  agentKey?: string;
+  channel?: string;
+  /**
+   * The agent run the call belongs to (`RoutingRunAttribution`), as known when the
+   * call settled: the ledger of a turn is the sum of its rows, whatever became of
+   * the run.
+   */
+  conversationId?: string;
+  turnId?: string;
+  runId?: string;
+  traceSessionId?: string;
   createdAt?: Date;
+}
+
+/**
+ * What the model calls of one agent turn have cost so far, summed from
+ * `model_usage_logs` — the ledger each call writes when it settles, so it is
+ * complete for a turn that failed, was cut off, or is still running.
+ */
+export interface IAgentTurnUsageSummary {
+  calls: number;
+  errorCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  lastAt?: Date;
 }
 
 /**

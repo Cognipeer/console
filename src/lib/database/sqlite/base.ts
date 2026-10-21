@@ -1025,6 +1025,13 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.incidents, 'reopenCount', 'reopenCount INTEGER');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'finishReason', 'finishReason TEXT');
     this.ensureTableColumn(db, TABLES.modelUsageLogs, 'reasoningTokens', 'reasoningTokens INTEGER DEFAULT 0');
+    // Agent run attribution on usage rows (the per-turn ledger).
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'agentKey', 'agentKey TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'channel', 'channel TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'conversationId', 'conversationId TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'turnId', 'turnId TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'runId', 'runId TEXT');
+    this.ensureTableColumn(db, TABLES.modelUsageLogs, 'traceSessionId', 'traceSessionId TEXT');
     this.ensureTableColumn(db, TABLES.usageDaily, 'reasoningTokens', 'reasoningTokens INTEGER NOT NULL DEFAULT 0');
 
     // external_model_pricing.versions (effective-dated price history) was
@@ -1281,6 +1288,13 @@ export class SQLiteProviderBase {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_model_usage_router
         ON ${TABLES.modelUsageLogs}(json_extract(routing, '$.routerKey'), createdAt DESC);
+    `);
+
+    // Agent run ledger: the model calls of one turn. Same ordering constraint —
+    // `conversationId` / `turnId` reach legacy DBs via ensureTableColumn.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_model_usage_turn
+        ON ${TABLES.modelUsageLogs}(conversationId, turnId, createdAt DESC);
     `);
 
     // mcp_request_logs.serverId index — must be created here (after

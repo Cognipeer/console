@@ -164,6 +164,31 @@ describe('logModelUsage', () => {
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   });
 
+  it('stamps the agent run on the row: agent, channel, conversation, turn, run and trace session', async () => {
+    await logModelUsage('tenant_acme', MOCK_MODEL, {
+      requestId: 'req-run',
+      route: 'agent.chat',
+      status: 'success',
+      providerRequest: {},
+      providerResponse: {},
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+      agentKey: 'helper',
+      channel: 'dashboard',
+      run: { conversationId: 'conv-1', turnId: 'turn-1', runId: 'run-1', traceSessionId: 'sess-1' },
+    });
+    expect(db.createModelUsageLog.mock.calls[0][0]).toMatchObject({
+      agentKey: 'helper', channel: 'dashboard', conversationId: 'conv-1', turnId: 'turn-1', runId: 'run-1', traceSessionId: 'sess-1',
+    });
+    // A run that has not learned its turn yet stamps what it knows; nothing is written as undefined.
+    await logModelUsage('tenant_acme', MOCK_MODEL, {
+      requestId: 'req-early', route: 'agent.chat', status: 'success', providerRequest: {}, providerResponse: {},
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, run: { conversationId: 'conv-1' },
+    });
+    const early = db.createModelUsageLog.mock.calls[1][0];
+    expect(early.conversationId).toBe('conv-1');
+    expect('turnId' in early).toBe(false);
+  });
+
   it('creates a model usage log with correct fields', async () => {
     await logModelUsage('tenant_acme', MOCK_MODEL, {
       requestId: 'req-001',

@@ -188,6 +188,7 @@ export type {
   IModelUsageLog,
   ModelUsageStatus,
   IModelUsageAggregate,
+  IAgentTurnUsageSummary,
   IUsageAttributionFields,
   UsageActorType,
   UsageSource,

@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
-import type { DatabaseProvider, IAgentTurnCompaction } from '@/lib/database';
+import type { DatabaseProvider, IAgentTurnCompaction, IAgentTurnUsageSummary } from '@/lib/database';
 import { classifyAgentRunError } from './agentErrors';
 import { delegatedSubagentName } from './subagentEvents';
 import { sessionUsageEventData, type SessionBudgetSettlement } from './sessionBudget';
@@ -28,6 +28,8 @@ type TurnDb = Pick<
   DatabaseProvider,
   'appendAgentSessionEvents' | 'getAgentSessionMaxSeq' | 'updateAgentConversationRuntime'
 > & {
+  /** The ledger of this turn's model calls (what they cost so far), for a turn that ends without a usage of its own. */
+  summarizeModelUsageForTurn?: DatabaseProvider['summarizeModelUsageForTurn'];
   /** Present on a resuming leg's database: the earlier legs' tool events, to avoid writing them twice. */
   listAgentSessionEvents?: (
     conversationId: string,
@@ -89,6 +91,8 @@ export interface SessionTurnFinish {
 
 export interface SessionTurnEvents {
   readonly writer: SessionEventWriter;
+  /** Names this turn: the conversation's `runtimeTurnId` and the `turnId` on the usage rows of its model calls. */
+  readonly turnId: string;
   /** Maps the SDK's tool-call events onto `agent.tool_use` / `agent.tool_result`. */
   onSdkEvent(event: AgentSdkEvent): void;
   onCompaction(compaction: IAgentTurnCompaction): void;
@@ -257,8 +261,35 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     }
   };
 
+  /**
+   * What this turn's model calls have cost so far, from their usage rows — the
+   * ledger a turn that threw or was cut off still has. Nothing when the turn made
+   * no call, or the store cannot say.
+   */
+  const ledgerUsage = async (): Promise<Record<string, unknown> | undefined> => {
+    if (!db.summarizeModelUsageForTurn) return undefined;
+    try {
+      const spent: IAgentTurnUsageSummary = await db.summarizeModelUsageForTurn(conversationId, turnToken, options.projectId);
+      if (spent.calls === 0) return undefined;
+      return {
+        inputTokens: spent.inputTokens,
+        outputTokens: spent.outputTokens,
+        cachedInputTokens: spent.cachedInputTokens,
+        reasoningTokens: spent.reasoningTokens,
+        totalTokens: spent.totalTokens,
+        costUsd: spent.costUsd,
+        calls: spent.calls,
+        source: 'ledger',
+      };
+    } catch (error) {
+      logger.warn('Could not read the usage ledger of the turn', { conversationId, error: String(error) });
+      return undefined;
+    }
+  };
+
   return {
     writer,
+    turnId: turnToken,
     emit: (type, data) => guarded('emit', () => writer.emit(type, data)),
     emitInTurn: (type, data) => guarded('emit', () => {
       if (isSuperseded()) return;
@@ -334,6 +365,8 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     async finish(result) {
       if (finished) return;
       finished = true;
+      // A turn the runtime could not account for (cancelled, timed out) still spent what its ledger says.
+      const spent = result.usage ? undefined : await ledgerUsage();
       try {
         await settle(result.stopReason, () => {
           ensureStarted(result.userMessage);
@@ -357,6 +390,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
           }
           writer.emit('session.status_idle', {
             stopReason: result.stopReason,
+            ...(spent ? { usage: spent } : {}),
             ...(result.pendingActionIds?.length ? { pendingActionIds: result.pendingActionIds } : {}),
             ...(result.detail ? { detail: result.detail } : {}),
           });
@@ -370,6 +404,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     async fail(error) {
       if (finished) return;
       finished = true;
+      const spent = await ledgerUsage();
       try {
         await settle('error', () => {
           ensureStarted();
@@ -379,7 +414,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
           const classified = classifyAgentRunError(error, { exposeInternal: false });
           const message = blocked ? (error as Error).message : classified.error.message;
           const code = blocked ? 'guardrail_block' : classified.error.code;
-          writer.emit('session.error', { message, ...(code ? { code } : {}) });
+          writer.emit('session.error', { message, ...(code ? { code } : {}), ...(spent ? { usage: spent } : {}) });
           writer.emit('session.status_idle', { stopReason: 'error', detail: message });
         });
       } catch (settleError) {

@@ -9,6 +9,7 @@ import type {
   IModel,
   IModelUsageLog,
   IModelUsageAggregate,
+  IAgentTurnUsageSummary,
   IModelUsageCostSnapshot,
   ModelCategory,
   ModelProviderType,
@@ -305,6 +306,48 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     }
 
     // ── Usage aggregation ────────────────────────────────────────────
+
+    async summarizeModelUsageForTurn(
+      conversationId: string,
+      turnId: string,
+      projectId?: string,
+    ): Promise<IAgentTurnUsageSummary> {
+      const db = this.getTenantDb();
+      const match: Record<string, unknown> = { conversationId, turnId };
+      if (projectId) match.projectId = projectId;
+      const [row] = await db
+        .collection(COLLECTIONS.modelUsageLogs)
+        .aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              calls: { $sum: 1 },
+              errorCalls: { $sum: { $cond: [{ $eq: ['$status', 'error'] }, 1, 0] } },
+              inputTokens: { $sum: { $ifNull: ['$inputTokens', 0] } },
+              outputTokens: { $sum: { $ifNull: ['$outputTokens', 0] } },
+              cachedInputTokens: { $sum: { $ifNull: ['$cachedInputTokens', 0] } },
+              reasoningTokens: { $sum: { $ifNull: ['$reasoningTokens', 0] } },
+              totalTokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+              costUsd: { $sum: { $ifNull: ['$pricingSnapshot.totalCost', 0] } },
+              lastAt: { $max: '$createdAt' },
+            },
+          },
+        ])
+        .toArray();
+      const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+      return {
+        calls: num(row?.calls),
+        errorCalls: num(row?.errorCalls),
+        inputTokens: num(row?.inputTokens),
+        outputTokens: num(row?.outputTokens),
+        cachedInputTokens: num(row?.cachedInputTokens),
+        reasoningTokens: num(row?.reasoningTokens),
+        totalTokens: num(row?.totalTokens),
+        costUsd: num(row?.costUsd),
+        ...(row?.lastAt instanceof Date ? { lastAt: row.lastAt } : {}),
+      };
+    }
 
     async aggregateModelUsage(
       modelKey: string,
