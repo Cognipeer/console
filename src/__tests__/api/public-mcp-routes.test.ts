@@ -545,6 +545,42 @@ describe('public MCP routes', () => {
       expect(vi.mocked(logMcpRequest).mock.calls[0][3]?.payloadLimitBytes).toBe(4096);
     });
 
+    describe('the host\'s _meta', () => {
+      const META = { 'openai/subject': 'v1/abc123', 'openai/userLocation': { city: 'Istanbul' } };
+      const callWithMeta = (name = 'echo') => rpc('tools/call', { name, arguments: {}, _meta: META });
+
+      it('is handed to the log write raw, next to where the call came from', async () => {
+        await start();
+        await post(callWithMeta(), { remoteAddress: '198.51.100.20' });
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toEqual(META);
+        expect(options?.client?.ip).toBe('198.51.100.20');
+      });
+
+      it('is carried by the log of a failed call too', async () => {
+        await start();
+        vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));
+        await post(callWithMeta());
+        const [, entry, , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(entry.status).toBe('error');
+        expect(options?.client?.meta).toEqual(META);
+      });
+
+      it('is carried by the streamable-HTTP POST on the /sse URL', async () => {
+        await start();
+        await post(callWithMeta(), { url: `${BASE}/sse` });
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toEqual(META);
+      });
+
+      it('is absent when the call carries none', async () => {
+        await start();
+        await post(callTool());
+        const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+        expect(options?.client?.meta).toBeUndefined();
+      });
+    });
+
     it('applies the same bound to the log of a failed call', async () => {
       await start();
       vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));

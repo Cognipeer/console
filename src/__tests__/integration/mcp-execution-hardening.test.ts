@@ -211,6 +211,8 @@ const MCP_ENV_NAMES = [
   'MCP_LAST_ERROR_THROTTLE_MS',
   'MCP_LOG_TOOL_NAME_MAX_CHARS',
   'MCP_LOG_USER_AGENT_MAX_CHARS',
+  'MCP_LOG_CLIENT_META',
+  'MCP_LOG_CLIENT_META_MAX_BYTES',
 ];
 
 /** Set one of the MCP limits for the current test (the typed config is cached). */
@@ -1019,6 +1021,93 @@ describe('logMcpRequest — what the caller chose is bounded', () => {
   it('adds nothing when no caller info is given', async () => {
     await write(entry());
     expect((await latestLog()).requestPayload).not.toHaveProperty('_client');
+  });
+
+  describe('the host\'s _meta', () => {
+    const HOST_META = {
+      progressToken: 'p-1',
+      'openai/subject': 'v1/abc123',
+      'openai/locale': 'en-US',
+      'openai/userLocation': { city: 'Istanbul', latitude: 41.0082, longitude: 28.9784 },
+      note: `a\r\nb ${'n'.repeat(1_000)}`,
+    };
+
+    async function storedClient() {
+      return ((await latestLog()).requestPayload as { _client?: Record<string, unknown> })._client;
+    }
+
+    it('is stored sanitized as _client.meta, next to who called', async () => {
+      await write(entry(), undefined, { client: { ip: '203.0.113.9', meta: HOST_META } });
+      const client = (await storedClient())!;
+      expect(client.ip).toBe('203.0.113.9');
+      const meta = client.meta as Record<string, unknown>;
+      expect(meta).not.toHaveProperty('progressToken');
+      expect(meta['openai/subject']).toBe('v1/abc123');
+      expect(meta['openai/userLocation']).toEqual({
+        city: 'Istanbul',
+        latitude: '[redacted]',
+        longitude: '[redacted]',
+      });
+      expect(meta.note as string).not.toMatch(/[\r\n]/);
+      expect((meta.note as string).length).toBeLessThanOrEqual(256);
+    });
+
+    it('is stored on its own when there is no address or user agent', async () => {
+      await write(entry(), undefined, { client: { meta: { 'openai/session': 's-1' } } });
+      expect(await storedClient()).toEqual({ meta: { 'openai/session': 's-1' } });
+    });
+
+    it('goes through the same scrub as the payload: sensitive keys and echoed secrets are masked', async () => {
+      await write(entry(), ['sk-live-0123456789abcdef'], {
+        client: { meta: { token: 'plain', ref: 'echo sk-live-0123456789abcdef', ok: 'kept' } },
+      });
+      const meta = (await storedClient())!.meta as Record<string, string>;
+      expect(meta.token).not.toBe('plain');
+      expect(meta.ref).not.toContain('sk-live-0123456789abcdef');
+      expect(meta.ok).toBe('kept');
+    });
+
+    it('is omitted when it is not an object, or empty once cleaned', async () => {
+      for (const meta of ['text', 5, [1], { progressToken: 'p-1' }]) {
+        await write(entry(), undefined, { client: { meta } });
+        expect((await latestLog()).requestPayload, JSON.stringify(meta)).not.toHaveProperty('_client');
+      }
+    });
+
+    it('honours MCP_LOG_CLIENT_META_MAX_BYTES', async () => {
+      setMcpEnv('MCP_LOG_CLIENT_META_MAX_BYTES', '300');
+      const meta = Object.fromEntries(Array.from({ length: 20 }, (_v, i) => [`k${i}`, 'v'.repeat(60)]));
+      await write(entry(), undefined, { client: { meta } });
+      const stored = (await storedClient())!.meta as Record<string, unknown>;
+      expect(stored._truncated).toBe(true);
+      expect(JSON.stringify(stored).length).toBeLessThanOrEqual(300);
+    });
+
+    it('keeps MCP_LOG_CLIENT_META_MAX_BYTES after the scrub has masked short values', async () => {
+      setMcpEnv('MCP_LOG_CLIENT_META_MAX_BYTES', '300');
+      // Sensitive key names are matched whole, so vary the case to get distinct ones.
+      const names = ['token', 'jwt', 'secret', 'password', 'cookie', 'bearer', 'pwd', 'passwd'];
+      const meta = Object.fromEntries(
+        names.flatMap((name) => [name, name.toUpperCase(), `${name[0].toUpperCase()}${name.slice(1)}`]).map((key) => [key, 'x']),
+      );
+      // Unmasked, all of it fits; masked, each value is 18 bytes.
+      expect(Buffer.byteLength(JSON.stringify(meta), 'utf8')).toBeLessThan(300);
+      await write(entry(), undefined, { client: { meta } });
+      const stored = (await storedClient())!.meta as Record<string, unknown>;
+      expect(stored._truncated).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(stored), 'utf8')).toBeLessThanOrEqual(300);
+    });
+
+    it('is not stored at all when MCP_LOG_CLIENT_META is false', async () => {
+      setMcpEnv('MCP_LOG_CLIENT_META', 'false');
+      await write(entry(), undefined, { client: { ip: '203.0.113.9', meta: HOST_META } });
+      const client = (await storedClient())!;
+      expect(client.ip).toBe('203.0.113.9');
+      expect(client).not.toHaveProperty('meta');
+
+      await write(entry(), undefined, { client: { meta: HOST_META } });
+      expect((await latestLog()).requestPayload).not.toHaveProperty('_client');
+    });
   });
 
   it('writes the row, with who called, when an argument is nested too deeply to serialize', async () => {

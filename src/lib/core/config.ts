@@ -494,6 +494,10 @@ export interface AppConfig {
     logToolNameMaxChars: number;
     /** Longest caller user-agent (chars) stored with an MCP request-log row. Min 16. */
     logUserAgentMaxChars: number;
+    /** Store the `params._meta` an MCP host sends with a tool call in the request-log row's `_client.meta`. */
+    logClientMeta: boolean;
+    /** Largest serialized `_client.meta` (bytes) kept per request-log row; keys beyond it are dropped. Min 256. */
+    logClientMetaMaxBytes: number;
 
     /** The SSE transport: `GET .../sse` opens a stream, `POST .../message?sessionId=` feeds it. */
     sse: {
@@ -979,6 +983,8 @@ function buildConfig(source: ConfigSource): AppConfig {
       lastErrorThrottleMs: Math.max(int(source, 'MCP_LAST_ERROR_THROTTLE_MS', 60_000), 0),
       logToolNameMaxChars: Math.max(int(source, 'MCP_LOG_TOOL_NAME_MAX_CHARS', 200), 16),
       logUserAgentMaxChars: Math.max(int(source, 'MCP_LOG_USER_AGENT_MAX_CHARS', 300), 16),
+      logClientMeta: bool(source, 'MCP_LOG_CLIENT_META', true),
+      logClientMetaMaxBytes: Math.max(int(source, 'MCP_LOG_CLIENT_META_MAX_BYTES', 2048), 256),
       sse: {
         maxSessions: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS', 2000), 0),
         maxSessionsPerIp: Math.max(int(source, 'MCP_SSE_MAX_SESSIONS_PER_IP', 50), 0),

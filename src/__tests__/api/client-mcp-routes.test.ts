@@ -296,6 +296,51 @@ describe('token MCP routes', () => {
     });
   });
 
+  describe('the host\'s _meta in the request log', () => {
+    const META = { 'openai/subject': 'v1/abc123', 'openai/locale': 'en-US' };
+    const callWithMeta = (meta: unknown) => ({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'tools/call',
+      params: { name: 'lookup', arguments: {}, _meta: meta },
+    });
+
+    it('is handed to the log write on a successful call, without the address or user agent', async () => {
+      await post('/api/client/v1/mcp/crm/message', callWithMeta(META));
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('is handed to the log write on a failed call', async () => {
+      vi.mocked(executeMcpTool).mockRejectedValueOnce(new Error('boom'));
+      await post('/api/client/v1/mcp/crm/message', callWithMeta(META));
+      const [, entry, , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(entry.status).toBe('error');
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('leaves out runtime_context, which is logged by header name only', async () => {
+      await post('/api/client/v1/mcp/crm/message', callWithMeta({
+        ...META,
+        runtime_context: { headers: { 'x-tenant-token': 'never-in-the-log-1234' } },
+      }));
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options).toEqual({ client: { meta: META } });
+    });
+
+    it('carries no meta when the call has no _meta', async () => {
+      await post('/api/client/v1/mcp/crm/message', callTool());
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options?.client).toBeUndefined();
+    });
+
+    it('is not recorded for a REST /execute call, even when the body carries one', async () => {
+      await post('/api/client/v1/mcp/crm/execute', { tool: 'lookup', arguments: {}, _meta: META });
+      const [, , , options] = vi.mocked(logMcpRequest).mock.calls[0];
+      expect(options?.client).toBeUndefined();
+    });
+  });
+
   describe('media tool results', () => {
     const image = {
       kind: 'tool_output',
