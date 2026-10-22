@@ -12,16 +12,28 @@
 // unconditionally, which crashed the process in production with:
 //   TypeError: Promise.try is not a function
 //     at unpdf/dist/pdfjs.mjs
+//
+// The extra arguments MUST be forwarded (`Promise.try(fn, ...args)` calls
+// `fn(...args)`, per spec). pdf.js dispatches every worker message as
+// `Promise.try(handler, data)`; a polyfill that calls `fn()` hands each
+// handler `undefined`, and every PDF conversion then fails with
+//   Cannot destructure property 'docId' of 'e' as it is undefined.
+type PromiseTry = <T, A extends unknown[]>(fn: (...args: A) => T | PromiseLike<T>, ...args: A) => Promise<T>;
+
 if (typeof (Promise as unknown as { try?: unknown }).try !== 'function') {
-  (Promise as unknown as { try: <T>(fn: () => T | PromiseLike<T>) => Promise<T> }).try = function try_<T>(
-    fn: () => T | PromiseLike<T>,
+  (Promise as unknown as { try: PromiseTry }).try = function try_<T, A extends unknown[]>(
+    fn: (...args: A) => T | PromiseLike<T>,
+    ...args: A
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       try {
-        resolve(fn());
+        resolve(fn(...args));
       } catch (err) {
         reject(err);
       }
     });
   };
 }
+
+// A module, not a global script: keeps `PromiseTry` file-local.
+export {};
