@@ -42,6 +42,7 @@ import type { QueuePayload } from '@/lib/core/queue';
 import { mcpEntityId } from './mcpEntityId';
 import { recordEntityMetric } from '@/lib/services/entityMetrics/entityMetricsRollup';
 import { resolveTenantDbName } from '@/lib/services/guardrail/hooks/recordCache';
+import { boundClientMeta } from './clientMeta';
 import { normalizeMcpInstructions, type McpDiscovery } from './discovery';
 import { isMcpToolInputError, McpServerConfigError, McpUnknownToolError, McpUpstreamError } from './errors';
 import { buildOpenApiRequest } from './openApiRequest';
@@ -1923,6 +1924,12 @@ export function isServerIssuedSessionId(value: unknown): value is string {
 export interface McpRequestClientInfo {
   ip?: string;
   userAgent?: string;
+  /**
+   * The JSON-RPC `params._meta` the host sent with the call, exactly as
+   * received. Bounded and scrubbed here (see `withClientInfo`), not by the
+   * caller, so every endpoint gets the same treatment.
+   */
+  meta?: unknown;
 }
 
 /** An IP address in text form (IPv6 with a zone id included) is well inside this. */
@@ -1938,18 +1945,33 @@ function cleanClientField(value: unknown, maxChars: number): string | undefined 
  * The log row has no column for the caller's network identity (adding one
  * would need a schema change on both databases), so it rides next to the tool
  * and arguments in the request payload under `_client` — the same convention
- * as `_runtimeAuth`.
+ * as `_runtimeAuth`. The host's `_meta` rides there too, as `_client.meta`:
+ * bounded first, then through the same scrub as the rest of the payload so a
+ * sensitive key name or an echoed secret is masked here as well.
  */
 function withClientInfo(
   payload: Record<string, unknown> | undefined,
   client: McpRequestClientInfo | undefined,
+  secretValues?: string[],
 ): Record<string, unknown> | undefined {
+  const config = getConfig().mcp;
   const ip = cleanClientField(client?.ip, CLIENT_IP_MAX_CHARS);
-  const userAgent = cleanClientField(client?.userAgent, getConfig().mcp.logUserAgentMaxChars);
-  if (!ip && !userAgent) return payload;
+  const userAgent = cleanClientField(client?.userAgent, config.logUserAgentMaxChars);
+  // The scrub runs inside the bound so the byte limit is judged on what is stored.
+  const meta = config.logClientMeta
+    ? boundClientMeta(client?.meta, {
+        maxBytes: config.logClientMetaMaxBytes,
+        scrub: (bounded) => redactLogPayload(bounded, { secretValues }),
+      })
+    : undefined;
+  if (!ip && !userAgent && !meta) return payload;
   return {
     ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}),
-    _client: { ...(ip ? { ip } : {}), ...(userAgent ? { userAgent } : {}) },
+    _client: {
+      ...(ip ? { ip } : {}),
+      ...(userAgent ? { userAgent } : {}),
+      ...(meta ? { meta } : {}),
+    },
   };
 }
 
@@ -2010,6 +2032,7 @@ export async function logMcpRequest(
       requestPayload: withClientInfo(
         redactLogPayload(entry.requestPayload, { secretValues, maxBytes }),
         opts?.client,
+        secretValues,
       ),
       responsePayload: redactLogPayload(entry.responsePayload, { secretValues, maxBytes }),
       errorMessage: redactLogString(

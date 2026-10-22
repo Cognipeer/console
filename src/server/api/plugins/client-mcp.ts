@@ -252,6 +252,8 @@ async function runToolCall(
     caller: CallerInfo;
     sessionId?: string;
     runtimeContext?: AgentRuntimeContext;
+    /** The JSON-RPC `params._meta` of a `tools/call`, raw; the log write bounds and scrubs it. */
+    clientMeta?: unknown;
   },
 ): Promise<
   | { ok: true; result: unknown; latencyMs: number }
@@ -268,6 +270,9 @@ async function runToolCall(
   // Values (runtime headers + static upstream credential) that must be scrubbed
   // from an echoed response before it is persisted.
   const secretValues = mcpRequestSecretValues(server, runtimeHeaders);
+  // Only the host's `_meta` is recorded here, not who called: the address and
+  // user agent stay out of token-caller rows.
+  const logOptions = log.clientMeta === undefined ? undefined : { client: { meta: log.clientMeta } };
   try {
     const { latencyMs, result } = await executeMcpTool(
       server,
@@ -298,7 +303,7 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    }, secretValues);
+    }, secretValues, logOptions);
     return { ok: true, result, latencyMs };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
@@ -322,7 +327,7 @@ async function runToolCall(
       transport: log.transport,
       sourceType: resolveSourceType(server),
       sessionId: log.sessionId,
-    }, secretValues);
+    }, secretValues, logOptions);
     return {
       ok: false,
       // The executors mask what they throw; this is the same scrub once more on
@@ -333,6 +338,18 @@ async function runToolCall(
       refused: isConsoleIdentityRefusal(error),
     };
   }
+}
+
+/**
+ * What of a call's `_meta` goes to the request log. `runtime_context` is this
+ * gateway's own channel for runtime headers; it is recorded as header names
+ * only (`_runtimeAuth`), so its values must not come back in through here.
+ */
+function loggableClientMeta(meta: unknown): unknown {
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return meta;
+  const rest = { ...(meta as Record<string, unknown>) };
+  delete rest.runtime_context;
+  return rest;
 }
 
 /**
@@ -467,6 +484,7 @@ async function handleClientMcpMessage(request: FastifyRequest, reply: FastifyRep
         userId: ctx.user?._id?.toString(),
       },
       sessionId: sessionId ?? undefined,
+      clientMeta: loggableClientMeta(meta),
       runtimeContext: buildRuntimeContextFromRequest(meta?.runtime_context, request.headers, {
         userId: ctx.user?._id?.toString(),
         tokenId: ctx.tokenRecord._id?.toString(),

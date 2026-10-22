@@ -342,7 +342,8 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
         args,
         isSse ? 'sse' : 'jsonrpc',
         sessionId,
-        clientInfoOf(request),
+        // The host's `_meta` is handed over raw; the log write bounds and scrubs it.
+        { ...clientInfoOf(request), meta: body.params?._meta },
       );
     } finally {
       releaseSlot();
