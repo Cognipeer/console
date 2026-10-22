@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -8,7 +8,9 @@ import {
   Button,
   Group,
   MultiSelect,
+  NumberInput,
   Paper,
+  SegmentedControl,
   Select,
   Stack,
   Switch,
@@ -21,6 +23,16 @@ import { useTranslations } from '@/lib/i18n';
 import type { CategoryCatalogEntry, PiiAction, PiiEngine } from '@/lib/services/pii/types';
 
 const SUPPORTED_LANGUAGES = ['global', 'en', 'tr', 'de'] as const;
+
+/** Preset minimum-confidence values; anything else is "custom". */
+const CONFIDENCE_PRESETS = { all: 0, balanced: 0.5, strict: 0.8 } as const;
+type ConfidencePreset = keyof typeof CONFIDENCE_PRESETS | 'custom';
+
+function presetFor(value: number): ConfidencePreset {
+  const match = (Object.keys(CONFIDENCE_PRESETS) as Array<keyof typeof CONFIDENCE_PRESETS>)
+    .find((k) => CONFIDENCE_PRESETS[k] === value);
+  return match ?? 'custom';
+}
 
 export interface PiiCustomPatternForm {
   id: string;
@@ -51,6 +63,12 @@ interface Props {
   onEngineChange: (next: PiiEngine) => void;
   /** Loaded category catalog from /api/pii/categories — already scoped to `engine`. */
   catalog: CategoryCatalogEntry[];
+  /** `detection.minConfidence` (0 = no filtering) — applies to both engines. */
+  minConfidence: number;
+  onMinConfidenceChange: (next: number) => void;
+  /** `detection.contextBoost` (absent on the stored policy = on). */
+  contextBoost: boolean;
+  onContextBoostChange: (next: boolean) => void;
 }
 
 function makePatternId(): string {
@@ -74,6 +92,10 @@ export default function PiiPolicyEditor(props: Props) {
   const tEngine = useTranslations('pii.engines');
   const tLang = useTranslations('pii.languages');
   const tSev = useTranslations('pii.severity');
+  const tSens = useTranslations('pii.detail.sensitivity');
+  // "Custom" is sticky once picked, even while the value happens to equal a preset.
+  const [customPicked, setCustomPicked] = useState(false);
+  const preset: ConfidencePreset = customPicked ? 'custom' : presetFor(props.minConfidence);
 
   const filteredCatalog = useMemo(() => {
     if (!props.languages.length) return props.catalog;
@@ -152,6 +174,61 @@ export default function PiiPolicyEditor(props: Props) {
             clearable
           />
         </Group>
+      </Paper>
+
+      {/* Detection sensitivity: the policy's `detection` settings */}
+      <Paper p="md" withBorder radius="sm">
+        <Stack gap="sm">
+          <div>
+            <Text fw={600} size="sm">{tSens('title')}</Text>
+            <Text size="xs" c="dimmed">{tSens('subtitle')}</Text>
+          </div>
+          <div>
+            <Text size="sm" fw={500} mb={4}>{tSens('minConfidence')}</Text>
+            <Group gap="sm" align="center" wrap="wrap">
+              <SegmentedControl
+                value={preset}
+                onChange={(v) => {
+                  const next = v as ConfidencePreset;
+                  if (next === 'custom') {
+                    setCustomPicked(true);
+                    return;
+                  }
+                  setCustomPicked(false);
+                  props.onMinConfidenceChange(CONFIDENCE_PRESETS[next]);
+                }}
+                data={[
+                  { value: 'all', label: tSens('presetAll') },
+                  { value: 'balanced', label: tSens('presetBalanced') },
+                  { value: 'strict', label: tSens('presetStrict') },
+                  { value: 'custom', label: tSens('presetCustom') },
+                ]}
+              />
+              <NumberInput
+                aria-label={tSens('value')}
+                value={props.minConfidence}
+                onChange={(v) => {
+                  const n = typeof v === 'number' ? v : Number.parseFloat(v);
+                  if (!Number.isFinite(n)) return;
+                  setCustomPicked(presetFor(n) === 'custom');
+                  props.onMinConfidenceChange(Math.min(1, Math.max(0, n)));
+                }}
+                min={0}
+                max={1}
+                step={0.05}
+                decimalScale={2}
+                w={96}
+              />
+            </Group>
+            <Text size="xs" c="dimmed" mt={4}>{tSens('allHint')}</Text>
+          </div>
+          <Switch
+            checked={props.contextBoost}
+            onChange={(e) => props.onContextBoostChange(e.currentTarget.checked)}
+            label={tSens('contextBoost')}
+            description={tSens('contextBoostHelper')}
+          />
+        </Stack>
       </Paper>
 
       {/* Built-in categories */}
