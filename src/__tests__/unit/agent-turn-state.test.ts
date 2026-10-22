@@ -388,7 +388,7 @@ describe('state persistence helpers', () => {
             } as never,
             messageCount: 2,
         });
-        const snapshot = store.rows.get('conv-1')!.snapshot;
+        const snapshot = decodeStoredState(store.rows.get('conv-1')!.snapshot);
         expect(snapshot).not.toContain('OLD PROMPT');
         expect(snapshot).not.toContain('__limitBreached');
         expect(snapshot).not.toContain('"usage"');

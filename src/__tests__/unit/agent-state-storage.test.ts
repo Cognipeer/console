@@ -97,7 +97,7 @@ describe('stored state encoding', () => {
         expect(back.toolHistory[0].rawOutput).toBeUndefined();
         expect(back.toolHistory[0].output).toBe((state.toolHistory as Array<{ output: string }>)[0].output);
         expect(back.messages).toHaveLength((state.messages as unknown[]).length);
-        expect(stored).not.toContain('[truncated for storage]');
+        expect(decodeStoredState(stored)).not.toContain('[truncated for storage]');
     });
 
     it('keeps a rawOutput that differs from what the model saw', () => {

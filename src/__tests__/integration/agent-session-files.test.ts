@@ -62,6 +62,7 @@ import {
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { decodeStoredState, encodeStoredState } from '@/lib/services/agents/agentTurnState';
 import {
   cleanupExpiredSessionFiles,
   deleteSessionFile,
@@ -938,7 +939,7 @@ describe('images are seen, survive compaction and later turns', () => {
   const partsOf = (message: { content: unknown }) => message.content as Part[];
   const imageUrls = (messages: Seen) => messages.flatMap((m) => (Array.isArray(m.content) ? partsOf(m as never) : []))
     .filter((part) => part.type === 'image_url').map((part) => part.image_url?.url);
-  const snapshotOf = async (id: string) => (await db.findAgentConversationState(id))!.snapshot;
+  const snapshotOf = async (id: string) => decodeStoredState((await db.findAgentConversationState(id))!.snapshot);
 
   async function vision(config: Partial<IAgentConfig> = {}) {
     setModel({ isMultimodal: true });
@@ -1221,9 +1222,10 @@ describe('images are seen, survive compaction and later turns', () => {
 
     // The SDK's window dropped the picture: simulate by taking it out of the saved state.
     const saved = (await db.findAgentConversationState(id))!;
-    const trimmed = JSON.parse(saved.snapshot) as { messages: Array<{ role: string; content: unknown }> };
+    const trimmed = JSON.parse(decodeStoredState(saved.snapshot)) as { messages: Array<{ role: string; content: unknown }> };
     trimmed.messages = trimmed.messages.map((m) => (Array.isArray(m.content) ? { ...m, content: 'what is this? [summarised]' } : m));
-    await db.saveAgentConversationState({ ...saved, snapshot: JSON.stringify(trimmed), sizeBytes: JSON.stringify(trimmed).length });
+    const snapshot = encodeStoredState(JSON.stringify(trimmed));
+    await db.saveAgentConversationState({ ...saved, snapshot, sizeBytes: snapshot.length });
 
     const model = scriptModel(() => answer('it was a cat'));
     await chat(id, 'what colour was the animal?');
@@ -1380,7 +1382,7 @@ describe('review findings: image formats, sizes, typed markers and titles', () =
   type Part = { type: string; text?: string; image_url?: { url?: string } };
   const partsOf = (message: { content: unknown }) => message.content as Part[];
   const allParts = (messages: Seen) => messages.flatMap((m) => (Array.isArray(m.content) ? partsOf(m as never) : []));
-  const snapshotOf = async (id: string) => (await db.findAgentConversationState(id))!.snapshot;
+  const snapshotOf = async (id: string) => decodeStoredState((await db.findAgentConversationState(id))!.snapshot);
 
   async function vision(config: Partial<IAgentConfig> = {}) {
     setModel({ isMultimodal: true });
