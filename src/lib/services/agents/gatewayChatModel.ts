@@ -254,7 +254,6 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           ...(input.purpose ? { purpose: input.purpose } : {}),
         },
-        logPrompt: false,
         logFailures: true,
         guardrailTurnKey: turnKey,
         onUsageSettled: settle,
