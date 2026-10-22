@@ -64,6 +64,7 @@ import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
 import { executeAgentChatLocal, executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { uploadSessionFile } from '@/lib/services/agents/sessionFiles';
+import { decodeStoredState } from '@/lib/services/agents/agentTurnState';
 import { destroyCache } from '@/lib/core/cache';
 import { toolOutput } from '@/lib/services/tools/toolOutput';
 
@@ -268,7 +269,7 @@ const partsOf = (message: { content: unknown }) => (Array.isArray(message.conten
 const imageUrls = (messages: Seen) => messages.flatMap((m) => partsOf(m))
   .filter((part) => part.type === 'image_url').map((part) => part.image_url?.url);
 const toolMessages = (messages: Seen) => messages.filter((m) => m.role === 'tool').map((m) => String(m.content));
-const snapshotOf = async (id: string) => (await db.findAgentConversationState(id))!.snapshot;
+const snapshotOf = async (id: string) => decodeStoredState((await db.findAgentConversationState(id))!.snapshot);
 
 /** A tool that returns a screenshot the way the browser tools do: text, an image block, structured data. */
 function screenshotTool(image: Buffer, name = 'screenshot') {

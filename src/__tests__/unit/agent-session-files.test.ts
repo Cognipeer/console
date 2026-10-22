@@ -6,6 +6,7 @@
  * store and the quota guard are faked).
  */
 
+import { randomBytes } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
@@ -84,7 +85,7 @@ import { normalizeAttachmentsFolder } from '@/lib/services/agents/sessionFilesCo
 import { sessionFileObjectKey } from '@/lib/services/agents/sessionFilesBucket';
 import { InputContentPartError, extractResponseUserInput, namedFileIds } from '@/lib/services/agents/responseInputFiles';
 import { isReadOnlyTool, HITL_READ_ONLY_TOOLS } from '@/lib/services/agents/agentHumanInTheLoop';
-import { serializeForStorage, MAX_STATE_BYTES } from '@/lib/services/agents/agentTurnState';
+import { decodeStoredState, serializeForStorage, MAX_STATE_BYTES } from '@/lib/services/agents/agentTurnState';
 import { validateAgentConfigShape } from '@/lib/services/agents/agentConfigValidation';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 
@@ -605,19 +606,19 @@ describe('the Responses input', () => {
 describe('the saved state', () => {
   it('holds an image as a short reference, so it never decides whether a state fits', () => {
     const reference = { type: 'image_url', image_url: { url: 'session-file://pic' }, fileId: 'pic', name: 'cat.png' };
-    const text = serializeForStorage({
+    const text = decodeStoredState(serializeForStorage({
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'look at this' }, reference] },
         { role: 'assistant', content: 'a cat' },
       ],
-    } as never)!;
+    } as never)!);
     expect(text).toContain('session-file://pic');
     expect(text).toContain('look at this');
     expect(text.length).toBeLessThan(400);
   });
 
   it('no longer rewrites image parts to fit: bytes that cannot shrink mean no stored state (the transcript replay takes over)', () => {
-    const inline = { type: 'image_url', image_url: { base64: 'A'.repeat(MAX_STATE_BYTES), media_type: 'image/png' } };
+    const inline = { type: 'image_url', image_url: { base64: randomBytes(MAX_STATE_BYTES).toString('base64'), media_type: 'image/png' } };
     expect(serializeForStorage({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, inline] }] } as never)).toBeNull();
   });
 });

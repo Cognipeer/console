@@ -68,6 +68,7 @@ import {
 import { RESUME_TIMEOUT_ACTOR, runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { truncateSessionAfterMessage } from '@/lib/services/agents/sessionTruncate';
 import { parsePausedState } from '@/lib/services/agents/agentPendingActions';
+import { decodeStoredState, encodeStoredState } from '@/lib/services/agents/agentTurnState';
 import { queueAgentRun } from '../helpers/agent-runs';
 
 const DB_NAME = 'tenant_hitl';
@@ -298,13 +299,13 @@ describe('a tool that needs approval pauses the turn', () => {
 
     const stored = await db.findAgentConversationState(id);
     expect(stored?.pausedSnapshot).toBeTruthy();
-    const paused = JSON.parse(stored!.pausedSnapshot!);
+    const paused = JSON.parse(decodeStoredState(stored!.pausedSnapshot!));
     expect(paused.state.pendingApprovals[0]).toMatchObject({ toolName: 'sandbox_exec', status: 'pending' });
     expect(paused.state.ctx.__awaitingApproval).toBeTruthy();
     // The unanswered call stays in the paused transcript; the normal snapshot repaired it away.
     const pausedAssistant = paused.state.messages.find((m: { tool_calls?: unknown }) => m.tool_calls);
     expect(pausedAssistant).toBeTruthy();
-    const normal = JSON.parse(stored!.snapshot);
+    const normal = JSON.parse(decodeStoredState(stored!.snapshot));
     expect(normal.messages.some((m: { tool_calls?: unknown }) => m.tool_calls)).toBe(false);
 
     const after = await storedConversation(id);
@@ -764,12 +765,12 @@ describe('(e) several requests', () => {
 
     // Put a second request into the same pause.
     const stored = (await db.findAgentConversationState(id))!;
-    const paused = JSON.parse(stored.pausedSnapshot!);
+    const paused = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
     paused.state.pendingApprovals.push({
       id: 'sdk-second', toolCallId: 'c2', toolName: 'sandbox_exec', args: { command: 'two' }, status: 'pending',
       requestedAt: new Date().toISOString(),
     });
-    await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(paused) });
+    await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(paused)) });
     const [secondAction] = await db.createAgentPendingActions([{
       tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, kind: 'tool_approval',
       sdkId: 'sdk-second', toolCallId: 'c2', toolName: 'sandbox_exec', args: { command: 'two' },
@@ -1289,10 +1290,10 @@ describe('background runs', () => {
       const { runId, actionId } = await startPaused(id, true);
       // The stored paused state remembers the flag; take it out so only the run row's mark is left to carry it.
       const stored = (await db.findAgentConversationState(id))!;
-      const envelope = JSON.parse(stored.pausedSnapshot!);
+      const envelope = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
       expect(envelope.turn.variablesInPrompt).toBe(false);
       delete envelope.turn.variablesInPrompt;
-      await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+      await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(envelope)) });
       expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.externalContent).toBe(true);
 
       const outcome = await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync');
@@ -1367,10 +1368,10 @@ describe('background runs', () => {
         const id = String((await newConversation())._id);
         const { runId, actionId } = await startMixed(id);
         const stored = (await db.findAgentConversationState(id))!;
-        const envelope = JSON.parse(stored.pausedSnapshot!);
+        const envelope = JSON.parse(decodeStoredState(stored.pausedSnapshot!));
         expect(envelope.turn).toMatchObject({ variablesInPrompt: false, literalVariables: ['team'] });
         delete envelope.turn.literalVariables;
-        await db.saveAgentConversationState({ ...stored, pausedSnapshot: JSON.stringify(envelope) });
+        await db.saveAgentConversationState({ ...stored, pausedSnapshot: encodeStoredState(JSON.stringify(envelope)) });
         expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.literalVariables).toEqual(['team']);
 
         expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync')).kind).toBe('resumed');
