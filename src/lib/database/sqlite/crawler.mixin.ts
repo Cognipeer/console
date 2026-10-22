@@ -3,12 +3,20 @@
  */
 
 import type {
+  CrawlResultFilters,
   ICrawler,
   ICrawlJob,
   ICrawlResult,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+
+/** Every crawl_results column except the (potentially large) bodyMarkdown. */
+const CRAWL_RESULT_SUMMARY_COLUMNS = [
+  'id', 'tenantId', 'projectId', 'jobId', 'crawlerKey', 'url', 'parentUrl', 'depth', 'type',
+  'httpStatus', 'contentType', 'title', 'description', 'bytes', 'ragDocumentId', 'ragStatus',
+  'errorMessage', 'fetchedAt', 'createdAt',
+].join(', ');
 
 export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class CrawlerOps extends Base {
@@ -424,17 +432,42 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return { ...record, _id: id, createdAt: new Date(now) };
     }
 
-    async listCrawlResults(
+    private crawlResultWhere(
       jobId: string,
-      options?: { limit?: number; skip?: number; type?: string },
-    ): Promise<ICrawlResult[]> {
-      const db = this.getTenantDb();
+      filters?: CrawlResultFilters,
+    ): { where: string; params: Record<string, unknown> } {
       const conds: string[] = ['jobId = @jobId'];
       const params: Record<string, unknown> = { jobId };
-      if (options?.type) { conds.push('type = @type'); params.type = options.type; }
-      let sql = `SELECT * FROM ${TABLES.crawlResults} WHERE ${conds.join(' AND ')} ORDER BY createdAt ASC`;
-      if (options?.limit) sql += ` LIMIT ${Math.min(options.limit, 5000)}`;
-      if (options?.skip) sql += ` OFFSET ${options.skip}`;
+      if (filters?.type) { conds.push('type = @type'); params.type = filters.type; }
+      if (filters?.ragStatus === 'none') {
+        conds.push("(ragStatus IS NULL OR ragStatus = '')");
+      } else if (filters?.ragStatus) {
+        conds.push('ragStatus = @ragStatus');
+        params.ragStatus = filters.ragStatus;
+      }
+      const search = filters?.search?.trim();
+      if (search) {
+        // Folded on both sides: plain LIKE folds ASCII case only, so "übersicht" would miss "Übersicht".
+        conds.push(`(${['url', 'title', 'errorMessage'].map((c) => `iam_fold(${c}) LIKE iam_fold(@search) ESCAPE '\\'`).join(' OR ')})`);
+        params.search = this.likePattern(search);
+      }
+      return { where: conds.join(' AND '), params };
+    }
+
+    async listCrawlResults(
+      jobId: string,
+      options?: CrawlResultFilters & { limit?: number; skip?: number; omitBody?: boolean },
+    ): Promise<ICrawlResult[]> {
+      const db = this.getTenantDb();
+      const { where, params } = this.crawlResultWhere(jobId, options);
+      const columns = options?.omitBody ? CRAWL_RESULT_SUMMARY_COLUMNS : '*';
+      // rowid breaks createdAt ties (same-millisecond inserts) so pages never overlap.
+      let sql = `SELECT ${columns} FROM ${TABLES.crawlResults} WHERE ${where} ORDER BY createdAt ASC, rowid ASC`;
+      const limit = options?.limit ? Math.min(Math.trunc(options.limit), 5000) : 0;
+      const skip = options?.skip ? Math.max(Math.trunc(options.skip), 0) : 0;
+      // SQLite only takes OFFSET after a LIMIT; -1 means "no limit".
+      if (limit > 0 || skip > 0) sql += ` LIMIT ${limit > 0 ? limit : -1}`;
+      if (skip > 0) sql += ` OFFSET ${skip}`;
       const rows = db.prepare(sql).all(params) as SqliteRow[];
       return rows.map((r) => this.mapCrawlResult(r));
     }
@@ -469,12 +502,25 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       return this.findCrawlResultById(id);
     }
 
-    async countCrawlResults(jobId: string): Promise<number> {
+    async countCrawlResults(jobId: string, filters?: CrawlResultFilters): Promise<number> {
       const db = this.getTenantDb();
+      const { where, params } = this.crawlResultWhere(jobId, filters);
       const row = db.prepare(
-        `SELECT COUNT(*) as cnt FROM ${TABLES.crawlResults} WHERE jobId = @jobId`,
-      ).get({ jobId }) as SqliteRow;
+        `SELECT COUNT(*) as cnt FROM ${TABLES.crawlResults} WHERE ${where}`,
+      ).get(params) as SqliteRow;
       return Number(row.cnt) || 0;
+    }
+
+    async countCrawlResultsByType(
+      jobId: string,
+    ): Promise<Partial<Record<ICrawlResult['type'], number>>> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT type, COUNT(*) as cnt FROM ${TABLES.crawlResults} WHERE jobId = @jobId GROUP BY type`,
+      ).all({ jobId }) as SqliteRow[];
+      const counts: Partial<Record<ICrawlResult['type'], number>> = {};
+      for (const row of rows) counts[row.type as ICrawlResult['type']] = Number(row.cnt) || 0;
+      return counts;
     }
 
     async deleteCrawlResultsByJob(jobId: string): Promise<number> {

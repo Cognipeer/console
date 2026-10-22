@@ -537,6 +537,7 @@ export type {
   ICrawler,
   ICrawlJob,
   ICrawlResult,
+  CrawlResultFilters,
   ICrawlerScope,
   ICrawlerCookie,
   ICrawlerHttpConfig,

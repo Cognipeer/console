@@ -10,6 +10,7 @@ export {
   listCrawlJobs,
   getCrawlJob,
   listCrawlJobResults,
+  listCrawlJobResultsPage,
   getCrawlResult,
   syncCrawlJobToRag,
   cancelCrawlJob,

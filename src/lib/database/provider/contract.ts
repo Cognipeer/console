@@ -46,6 +46,7 @@ import type {
   ICrawler,
   ICrawlJob,
   ICrawlResult,
+  CrawlResultFilters,
   CrawlJobStatus,
   CrawlerStatus,
   IAgentRun,
@@ -2365,7 +2366,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<ICrawlResult>;
   listCrawlResults(
     jobId: string,
-    options?: { limit?: number; skip?: number; type?: string },
+    options?: CrawlResultFilters & {
+      limit?: number;
+      skip?: number;
+      /** Leave `bodyMarkdown` out — list views fetch one row's body on demand. */
+      omitBody?: boolean;
+    },
   ): Promise<ICrawlResult[]>;
   findCrawlResultById(id: string): Promise<ICrawlResult | null>;
   /**
@@ -2377,7 +2383,9 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Pick<ICrawlResult, 'ragDocumentId' | 'ragStatus' | 'errorMessage'>>,
   ): Promise<ICrawlResult | null>;
-  countCrawlResults(jobId: string): Promise<number>;
+  countCrawlResults(jobId: string, filters?: CrawlResultFilters): Promise<number>;
+  /** Per-type row counts for a job (types with no rows are omitted). */
+  countCrawlResultsByType(jobId: string): Promise<Partial<Record<ICrawlResult['type'], number>>>;
   /**
    * Delete all crawl results for a job. Used when an interrupted job is
    * restarted from scratch so the fresh run doesn't append duplicates to the

@@ -4485,6 +4485,15 @@ export interface ICrawlResult {
   createdAt?: Date;
 }
 
+/** Row filters shared by the crawl-result list and count queries. */
+export interface CrawlResultFilters {
+  type?: string;
+  /** Knowledge Engine outcome; `'none'` matches rows that were never sent. */
+  ragStatus?: string;
+  /** Case-insensitive substring match over url, title and errorMessage. */
+  search?: string;
+}
+
 // ── PII Service types ───────────────────────────────────────────────────────
 
 /**
