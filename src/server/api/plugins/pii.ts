@@ -30,6 +30,7 @@ import {
   listPiiPolicies,
   maskPii,
   parseCustomPatternsInput,
+  parseDetectionInput,
   redactPii,
   scanWithPolicy,
   tokenizePii,
@@ -143,6 +144,8 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
         ?? buildDefaultPolicyCategories(engine);
       const customPatterns = parseCustomPatternsInput(body.customPatterns);
       if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
+      const detection = parseDetectionInput(body.detection);
+      if (detection.error) return reply.code(400).send({ error: detection.error });
       const policy = await createPiiPolicy(
         session.tenantDbName,
         session.tenantId,
@@ -159,6 +162,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           metadata: typeof body.metadata === 'object' && body.metadata !== null
             ? (body.metadata as Record<string, unknown>)
             : undefined,
+          detection: detection.detection,
           projectId,
         },
       );
@@ -197,6 +201,8 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.engine !== undefined && !isEngine(body.engine)) return reply.code(400).send({ error: `engine must be ${ENGINES_HINT}` });
       const customPatterns = parseCustomPatternsInput(body.customPatterns);
       if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
+      const detection = parseDetectionInput(body.detection);
+      if (detection.error) return reply.code(400).send({ error: detection.error });
       const policy = await updatePiiPolicy(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
@@ -207,6 +213,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
         languages: parsePiiLanguages(body.languages),
         enabled: body.enabled as boolean | undefined,
         metadata: body.metadata as Record<string, unknown> | undefined,
+        detection: detection.detection,
       });
       if (!policy) return reply.code(404).send({ error: 'PII policy not found' });
       return reply.code(200).send({ policy });
@@ -246,6 +253,8 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
         if (body.engine !== undefined && !isEngine(body.engine)) return reply.code(400).send({ error: `engine must be ${ENGINES_HINT}` });
         const customPatterns = parseCustomPatternsInput(body.customPatterns);
         if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
+        const detection = parseDetectionInput(body.detection);
+        if (detection.error) return reply.code(400).send({ error: detection.error });
         const payload = {
           text: body.text,
           categories: typeof body.categories === 'object' && body.categories !== null
@@ -255,6 +264,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           languages: parsePiiLanguages(body.languages),
           locale: parsePiiLocale(body.locale),
           engine: isEngine(body.engine) ? body.engine : undefined,
+          detection: detection.detection,
         };
         const result = await ADHOC[op](payload);
         return reply.code(200).send(result);

@@ -6,6 +6,7 @@ import type {
   IPiiPolicy,
   IPiiCustomPattern,
   PiiAction,
+  PiiDetectionConfig,
   PiiEngine,
   PiiLanguage,
 } from '@/lib/database';
@@ -120,6 +121,10 @@ export interface CreatePiiPolicyInput {
   languages?: PiiLanguage[];
   enabled?: boolean;
   metadata?: Record<string, unknown>;
+  /** Detection tuning (`minConfidence`, `contextBoost`). On update it is
+   *  MERGED into the stored value, so a field the caller leaves out keeps
+   *  its stored setting. */
+  detection?: PiiDetectionConfig;
 }
 
 export type UpdatePiiPolicyInput = Partial<Omit<CreatePiiPolicyInput, 'projectId'>>;
@@ -138,6 +143,9 @@ export interface DetectInput {
    *  routes have no stored policy to read it from, so a caller testing a
    *  cognipeer-engine draft (not yet saved) must pass it explicitly. */
   engine?: PiiEngine;
+  /** Same shape as a stored policy's `detection`: lets the test panel try an
+   *  unsaved threshold. */
+  detection?: PiiDetectionConfig;
 }
 
 export interface RedactInput extends DetectInput {

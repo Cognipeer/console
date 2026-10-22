@@ -31,6 +31,8 @@ declare module '@cognipeer/pii' {
     locale?: string;
     detection?: {
       mode?: PiiDetectionMode;
+      /** Findings below this 0–1 confidence are dropped. Absent/0 = no filtering. */
+      minConfidence?: number;
       contextBoost?: boolean;
       ner?: {
         minScore?: number;
