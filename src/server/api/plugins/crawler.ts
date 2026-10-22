@@ -13,7 +13,7 @@ import {
   getCrawlJob,
   getCrawlResult,
   listCrawlers,
-  listCrawlJobResults,
+  listCrawlJobResultsPage,
   listCrawlJobs,
   listCrawlerUrls,
   removeCrawlerUrls,
@@ -50,6 +50,11 @@ function sendError(
       ? 400
       : 500;
   return reply.code(status).send({ error: message });
+}
+
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = raw ? Math.trunc(Number(raw)) : fallback;
+  return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
 }
 
 export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
@@ -314,17 +319,27 @@ export const crawlerApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { jobId } = request.params as { jobId: string };
-      const query = (request.query ?? {}) as { limit?: string; skip?: string; type?: string };
-      const results = await listCrawlJobResults(
+      const query = (request.query ?? {}) as {
+        limit?: string;
+        skip?: string;
+        type?: string;
+        ragStatus?: string;
+        search?: string;
+      };
+      // The run browser pages through rows without their markdown body and
+      // loads one row's body from /results/:resultId when it is selected.
+      const page = await listCrawlJobResultsPage(
         { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
         jobId,
         {
-          limit: query.limit ? Number(query.limit) : 100,
-          skip: query.skip ? Number(query.skip) : 0,
-          type: query.type,
+          limit: clampInt(query.limit, 50, 1, 200),
+          skip: clampInt(query.skip, 0, 0, Number.MAX_SAFE_INTEGER),
+          type: query.type || undefined,
+          ragStatus: query.ragStatus || undefined,
+          search: query.search?.slice(0, 200) || undefined,
         },
       );
-      return reply.code(200).send({ results });
+      return reply.code(200).send(page);
     } catch (error) {
       if (sendProjectContextError(reply, error)) return;
       logger.error('List crawl results failed', { error });

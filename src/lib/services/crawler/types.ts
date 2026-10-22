@@ -70,6 +70,15 @@ export type CrawlerView = Omit<ICrawler, '_id'> & { id: string };
 export type CrawlJobView = Omit<ICrawlJob, '_id'> & { id: string };
 export type CrawlResultView = Omit<ICrawlResult, '_id'> & { id: string };
 
+/** One page of a job's results for the run browser: rows without bodyMarkdown. */
+export interface CrawlResultPageView {
+  results: CrawlResultView[];
+  /** Rows matching the filters, across all pages. */
+  total: number;
+  /** Unfiltered per-type counts for the whole job. */
+  counts: { html: number; file: number; error: number };
+}
+
 /**
  * Dispatch mode for a run.
  *

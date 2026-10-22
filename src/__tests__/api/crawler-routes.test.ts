@@ -209,15 +209,29 @@ describe('GET /api/crawler/jobs and /jobs/:id/results return id + status on the 
       headers: REQUEST_HEADERS,
     });
     expect(resultsRes.statusCode).toBe(200);
-    const { results } = parseJsonBody<{
+    const { results, total, counts } = parseJsonBody<{
       results: Array<{ id?: string; _id?: unknown; url?: string; bodyMarkdown?: string }>;
+      total: number;
+      counts: { html: number; file: number; error: number };
     }>(resultsRes.body);
     expect(results.length).toBeGreaterThan(0);
+    expect(total).toBe(results.length);
+    expect(counts.html).toBe(1);
     for (const r of results) {
       expect(r.id, 'result must have `id`').toBeTruthy();
       expect(r._id, 'result must NOT have raw `_id`').toBeUndefined();
+      // The list is a summary; the body comes from /results/:resultId.
+      expect(r.bodyMarkdown).toBeUndefined();
     }
-    expect(results[0]!.bodyMarkdown).toMatch(/UNIQUE_MARKER/);
+
+    const oneRes = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/jobs/${ourJob!.id}/results/${results[0]!.id}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(oneRes.statusCode).toBe(200);
+    const { result } = parseJsonBody<{ result: { bodyMarkdown?: string } }>(oneRes.body);
+    expect(result.bodyMarkdown).toMatch(/UNIQUE_MARKER/);
   }, 30_000);
 
   it('GET /jobs/{id} returns serialized job', async () => {
@@ -470,5 +484,108 @@ describe('POST /api/crawler/jobs/:jobId/sync-to-rag', () => {
       payload: JSON.stringify({ ragModuleKey: 'kb-module-routes-test' }),
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('GET /api/crawler/jobs/:jobId/results pages, filters and searches server-side', () => {
+  type Page = {
+    results: Array<{ id: string; url: string; type: string; bodyMarkdown?: string }>;
+    total: number;
+    counts: { html: number; file: number; error: number };
+  };
+  let jobId = '';
+
+  async function getPage(query: string): Promise<Page> {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/crawler/jobs/${jobId}/results?${query}`,
+      headers: REQUEST_HEADERS,
+    });
+    expect(res.statusCode).toBe(200);
+    return parseJsonBody<Page>(res.body);
+  }
+
+  beforeAll(async () => {
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/crawler/crawlers',
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        name: 'Paging Crawler',
+        engine: 'axios',
+        maxDepth: 0,
+        maxPages: 1,
+        autoCrawl: false,
+        http: { allowPrivateNetwork: true },
+      }),
+    });
+    const { crawler } = parseJsonBody<{ crawler: { key: string } }>(createRes.body);
+    const crawlRes = await app.inject({
+      method: 'POST',
+      url: `/api/crawler/crawlers/${crawler.key}/crawl`,
+      headers: { ...REQUEST_HEADERS, 'content-type': 'application/json' },
+      payload: JSON.stringify({ urls: [originUrl], mode: 'sync' }),
+    });
+    jobId = parseJsonBody<{ jobId: string }>(crawlRes.body).jobId;
+
+    // 1 crawled page + 120 seeded rows: 100 pages, 15 files, 5 errors.
+    const db = await getDatabase();
+    await db.switchToTenant(TENANT_DB_NAME);
+    for (let i = 0; i < 120; i += 1) {
+      const type = i < 100 ? 'html' : i < 115 ? 'file' : 'error';
+      await db.createCrawlResult({
+        tenantId: TENANT_ID,
+        projectId: FAKE_PROJECT_ID,
+        jobId,
+        url: `https://docs.example.com/${type}/${i}`,
+        depth: 1,
+        type,
+        title: i === 7 ? 'Pricing 100%_off guide' : `Seeded ${type} ${i}`,
+        bodyMarkdown: type === 'error' ? undefined : `body ${i}`,
+        errorMessage: type === 'error' ? 'ECONNRESET upstream' : undefined,
+        ragStatus: i < 10 ? 'indexed' : undefined,
+      });
+    }
+  }, 30_000);
+
+  it('returns one page at a time with the filtered total and whole-job counts', async () => {
+    const first = await getPage('limit=50&skip=0');
+    expect(first.results).toHaveLength(50);
+    expect(first.total).toBe(121);
+    expect(first.counts).toEqual({ html: 101, file: 15, error: 5 });
+    expect(first.results.every((r) => r.bodyMarkdown === undefined)).toBe(true);
+
+    const last = await getPage('limit=50&skip=100');
+    expect(last.results).toHaveLength(21);
+    const firstIds = new Set(first.results.map((r) => r.id));
+    expect(last.results.some((r) => firstIds.has(r.id))).toBe(false);
+  });
+
+  it('filters by type and Knowledge Engine status, including never-sent rows', async () => {
+    const files = await getPage('type=file');
+    expect(files.total).toBe(15);
+    expect(files.results.every((r) => r.type === 'file')).toBe(true);
+    expect(files.counts).toEqual({ html: 101, file: 15, error: 5 });
+
+    expect((await getPage('ragStatus=indexed')).total).toBe(10);
+    expect((await getPage('ragStatus=none')).total).toBe(111);
+    expect((await getPage('type=html&ragStatus=none')).total).toBe(91);
+  });
+
+  it('searches url, title and error message case-insensitively, wildcards taken literally', async () => {
+    expect((await getPage('search=DOCS.EXAMPLE.COM%2Ffile')).total).toBe(15);
+    expect((await getPage('search=econnreset')).total).toBe(5);
+
+    const literal = await getPage(`search=${encodeURIComponent('100%_off')}`);
+    expect(literal.total).toBe(1);
+    expect(literal.results[0]!.url).toBe('https://docs.example.com/html/7');
+    // `%` and `_` are not wildcards: "1%0" would otherwise match "100".
+    expect((await getPage(`search=${encodeURIComponent('1%0')}`)).total).toBe(0);
+  });
+
+  it('clamps out-of-range paging params instead of failing', async () => {
+    const page = await getPage('limit=100000&skip=-5');
+    expect(page.results).toHaveLength(121);
+    expect((await getPage('limit=abc')).results).toHaveLength(50);
   });
 });

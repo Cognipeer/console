@@ -4,6 +4,7 @@
 
 import { ObjectId } from 'mongodb';
 import type {
+  CrawlResultFilters,
   ICrawler,
   ICrawlJob,
   ICrawlResult,
@@ -257,17 +258,33 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return { ...doc, _id: result.insertedId.toString() };
     }
 
+    private crawlResultQuery(jobId: string, filters?: CrawlResultFilters): Record<string, unknown> {
+      const query: Record<string, unknown> = { jobId };
+      if (filters?.type) query.type = filters.type;
+      if (filters?.ragStatus === 'none') query.ragStatus = { $in: [null, ''] };
+      else if (filters?.ragStatus) query.ragStatus = filters.ragStatus;
+      const search = filters?.search?.trim();
+      if (search) {
+        const pattern = this.escapeRegex(search);
+        query.$or = [
+          { url: { $regex: pattern, $options: 'i' } },
+          { title: { $regex: pattern, $options: 'i' } },
+          { errorMessage: { $regex: pattern, $options: 'i' } },
+        ];
+      }
+      return query;
+    }
+
     async listCrawlResults(
       jobId: string,
-      options?: { limit?: number; skip?: number; type?: string },
+      options?: CrawlResultFilters & { limit?: number; skip?: number; omitBody?: boolean },
     ): Promise<ICrawlResult[]> {
       const db = this.getTenantDb();
-      const query: Record<string, unknown> = { jobId };
-      if (options?.type) query.type = options.type;
       const cursor = db
         .collection<ICrawlResult>(COLLECTIONS.crawlResults)
-        .find(query)
+        .find(this.crawlResultQuery(jobId, options))
         .sort({ createdAt: 1 });
+      if (options?.omitBody) cursor.project({ bodyMarkdown: 0 });
       if (options?.skip) cursor.skip(options.skip);
       if (options?.limit) cursor.limit(options.limit);
       const docs = await cursor.toArray();
@@ -307,11 +324,27 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       return { ...result, _id: toId(result._id) } as ICrawlResult;
     }
 
-    async countCrawlResults(jobId: string): Promise<number> {
+    async countCrawlResults(jobId: string, filters?: CrawlResultFilters): Promise<number> {
       const db = this.getTenantDb();
       return db
         .collection<ICrawlResult>(COLLECTIONS.crawlResults)
-        .countDocuments({ jobId });
+        .countDocuments(this.crawlResultQuery(jobId, filters));
+    }
+
+    async countCrawlResultsByType(
+      jobId: string,
+    ): Promise<Partial<Record<ICrawlResult['type'], number>>> {
+      const db = this.getTenantDb();
+      const rows = await db
+        .collection<ICrawlResult>(COLLECTIONS.crawlResults)
+        .aggregate<{ _id: ICrawlResult['type']; count: number }>([
+          { $match: { jobId } },
+          { $group: { _id: '$type', count: { $sum: 1 } } },
+        ])
+        .toArray();
+      const counts: Partial<Record<ICrawlResult['type'], number>> = {};
+      for (const row of rows) counts[row._id] = row.count;
+      return counts;
     }
 
     async deleteCrawlResultsByJob(jobId: string): Promise<number> {
