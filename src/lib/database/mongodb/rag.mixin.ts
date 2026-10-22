@@ -66,6 +66,28 @@ export function RagMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: T
       return { ...result, _id: result._id?.toString() } as IRagModule;
     }
 
+    async incrementRagModuleTotals(
+      id: string,
+      delta: { documents?: number; chunks?: number },
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      // Pipeline update rather than `$inc` so a decrement can be clamped at 0
+      // and a module created without the fields still starts from 0.
+      const add = (field: string, by: number) => ({
+        $max: [0, { $add: [{ $ifNull: [`$${field}`, 0] }, by] }],
+      });
+      await db.collection(COLLECTIONS.ragModules).updateOne(
+        { _id: new ObjectId(id) },
+        [{
+          $set: {
+            totalDocuments: add('totalDocuments', delta.documents ?? 0),
+            totalChunks: add('totalChunks', delta.chunks ?? 0),
+            updatedAt: new Date(),
+          },
+        }],
+      );
+    }
+
     async deleteRagModule(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       const result = await db

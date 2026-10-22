@@ -15,7 +15,6 @@ import {
   isFileByExtension,
 } from './axiosFetcher';
 import {
-  Semaphore,
   coolDownAfterReset,
   isTransientFetchError,
   resetAwareDelayMs,
@@ -98,7 +97,8 @@ export * from './types';
  *                      come back while reachable URLs remain in the queue)
  *   - plan.scope      (sameDomain / allowList / blockList)
  *   - deps.signal     (abort mid-crawl; in-flight pages still yield)
- *   - plan.http.maxConcurrency (default 5, capped at 16)
+ *   - plan.http.maxConcurrency (default 5, capped at 16): fetches kept in
+ *                      flight at once, refilled as each one settles
  */
 export async function* crawl(
   plan: CrawlPlan,
@@ -134,7 +134,15 @@ export async function* crawl(
   // Landing URLs (post-redirect) whose content has already been taken by a
   // fetched page — separate from `visited`, which tracks scheduled URLs.
   const claimedLandingUrls = new Set<string>();
-  const semaphore = new Semaphore(concurrency);
+  // Fetches outlive the `yield` that hands their predecessors to the caller,
+  // so they need a signal the engine itself can pull: it follows the caller's
+  // abort, and also fires when the caller stops iterating early (break/throw),
+  // so in-flight requests end instead of running on detached.
+  const stop = new AbortController();
+  const onCallerAbort = () => stop.abort();
+  if (deps.signal?.aborted) stop.abort();
+  else deps.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  const signal = stop.signal;
   const session =
     plan.engine !== 'axios'
       ? new PlaywrightSession(plan.http, downloadableMimes)
@@ -184,11 +192,11 @@ export async function* crawl(
   const axiosRetryOptions = {
     isRetryable: isTransientFetchError,
     getDelayMs: resetAwareDelayMs,
-    signal: deps.signal,
+    signal,
   } as const;
   const resetAwareRetryOptions = {
     getDelayMs: resetAwareDelayMs,
-    signal: deps.signal,
+    signal,
   } as const;
 
   // ── per-URL fetch with engine auto-selection ─────────────────────
@@ -204,14 +212,14 @@ export async function* crawl(
   }> {
     if (plan.engine === 'axios') {
       return retry(
-        () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
+        () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
         retries,
         resetAwareRetryOptions,
       );
     }
     if (plan.engine === 'playwright') {
       if (!session) throw new Error('Playwright session unavailable');
-      return retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
+      return retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
     }
     // auto mode, known-file URL (by extension): try axios first (it streams
     // bytes cheaply), but fall back to the browser download path when axios
@@ -224,20 +232,20 @@ export async function* crawl(
       // Host already known to break axios (bad TLS chain) — skip straight to
       // the browser download path instead of re-paying a doomed axios attempt.
       if (session && axiosCircuitOpen(url)) {
-        return retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
+        return retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
       }
       try {
         return await retry(
-          () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
+          () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
           retries,
           axiosRetryOptions,
         );
       } catch (err) {
         recordAxiosOutcome(url, err);
         if (!session) throw err;
-        await coolDownAfterReset(err, deps.signal);
+        await coolDownAfterReset(err, signal);
         try {
-          return await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
+          return await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
         } catch (pwErr) {
           throw new Error(
             `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -248,7 +256,7 @@ export async function* crawl(
     // auto: axios first, escalate to playwright if shell-like.
     // Skip axios entirely when the host's breaker is open.
     if (session && axiosCircuitOpen(url)) {
-      const pw = await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
+      const pw = await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
       if (pw.type === 'html' && pw.html && looksLikeJsShell(pw.html)) {
         throw new FetchStageError(
           `${url} still looks JS-rendered or bot-challenged after Playwright rendering`,
@@ -258,7 +266,7 @@ export async function* crawl(
     }
     try {
       const r = await retry(
-        () => fetchWithAxios(url, plan.http, downloadableMimes, deps.signal),
+        () => fetchWithAxios(url, plan.http, downloadableMimes, signal),
         retries,
         axiosRetryOptions,
       );
@@ -294,10 +302,10 @@ export async function* crawl(
         for (const candidate of candidates) {
           let attempt: Awaited<ReturnType<typeof session.fetch>>;
           try {
-            attempt = await retry(() => session.fetch(candidate, deps.signal), retries, resetAwareRetryOptions);
+            attempt = await retry(() => session.fetch(candidate, signal), retries, resetAwareRetryOptions);
           } catch (err) {
             failure = `Playwright fallback failed for JS-shell/challenge page ${url}: ${(err as Error).message}`;
-            if (deps.signal?.aborted) break;
+            if (signal.aborted) break;
             continue;
           }
           // A real (stealth-hardened) browser navigation not throwing doesn't
@@ -329,10 +337,10 @@ export async function* crawl(
       if (err instanceof FetchStageError) throw err;
       recordAxiosOutcome(url, err);
       if (!session) throw err;
-      await coolDownAfterReset(err, deps.signal);
+      await coolDownAfterReset(err, signal);
       let pw: Awaited<ReturnType<typeof session.fetch>>;
       try {
-        pw = await retry(() => session.fetch(url, deps.signal), retries, resetAwareRetryOptions);
+        pw = await retry(() => session.fetch(url, signal), retries, resetAwareRetryOptions);
       } catch (pwErr) {
         throw new Error(
           `All engines failed for ${url}: ${(pwErr as Error).message}`,
@@ -347,195 +355,241 @@ export async function* crawl(
     }
   }
 
-  // ── BFS frontier ─────────────────────────────────────────────────
+  // ── per-URL task ─────────────────────────────────────────────────
   interface Frontier {
     url: string;
     depth: number;
     parent?: string;
     rootDomain: string;
   }
-  const queue: Frontier[] = [];
-  for (const seed of seeds) {
-    queue.push({ url: seed, depth: 0, rootDomain: getHostname(seed) });
-  }
 
-  let yielded = 0;
+  type ItemOutcome =
+    | null
+    | PageResult
+    | { result: PageResult; children: string[]; item: Frontier };
 
-  try {
-    while (queue.length > 0) {
-      if (deps.signal?.aborted) {
-        logger.warn('Crawl aborted via signal');
-        break;
-      }
-      if (maxPages > 0 && yielded >= maxPages) break;
+  /**
+   * Fetch and convert one frontier entry. `null` means skipped (already
+   * visited, out of scope, a duplicate landing URL); a bare PageResult is an
+   * error page. Never rejects.
+   */
+  async function processItem(item: Frontier): Promise<ItemOutcome> {
+    if (visited.has(item.url)) return null;
+    if (isSkippableExtension(item.url)) return null;
+    if (signal.aborted) return null;
+    visited.add(item.url);
 
-      // Pull a batch sized by concurrency
-      const batch = queue.splice(0, concurrency);
-      const tasks = batch.map(async (item) => {
-        if (visited.has(item.url)) return null;
-        if (isSkippableExtension(item.url)) return null;
-        // An in-flight batch can be up to `concurrency` (up to 16) fetches;
-        // without this check a cancel/abort requested while this batch is
-        // running would only be honored once every task in it settles
-        // (potentially minutes later on a slow/unreachable host). Bail out
-        // of not-yet-started work immediately instead.
-        if (deps.signal?.aborted) return null;
-        visited.add(item.url);
+    // Scope checks at fetch time too (seeds may bypass extract filter)
+    const host = getHostname(item.url);
+    if (plan.scope.blockList && matchesAny(host, plan.scope.blockList)) {
+      return null;
+    }
+    try {
+      assertSafeUrl(item.url, plan.http.allowPrivateNetwork);
+    } catch (err) {
+      return errorPage(item, (err as Error).message);
+    }
 
-        // Scope checks at fetch time too (seeds may bypass extract filter)
-        const host = getHostname(item.url);
-        if (plan.scope.blockList && matchesAny(host, plan.scope.blockList)) {
-          return null;
-        }
-        try {
-          assertSafeUrl(item.url, plan.http.allowPrivateNetwork);
-        } catch (err) {
-          return errorPage(item, (err as Error).message);
-        }
-
-        await semaphore.acquire();
-        try {
-          const fetched = await fetchOne(item.url);
-          // Claim the URL the content was actually served from. `visited`
-          // only knows what was SCHEDULED, so two queued aliases of one page
-          // (`/old` → `/new`, plus `/new` itself) both pass it inside the same
-          // concurrent batch. Claiming is check-and-add with no await between,
-          // so exactly one result per landing URL survives; the loser is
-          // dropped before conversion/yield and never counts toward maxPages.
-          // Also mark it visited so later links straight to it aren't queued.
-          const landingUrl = normalizeUrl(fetched.finalUrl ?? item.url);
-          if (claimedLandingUrls.has(landingUrl)) return null;
-          claimedLandingUrls.add(landingUrl);
-          visited.add(landingUrl);
-          if (fetched.type === 'file') {
-            let attachmentBody: string | undefined;
-            if (fetched.fileBuffer) {
-              attachmentBody = await withTimeout(
-                fileToMarkdown({
-                  buffer: fetched.fileBuffer,
-                  fileName: deriveAttachmentFileName(
-                    item.url,
-                    fetched.contentType,
-                  ),
-                  options: plan.markdownOptions,
-                }),
-                MARKDOWN_CONVERSION_TIMEOUT_MS,
-                `Attachment markdown conversion for ${item.url}`,
-              ).catch((err: unknown) => {
-                logger.warn('Attachment markdown conversion failed', {
-                  url: item.url,
-                  error: (err as Error).message,
-                });
-                return undefined;
-              });
-            }
-            return {
-              url: item.url,
-              parentUrl: item.parent,
-              depth: item.depth,
-              type: 'file' as const,
-              httpStatus: fetched.httpStatus,
-              contentType: fetched.contentType,
-              body: attachmentBody,
-              bytes: fetched.fileBytes,
-              fetchedAt: new Date(),
-            };
-          }
-          const html = fetched.html ?? '';
-          // Resolve relative links / assets against where the content was
-          // actually served from, not the pre-redirect URL (e.g. /old-path →
-          // /new-dir/page makes `../x` land in the wrong place otherwise).
-          const pageUrl = fetched.finalUrl ?? item.url;
-          const meta = extractMeta(html);
-          const body = await withTimeout(
-            htmlToMarkdown({
-              html,
-              url: pageUrl,
+    try {
+      const fetched = await fetchOne(item.url);
+      // Claim the URL the content was actually served from. `visited`
+      // only knows what was SCHEDULED, so two queued aliases of one page
+      // (`/old` → `/new`, plus `/new` itself) can both pass it while they
+      // are in flight together. Claiming is check-and-add with no await
+      // between, so exactly one result per landing URL survives; the loser
+      // is dropped before conversion/yield and never counts toward maxPages.
+      // Also mark it visited so later links straight to it aren't queued.
+      const landingUrl = normalizeUrl(fetched.finalUrl ?? item.url);
+      if (claimedLandingUrls.has(landingUrl)) return null;
+      claimedLandingUrls.add(landingUrl);
+      visited.add(landingUrl);
+      if (fetched.type === 'file') {
+        let attachmentBody: string | undefined;
+        if (fetched.fileBuffer) {
+          attachmentBody = await withTimeout(
+            fileToMarkdown({
+              buffer: fetched.fileBuffer,
+              fileName: deriveAttachmentFileName(
+                item.url,
+                fetched.contentType,
+              ),
               options: plan.markdownOptions,
             }),
             MARKDOWN_CONVERSION_TIMEOUT_MS,
-            `HTML markdown conversion for ${item.url}`,
+            `Attachment markdown conversion for ${item.url}`,
           ).catch((err: unknown) => {
-            logger.warn(
-              'HTML markdown conversion failed; keeping page with no body',
-              {
-                url: item.url,
-                error: (err as Error).message,
-              },
-            );
-            return '';
-          });
-          // Discover children only if autoCrawl and we have depth budget
-          let children: string[] = [];
-          if (plan.autoCrawl && maxDepth > 0 && item.depth < maxDepth) {
-            children = extractLinks({
-              html,
-              pageUrl,
-              rootDomain: item.rootDomain,
-              scope: plan.scope,
-              visited,
+            logger.warn('Attachment markdown conversion failed', {
+              url: item.url,
+              error: (err as Error).message,
             });
-          }
-          const result: PageResult = {
+            return undefined;
+          });
+        }
+        return {
+          result: {
             url: item.url,
             parentUrl: item.parent,
             depth: item.depth,
-            type: 'html',
+            type: 'file',
             httpStatus: fetched.httpStatus,
             contentType: fetched.contentType,
-            title: meta.title || undefined,
-            description: meta.description || undefined,
-            body,
-            bytes: fetched.htmlBytes,
+            body: attachmentBody,
+            bytes: fetched.fileBytes,
             fetchedAt: new Date(),
-          };
-          return { result, children, item };
-        } catch (err) {
-          return errorPage(item, (err as Error).message);
-        } finally {
-          semaphore.release();
-        }
-      });
-
-      const settled = await Promise.all(tasks);
-      // Process every result in this batch before honoring maxPages — a
-      // `return` triggered mid-loop (as soon as the Nth success was seen)
-      // used to silently drop any later entries in the SAME `settled` array,
-      // including error pages that had already been fetched (network cost
-      // already paid) but would then vanish with no error reported anywhere.
-      // Instead, finish yielding the whole batch and only stop pulling new
-      // batches afterwards.
-      let limitReached = false;
-      for (const r of settled) {
-        if (!r) continue;
-        if ('result' in r) {
-          yield r.result;
-          yielded++;
-          if (maxPages > 0 && yielded >= maxPages) {
-            limitReached = true;
-            continue;
-          }
-          for (const child of r.children) {
-            if (visited.has(child)) continue;
-            queue.push({
-              url: child,
-              depth: r.item.depth + 1,
-              parent: r.item.url,
-              rootDomain: r.item.rootDomain,
-            });
-          }
-        } else {
-          // Error page: still surfaced to the caller (so it shows up in the
-          // run's error count / logs) but intentionally NOT counted against
-          // `maxPages` — otherwise a handful of broken/blocked URLs would
-          // silently shrink the number of real pages a run returns below
-          // what was requested, even though more crawlable URLs remain.
-          yield r;
-        }
+          },
+          children: [],
+          item,
+        };
       }
-      if (limitReached) return;
+      const html = fetched.html ?? '';
+      // Resolve relative links / assets against where the content was
+      // actually served from, not the pre-redirect URL (e.g. /old-path →
+      // /new-dir/page makes `../x` land in the wrong place otherwise).
+      const pageUrl = fetched.finalUrl ?? item.url;
+      const meta = extractMeta(html);
+      const body = await withTimeout(
+        htmlToMarkdown({
+          html,
+          url: pageUrl,
+          options: plan.markdownOptions,
+        }),
+        MARKDOWN_CONVERSION_TIMEOUT_MS,
+        `HTML markdown conversion for ${item.url}`,
+      ).catch((err: unknown) => {
+        logger.warn(
+          'HTML markdown conversion failed; keeping page with no body',
+          {
+            url: item.url,
+            error: (err as Error).message,
+          },
+        );
+        return '';
+      });
+      // Discover children only if autoCrawl and we have depth budget
+      let children: string[] = [];
+      if (plan.autoCrawl && maxDepth > 0 && item.depth < maxDepth) {
+        children = extractLinks({
+          html,
+          pageUrl,
+          rootDomain: item.rootDomain,
+          scope: plan.scope,
+          visited,
+        });
+      }
+      const result: PageResult = {
+        url: item.url,
+        parentUrl: item.parent,
+        depth: item.depth,
+        type: 'html',
+        httpStatus: fetched.httpStatus,
+        contentType: fetched.contentType,
+        title: meta.title || undefined,
+        description: meta.description || undefined,
+        body,
+        bytes: fetched.htmlBytes,
+        fetchedAt: new Date(),
+      };
+      return { result, children, item };
+    } catch (err) {
+      return errorPage(item, (err as Error).message);
     }
+  }
+
+  // ── BFS frontier: a sliding pool ─────────────────────────────────
+  // Up to `concurrency` fetches are in flight at all times: a new one starts
+  // the moment any of them settles. The previous fixed batches (`Promise.all`
+  // over `concurrency` URLs) left every slot idle behind the slowest URL in
+  // the batch — one 30s navigation timeout or reset backoff stalled the run.
+  // Scheduling happens in each fetch's completion handler, not in the
+  // generator body, so the pool keeps fetching while the caller is still
+  // persisting/ingesting an earlier page. `ready` is capped at `concurrency`
+  // so a slower caller applies backpressure instead of the engine buffering
+  // the whole site in memory.
+  const queue: Frontier[] = seeds.map((seed) => ({
+    url: seed,
+    depth: 0,
+    rootDomain: getHostname(seed),
+  }));
+  const ready: PageResult[] = [];
+  const running = new Set<Promise<void>>();
+  // Successful pages so far. With maxPages set a fetch only starts while
+  // `accepted + running.size < maxPages` (every in-flight fetch may still
+  // become a page), so the run returns at most maxPages pages and never pays
+  // for fetches it would have to throw away. An error page doesn't count:
+  // it frees its slot for the next URL.
+  let accepted = 0;
+  let wake: (() => void) | null = null;
+
+  const budgetLeft = () => maxPages === 0 || accepted + running.size < maxPages;
+
+  function settle(outcome: ItemOutcome): void {
+    if (!outcome) return;
+    if (!('result' in outcome)) {
+      // Error page: still surfaced to the caller (so it shows up in the
+      // run's error count / logs) but intentionally NOT counted against
+      // `maxPages` — otherwise a handful of broken/blocked URLs would
+      // silently shrink the number of real pages a run returns below
+      // what was requested, even though more crawlable URLs remain.
+      ready.push(outcome);
+      return;
+    }
+    accepted++;
+    ready.push(outcome.result);
+    if (maxPages > 0 && accepted >= maxPages) return;
+    for (const child of outcome.children) {
+      if (visited.has(child)) continue;
+      queue.push({
+        url: child,
+        depth: outcome.item.depth + 1,
+        parent: outcome.item.url,
+        rootDomain: outcome.item.rootDomain,
+      });
+    }
+  }
+
+  function pump(): void {
+    while (
+      queue.length > 0 &&
+      running.size < concurrency &&
+      ready.length < concurrency &&
+      budgetLeft() &&
+      !signal.aborted
+    ) {
+      const item = queue.shift()!;
+      const task: Promise<void> = processItem(item)
+        .catch((err: unknown) => errorPage(item, (err as Error).message))
+        .then((outcome) => {
+          running.delete(task);
+          settle(outcome);
+          pump();
+          const resume = wake;
+          wake = null;
+          resume?.();
+        });
+      running.add(task);
+    }
+  }
+
+  try {
+    pump();
+    while (ready.length > 0 || running.size > 0) {
+      if (ready.length === 0) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        continue;
+      }
+      yield ready.shift()!;
+      // The caller is done with that page, so `ready` has room again.
+      pump();
+    }
+    if (deps.signal?.aborted) logger.warn('Crawl aborted via signal');
   } finally {
+    deps.signal?.removeEventListener('abort', onCallerAbort);
+    // Nothing is in flight after a full run. When the caller stopped early,
+    // end what is and let it settle before closing the browser under it.
+    stop.abort();
+    await Promise.allSettled(running);
     if (session) {
       await session.close();
     }

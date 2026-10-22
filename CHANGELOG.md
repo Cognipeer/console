@@ -659,3 +659,14 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   workspace owners and admins. The default rules use it.
 - **Deleting a project** now deletes its alert rules, so they no longer evaluate and notify under "Unknown Project", and
   closes its open incidents. Its alert history is kept.
+
+### Crawler throughput
+
+- A crawler's **Max concurrency** (`http.maxConcurrency`, 1–16) now applies to the whole run. Fetches run as a sliding
+  pool that refills as each one finishes, instead of in fixed batches that waited for the slowest URL. Fetching goes on
+  while earlier pages are still being saved, and pages are saved and ingested into the Knowledge Engine with the same
+  concurrency, instead of one at a time. On a 100-page test site with one slow page in twenty, a run at concurrency 16
+  takes 5 s instead of 36 s.
+- `maxPages` is a hard cap: a run returns at most that many pages, and downloaded files count toward it as documented.
+- Knowledge Engine document and chunk totals are now updated atomically, so concurrent ingests into one module no
+  longer overwrite each other's counts.

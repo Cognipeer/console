@@ -699,9 +699,9 @@ describe('RAG Service', () => {
 
     it('updates module total counts', async () => {
       await ingestDocument(DB_NAME, TENANT_ID, PROJECT_ID, ingestReq);
-      expect(db.updateRagModule).toHaveBeenCalledWith(
+      expect(db.incrementRagModuleTotals).toHaveBeenCalledWith(
         'ragmod-1',
-        expect.objectContaining({ totalDocuments: 1 }),
+        expect.objectContaining({ documents: 1 }),
       );
     });
 
@@ -1469,10 +1469,7 @@ describe('RAG Service', () => {
 
     it('updates module stats after deletion', async () => {
       await deleteRagDocument(DB_NAME, TENANT_ID, PROJECT_ID, deleteReq);
-      expect(db.updateRagModule).toHaveBeenCalledWith(
-        'ragmod-1',
-        expect.objectContaining({ totalDocuments: 2, totalChunks: 7 }),
-      );
+      expect(db.incrementRagModuleTotals).toHaveBeenCalledWith('ragmod-1', { documents: -1, chunks: -3 });
     });
 
     it('deletes the document record and returns true', async () => {

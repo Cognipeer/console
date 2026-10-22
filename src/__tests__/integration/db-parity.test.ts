@@ -2663,6 +2663,25 @@ describeForEachProvider('RAG module teardown + shared index accounting', (getDb)
     expect(await db.countRagModulesByVectorIndexKey('idx-nobody')).toBe(0);
   });
 
+  it('adds to the document/chunk totals atomically and clamps them at 0', async () => {
+    const db = getDb();
+    const created = await db.createRagModule(baseModule('m-totals', 'idx-shared', 'proj-1'));
+    const id = String(created._id);
+
+    // Concurrent ingests into one module: every increment has to land.
+    await Promise.all(
+      Array.from({ length: 20 }, () => db.incrementRagModuleTotals(id, { documents: 1, chunks: 3 })),
+    );
+    let found = await db.findRagModuleById(id);
+    expect(found?.totalDocuments).toBe(20);
+    expect(found?.totalChunks).toBe(60);
+
+    await db.incrementRagModuleTotals(id, { documents: -25, chunks: -100 });
+    found = await db.findRagModuleById(id);
+    expect(found?.totalDocuments).toBe(0);
+    expect(found?.totalChunks).toBe(0);
+  });
+
   it('persists the retrieval controls and the re-index handshake on a module', async () => {
     const db = getDb();
     const created = await db.createRagModule({

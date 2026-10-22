@@ -143,6 +143,20 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       return this.findRagModuleById(id);
     }
 
+    async incrementRagModuleTotals(
+      id: string,
+      delta: { documents?: number; chunks?: number },
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      db.prepare(
+        `UPDATE ${TABLES.ragModules}
+         SET totalDocuments = MAX(0, COALESCE(totalDocuments, 0) + @documents),
+             totalChunks = MAX(0, COALESCE(totalChunks, 0) + @chunks),
+             updatedAt = @updatedAt
+         WHERE id = @id`,
+      ).run({ id, documents: delta.documents ?? 0, chunks: delta.chunks ?? 0, updatedAt: this.now() });
+    }
+
     async deleteRagModule(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       return db.prepare(`DELETE FROM ${TABLES.ragModules} WHERE id = @id`).run({ id }).changes > 0;
