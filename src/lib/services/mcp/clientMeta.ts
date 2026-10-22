@@ -113,9 +113,9 @@ function byteLength(value: unknown): number {
  * result is still larger than `maxBytes` once serialized, keys are dropped from
  * the end until it fits and `_truncated: true` says so.
  *
- * `scrub` (the secret redaction of the log payload) runs on every candidate
- * before it is measured: masking a short value under a sensitive key name makes
- * it longer, so the size limit has to be judged on what is actually stored.
+ * `scrub` (the secret redaction of the log payload) runs before anything is
+ * measured: masking a short value under a sensitive key name makes it longer,
+ * so the size limit has to be judged on what is actually stored.
  */
 export function boundClientMeta(
   raw: unknown,
@@ -125,13 +125,20 @@ export function boundClientMeta(
   const entries = boundEntries(raw, false);
   if (entries.length === 0) return undefined;
 
-  const build = (kept: Array<[string, unknown]>, truncated: boolean) => {
-    const meta = Object.fromEntries(truncated ? [...kept, ['_truncated', true]] : kept);
-    return opts.scrub ? opts.scrub(meta) : meta;
-  };
-
-  const whole = build(entries, false);
+  const bounded = Object.fromEntries(entries);
+  const whole = opts.scrub ? opts.scrub(bounded) : bounded;
   if (byteLength(whole) <= opts.maxBytes) return whole;
-  while (entries.length > 0 && byteLength(build(entries, true)) > opts.maxBytes) entries.pop();
-  return build(entries, true);
+
+  // Each entry is measured once (`"key":value` plus its comma) rather than the
+  // whole object again per dropped key: the input can be large, and the cost
+  // should stay linear in it.
+  const kept: Array<[string, unknown]> = [];
+  let size = byteLength({ _truncated: true });
+  for (const [key, value] of Object.entries(whole)) {
+    const entryBytes = byteLength({ [key]: value }) - 1;
+    if (size + entryBytes > opts.maxBytes) break;
+    kept.push([key, value]);
+    size += entryBytes;
+  }
+  return Object.fromEntries([...kept, ['_truncated', true]]);
 }
