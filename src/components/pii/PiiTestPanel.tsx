@@ -11,6 +11,7 @@ import {
   Table,
   Text,
   Textarea,
+  Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useLocale, useTranslations } from '@/lib/i18n';
@@ -29,6 +30,8 @@ interface Finding {
   action: PiiAction;
   block: boolean;
   replacement: string;
+  confidence?: number;
+  evidence?: string[];
 }
 
 interface ScanResult {
@@ -45,15 +48,25 @@ interface Props {
   /** Which detector to test against — reflects the (possibly unsaved) draft's
    *  current selection, not necessarily what the saved policy still has. */
   engine: PiiEngine;
+  /** The draft's `detection` settings — same caveat as `engine`. */
+  minConfidence: number;
+  contextBoost: boolean;
 }
 
-export default function PiiTestPanel({ categories, customPatterns, languages, engine }: Props) {
+/** Row identity for matching a threshold-free scan against the filtered one. */
+const findingKey = (f: Finding) => `${f.category}:${f.start}:${f.end}`;
+
+export default function PiiTestPanel({ categories, customPatterns, languages, engine, minConfidence, contextBoost }: Props) {
   const t = useTranslations('pii.test');
   const tSev = useTranslations('pii.severity');
   const locale = useLocale();
 
   const [text, setText] = useState('');
   const [result, setResult] = useState<ScanResult | null>(null);
+  /** Findings the threshold dropped, shown greyed so the threshold's effect is visible. */
+  const [ignored, setIgnored] = useState<Finding[]>([]);
+  /** Threshold the shown result was produced with (the draft may change after the run). */
+  const [ranThreshold, setRanThreshold] = useState(0);
   const [activeAction, setActiveAction] = useState<'detect' | 'redact' | 'mask' | 'tokenize' | null>(null);
   const [running, setRunning] = useState(false);
 
@@ -62,24 +75,34 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
     setRunning(true);
     setActiveAction(action);
     try {
-      const res = await fetch(`/api/pii/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text,
-          categories,
-          customPatterns,
-          languages,
-          locale,
-          engine,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? 'Failed');
-      }
-      const data = (await res.json()) as ScanResult;
+      const post = async (op: string, threshold: number) => {
+        const res = await fetch(`/api/pii/${op}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            categories,
+            customPatterns,
+            languages,
+            locale,
+            engine,
+            detection: { minConfidence: threshold, contextBoost },
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? 'Failed');
+        }
+        return (await res.json()) as ScanResult;
+      };
+      const [data, unfiltered] = await Promise.all([
+        post(action, minConfidence),
+        minConfidence > 0 ? post('detect', 0) : Promise.resolve(null),
+      ]);
+      const kept = new Set(data.findings.map(findingKey));
       setResult(data);
+      setIgnored(unfiltered ? unfiltered.findings.filter((f) => !kept.has(findingKey(f))) : []);
+      setRanThreshold(minConfidence);
     } catch (err) {
       notifications.show({
         title: 'PII',
@@ -93,10 +116,15 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
 
   return (
     <Stack gap="md">
-      <div>
-        <Text fw={600} size="sm">{t('title')}</Text>
-        <Text size="xs" c="dimmed">{t('subtitle')}</Text>
-      </div>
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <div>
+          <Text fw={600} size="sm">{t('title')}</Text>
+          <Text size="xs" c="dimmed">{t('subtitle')}</Text>
+        </div>
+        <Tooltip label={t('thresholdHint')}>
+          <Badge variant="outline" color="gray">{t('threshold', { value: minConfidence.toFixed(2) })}</Badge>
+        </Tooltip>
+      </Group>
 
       <Textarea
         label={t('input')}
@@ -185,7 +213,7 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
 
           <Paper p="md" withBorder radius="sm">
             <Text size="sm" fw={600} mb="xs">{t('findings')}</Text>
-            {result.findings.length === 0 ? (
+            {result.findings.length === 0 && ignored.length === 0 ? (
               <Text size="sm" c="dimmed">{t('noFindings')}</Text>
             ) : (
               <Table striped highlightOnHover withColumnBorders verticalSpacing="xs" fz="xs">
@@ -194,25 +222,41 @@ export default function PiiTestPanel({ categories, customPatterns, languages, en
                     <Table.Th>{t('category')}</Table.Th>
                     <Table.Th>{t('severity')}</Table.Th>
                     <Table.Th>{t('value')}</Table.Th>
+                    <Table.Th>{t('confidence')}</Table.Th>
+                    <Table.Th>{t('evidence')}</Table.Th>
                     <Table.Th>{t('offset')}</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                  {result.findings.map((f, i) => (
-                    <Table.Tr key={`${f.category}-${f.start}-${i}`}>
+                  {[
+                    ...result.findings.map((f) => ({ f, below: false })),
+                    ...ignored.map((f) => ({ f, below: true })),
+                  ].map(({ f, below }, i) => (
+                    <Table.Tr key={`${f.category}-${f.start}-${i}`} style={below ? { opacity: 0.5 } : undefined}>
                       <Table.Td>
                         <div>
                           <Text size="xs" fw={500}>{f.label}</Text>
                           <Text size="xs" c="dimmed">{f.category}</Text>
+                          {below && (
+                            <Badge size="xs" variant="outline" color="gray" mt={2}>{t('belowThreshold')}</Badge>
+                          )}
                         </div>
                       </Table.Td>
                       <Table.Td>
-                        <Badge size="xs" color={f.severity === 'high' ? 'red' : f.severity === 'medium' ? 'orange' : 'gray'}>
+                        <Badge size="xs" color={below ? 'gray' : f.severity === 'high' ? 'red' : f.severity === 'medium' ? 'orange' : 'gray'}>
                           {tSev(f.severity)}
                         </Badge>
                       </Table.Td>
                       <Table.Td style={{ fontFamily: 'var(--font-mono, monospace)', maxWidth: 320, wordBreak: 'break-all' }}>
                         {f.value}
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="xs" fw={below ? 400 : 600} c={below || (f.confidence ?? 1) < ranThreshold ? 'dimmed' : undefined}>
+                          {typeof f.confidence === 'number' ? f.confidence.toFixed(2) : '—'}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Text size="xs" c="dimmed">{f.evidence?.length ? f.evidence.join(' · ') : '—'}</Text>
                       </Table.Td>
                       <Table.Td>
                         <Text size="xs" c="dimmed">{f.start}–{f.end}</Text>

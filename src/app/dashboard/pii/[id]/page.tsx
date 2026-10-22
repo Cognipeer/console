@@ -44,6 +44,7 @@ interface PolicyView {
   customPatterns?: PiiCustomPatternForm[];
   languages?: string[];
   enabled: boolean;
+  detection?: { minConfidence?: number; contextBoost?: boolean };
 }
 
 export default function PiiPolicyDetailPage() {
@@ -72,6 +73,8 @@ export default function PiiPolicyDetailPage() {
   const [categories, setCategories] = useState<Record<string, boolean>>({});
   const [customPatterns, setCustomPatterns] = useState<PiiCustomPatternForm[]>([]);
   const [languages, setLanguages] = useState<string[]>([]);
+  const [minConfidence, setMinConfidence] = useState(0);
+  const [contextBoost, setContextBoost] = useState(true);
 
   /** Fetch `forEngine`'s catalog in the current locale; returns its defaults, or null on a non-OK response. */
   const loadCatalog = async (forEngine: PiiEngine): Promise<Record<string, boolean> | null> => {
@@ -111,6 +114,8 @@ export default function PiiPolicyDetailPage() {
         })),
       );
       setLanguages(p.languages ?? []);
+      setMinConfidence(p.detection?.minConfidence ?? 0);
+      setContextBoost(p.detection?.contextBoost !== false);
       await loadCatalog(loadedEngine);
     } catch (err) {
       notifications.show({
@@ -180,6 +185,7 @@ export default function PiiPolicyDetailPage() {
           categories,
           customPatterns,
           languages,
+          detection: { minConfidence, contextBoost },
         }),
       });
       if (!res.ok) {
@@ -359,6 +365,10 @@ export default function PiiPolicyDetailPage() {
             engine={engine}
             onEngineChange={(next) => void handleEngineChange(next)}
             catalog={catalog}
+            minConfidence={minConfidence}
+            onMinConfidenceChange={setMinConfidence}
+            contextBoost={contextBoost}
+            onContextBoostChange={setContextBoost}
           />
 
           <Group justify="flex-end">
@@ -379,6 +389,8 @@ export default function PiiPolicyDetailPage() {
           customPatterns={customPatterns}
           languages={languages}
           engine={engine}
+          minConfidence={minConfidence}
+          contextBoost={contextBoost}
         />
       ) : null}
 

@@ -88,6 +88,8 @@ export interface IGuardrailEvaluationLog extends IUsageAttributionFields {
     action: string;
     block: boolean;
     value?: string;
+    /** 0–1 detector confidence; PII findings carry it, other families may not. */
+    confidence?: number;
   }>;
   inputText?: string;
   latencyMs?: number;
