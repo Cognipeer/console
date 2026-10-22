@@ -932,10 +932,7 @@ export async function ingestDocument(
       lastIndexedAt,
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
-      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
 
     return withoutInlineSource({ ...docRecord, status: 'indexed' as const, chunkCount, lastIndexedAt });
   } catch (error) {
@@ -1027,10 +1024,7 @@ export async function indexPendingRagDocument(
       lastIndexedAt: new Date(),
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalDocuments: (ragModule.totalDocuments ?? 0) + 1,
-      totalChunks: (ragModule.totalChunks ?? 0) + chunkCount,
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { documents: 1, chunks: chunkCount });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Ingestion failed';
     await db.updateRagDocument(documentId, { status: 'failed', errorMessage: msg });
@@ -1613,10 +1607,7 @@ export async function deleteRagDocument(
   await discardDocumentSource(tenantDbName, tenantId, projectId, doc, CASCADE_ACTOR);
 
   // Update module stats
-  await db.updateRagModule(String(ragModule._id), {
-    totalDocuments: Math.max(0, (ragModule.totalDocuments ?? 0) - 1),
-    totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - chunkCount),
-  } as Partial<IRagModule>);
+  await db.incrementRagModuleTotals(String(ragModule._id), { documents: -1, chunks: -chunkCount });
 
   return db.deleteRagDocument(request.documentId);
 }
@@ -1872,9 +1863,7 @@ export async function reingestDocument(
       ...sourceFields,
     });
 
-    await db.updateRagModule(String(ragModule._id), {
-      totalChunks: Math.max(0, (ragModule.totalChunks ?? 0) - oldChunkCount + chunkCount),
-    } as Partial<IRagModule>);
+    await db.incrementRagModuleTotals(String(ragModule._id), { chunks: chunkCount - oldChunkCount });
 
     logger.debug('Re-indexed document', {
       documentId: request.documentId,

@@ -1309,6 +1309,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<IRagModule, 'tenantId' | 'key' | 'createdBy'>>,
   ): Promise<IRagModule | null>;
+  /**
+   * Atomically add to a module's `totalDocuments` / `totalChunks` (negative
+   * subtracts; each total is clamped at 0). Ingests into one module run
+   * concurrently (parallel crawl pages, the ingest queue), so a
+   * read-modify-write through `updateRagModule` loses updates.
+   */
+  incrementRagModuleTotals(
+    id: string,
+    delta: { documents?: number; chunks?: number },
+  ): Promise<void>;
   deleteRagModule(id: string): Promise<boolean>;
   findRagModuleById(id: string): Promise<IRagModule | null>;
   findRagModuleByKey(key: string, projectId?: string): Promise<IRagModule | null>;
