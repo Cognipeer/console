@@ -447,7 +447,8 @@ export function CrawlerMixin<TBase extends Constructor<SQLiteProviderBase>>(Base
       }
       const search = filters?.search?.trim();
       if (search) {
-        conds.push(this.likeAny(['url', 'title', 'errorMessage'], '@search'));
+        // Folded on both sides: plain LIKE folds ASCII case only, so "übersicht" would miss "Übersicht".
+        conds.push(`(${['url', 'title', 'errorMessage'].map((c) => `iam_fold(${c}) LIKE iam_fold(@search) ESCAPE '\\'`).join(' OR ')})`);
         params.search = this.likePattern(search);
       }
       return { where: conds.join(' AND '), params };

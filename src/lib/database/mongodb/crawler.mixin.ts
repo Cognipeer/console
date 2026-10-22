@@ -11,6 +11,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+import { foldedRegexSource } from '@/lib/shared/searchFold';
 
 function toId(value: ObjectId | string | undefined): string {
   if (!value) return '';
@@ -265,7 +266,7 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       else if (filters?.ragStatus) query.ragStatus = filters.ragStatus;
       const search = filters?.search?.trim();
       if (search) {
-        const pattern = this.escapeRegex(search);
+        const pattern = foldedRegexSource(search);
         query.$or = [
           { url: { $regex: pattern, $options: 'i' } },
           { title: { $regex: pattern, $options: 'i' } },

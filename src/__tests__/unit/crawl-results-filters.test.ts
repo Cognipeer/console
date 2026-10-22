@@ -20,7 +20,7 @@ describeForEachProvider('crawl result filters', (getDb) => {
     await db.switchToTenant(dbName);
     const rows: Array<Omit<ICrawlResult, '_id' | 'createdAt'>> = [
       { tenantId, jobId, url: 'https://a.test/pricing', depth: 0, type: 'html', title: 'Pricing 100%_off', bodyMarkdown: 'big body', ragStatus: 'indexed' },
-      { tenantId, jobId, url: 'https://a.test/docs', depth: 1, type: 'html', title: 'Docs', bodyMarkdown: 'docs body', ragStatus: 'failed' },
+      { tenantId, jobId, url: 'https://a.test/docs', depth: 1, type: 'html', title: 'Docs Übersicht', bodyMarkdown: 'docs body', ragStatus: 'failed' },
       { tenantId, jobId, url: 'https://a.test/guide.pdf', depth: 1, type: 'file', bodyMarkdown: 'pdf text' },
       { tenantId, jobId, url: 'https://a.test/broken', depth: 1, type: 'error', errorMessage: 'ECONNRESET upstream' },
       { tenantId, jobId: 'other-job', url: 'https://a.test/pricing', depth: 0, type: 'html' },
@@ -46,7 +46,7 @@ describeForEachProvider('crawl result filters', (getDb) => {
     const page = await db.listCrawlResults(jobId, { limit: 2, skip: 1, omitBody: true });
     expect(page.map((r) => r.url)).toEqual(['https://a.test/docs', 'https://a.test/guide.pdf']);
     expect(page.every((r) => r.bodyMarkdown === undefined)).toBe(true);
-    expect(page[0]!.title).toBe('Docs');
+    expect(page[0]!.title).toBe('Docs Übersicht');
 
     // OFFSET without a LIMIT.
     expect((await db.listCrawlResults(jobId, { skip: 3 })).map((r) => r.url)).toEqual(['https://a.test/broken']);
@@ -65,6 +65,7 @@ describeForEachProvider('crawl result filters', (getDb) => {
   it('searches url, title and error message case-insensitively with wildcards taken literally', async () => {
     const db = getDb();
     expect(await db.countCrawlResults(jobId, { search: 'GUIDE.PDF' })).toBe(1);
+    expect(await db.countCrawlResults(jobId, { search: 'übersicht' })).toBe(1);
     expect(await db.countCrawlResults(jobId, { search: 'econnreset' })).toBe(1);
     expect(await db.countCrawlResults(jobId, { search: '100%_off' })).toBe(1);
     expect(await db.countCrawlResults(jobId, { search: '1%0' })).toBe(0);

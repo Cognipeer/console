@@ -105,6 +105,10 @@ export default function RunDetailModal({
     setPage(1);
     setListing(EMPTY_PAGE);
     setSelectedId(null);
+  }, [jobId]);
+
+  // The sync target follows the default module without discarding the loaded listing.
+  useEffect(() => {
     setSyncModuleKey(defaultRagModuleKey || null);
   }, [jobId, defaultRagModuleKey]);
 
