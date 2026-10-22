@@ -15,6 +15,7 @@ export {
   detokenizePii,
   scanWithPolicy,
   parseCustomPatternsInput,
+  parseDetectionInput,
   MAX_CUSTOM_PATTERNS_PER_POLICY,
   PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,

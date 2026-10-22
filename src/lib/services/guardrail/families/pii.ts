@@ -290,6 +290,7 @@ function toSafetyFinding(params: {
     code: params.code,
     path: unit?.path,
     span: params.span,
+    confidence: finding.confidence,
   };
 }
 

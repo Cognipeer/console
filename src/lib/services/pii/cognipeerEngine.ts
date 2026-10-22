@@ -13,6 +13,9 @@
  * (all five values, including `'block'`/`'tokenize'`, which the npm
  * package's own public API does not know about), same finding shape out.
  *
+ * FORWARDED from the policy: `detection.minConfidence` and
+ * `detection.contextBoost`, which mean the same thing in both engines.
+ *
  * NOT EXPOSED YET: the package's `detection.mode` tier ladder
  * (`pattern` / `+dictionary` / `+dictionary+ner` / `+ner-verified`). Hardcoded
  * to `pattern+dictionary` below — the lightest tier that still makes
@@ -22,7 +25,7 @@
  * exposes `IPiiPolicy.detection.mode` for the `regex` engine.
  */
 
-import type { IPiiCustomPattern, PiiAction, PiiLanguage } from '@/lib/database';
+import type { IPiiCustomPattern, PiiAction, PiiDetectionConfig, PiiLanguage } from '@/lib/database';
 import type { PiiFinding } from './types';
 
 /** Cached module reference — the package's functions are stateless calls (no
@@ -41,6 +44,9 @@ export interface CognipeerScanOptions {
   categories?: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
   languages?: PiiLanguage[];
+  /** Only the engine-neutral knobs travel; the regex engine's `mode`/`ner`
+   *  vocabulary does not map onto the package's tiers. */
+  detection?: Pick<PiiDetectionConfig, 'minConfidence' | 'contextBoost'>;
 }
 
 export interface CognipeerScanOutcome {
@@ -61,7 +67,11 @@ export async function scanWithCognipeer(
     categories: options.categories,
     customPatterns: options.customPatterns,
     languages: options.languages,
-    detection: { mode: DEFAULT_MODE },
+    detection: {
+      mode: DEFAULT_MODE,
+      ...(options.detection?.minConfidence !== undefined ? { minConfidence: options.detection.minConfidence } : {}),
+      ...(options.detection?.contextBoost !== undefined ? { contextBoost: options.detection.contextBoost } : {}),
+    },
   };
 
   // The package's public API has three action-shaped calls, not five — see

@@ -14,6 +14,7 @@ import type {
   IPiiCustomPattern,
   IPiiPolicy,
   PiiAction,
+  PiiDetectionConfig,
   PiiEngine,
   PiiLanguage,
 } from '@/lib/database';
@@ -130,6 +131,37 @@ export function parseCustomPatternsInput(
   return { patterns: out };
 }
 
+/**
+ * Validate a `detection` request field. Only the two operator-facing knobs
+ * are accepted: `minConfidence` (0–1) and `contextBoost`. The pipeline's
+ * other settings (`mode`, `ner`) have no API yet, so an unknown key is an
+ * error rather than a field that is silently dropped. `undefined` means
+ * "field absent" and is passed through untouched.
+ */
+export function parseDetectionInput(
+  input: unknown,
+): { detection?: Pick<PiiDetectionConfig, 'minConfidence' | 'contextBoost'>; error?: string } {
+  if (input === undefined) return {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { error: 'detection must be an object' };
+  }
+  const raw = input as Record<string, unknown>;
+  const unknownKey = Object.keys(raw).find((key) => key !== 'minConfidence' && key !== 'contextBoost');
+  if (unknownKey) return { error: `detection.${unknownKey} is not supported (use minConfidence, contextBoost)` };
+  const detection: Pick<PiiDetectionConfig, 'minConfidence' | 'contextBoost'> = {};
+  if (raw.minConfidence !== undefined) {
+    if (typeof raw.minConfidence !== 'number' || !Number.isFinite(raw.minConfidence) || raw.minConfidence < 0 || raw.minConfidence > 1) {
+      return { error: 'detection.minConfidence must be a number between 0 and 1' };
+    }
+    detection.minConfidence = raw.minConfidence;
+  }
+  if (raw.contextBoost !== undefined) {
+    if (typeof raw.contextBoost !== 'boolean') return { error: 'detection.contextBoost must be a boolean' };
+    detection.contextBoost = raw.contextBoost;
+  }
+  return { detection };
+}
+
 export async function createPiiPolicy(
   tenantDbName: string,
   tenantId: string,
@@ -154,6 +186,7 @@ export async function createPiiPolicy(
     languages: input.languages ?? [],
     enabled: input.enabled ?? true,
     metadata: input.metadata ?? {},
+    ...(input.detection ? { detection: input.detection } : {}),
     createdBy,
   });
 
@@ -168,7 +201,15 @@ export async function updatePiiPolicy(
 ): Promise<PiiServicePolicyView | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
-  const updated = await db.updatePiiPolicy(id, { ...input, updatedBy });
+  // `detection` is merged, not replaced: a client that sends only
+  // `minConfidence` must not wipe a stored `mode`/`ner` it never saw.
+  let detection = input.detection;
+  if (detection) {
+    const existing = await db.findPiiPolicyById(id);
+    if (!existing) return null;
+    detection = { ...existing.detection, ...detection };
+  }
+  const updated = await db.updatePiiPolicy(id, { ...input, ...(detection ? { detection } : {}), updatedBy });
   if (!updated) return null;
   return serializePiiPolicy(updated);
 }
@@ -261,7 +302,12 @@ async function runDetection(
   if (engine === 'cognipeer') {
     return scanWithCognipeer(
       text,
-      { categories: options.categories, customPatterns: options.customPatterns, languages: options.languages },
+      {
+        categories: options.categories,
+        customPatterns: options.customPatterns,
+        languages: options.languages,
+        detection: options.detection,
+      },
       action,
     );
   }
