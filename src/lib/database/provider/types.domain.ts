@@ -3383,6 +3383,12 @@ export interface IAgentConversationMessage {
   compactions?: IAgentTurnCompaction[];
   /** The tool results those summarizations replaced with a placeholder. */
   compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+  /** Every plan version the agent wrote during this turn, oldest first (at most 30). */
+  plans?: IAgentTurnPlanSnapshot[];
+  /** The sub-agents this turn ran, in start order, each with its own steps. */
+  subagentRuns?: IAgentTurnSubagentRun[];
+  /** Sub-agent runs past the per-message cap: counted, not stored. */
+  subagentRunsDropped?: number;
   /**
    * Things that went wrong without failing the turn — a memory lookup that
    * failed, a knowledge search that errored — so an answer built without them
@@ -3421,6 +3427,97 @@ export interface IAgentTurnCompaction {
   integrityNotes?: string[];
   /** The summarizer call failed and a local fallback summary was used. */
   failed?: boolean;
+  /** The pass's id: agent-sdk ≥ 0.20 sends one (its summarize_context call id); Console makes one otherwise. */
+  id?: string;
+  /** 1-based pass number within this message (a resumed leg is a new message and starts again at 1). */
+  index?: number;
+  /**
+   * Where the pass happened: the last tool call of the agent's own that had
+   * finished before it, or `null` when none had yet in this message. Absent on
+   * passes stored before positions existed; those are placed by `at`.
+   */
+  afterToolCallId?: string | null;
+  /** Which check started the pass (agent-sdk ≥ 0.20). */
+  trigger?: 'pre_leg' | 'mid_leg' | 'post_tools';
+  /** The tool results THIS pass replaced. The message's `compactedTools` is the whole turn's. */
+  compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+}
+
+export type AgentPlanStepStatus = 'not-started' | 'in-progress' | 'completed' | 'blocked';
+
+/** One step of the agent's plan (the SDK's PlanStepRecord, text clipped). */
+export interface IAgentPlanStep {
+  id: number | string;
+  title: string;
+  status: AgentPlanStepStatus;
+  owner?: string;
+  exitCriteria?: string;
+  evidence?: string;
+}
+
+/** One version of the agent's plan, as a manage_plan write or update left it. */
+export interface IAgentTurnPlanSnapshot {
+  /** The manage_plan / manage_todo_list call that wrote it. */
+  toolCallId?: string;
+  version: number;
+  operation: 'write' | 'update';
+  steps: IAgentPlanStep[];
+  /** Completed steps over all steps, 0..1 (the SDK names it `adherenceScore`). */
+  completion?: number;
+  /** When Console received it (ISO). */
+  at: string;
+}
+
+/** One tool call a sub-agent made, kept short on the parent's message. */
+export interface IAgentSubagentStep {
+  id?: string;
+  name: string;
+  status: 'running' | 'success' | 'error';
+  /** Clipped to about 1 KB; `_truncated` marks a step whose args or output were cut. */
+  args?: unknown;
+  output?: unknown;
+  error?: string;
+  durationMs?: number;
+  timestamp?: string;
+  _truncated?: boolean;
+}
+
+export type AgentSubagentRunPhase = 'start' | 'result' | 'error' | 'paused';
+
+/** One sub-agent a turn ran: its header, its own tool calls and its own summarization passes. */
+export interface IAgentTurnSubagentRun {
+  /** The SDK's spawn id (`sa_…`); a resumed run keeps it. */
+  id: string;
+  name: string;
+  mode?: 'registry' | 'adhoc';
+  /** The delegate_to / spawn_subagent / spawn_subagents_parallel call that started it. */
+  parentToolCallId?: string;
+  /** Started by spawn_subagents_parallel. */
+  parallel?: boolean;
+  /** This message continues a run an earlier message of the turn started (it paused for a person); `steps` holds this leg's only. */
+  resumed?: boolean;
+  /** The latest lifecycle event seen. */
+  phase: AgentSubagentRunPhase;
+  /** The SDK's status: ok | incomplete | blocked | needs_input | cancelled | error. */
+  status?: string;
+  note?: string;
+  /** The task it was given, clipped to 2 KB. */
+  input?: string;
+  /** What it answered, clipped to 2 KB. */
+  result?: string;
+  error?: string;
+  durationMs?: number;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  /** The registry entry it ran, when Console knows it. */
+  target?: { kind: 'ref' | 'inline'; agentName?: string; version?: number };
+  startedAt?: string;
+  endedAt?: string;
+  /** Its own tool calls, in order (at most 50). */
+  steps: IAgentSubagentStep[];
+  /** Steps past the cap: counted, not stored. */
+  stepsDropped?: number;
+  /** Its own summarization passes. They never count as the parent's. */
+  compactions?: IAgentTurnCompaction[];
 }
 
 /** Why a turn stopped, as the session API reports it (conversation + events). */
