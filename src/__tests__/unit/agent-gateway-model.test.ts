@@ -128,7 +128,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('attribution and usage', () => {
-  it('a real agent loop writes ONE usage row per model call, on the agent route, attributed to the agent and the user, without the prompt', async () => {
+  it('a real agent loop writes ONE usage row per model call, on the agent route, attributed to the agent and the user, with the prompt', async () => {
     const result = await runAgent(await build('m', {
       route: 'agent.chat', agentKey: 'support-bot', sessionId: 'sess-1', userId: 'user-7',
     }));
@@ -145,9 +145,8 @@ describe('attribution and usage', () => {
         providerRequest: { agentKey: 'support-bot', sessionId: 'sess-1' },
         usage: { inputTokens: 100, outputTokens: 10 },
       });
-      // The context of an agent step is the whole conversation; the trace holds it, the row only its size.
-      expect(row.providerRequest).not.toHaveProperty('messages.0');
-      expect(row.providerRequest.messages).toMatchObject({ count: expect.any(Number) });
+      // The row carries the step's messages, so the request details show the input beside the output.
+      expect(row.providerRequest.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'user' })]));
     }
   });
 
