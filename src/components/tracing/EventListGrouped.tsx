@@ -173,6 +173,11 @@ function GroupBlock({
                 <Badge size="xs" variant="light" color="yellow" style={{ flexShrink: 0 }}>resumed</Badge>
               </Tooltip>
             ) : null}
+            {node.running ? (
+              <Tooltip label="Still running. The sub-agent's own record is written when it finishes; until then its steps are grouped here." multiline maw={300} withArrow>
+                <Badge size="xs" variant="light" color="blue" style={{ flexShrink: 0 }}>running</Badge>
+              </Tooltip>
+            ) : null}
             {node.inferred ? (
               <Tooltip label="This SDK sent a flat list of calls; the step boundaries were inferred (each model call opens a step)." multiline maw={280} withArrow>
                 <Badge size="xs" variant="outline" color="gray" style={{ flexShrink: 0 }}>inferred</Badge>
