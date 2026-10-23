@@ -32,6 +32,7 @@ import {
   startRagReindex,
 } from '@/lib/services/rag/ragReindexService';
 import { answerWithRag, type RagAnswerRequest } from '@/lib/services/rag/ragAnswerService';
+import { exportRagModule, importRagModuleJsonl } from '@/lib/services/rag/ragTransfer';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -501,6 +502,62 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       logger.error('Ingest RAG document error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.get('/rag/modules/:key/export', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const result = await exportRagModule(session.tenantDbName, session.tenantId, projectId, key);
+
+      if (!result) {
+        return reply.code(404).send({ error: 'Knowledge Engine module not found' });
+      }
+
+      return reply
+        .code(200)
+        .header('content-type', 'application/x-ndjson; charset=utf-8')
+        .header('content-disposition', `attachment; filename="${result.fileName}"`)
+        .send(result.body);
+    } catch (error) {
+      logger.error('Export RAG module error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  app.post('/rag/modules/:key/import', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { key } = request.params as { key: string };
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.data !== 'string' || body.data.trim() === '') {
+        return reply.code(400).send({ error: '"data" must be a non-empty JSONL string' });
+      }
+
+      const result = await importRagModuleJsonl(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        key,
+        session.userId,
+        body.data,
+      );
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Import RAG module error', { error });
+      if (error instanceof Error && /not found|not active|at most|Unsupported export version/.test(error.message)) {
+        return reply.code(400).send({ error: error.message });
+      }
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',
