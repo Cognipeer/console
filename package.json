@@ -52,7 +52,7 @@
     "@fastify/websocket": "^11.2.0",
     "@huggingface/transformers": "^3.8.1",
     "@mantine/charts": "^8.3.2",
-    "@mantine/core": "^8.3.2",
+    "@mantine/core": "^9.5.2",
     "@mantine/dates": "^8.3.2",
     "@mantine/form": "^8.3.2",
     "@mantine/hooks": "^8.3.2",
