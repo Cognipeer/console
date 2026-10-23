@@ -81,7 +81,7 @@ afterEach(() => {
 describe('engineSelfTest', () => {
   it('passes on a working engine, reporting what it checked', () => {
     const result = engineSelfTest();
-    expect(result).toMatchObject({ ok: true, checks: 40, cedar: { sdk: expect.any(String), language: expect.any(String) } });
+    expect(result).toMatchObject({ ok: true, checks: 48, cedar: { sdk: expect.any(String), language: expect.any(String) } });
     if (result.ok) {
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
       expect(result.durationMs).toBeLessThan(5_000);

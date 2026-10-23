@@ -725,7 +725,7 @@ function summariseConversation(
 }
 
 /** The `channel` values a run can carry (the runs list filters on them). */
-const RUN_CHANNEL_VALUES = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder'] as const satisfies ReadonlyArray<NonNullable<IAgentRun['channel']>>;
+const RUN_CHANNEL_VALUES = ['runs', 'responses', 'chat_completions', 'a2a', 'trigger', 'reminder', 'messaging'] as const satisfies ReadonlyArray<NonNullable<IAgentRun['channel']>>;
 
 /** A session row's run that is waiting for its time, queued or running. */
 interface ActiveRunRow { id: string; status: IAgentRun['status']; scheduledFor?: number; cancelRequested: boolean }

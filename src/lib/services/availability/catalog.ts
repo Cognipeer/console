@@ -40,6 +40,7 @@ export const SERVICE_REQUIRES: Readonly<Record<string, readonly string[]>> = {
   rag: ['models', 'vector'],
   memory: ['vector'],
   portals: ['agents'],
+  channels: ['agents'],
   realtime: ['models'],
   evaluations: ['models'],
   redteam: ['models'],

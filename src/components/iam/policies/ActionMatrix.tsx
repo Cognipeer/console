@@ -250,7 +250,12 @@ export default function ActionMatrix({ catalog, index, labels, effect = 'permit'
                                   {t('matrix.enforcedInPortal')}
                                 </Badge>
                               ) : null}
-                              {action.enforcedIn?.some((channel) => channel !== 'portal') ? (
+                              {action.enforcedIn?.includes('messaging') ? (
+                                <Badge size="xs" variant="light" ml={6} data-testid="enforced-in-messaging">
+                                  {t('matrix.enforcedInMessaging')}
+                                </Badge>
+                              ) : null}
+                              {action.enforcedIn?.some((channel) => channel !== 'portal' && channel !== 'messaging') ? (
                                 <Badge size="xs" variant="light" ml={6} data-testid="enforced-in-agents">
                                   {t('matrix.enforcedInAgents')}
                                 </Badge>

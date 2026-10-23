@@ -122,6 +122,8 @@ function resourceReplay(
   const label = text(meta.resourceName);
   if (!action || !channel || !type || !id) return null;
   if (!Object.hasOwn(RUNTIME_ENFORCED_ACTIONS, action)) return null;
+  // A refusal of the Slack / Teams runtime names its resource but is not replayed (the Access check does not rebuild a deployment's access list).
+  if (channel === 'messaging') return { channel, resource: { type, id, ...(label ? { label } : {}) }, input: null };
   // A portal asks for people only; the agent routes for people and tokens.
   if (channel === 'portal' && principal.type === 'token') return null;
   if (channel !== 'portal' && channel !== 'dashboard' && channel !== 'api') return null;

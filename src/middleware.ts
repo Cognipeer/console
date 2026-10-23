@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { TokenManager } from '@/lib/license/token-manager';
-import { buildLoginPath, isPortalPagePath } from '@/lib/security/returnTo';
+import { buildLoginPath, isChannelLinkPagePath, isPortalPagePath } from '@/lib/security/returnTo';
 import {
   matchPortalHost,
   portalHostPagePath,
@@ -57,9 +57,10 @@ function applySecurityHeaders(response: NextResponse, pathname = ''): void {
 }
 
 /**
- * Where an unauthenticated visitor is sent. Portal pages (`/p/<key>`) are links
- * people receive and open cold, so they carry the way back through login. Every
- * other path keeps the bare `/login` it always had.
+ * Where an unauthenticated visitor is sent. Portal pages (`/p/<key>`) and channel
+ * link pages (`/channels/link/<token>`) are links people receive and open cold,
+ * so they carry the way back through login. Every other path keeps the bare
+ * `/login` it always had.
  *
  * `/p/*` is deliberately NOT a dashboard path: the project / no-project
  * redirect lives in the dashboard layout and nothing here ties it to
@@ -68,7 +69,9 @@ function applySecurityHeaders(response: NextResponse, pathname = ''): void {
  */
 function loginRedirectPath(request: NextRequest): string {
   const { pathname, search } = request.nextUrl;
-  return isPortalPagePath(pathname) ? buildLoginPath(`${pathname}${search}`) : '/login';
+  return isPortalPagePath(pathname) || isChannelLinkPagePath(pathname)
+    ? buildLoginPath(`${pathname}${search}`)
+    : '/login';
 }
 
 /**

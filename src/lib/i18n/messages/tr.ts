@@ -8,6 +8,11 @@
 
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
+import { agentChannelsTr } from './agentChannels.tr';
+import { agentChannelsDeployTr } from './agentChannelsDeploy.tr';
+import { agentChannelsLinkTr } from './agentChannelsLink.tr';
+import { agentChannelsListTr } from './agentChannelsList.tr';
+import { agentChannelsSetupTr } from './agentChannelsSetup.tr';
 import { agentTemplatesTr } from './agentTemplates.tr';
 import { alertsTr, incidentsTr } from './alerts.tr';
 import { analyticsDashboardsTr } from './analyticsDashboards.tr';
@@ -1106,6 +1111,7 @@ export const tr: typeof en = {
       sso: 'Tek Oturum Açma (SSO)',
       ldap: 'LDAP Dizini',
       portals: 'Portallar',
+      channels: 'Kanallar',
       resources: 'Kaynak Kaydı',
       iam: 'Yetki Motoru',
       webhooks: 'Webhook’lar',
@@ -1220,6 +1226,14 @@ export const tr: typeof en = {
         name: 'Çalışma alanı sahipleri ve yöneticileri bir portalın ajanlarını test olarak deneyebilir',
         description: 'İşaretli bir test oturumunda çalışma alanı sahibi ya da yöneticisi, erişim listesi adını anmasa bile portalın sunduğu ajanları çalıştırabilir. Test oturumlarının konuşmaları işaretlenir ve portalın istatistiklerine katılmaz.',
       },
+      'messaging-agent': {
+        name: 'Bir dağıtımın erişim listesindekiler ajanını Slack ve Teams\'te kullanabilir',
+        description: 'Slack ya da Microsoft Teams\'te, ajanın o bağlantıdaki dağıtımının erişim listesi kişiyi ya da gruplarından birini kabul ediyorsa veya dağıtım çalışma alanındaki herkese açıksa kişi ajanla konuşabilir. Liste dağıtım üzerinde düzenlenir; dağıtım başına kural saklanmaz.',
+      },
+      'messaging-agent-boundary': {
+        name: 'Slack ve Teams\'teki ajanları yalnızca erişim listesi çalıştırır',
+        description: 'Slack ya da Microsoft Teams\'te, dağıtımın erişim listesi kabul etmedikçe kimse rolü ya da bir izin kuralı ne derse desin bir ajanı çalıştıramaz (listede olmayan bir çalışma alanı sahibi de içeri alınmaz, API token\'ları ise hiçbir zaman alınmaz). Engelleme kuralları listedeki kişileri yine de engelleyebilir.',
+      },
       'agent-approve': {
         name: 'Bir ajanın araç çağrılarını onaylayabilecek kişiler',
         description: 'Bir kişi, bir ajan oturumundaki araç çağrısını onaylayabilir (izin ver, reddet, argümanları düzenle, oturum için hatırla): oturumu kendisi başlattıysa ya da ajan onu kabul ediyorsa; yani çalışma alanı sahipleri ve yöneticileri ile ajanın projesinin yöneticileri (varsayılan) ya da projenin tüm üyeleri. Ajanın "kimler onaylayabilir" ayarı bu kuralın girdisidir. Ajanlarda Yazma erişimi tek başına yetmez; kendi izin kurallarınız bir uyum grubu gibi daha fazla onaylayıcı atayabilir.',
@@ -1265,6 +1279,14 @@ export const tr: typeof en = {
   analyticsDashboards: analyticsDashboardsTr,
   projectTabs: projectTabsTr,
   accountPage: accountPageTr,
+  // Slack ve Microsoft Teams'teki ajanlar (Enterprise): ekran başına bir dosya (agentChannels*.tr.ts).
+  agentChannels: {
+    ...agentChannelsTr,
+    ...agentChannelsListTr,
+    ...agentChannelsSetupTr,
+    ...agentChannelsDeployTr,
+    ...agentChannelsLinkTr,
+  },
   iamPrincipals: {
     segments: {
       label: 'Kimlik türü',
@@ -1589,6 +1611,8 @@ export const tr: typeof en = {
         portalUsePolicy: 'Reddedildi: {who}, "{resource}" portalını "{policies}" politikası nedeniyle açamadı',
         portalInvoke: 'Reddedildi: {who}, bir portalda "{resource}" ajanını çalıştıramadı çünkü portalın erişim listesinde yok',
         portalInvokePolicy: 'Reddedildi: {who}, bir portalda "{resource}" ajanını "{policies}" politikası nedeniyle çalıştıramadı',
+        messagingInvoke: 'Reddedildi: {who}, Slack ya da Teams üzerinden "{resource}" ajanını çalıştıramadı çünkü dağıtımın erişim listesinde yok',
+        messagingInvokePolicy: 'Reddedildi: {who}, Slack ya da Teams üzerinden "{resource}" ajanını "{policies}" politikası nedeniyle çalıştıramadı',
         approve: 'Reddedildi: {who}, "{resource}" ajanının araç çağrısını onaylayamadı çünkü hiçbir kural onu onaylayıcı atamıyor',
         approvePolicy: 'Reddedildi: {who}, "{resource}" ajanının araç çağrısını "{policies}" politikası nedeniyle onaylayamadı',
         approveInPortal: 'Reddedildi: {who}, "{portal}" portalında "{resource}" ajanının araç çağrısını onaylayamadı çünkü hiçbir kural onu onaylayıcı atamıyor',
@@ -1660,6 +1684,8 @@ export const tr: typeof en = {
     iamDescription: 'Politikalar, kişiler, erişim kontrolü, denetim izi ve limitler',
     webhooks: 'Webhook’lar',
     webhooksDescription: 'Kendi uç noktalarınıza imzalı olaylar gönderin',
+    agentChannels: 'Kanallar',
+    agentChannelsDescription: 'Ajanları Slack ve Microsoft Teams’e bağlayın',
     agentSessions: 'Oturumlar',
     agentSessionsActive: 'Aktif',
     agentSessionsAll: 'Tümü',
@@ -1778,6 +1804,7 @@ export const tr: typeof en = {
       dashboard: 'Panel',
       api: 'API',
       portal: 'Portal',
+      messaging: 'Slack ve Teams',
     },
     effects: {
       permit: 'İzin ver',
@@ -1871,6 +1898,8 @@ export const tr: typeof en = {
       boundariesHelp: 'Hiçbir iznin aşamayacağı sınırlar.',
       portalBased: 'Portallar',
       portalHelp: 'Bir portalı kimin açabileceğine ve içinde ajan çalıştırabileceğine portalın erişim listesi karar verir. Bu kurallar o listeyi okur; bu yüzden portal başına saklanan bir kural yoktur. Engelleme kuralları yine de kişileri engelleyebilir.',
+      messagingBased: 'Slack ve Teams',
+      messagingHelp: 'Bir ajanı Slack ya da Microsoft Teams üzerinden kimin çalıştırabileceğine, ajanın bağlantıdaki dağıtımının erişim listesi karar verir. Bu kurallar o listeyi okur; bu yüzden dağıtım başına saklanan bir kural yoktur. Engelleme kuralları yine de kişileri engelleyebilir.',
       agentBased: 'Ajan onayları',
       agentHelp: 'Bir ajan oturumundaki araç çağrısını kimin onaylayabileceğine oturumun sahibi ile ajanın "kimler onaylayabilir" ayarı karar verir. Bu kurallar ikisini de okur; bu yüzden ajan başına saklanan bir kural yoktur. Kendi izin kurallarınız daha fazla onaylayıcı atayabilir, engelleme kuralları da kişileri engelleyebilir.',
       badge: 'Yerleşik',
@@ -1886,6 +1915,7 @@ export const tr: typeof en = {
       advanced: 'Belirli işlemler',
       advancedHint: 'Bir agent\'ı çağırmak, bir araç çalıştırmak, bir bilgi modülünü sorgulamak… Erişim testi bunların hepsini değerlendirir. Bugün yalnızca "Portallarda denetlenir" ya da "Ajan isteklerinde denetlenir" ile işaretli olanlar uygulanır; gerisini istek kapıları henüz uygulamıyor.',
       enforcedInPortal: 'Portallarda denetlenir',
+      enforcedInMessaging: 'Slack ve Teams\'te denetlenir',
       enforcedInAgents: 'Ajan isteklerinde denetlenir',
       selected: 'Seçilen işlemler ({count})',
       nothingSelected: 'Henüz bir şey seçilmedi.',
@@ -2153,6 +2183,10 @@ export const tr: typeof en = {
         boundary: 'Portalın erişim listesi bu kişiyi kabul etmiyor ve başka hiçbir şey bir portalı açamaz ya da içindeki ajanları çalıştıramaz.',
         network: 'Portal yalnızca listelenen ağlardan kullanılabilir ve bu adres onlardan biri değil (ya da adres bilinmiyordu).',
         test: 'Bir çalışma alanı sahibi ya da yöneticisi portalı test oturumunda deniyor.',
+      },
+      messagingReason: {
+        list: 'Dağıtımın erişim listesi bu kişiyi kabul ediyor.',
+        boundary: 'Dağıtımın erişim listesi bu kişiyi kabul etmiyor ve başka hiçbir şey Slack ya da Teams üzerinden bir ajanı çalıştıramaz.',
       },
       approvalReason: {
         rule: 'Bu kişi oturumu başlatmış, ajan onu onaylayıcı olarak kabul ediyor ya da izin kurallarınızdan biri onu onaylayıcı atıyor.',
@@ -2584,6 +2618,7 @@ export const tr: typeof en = {
     healthTool: 'Araçlar',
     account: 'Hesabım',
     webhooks: 'Webhook’lar',
+    channels: 'Kanallar',
     pii: 'PII Servisi',
     threads: 'Konuşmalar',
     migrations: 'Migrasyonlar',
@@ -5565,6 +5600,7 @@ export const tr: typeof en = {
       'ai-app-gateway': 'AI App Gateway\'ler',
       'prompt-optimizer': 'Prompt optimizasyonları',
       'portal': 'Portallar',
+      'channel-deployment': 'Kanal dağıtımları',
     },
   },
   iamLimits: {

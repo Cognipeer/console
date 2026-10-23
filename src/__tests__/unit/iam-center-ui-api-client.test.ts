@@ -278,7 +278,7 @@ describe('normalizeCatalog', () => {
     expect(c.actions[0].labelParams).toEqual({ type: 'agent' }); // non-string params dropped
     expect(c.actions[1]).toMatchObject({ kind: 'group', labelKey: '', labelParams: {} });
     expect(c.actions[2]).toMatchObject({ kind: 'service', level: 'read' });
-    expect(c.channels).toEqual(['dashboard', 'api', 'portal']);
+    expect(c.channels).toEqual(['dashboard', 'api', 'portal', 'messaging']);
     expect(c.contextAttrs).toEqual([]);
   });
 

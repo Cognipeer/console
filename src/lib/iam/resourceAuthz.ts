@@ -15,7 +15,9 @@
  *    HTTP wrapper, and the way a handler asks.
  *
  * It is the same engine, with the same managed rules and custom policies as the
- * gates, asked in the `portal` channel:
+ * gates, asked in the `portal` channel (and, for running an agent from Slack or Teams, in the
+ * `messaging` channel, which follows the same rules with the access list of the agent's DEPLOYMENT
+ * as the only grant: managed:messaging:*; a decision there without `subject.deploymentId` is refused):
  *
  *  - The portal's ACCESS LIST is the portal's built-in policy (managed:portal:*,
  *    managedPolicies.ts): it grants, and nothing else does - no RBAC level, no
@@ -58,7 +60,7 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import type { RbacUserLike } from '@/lib/security/rbac';
 import { RUNTIME_ENFORCED_ACTIONS } from './actions';
-import { IAM_CHANNELS, type IamChannel } from './context';
+import { IAM_CHANNELS, isRuntimeIamChannel, type IamChannel } from './context';
 import { recordPortalTestSession, recordResourceDenial } from './denialAudit';
 import { authorize, customPolicyIdsOf } from './engine';
 import { recordAuthorizationUnavailable, type EnforceUnavailableReason } from './enforce';
@@ -124,6 +126,9 @@ export interface ResourceAuthzSubject {
   portalKey?: string;
   /** The portal's display name: named separately in the audit row, never as the resource (that is the agent). */
   portalName?: string;
+  /** The deployment (agent on a Slack / Teams connection) the action is asked through. Required in the `messaging` channel: the replay needs it. */
+  deploymentId?: string;
+  connectionId?: string;
   /**
    * What the row calls the thing asked about: the agent for an approval or a session action (its key or name -
    * never the portal it was reached through), the portal for `portal.use`, the bucket for a bucket action.
@@ -131,23 +136,30 @@ export interface ResourceAuthzSubject {
   resourceName?: string;
 }
 
+/**
+ * A decision of a runtime (not of a gate). `portal`: the portal runtime, which names the portal (`subject.portalId` is
+ * required: the replay needs it). `messaging`: the Slack / Teams runtime running an agent through a deployment, which names
+ * the deployment (`subject.deploymentId` is required). Both are checked at run time: a decision without its id is refused
+ * as unusable (503), never decided.
+ */
 export interface ResourceAuthzInput {
   tenantDbName: string;
   tenantId: string;
   userId: string;
   /** The user's row when the caller has it; omitted = it is read (and cached for a few seconds). */
   user?: RbacUserLike & { projectIds?: string[] };
-  channel: 'portal';
+  channel: 'portal' | 'messaging';
   action: ResourceAuthzAction;
   /**
    * What the action is about: a portal (`portalResource`), an agent run through one
    * (`portalAgentResource`) or the agent of a session answered through one
-   * (`portalAgentSessionResource`). A function receives the requester's
+   * (`portalAgentSessionResource`); in the messaging channel an agent run through a deployment
+   * (`messagingAgentResource`). A function receives the requester's
    * groups once they are loaded, so a long access list can be cut down to their slice.
    */
   resource: IamResource | ((requester: ResourceAuthzRequester) => IamResource);
-  /** What the audit row and the decision lookup name. `portalId` is required: the replay needs it. */
-  subject: ResourceAuthzSubject & { portalId: string };
+  /** What the audit row and the decision lookup name: `portalId` in the portal channel, `deploymentId` in the messaging channel. */
+  subject: ResourceAuthzSubject;
   client?: ResourceAuthzClient;
 }
 
@@ -313,6 +325,8 @@ function audit(
     ...(input.subject.portalId ? { portalId: input.subject.portalId } : {}),
     ...(input.subject.portalKey ? { portalKey: input.subject.portalKey } : {}),
     ...(input.subject.portalName ? { portalName: input.subject.portalName } : {}),
+    ...(input.subject.deploymentId ? { deploymentId: input.subject.deploymentId } : {}),
+    ...(input.subject.connectionId ? { connectionId: input.subject.connectionId } : {}),
     ...(input.client?.embedded === true ? { contextEmbedded: true } : {}),
     ...(input.client?.test === true ? { contextTest: true } : {}),
     ...(principal?.contextProjectId ? { projectId: principal.contextProjectId } : {}),
@@ -341,9 +355,10 @@ function refuseUnavailable(
     channel: input.channel,
     action: input.action,
     ...(input.subject.portalId ? { portalId: input.subject.portalId } : {}),
+    ...(input.subject.deploymentId ? { deploymentId: input.subject.deploymentId } : {}),
   });
   const key = [
-    input.tenantDbName, askerKey(input, refusal.principal ?? input.principal ?? null), input.action, `${ref.type}:${ref.id}`, input.subject.portalId ?? '', 'unavailable',
+    input.tenantDbName, askerKey(input, refusal.principal ?? input.principal ?? null), input.action, `${ref.type}:${ref.id}`, input.subject.portalId ?? input.subject.deploymentId ?? '', 'unavailable',
   ].join('|');
   const claimed = claim(key, input.tenantDbName, () => minted);
   if (claimed.audit && input.auditUnavailable) audit(refusal, claimed.decisionId, 'authorization_unavailable', 'unavailable', [], []);
@@ -360,6 +375,9 @@ function validDecision(input: unknown): input is Decision {
   // An action is only ever asked in the channels its runtime decides it in (actions.ts).
   if (!RUNTIME_ENFORCED_ACTIONS[i.action as string]?.includes(i.channel as IamChannel)) return false;
   if (i.channel === 'portal') return !!i.subject && isText(i.subject.portalId);
+  // The messaging runtime describes the person itself (no prebuilt principal: a token never speaks for a person here) and
+  // must name the deployment whose access list decides: without one the decision could not be replayed, so it is not made.
+  if (i.channel === 'messaging') return !!i.subject && isText(i.subject.deploymentId) && !i.principal;
   // The dashboard and the API ask for the request's own principal; nothing else describes it.
   return !!i.principal && typeof i.principal === 'object' && !!i.subject;
 }
@@ -413,8 +431,8 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
     resource,
     context: {
       channel: input.channel,
-      // The portal has no project; a request of the dashboard or the API runs in one.
-      ...(input.channel !== 'portal' && principal.contextProjectId ? { projectId: principal.contextProjectId } : {}),
+      // A runtime channel (portal, messaging) has no project; a request of the dashboard or the API runs in one.
+      ...(!isRuntimeIamChannel(input.channel) && principal.contextProjectId ? { projectId: principal.contextProjectId } : {}),
       ip: input.client?.ip,
       method: input.client?.method,
       path: input.client?.path,
@@ -439,7 +457,7 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
   // The session is part of what was refused: the same person refused on two sessions of one agent is two refusals.
   const session = sessionFactsOf(resource);
   const key = [
-    input.tenantDbName, askerKey(input, principal), input.action, `${ref.type}:${ref.id}`, input.subject.portalId ?? '',
+    input.tenantDbName, askerKey(input, principal), input.action, `${ref.type}:${ref.id}`, input.subject.portalId ?? input.subject.deploymentId ?? '',
     session.ownerId ?? '', [...reasons].sort().join(','),
   ].join('|');
   const claimed = claim(key, input.tenantDbName, randomUUID);
@@ -454,6 +472,7 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
       resourceType: ref.type,
       resourceId: ref.id,
       ...(input.subject.portalId ? { portalId: input.subject.portalId } : {}),
+      ...(input.subject.deploymentId ? { deploymentId: input.subject.deploymentId } : {}),
       reasons,
     });
     audit(refusal, claimed.decisionId, 'forbidden', 'engine', reasons, policyIds);

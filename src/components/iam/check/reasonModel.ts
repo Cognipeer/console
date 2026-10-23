@@ -30,6 +30,10 @@ export type BuiltInKind =
   | 'portalNetwork'
   /** `managed:portal:test-use|test-agent`: a workspace owner or admin trying the portal out. */
   | 'portalTest'
+  /** `managed:messaging:agent`: the access list of the agent's deployment on a Slack / Teams connection admits the person. */
+  | 'messagingList'
+  /** `managed:messaging:agent-boundary`: nothing but the deployment's access list runs the agent from Slack or Teams. */
+  | 'messagingBoundary'
   /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may approve its tool calls. */
   | 'approvalRule'
   | 'other';
@@ -44,6 +48,7 @@ const MANAGED = /^managed:(rbac|boundary):(user|token|token-cap|project)-(read|w
 const PORTAL_MANAGED = /^managed:portal:(use|agent)(-boundary)?$/;
 const PORTAL_NETWORK_MANAGED = /^managed:portal:(agent-)?network-boundary$/;
 const PORTAL_TEST_MANAGED = /^managed:portal:test-(use|agent)$/;
+const MESSAGING_MANAGED = /^managed:messaging:agent(-boundary)?$/;
 const AGENT_MANAGED = /^managed:agent:approve(-token)?$/;
 
 export function parseBuiltInReason(cedarId: string): BuiltInReason {
@@ -51,6 +56,8 @@ export function parseBuiltInReason(cedarId: string): BuiltInReason {
   if (portal) return { kind: portal[2] ? 'portalBoundary' : 'portalList', level: null };
   if (PORTAL_NETWORK_MANAGED.test(cedarId)) return { kind: 'portalNetwork', level: null };
   if (PORTAL_TEST_MANAGED.test(cedarId)) return { kind: 'portalTest', level: null };
+  const messaging = MESSAGING_MANAGED.exec(cedarId);
+  if (messaging) return { kind: messaging[1] ? 'messagingBoundary' : 'messagingList', level: null };
   const agent = AGENT_MANAGED.exec(cedarId);
   if (agent) return { kind: 'approvalRule', level: null };
   const match = MANAGED.exec(cedarId);

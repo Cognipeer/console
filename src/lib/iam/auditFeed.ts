@@ -266,6 +266,20 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
         key: action === 'portal.use' ? (byPolicy ? 'denied.portalUsePolicy' : 'denied.portalUse') : (byPolicy ? 'denied.portalInvokePolicy' : 'denied.portalInvoke'),
         params: { who: whoLabel, resource: target, policies: names },
       };
+    } else if (str(meta.channel) === 'messaging' && action === 'agent.invoke') {
+      // A refusal of the messaging runtime (resourceAuthz.ts): running one agent from Slack or Teams.
+      const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)
+        ? (meta.policyNames as Record<string, unknown>)
+        : {};
+      const names = policyIds.map((id) => policyName.get(id) ?? str(kept[id]) ?? id).join('", "');
+      const whoLabel = who?.label ?? 'someone';
+      const target = str(meta.resourceName) ?? str(meta.resourceId) ?? '';
+      const byPolicy = policyIds.length > 0;
+      summary = `Denied ${whoLabel} running agent "${target}" from Slack or Teams ${byPolicy ? `by policy "${names}"` : 'because they are not on its access list'}`;
+      text = {
+        key: byPolicy ? 'denied.messagingInvokePolicy' : 'denied.messagingInvoke',
+        params: { who: whoLabel, resource: target, policies: names },
+      };
     } else {
       const names = policyIds.map((id) => policyName.get(id) ?? id).join('", "');
       const reason = policyIds.length > 0 ? 'policy'

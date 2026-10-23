@@ -10,6 +10,7 @@ export * from './events';
 export * from './entities';
 export * from './managedPolicies';
 export * from './portalEntities';
+export * from './messagingEntities';
 export * from './agentEntities';
 export {
   authorizeResourceAccess,

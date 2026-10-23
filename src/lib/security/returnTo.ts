@@ -72,6 +72,15 @@ export function isPortalPagePath(pathname: string): boolean {
 }
 
 /**
+ * True for the Agent Channels account-link page (`/channels/link/<token>`): a
+ * link a chat bot sends to someone in Slack / Teams, opened cold, so it must
+ * survive the trip through login.
+ */
+export function isChannelLinkPagePath(pathname: string): boolean {
+  return pathname.startsWith('/channels/link/');
+}
+
+/**
  * Where to send someone who just authenticated but must set a new password
  * first. The destination rides along so the interstitial can finish the trip.
  */

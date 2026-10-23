@@ -37,7 +37,7 @@ export interface AgentRuntimeContext {
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
   tokenId?: string;
-  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder';
+  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal' | 'trigger' | 'reminder' | 'messaging';
   /** Stamped by the server on a run a trigger started: its id and kind (schedule, webhook...). Tagged on the trace. */
   trigger?: { id: string; type: string };
   /**

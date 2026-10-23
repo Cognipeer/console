@@ -8,7 +8,8 @@
  *   projectId  the project the request runs in (resolved the way the handler
  *              resolves it, not the raw cookie)
  *   channel    'dashboard' (cookie session), 'api' (API token), 'portal' (a person using a
- *              portal: opening it, running its agents - resourceAuthz.ts)
+ *              portal: opening it, running its agents - resourceAuthz.ts), 'messaging' (a person
+ *              writing to an agent in Slack or Microsoft Teams - the same runtime shape as the portal)
  *   ip         the caller's address as the server's trust-proxy setting sees it
  *              (Cedar `ipaddr` extension); never a raw X-Forwarded-For
  *   now        the decision time (Cedar `datetime` extension); filled in by the
@@ -33,8 +34,19 @@
 
 import { isIP } from 'node:net';
 
-export const IAM_CHANNELS = ['dashboard', 'api', 'portal'] as const;
+export const IAM_CHANNELS = ['dashboard', 'api', 'portal', 'messaging'] as const;
 export type IamChannel = typeof IAM_CHANNELS[number];
+
+/**
+ * The channels of a RUNTIME that answers for a person without a dashboard session or an API token (the enterprise portal
+ * and the Slack / Teams messaging runtime): no active project, no project narrowing, the access list of the thing they are
+ * reached through is the only grant. Everything else is the session plane (the dashboard and the API).
+ */
+export const RUNTIME_IAM_CHANNELS = ['portal', 'messaging'] as const satisfies readonly IamChannel[];
+
+export function isRuntimeIamChannel(value: unknown): value is (typeof RUNTIME_IAM_CHANNELS)[number] {
+  return typeof value === 'string' && (RUNTIME_IAM_CHANNELS as readonly string[]).includes(value);
+}
 
 export function isIamChannel(value: unknown): value is IamChannel {
   return typeof value === 'string' && (IAM_CHANNELS as readonly string[]).includes(value);

@@ -104,7 +104,8 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
 /**
  * Resource actions that something other than the HTTP gates decides, and the
  * channels they are decided in. Opening a portal and running an agent through one
- * are asked by the portal runtime (enterprise overlay) with `channel: 'portal'`
+ * are asked by the portal runtime (enterprise overlay) with `channel: 'portal'`,
+ * and running an agent from Slack / Teams by the messaging runtime with `channel: 'messaging'`
  * (resourceAuthz.ts). Answering a pending approval is asked by the agent routes
  * (dashboard, API) and by the portal runtime; looking at / acting on a session
  * somebody else started is asked by the agent routes; choosing the bucket an agent
@@ -114,14 +115,14 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
  * product asks for it yet.
  *
  * Pure data; whether the runtime exists in THIS build is runtimeEnforced.ts: the
- * `portal` channel exists only where the enterprise overlay registered its resolver,
- * the other channels always. A policy rule about these actions is accepted (and said
+ * `portal` and `messaging` channels exist only where the enterprise overlay registered their
+ * resolvers, the other channels always. A policy rule about these actions is accepted (and said
  * to take effect) only where it does.
  */
 export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChannel[]>> = Object.freeze({
   'portal.use': ['portal'],
   'portal.conversations_view': ['dashboard', 'api'],
-  'agent.invoke': ['portal'],
+  'agent.invoke': ['portal', 'messaging'],
   'agent.approve': ['dashboard', 'api', 'portal'],
   'agent.session_view_others': ['dashboard', 'api'],
   'agent.session_manage_others': ['dashboard', 'api'],
@@ -154,12 +155,16 @@ export function isSessionResourceAction(id: string): boolean {
  *
  *  - `portal` has no inventory provider in this edition: the enterprise overlay
  *    contributes the registry entry, and its access list is not part of it.
- *  - `agent` is a core type. The managed portal policies (managedPolicies.ts) are
+ *  - `channel-deployment` is the enterprise Slack / Teams feature's: the same, an access list
+ *    on an entity the managed messaging policies read.
+ *  - `agent` is a core type. The managed portal and messaging policies (managedPolicies.ts) are
  *    written against `Agent`, so the managed set must validate against the schema
  *    even if the registry has not registered its types yet.
  */
 export const EXTRA_RESOURCE_TYPES: ReadonlyArray<CatalogResourceType> = [
   { type: 'portal', service: 'portals' },
+  // A deployment of an agent on a Slack / Teams connection: carries its own access list (messagingEntities.ts).
+  { type: 'channel-deployment', service: 'channels' },
   { type: 'agent', service: 'agents' },
 ];
 

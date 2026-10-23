@@ -124,7 +124,7 @@ export interface CheckLinkParams {
   resourceId?: string;
   /** Display name of the resource, so the picker does not show a bare id. */
   resourceLabel?: string;
-  channel?: 'dashboard' | 'api' | 'portal';
+  channel?: 'dashboard' | 'api' | 'portal' | 'messaging';
   /** The portal an agent is run through (`agent.invoke` in the portal channel). */
   portalId?: string;
   portalLabel?: string;
@@ -158,7 +158,7 @@ export function parseCheckParams(params: ParamReader): CheckLinkParams {
     resourceType: resourceId ? resourceType : undefined,
     resourceId: resourceType ? resourceId : undefined,
     resourceLabel: resourceType && resourceId ? nonEmpty(params.get('resourceLabel')) : undefined,
-    channel: channel === 'dashboard' || channel === 'api' || channel === 'portal' ? channel : undefined,
+    channel: channel === 'dashboard' || channel === 'api' || channel === 'portal' || channel === 'messaging' ? channel : undefined,
     portalId: nonEmpty(params.get('portalId')),
     portalLabel: nonEmpty(params.get('portalId')) ? nonEmpty(params.get('portalLabel')) : undefined,
   };

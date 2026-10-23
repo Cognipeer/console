@@ -1,0 +1,300 @@
+/**
+ * Agent channels: the full-screen setup wizard: platform, Slack steps, Teams steps.
+ * Spread into the `agentChannels` namespace in `en.ts`; the shared words are in agentChannels.en.ts (`common`).
+ *
+ * A sentence may carry a little markup (parseRich in the wizard's stepsModel.ts): `**bold**` for a label on the
+ * other product's screen, `` `code` `` for a value or a token prefix, `{slot}` for a link or a name the screen
+ * puts in. The labels of Slack and Azure stay in English in both languages: that is what the person sees there.
+ * Each step of a platform keeps its words under its step id (`slack.manifest`, `teams.endpoint`, …): `title` is the
+ * section heading, `check` the line in the summary checklist, `tick` the button that marks the step as done.
+ */
+export const agentChannelsSetupEn = {
+  setup: {
+    title: 'Add channel',
+    subtitle: 'Connect your agents to Slack or Microsoft Teams, step by step.',
+    titleDraft: 'Add channel · {name}',
+    titleGuide: 'Setup guide · {name}',
+    draftSaved: 'Draft saved. You can close this and continue from the channel page at any time.',
+    reopenHint: 'You can open this guide again from the channel page whenever you need it.',
+    disabledNote: 'This channel is switched off, so nothing is answered. Switch it on from the channel page.',
+    loading: 'Loading the channel',
+    loadFailed: 'The channel could not be loaded.',
+    progress: '{done} of {total} ready',
+    optional: 'Optional',
+    created: 'Channel created',
+    ticked: 'Marked as done',
+    actions: {
+      next: 'Next: setup',
+      finish: 'Finish',
+      finishAndAddAgent: 'Finish and add an agent',
+      undo: 'Undo',
+      continue: 'Continue',
+    },
+    platform: {
+      title: 'Platform and name',
+      hint: 'Choose where your agents answer, and name the channel.',
+      choose: 'Platform',
+      check: 'Channel created',
+      checks: {
+        platform: 'Platform chosen',
+        name: 'Name entered',
+      },
+      cards: {
+        slack: {
+          text: 'You create your own Slack app. It connects with Socket Mode: no public address is needed, and the steps are the same on SaaS and on-premises.',
+          meta: 'About 10 minutes · You need permission to install apps in the Slack workspace',
+        },
+        teams: {
+          text: "You create your own bot in Azure. Microsoft sends the messages to Console's public address.",
+          meta: 'About 15 minutes · You need an Azure subscription and permission to upload apps to Teams',
+          onPrem: 'On-premises, only the path /api/public/channels/teams/… has to be reachable from the internet.',
+        },
+      },
+      name: {
+        label: 'Channel name',
+        placeholder: 'Acme Assistant',
+        hintSlack: 'The Slack app and its bot take their names from this. Slack allows at most 35 characters for the app name.',
+        hintTeams: 'Also the name of the Teams app that people see.',
+        previewSlack: 'Slack app: {app} · bot user: {bot}',
+        cut: 'Slack will cut the app name to 35 characters.',
+      },
+      about: {
+        label: 'Description',
+        placeholder: 'For the sales and IT teams',
+        hintSlack: 'Becomes the description of the Slack app (the first 140 characters).',
+        hintTeams: 'Becomes the description of the Teams app.',
+      },
+      locale: {
+        label: 'Bot language',
+        hint: "The language of the bot's own messages: login links, agent pickers and refusals. The agent answers in whatever language it uses.",
+      },
+      readOnly: 'You can change the name, description and language on the channel page.',
+    },
+    summary: {
+      channel: 'Channel',
+      platform: 'Platform',
+      name: 'Name',
+      language: 'Bot language',
+      state: 'State',
+      workspace: 'Workspace',
+      bot: 'Bot',
+      appId: 'App ID',
+      tenantId: 'Tenant ID',
+      credentials: 'Credentials',
+      appToken: 'App-level token',
+      botToken: 'Bot token',
+      clientSecret: 'Client secret',
+      updated: 'Updated',
+      steps: 'Steps',
+    },
+    result: {
+      passed: 'All checks passed. The channel is connected.',
+      passedTeams: 'All checks passed. The channel is connected once the first message arrives.',
+      failed: 'Saved, but not every check passed. Fix what is marked and verify again.',
+      healthy: 'The saved credentials work.',
+    },
+    done: {
+      title: 'Ready to add agents',
+      connected: 'The channel is connected.',
+      pending: 'Finish the steps above to connect the channel.',
+      next: 'Next, add the agents that answer here and choose who may use them. You can do this any time with **Add agent** on the channel page.',
+    },
+  },
+
+  slack: {
+    intro: 'Create your own Slack app in a few steps. Do each step in Slack, then tick it off here.',
+    manifest: {
+      title: 'Create the app from the manifest',
+      check: 'Slack app created',
+      description: 'Console generates the manifest, so the name, permissions, events and Socket Mode are already set. You only paste it.',
+      steps: {
+        open: 'Open {link} and choose **Create New App**, then **From a manifest**.',
+        paste: 'Pick your workspace, choose the **JSON** tab and paste the manifest below.',
+        create: 'Click **Next**, then **Create**.',
+      },
+      link: 'api.slack.com/apps',
+      copyLabel: 'Manifest (JSON)',
+      download: 'Download JSON',
+      names: 'This manifest creates the app {app} with the bot user {bot}.',
+      naming: 'Console takes both names from the channel name. Slack allows at most 35 characters for an app name, and a bot user name may only use lowercase letters, digits, `-`, `_` and `.` (for example, "Acme Asistan" becomes `acme-asistan`).',
+      tick: 'I created the app',
+    },
+    appToken: {
+      title: 'Get the app-level token',
+      check: 'App-level token created',
+      description: 'Console connects to Slack over Socket Mode, which needs an app-level token. It is not part of the manifest, so you create it in Slack.',
+      steps: {
+        open: 'In your Slack app, open **Basic Information** and scroll down to **App-Level Tokens**.',
+        generate: 'Click **Generate Token and Scopes**, give it a name (for example `console`) and add the scope `connections:write`.',
+        copy: 'Click **Generate** and copy the token that starts with `xapp-`. You paste it in step {step}.',
+      },
+      tick: 'I copied the token',
+    },
+    install: {
+      title: 'Install the app in your workspace',
+      check: 'App installed in the workspace',
+      description: 'Installing the app creates the bot token that Console uses to post answers.',
+      steps: {
+        install: 'Open **Install App** in the left menu, click **Install to Workspace** and then **Allow**.',
+        copy: 'Open **OAuth & Permissions** and copy the **Bot User OAuth Token**. It starts with `xoxb-`.',
+      },
+      approval: 'If your Slack workspace requires approval for new apps, the request goes to a workspace admin. Come back to this step once they approve.',
+      tick: 'I installed it',
+    },
+    credentials: {
+      title: 'Paste the tokens and verify',
+      check: 'Tokens verified',
+      description: 'Console checks both tokens with Slack and opens a Socket Mode connection to prove that it works.',
+      appToken: {
+        label: 'App-level token',
+        hint: 'Starts with xapp-. You created it in step {step}.',
+      },
+      botToken: {
+        label: 'Bot token',
+        hint: 'Starts with xoxb-. You copied it in step {step}.',
+      },
+      saved: 'Saved: {hint}. Leave the field empty to keep it.',
+      problems: {
+        appToken: {
+          prefix: 'An app-level token starts with xapp-.',
+          swapped: 'This is the bot token (xoxb-…). Paste it in the bot token field.',
+        },
+        botToken: {
+          prefix: 'A bot token starts with xoxb-.',
+          swapped: 'This is the app-level token (xapp-…). Paste it in the app-level token field.',
+        },
+        tooLong: 'This is too long to be a token.',
+        masked: 'This is the hidden form of a saved token. Leave the field empty to keep the saved one.',
+      },
+      verify: 'Verify and save',
+      verifyAgain: 'Verify again',
+      encrypted: 'Tokens are stored encrypted and never shown again; only the last four characters stay visible.',
+      locked: 'This channel belongs to the Slack workspace {team}. New tokens must come from an app in the same workspace; for another workspace, create a new channel.',
+      connectedTo: 'Connected to {team} as {bot}.',
+    },
+    invite: {
+      title: 'Invite the bot to channels',
+      description: 'Direct messages work right away. To answer in a channel, the bot has to be in it.',
+      command: 'Type this in every channel where agents should answer:',
+      mention: 'In channels the bot only sees messages that @mention it, and it always answers in a thread.',
+      picker: 'When you add an agent later, the channel list only offers the channels the bot has been invited to.',
+      tick: 'I invited the bot',
+    },
+    done: {
+      sockets: 'Slack renews Socket Mode connections every few hours. Console keeps two connections open for each channel, so no message is missed.',
+    },
+  },
+
+  teams: {
+    intro: 'Create your own bot in Azure, then download the Teams app package from Console and upload it to Teams. Do each step in Azure or Teams, then tick it off here.',
+    azureBot: {
+      title: 'Create an Azure Bot',
+      check: 'Azure Bot created',
+      description: 'The bot lives in your Azure subscription. Console is the brain behind it.',
+      steps: {
+        create: 'Open {link}, click **Create a resource**, search for **Azure Bot** and click **Create**.',
+        type: 'Set **Type of App** to **Single Tenant** and **Creation type** to **Create new Microsoft App ID**.',
+        finish: 'Click **Review + create**, then **Create**. When it is done, click **Go to resource**.',
+      },
+      link: 'portal.azure.com',
+      singleTenant: 'New bots can only be single tenant: Microsoft no longer allows new multi-tenant bots (since 31 July 2025). A single-tenant bot works with Teams in your own organization.',
+      tick: 'I created the bot',
+    },
+    endpoint: {
+      title: 'Enter the messaging endpoint',
+      check: 'Messaging endpoint entered',
+      description: 'Azure sends every Teams message to this address. It is unique to this channel.',
+      label: 'Messaging endpoint',
+      steps: {
+        paste: 'In the bot, open **Settings**, then **Configuration**. Paste the address into **Messaging endpoint** and click **Apply**.',
+      },
+      onPrem: 'On-premises: this address must be reachable from the internet over HTTPS. On your reverse proxy or WAF, it is enough to open the path {path}.',
+      warnings: {
+        insecure: 'This address does not use HTTPS, and Azure only calls HTTPS addresses. Ask your administrator to set the public address of Console.',
+        local: 'This address cannot be reached from the internet, so Azure cannot call it. Ask your administrator to set the public address of Console.',
+      },
+      tick: 'I entered the endpoint',
+    },
+    credentials: {
+      title: 'Copy the credentials and verify',
+      check: 'Credentials verified',
+      description: 'Copy three values from Azure and paste them here. Console asks Azure for a token to prove that they work.',
+      steps: {
+        ids: 'On the **Configuration** page, copy **Microsoft App ID** and **App Tenant ID**.',
+        secret: 'Click **Manage Password** next to the App ID (**Certificates & secrets**), then **New client secret** and **Add**.',
+        value: 'Copy the **Value** of the new secret right away: Azure never shows it again.',
+      },
+      appId: { label: 'Microsoft App ID' },
+      tenantId: { label: 'App Tenant ID' },
+      secret: {
+        label: 'Client secret (Value)',
+        hint: 'Paste the Value column, not the Secret ID.',
+      },
+      saved: 'Saved: {hint}. Leave the field empty to keep it.',
+      invalidGuid: 'This must be a GUID such as 00000000-0000-0000-0000-000000000000.',
+      problems: {
+        masked: 'This is the hidden form of a saved secret. Leave the field empty to keep the saved one.',
+        tooLong: 'This is too long to be a client secret.',
+      },
+      locked: 'The Azure app of a channel cannot change; for another bot, create a new channel. You can still paste a new client secret when the old one expires.',
+      encrypted: 'The client secret is stored encrypted and never shown again. When it expires in Azure, paste a new one from the channel page.',
+      verify: 'Verify and save',
+      verifyAgain: 'Verify again',
+      fixTitle: 'How to fix it',
+      fixes: {
+        service_principal_missing: 'Create the service principal. In the Microsoft Entra admin center open **App registrations**, pick your app and, on the Overview page, click **Create Service Principal** under **Managed application in local directory**. Then verify again.',
+        invalid_secret: 'Azure did not accept this secret. Copy the **Value** of the client secret, not its Secret ID, or create a new secret and paste that one.',
+        secret_expired: 'In Azure open **Certificates & secrets**, create a **New client secret** and paste its **Value** here.',
+        app_not_found: 'Check the **Microsoft App ID**: it has to be the one on the bot\'s **Configuration** page, and the app has to live in the directory named by the **App Tenant ID**.',
+        tenant_not_found: 'Check the **App Tenant ID** on the bot\'s **Configuration** page.',
+      },
+    },
+    teamsChannel: {
+      title: 'Turn on the Teams channel',
+      check: 'Teams channel turned on',
+      description: 'Without it, Teams cannot send messages to the bot.',
+      steps: {
+        enable: 'In the bot, open **Channels**, click **Microsoft Teams**, accept the terms and click **Apply**.',
+      },
+      tick: 'I turned it on',
+    },
+    firstMessage: {
+      title: 'Check the connection',
+      check: 'First message received',
+      description: 'Console proves that Azure can reach it, and waits for the first message from Teams.',
+      credentialsOk: 'Azure issued a token for the bot.',
+      credentialsPending: 'Verify the credentials in step {step} first.',
+      waiting: 'Waiting for the first message…',
+      waitingHint: 'Upload the app to Teams (step {step}) and write a message to the bot. This turns green when it arrives.',
+      received: 'First message received',
+      receivedAt: 'Received {time}',
+      checkNow: 'Check now',
+      disabled: 'This channel is switched off, so Console ignores Teams messages. Switch it on from the channel page.',
+      troubleTitle: 'Nothing after a few minutes?',
+      trouble: {
+        endpoint: 'The messaging endpoint is entered in Azure (step {step}).',
+        channel: 'The Microsoft Teams channel is turned on (step {step}).',
+        app: 'The app is uploaded and added to a team or a chat (step {step}), and you @mention it in channels.',
+      },
+    },
+    package: {
+      title: 'Upload the app to Teams',
+      check: 'App uploaded to Teams',
+      description: 'Teams shows your bot as an app. Console generates the package; you upload it.',
+      download: 'Download the Teams package (.zip)',
+      caption: 'The manifest and the icons. The app ID is the bot ID.',
+      needsCredentials: 'Enter the credentials in step {step} first: the package carries the bot ID.',
+      orgTitle: 'For the whole organization (recommended)',
+      org: 'Teams admin center, then **Teams apps**, **Manage apps**, **Upload new app**: choose the package. It shows up in everyone\'s app list within a few hours.',
+      quickTitle: 'Quick try',
+      quick: 'In Teams: **Apps**, **Manage your apps**, **Upload an app**, **Upload a custom app**. This needs permission to upload custom apps.',
+      then: 'Then add the app to a team or a chat. In channels it answers when you @mention {name}; in a personal chat you just write.',
+      notes: {
+        mentions: 'In channels, only @mentions reach the bot.',
+        private: 'Teams bots cannot post in private channels.',
+        email: 'Matching people by email needs no extra permission (Microsoft Graph): Teams gives the email of the person to the bot itself.',
+      },
+      tick: 'I uploaded the app',
+    },
+  },
+};

@@ -164,7 +164,10 @@ export function parseSimulateInput(input: unknown): ParsedInput {
         else issues.push({ message: 'context.projectId is not a valid project id', field: 'context.projectId' });
       }
       if (c.channel !== undefined && c.channel !== null && c.channel !== '') {
-        if (isIamChannel(c.channel)) channel = c.channel;
+        // The Slack / Teams runtime is decided by the access list of a deployment, which this check does not rebuild (yet):
+        // answering "denied" for a plain agent would be wrong, so the channel is not offered.
+        if (c.channel === 'messaging') issues.push({ message: 'The Access check does not simulate Slack and Teams yet; the deployment\'s access list decides who may run its agent there', field: 'context.channel' });
+        else if (isIamChannel(c.channel)) channel = c.channel;
         else issues.push({ message: `context.channel must be one of ${IAM_CHANNELS.join(', ')}`, field: 'context.channel' });
       }
       if (c.portalId !== undefined && c.portalId !== null && c.portalId !== '') {

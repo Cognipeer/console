@@ -16,7 +16,9 @@
  *   <RegistryType> in [Project] { service, adminService, key?, tags? }
  *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group>,
  *                           embedAccess?: String, networkMode?: String, net0 ... net31?: ipaddr }
- *   Agent    in [Project, Portal] { ..., portal?: Portal, approvers?: String, owners?: Set<User> }
+ *   ChannelDeployment in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
+ *   Agent    in [Project, Portal, ChannelDeployment] { ..., portal?: Portal, channelDeployment?: ChannelDeployment,
+ *                                                        approvers?: String, owners?: Set<User> }
  *
  * `owners` and `approvers` describe the SESSION an agent is asked about (agentEntities.ts): the
  * people who started it, and whose answer the agent accepts for a pending approval. The managed
@@ -25,7 +27,9 @@
  * The portal's access list is part of the Portal entity (mode / allowedUsers /
  * allowedGroups, built by portalEntities.ts), so the managed portal policies
  * (managedPolicies.ts) can read it and nothing is stored per portal. An Agent that
- * is run through a portal is `in` that portal and names it in `portal`.
+ * is run through a portal is `in` that portal and names it in `portal`. A deployment of an agent
+ * on a Slack / Teams connection carries the same three attributes (messagingEntities.ts); an Agent
+ * run through one is `in` it and names it in `channelDeployment`.
  *
  * `readSvcs/writeSvcs/adminSvcs` are the services where the principal's
  * EFFECTIVE level (role default, user override, group grants — computed by the
@@ -101,7 +105,7 @@ const contextType = (): TypeJson =>
  * Bumped whenever the generated schema changes in a way the NAMES of its types and
  * actions do not show (the signature below, and so the preparsed copy, follows).
  */
-const SCHEMA_REVISION = 4;
+const SCHEMA_REVISION = 5;
 
 type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
 
@@ -127,6 +131,27 @@ function applyPortalShape(entityTypes: Record<string, TypeJson>, resourceEntityT
   if (!agent) return;
   agent.memberOfTypes = [...new Set([...(agent.memberOfTypes ?? []), portalName])];
   agent.shape.attributes.portal = attr(entity(portalName), false);
+}
+
+/**
+ * What the messaging rules need beyond the generic resource shape: the same access list as a Portal's (mode / allowedUsers /
+ * allowedGroups; no networks, no embed), and the agent run through a deployment is `in` it and names it in `channelDeployment`.
+ * Everything is optional, like the portal's: a deployment without an access list matches no rule and the managed boundary refuses.
+ */
+function applyMessagingShape(entityTypes: Record<string, TypeJson>, resourceEntityTypes: Record<string, string>): void {
+  const deploymentName = resourceEntityTypes['channel-deployment'];
+  const deployment = deploymentName ? (entityTypes[deploymentName] as EntityTypeJson | undefined) : undefined;
+  if (!deploymentName || !deployment) return;
+  Object.assign(deployment.shape.attributes, {
+    mode: attr(str(), false),
+    allowedUsers: attr(setOf(entity('User')), false),
+    allowedGroups: attr(setOf(entity('Group')), false),
+  });
+  const agentName = resourceEntityTypes.agent;
+  const agent = agentName ? (entityTypes[agentName] as EntityTypeJson | undefined) : undefined;
+  if (!agent) return;
+  agent.memberOfTypes = [...new Set([...(agent.memberOfTypes ?? []), deploymentName])];
+  agent.shape.attributes.channelDeployment = attr(entity(deploymentName), false);
 }
 
 /**
@@ -209,6 +234,7 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
   }
 
   applyPortalShape(entityTypes, resourceEntityTypes);
+  applyMessagingShape(entityTypes, resourceEntityTypes);
   applyAgentShape(entityTypes, resourceEntityTypes);
 
   const actions: Record<string, TypeJson> = {};

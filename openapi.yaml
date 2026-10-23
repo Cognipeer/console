@@ -126,6 +126,9 @@ tags:
   - name: Agent Triggers
     description: >-
       Saved ways of starting an agent - on a cron schedule, once, by hand, or when an external system posts an event (GitHub, GitLab, Azure DevOps or any sender) - and the public webhook URL that receives those events. Every fire is an ordinary run (`channel: trigger`), listed by `GET /agents/runs?trigger_id=`.
+  - name: Agent Channels
+    description: >-
+      Enterprise. Agents answering in Slack and Microsoft Teams. The admin screens live in the console; the one public endpoint is the Bot Framework messaging endpoint of a Teams connection, which Microsoft calls with a signed token.
   - name: Console Identity
     description: >-
       Public signing keys of a workspace's Console identity issuer. An MCP server or connected agent set up for Console identity receives, with every call, a short-lived token Console signs for the person behind the call (`Authorization: Bearer`, RS256, five minutes, audience = the server URL); it verifies the token with these keys.
@@ -894,6 +897,7 @@ paths:
               - a2a
               - trigger
               - reminder
+              - messaging
         - name: trigger
           in: query
           required: false
@@ -15573,6 +15577,110 @@ paths:
                   type: api_error
                   message: The webhook cannot be looked up right now; retry later.
                   code: webhook_unavailable
+  /channels/teams/{tenantId}/{connectionId}:
+    servers:
+      - url: https://console.cognipeer.com/api/public
+        description: Cognipeer managed service
+      - url: '{gatewayUrl}/api/public'
+        description: Self-hosted / on-premise gateway
+        variables:
+          gatewayUrl:
+            default: http://localhost:3000
+            description: Scheme and host of your Console gateway
+    post:
+      tags: [Agent Channels]
+      summary: Receive a Microsoft Teams bot activity (Bot Framework messaging endpoint)
+      operationId: receiveTeamsChannelActivity
+      security: []
+      description: |-
+        Enterprise. The **messaging endpoint** of a Teams connection (Agent Channels): set it as the messaging endpoint of
+        the Azure Bot, and Microsoft posts every activity of the bot here (a person's message, a card action, the bot being
+        added to a team). **No API token**: the request carries a Bot Framework JWT in `Authorization: Bearer`, which the
+        endpoint verifies (issuer `https://api.botframework.com`, audience the connection's Microsoft app id, signing key
+        from the Bot Framework OpenID metadata, the token's `serviceUrl` claim equal to the activity's `serviceUrl`).
+
+        The activity is acknowledged at once and handled afterwards: the endpoint answers `200` with an empty object as soon as
+        the token is verified and the activity is queued, and never echoes why an activity was ignored (an activity from
+        another Azure tenant, an unsupported type, a person who is not linked yet). The agent's reply is sent back through the
+        Bot Framework connector, not in this response. The body is limited to 256 KB.
+
+        Needs the `channels` service and an Enterprise license for the workspace; without them, and for an unknown or
+        non-Teams connection, the answer is `404`.
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: The tenant id, as in the messaging endpoint shown on the connection.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{1,64}$'
+        - name: connectionId
+          in: path
+          required: true
+          description: The id of the Teams connection, as in the messaging endpoint shown on the connection.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: A Bot Framework activity object, as Microsoft posts it (`type`, `id`, `serviceUrl`, `channelId`, `from`, `conversation`, `recipient`, `text`, `value`, `channelData`, ...).
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  description: The activity type, for example `message`, `conversationUpdate` or `invoke`.
+                serviceUrl:
+                  type: string
+                  description: The connector endpoint replies are sent to. Must equal the `serviceUrl` claim of the token.
+                channelId:
+                  type: string
+                  example: msteams
+            example:
+              type: message
+              id: '1700000000000'
+              channelId: msteams
+              serviceUrl: https://smba.trafficmanager.net/emea/
+              from: {id: '29:1AbCdEf', name: Ada Lovelace, aadObjectId: 00000000-0000-0000-0000-000000000000}
+              conversation: {id: 'a:1AbCdEf', conversationType: personal, tenantId: 00000000-0000-0000-0000-000000000000}
+              recipient: {id: '28:00000000-0000-0000-0000-000000000000', name: Support bot}
+              text: How many days of leave do I have left?
+      responses:
+        '200':
+          description: The activity was verified and accepted (or deliberately ignored). The body is an empty object.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+              example: {}
+        '401':
+          description: >-
+            `unauthorized`: the Bot Framework token is missing, expired, signed for another app or `serviceUrl`, or fails verification. The body is the same for every reason.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: authentication_error
+                  message: Unauthorized.
+                  code: unauthorized
+        '404':
+          description: >-
+            `not_found`: no such tenant or connection, the connection is not a Teams one or is disabled, or Agent Channels is not available for the workspace (service off, or no Enterprise license).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  type: not_found_error
+                  message: Not found.
+                  code: not_found
   /identity/{tenantId}/.well-known/jwks.json:
     servers:
       - url: https://console.cognipeer.com/api/public
@@ -17513,7 +17621,8 @@ components:
             - a2a
             - trigger
             - reminder
-          description: "Which API started the run. `reminder`: a reminder the agent set itself (`reminder_set`), started when it came due."
+            - messaging
+          description: "Which API started the run. `reminder`: a reminder the agent set itself (`reminder_set`), started when it came due. `messaging`: a person's message in Slack or Microsoft Teams (Agent Channels)."
         trigger:
           type: string
           nullable: true

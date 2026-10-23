@@ -157,6 +157,14 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.portalReason.test');
       break;
+    case 'messagingList':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.messagingReason.list');
+      break;
+    case 'messagingBoundary':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.messagingReason.boundary');
+      break;
     case 'approvalRule':
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.approvalReason.rule');

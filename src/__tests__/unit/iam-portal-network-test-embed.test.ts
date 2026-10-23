@@ -97,7 +97,7 @@ describe('the managed portal rules are well formed', () => {
       PORTAL_POLICY_IDS.testUse,
       PORTAL_POLICY_IDS.testAgent,
     ]));
-    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(22);
+    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(24);
     const result = await enter(listed, base);
     expect(result.failed).toBeFalsy();
     expect(result.errors).toEqual([]);

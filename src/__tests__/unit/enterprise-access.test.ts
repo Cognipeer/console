@@ -48,6 +48,17 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/portalish/foo')).toBeNull();
   });
 
+  it('gates the channels admin API and the self-service identity API, bare collection paths included', () => {
+    expect(getEnterpriseModuleForPath('/api/channels')).toBe('channels');
+    expect(getEnterpriseModuleForPath('/api/channels/connections')).toBe('channels');
+    expect(getEnterpriseModuleForPath('/api/channels/connections/abc/deployments')).toBe('channels');
+    expect(getEnterpriseModuleForPath('/api/channel-identities')).toBe('channels');
+    expect(getEnterpriseModuleForPath('/api/channel-identities/link/tenant.token')).toBe('channels');
+    // The public Teams webhook checks the licence in-handler (public prefix); near-misses stay ungated.
+    expect(getEnterpriseModuleForPath('/api/public/channels/teams/t/c')).toBeNull();
+    expect(getEnterpriseModuleForPath('/api/channelsx')).toBeNull();
+  });
+
   it('gates the entity health API, bare collection path included', () => {
     expect(getEnterpriseModuleForPath('/api/entity-health')).toBe('health');
     expect(getEnterpriseModuleForPath('/api/entity-health/summary')).toBe('health');

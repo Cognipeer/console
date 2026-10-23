@@ -33,7 +33,7 @@
 
 import { runWithTenantScope } from '@/lib/database';
 import { isPermissionService, RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
-import { isIamChannel, IAM_CHANNELS, parseCidr, toCedarDatetime, type IamChannel } from './context';
+import { isIamChannel, isRuntimeIamChannel, IAM_CHANNELS, parseCidr, toCedarDatetime, type IamChannel } from './context';
 import { RUNTIME_ENFORCED_ACTIONS, impliedLevelActionIds, serviceActionId, type ActionDefinition } from './actions';
 import type { CedarMessage } from './cedar';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
@@ -629,7 +629,7 @@ export interface GateReach {
   /** The only resource selector is "specific resources" (no services, no projects). */
   specificOnly: boolean;
   hasSpecific: boolean;
-  /** The only channel is `portal`. */
+  /** Every channel of the rule is a runtime one (`portal`, `messaging`: the person is reached through an access list, not a session). */
   portalOnly: boolean;
   hasPortal: boolean;
   /**
@@ -641,11 +641,11 @@ export interface GateReach {
   unasked: string[];
   /** The rule can match a decision of the request gates. */
   gatePlane: boolean;
-  /** The rule can match a decision of the portal runtime (the actions, the channel and the resources all fit). */
+  /** The rule can match a decision of a runtime of access-list channels (the portal, Slack / Teams): the actions, the channel and the resources all fit. */
   portalPlane: boolean;
   /** The rule can match a decision of the agent routes about a session (the actions, the channel and the resources all fit). */
   sessionPlane: boolean;
-  /** The rule's channels (if it limits them) include `portal`. */
+  /** The rule's channels (if it limits them) include a runtime one (`portal`, `messaging`). */
   portalChannelOk: boolean;
   /** The rule names, or through the Read / Write levels covers, an action the portal runtime asks for (whatever its channel and resources say). */
   portalCovered: boolean;
@@ -667,7 +667,7 @@ export interface GateReach {
   writeAppointsApprovers: boolean;
 }
 
-/** The actions of the portal itself (a rule that names one is "about portals" on purpose). */
+/** The actions of the portal itself and of the messaging runtime (a rule that names one is "about access lists" on purpose). */
 const PORTAL_ACTIONS: readonly string[] = ['portal.use', 'agent.invoke'];
 
 /**
@@ -684,7 +684,7 @@ function runtimeReaches(id: string, channel: IamChannel, sel: PolicySpecResource
   const service = def?.service ?? 'agents';
   const type = def?.resourceType ?? 'agent';
   return !!sel.services?.includes(service) || !!sel.projects?.length
-    || refs.some((r) => r.type === type || (channel === 'portal' && r.type === 'portal'));
+    || refs.some((r) => r.type === type || (channel === 'portal' && r.type === 'portal') || (channel === 'messaging' && r.type === 'channel-deployment'));
 }
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
@@ -699,38 +699,42 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
 
   // Which runtime actions the rule covers: named, or inside the Read / Write level that holds them.
   const hasLevel = (id: string) => defs.some((a) => a.kind === 'group' && a.id === id);
-  const portalChannelOk = channels.length === 0 || channels.includes('portal');
+  const portalChannelOk = channels.length === 0 || channels.some(isRuntimeIamChannel);
   const refs = sel?.resources ?? [];
   const asked = Object.keys(RUNTIME_ENFORCED_ACTIONS)
     .map((id) => view.actions.get(id))
     .filter((def): def is ActionDefinition => !!def && def.kind === 'resource' && isRuntimeEnforced(def.id))
     .filter((def) => runtimeIds.has(def.id) || (!!def.group && hasLevel(def.group)))
     .map((def) => ({ id: def.id, channels: enforcedChannelsOf(def.id) }));
-  const portalAsked = asked.filter((a) => a.channels.includes('portal'));
-  const sessionAsked = asked.filter((a) => a.channels.some((c) => c !== 'portal'));
+  const portalAsked = asked.filter((a) => a.channels.some(isRuntimeIamChannel));
+  const sessionAsked = asked.filter((a) => a.channels.some((c) => !isRuntimeIamChannel(c)));
   // The rule's channels meet the ones the action is asked in (no channels at all = every channel).
-  const appChannel = (a: { channels: IamChannel[] }) => a.channels.filter((c) => c !== 'portal').some((c) => channels.length === 0 || channels.includes(c));
+  const appChannel = (a: { channels: IamChannel[] }) => a.channels.filter((c) => !isRuntimeIamChannel(c)).some((c) => channels.length === 0 || channels.includes(c));
+  // The runtime channels the rule meets for an action, and whether the rule's resources reach it in one of them.
+  const runtimeChannelsOf = (a: { channels: IamChannel[] }) => a.channels.filter((c) => isRuntimeIamChannel(c) && (channels.length === 0 || channels.includes(c)));
+  const runtimeReach = (a: { id: string; channels: IamChannel[] }, selection: PolicySpecResourceSelection | null) =>
+    runtimeChannelsOf(a).some((c) => runtimeReaches(a.id, c, selection, view));
 
-  const portalPlane = portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', sel, view));
+  const portalPlane = portalAsked.some((a) => runtimeReach(a, sel));
   const approveAsked = sessionAsked.find((a) => a.id === 'agent.approve');
   const approvalAppoints = runtimeIds.has('agent.approve') && !!approveAsked
     && appChannel(approveAsked) && runtimeReaches('agent.approve', 'dashboard', sel, view);
   const sessionPlane = sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', sel, view));
   const refReachable = (ref: PolicySpecResourceRef) => {
     const only = { resources: [ref] };
-    return (portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', only, view)))
+    return portalAsked.some((a) => runtimeReach(a, only))
       || sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', only, view));
   };
 
-  const gateChannelOk = channels.length === 0 || channels.some((c) => c !== 'portal');
+  const gateChannelOk = channels.length === 0 || channels.some((c) => !isRuntimeIamChannel(c));
   return {
     gateActions,
     resourceActions,
     runtimeActions: [...runtimeIds],
     specificOnly,
     hasSpecific,
-    portalOnly: channels.length > 0 && channels.every((c) => c === 'portal'),
-    hasPortal: channels.includes('portal'),
+    portalOnly: channels.length > 0 && channels.every(isRuntimeIamChannel),
+    hasPortal: channels.some(isRuntimeIamChannel),
     unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null, spec.effect === 'permit'),
     gatePlane: gateActions > 0 && gateChannelOk && !specificOnly,
     portalPlane,
@@ -739,7 +743,8 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
     portalCovered: portalAsked.length > 0,
     sessionCovered: sessionAsked.length > 0,
     unenforcedSpecific: refs.filter((ref) => !refReachable(ref)).length,
-    portalExplicit: [...runtimeIds].some((id) => PORTAL_ACTIONS.includes(id)) || channels.includes('portal') || refs.some((r) => r.type === 'portal'),
+    portalExplicit: [...runtimeIds].some((id) => PORTAL_ACTIONS.includes(id)) || channels.some(isRuntimeIamChannel)
+      || refs.some((r) => r.type === 'portal' || r.type === 'channel-deployment'),
     approvalAppoints,
     writeAppointsApprovers: !approvalAppoints && hasLevel('Write') && !!sessionAsked.find((a) => a.id === 'agent.approve')
       && appChannel(sessionAsked.find((a) => a.id === 'agent.approve')!) && runtimeReaches('agent.approve', 'dashboard', sel, view),

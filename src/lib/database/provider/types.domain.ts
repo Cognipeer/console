@@ -4995,7 +4995,7 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Caller labels: at most 16 keys (`[A-Za-z0-9_.-]`, ≤64 chars), values ≤512 chars. */
   metadata?: Record<string, string> | null;
   /** The surface that created the run. */
-  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | null;
+  channel?: 'runs' | 'responses' | 'chat_completions' | 'a2a' | 'trigger' | 'reminder' | 'messaging' | null;
   triggerId?: string | null;
   trigger?: 'request' | 'schedule' | 'once' | 'manual' | 'webhook' | null;
   /**

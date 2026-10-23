@@ -28,11 +28,11 @@ export class ApiError extends Error {
 
 export type IamEffect = 'permit' | 'forbid';
 export type IamPolicyEffect = IamEffect | 'mixed';
-export type IamChannel = 'dashboard' | 'api' | 'portal';
+export type IamChannel = 'dashboard' | 'api' | 'portal' | 'messaging';
 export type IamPrincipalType = 'user' | 'group' | 'token';
 export type IamLevel = 'none' | 'read' | 'write' | 'admin';
 
-export const IAM_CHANNELS: readonly IamChannel[] = ['dashboard', 'api', 'portal'];
+export const IAM_CHANNELS: readonly IamChannel[] = ['dashboard', 'api', 'portal', 'messaging'];
 
 // ── policy spec (what the visual editor produces) ────────────────────────
 
@@ -127,7 +127,7 @@ export interface ManagedPolicy {
   nameKey?: string;
   descriptionKey?: string;
   /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed; `portal`: who may open a portal and run its agents; `agent`: who may answer an agent session's pending requests. */
-  group: 'rbac' | 'boundary' | 'portal' | 'agent';
+  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
   effect: IamEffect;
   cedar: string;
 }
@@ -546,7 +546,7 @@ function toEffect(v: unknown): IamEffect {
 }
 
 function toChannel(v: unknown): IamChannel | null {
-  return v === 'dashboard' || v === 'api' || v === 'portal' ? v : null;
+  return v === 'dashboard' || v === 'api' || v === 'portal' || v === 'messaging' ? v : null;
 }
 
 /** `true` / `false` for the usual spellings of a verdict, `null` when unknown. */
@@ -1128,11 +1128,13 @@ export const iamApi = {
           group:
             r.group === 'portal' || id.includes(':portal:')
               ? 'portal'
-              : r.group === 'agent' || id.includes(':agent:')
-                ? 'agent'
-                : r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:'))
-                  ? 'boundary'
-                  : 'rbac',
+              : r.group === 'messaging' || id.includes(':messaging:')
+                ? 'messaging'
+                : r.group === 'agent' || id.includes(':agent:')
+                  ? 'agent'
+                  : r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:'))
+                    ? 'boundary'
+                    : 'rbac',
           effect: toEffect(r.effect),
           cedar: str(r.cedar),
         };

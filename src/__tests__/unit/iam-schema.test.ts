@@ -111,7 +111,7 @@ describe('generated schema', () => {
     const { schema } = buildSchema([{ type: 'agent', service: 'agents' }]);
     const ns = (schema as unknown as Record<string, { entityTypes: Record<string, any> }>)[''];
     expect(Object.keys(ns.entityTypes)).toEqual(
-      expect.arrayContaining(['Tenant', 'Project', 'Group', 'User', 'ApiToken', 'Service', 'Agent', 'Portal']),
+      expect.arrayContaining(['Tenant', 'Project', 'Group', 'User', 'ApiToken', 'Service', 'Agent', 'Portal', 'ChannelDeployment']),
     );
     expect(Object.keys(ns.entityTypes.User.shape.attributes).sort()).toEqual(
       ['adminProjects', 'adminSvcs', 'projDenyAdmin', 'projDenyRead', 'projDenyWrite', 'projects', 'readSvcs', 'role', 'writeSvcs'],
@@ -124,9 +124,10 @@ describe('generated schema', () => {
     expect(token.project.required).toBe(false);
     expect(Object.keys(ns.entityTypes.Service.shape.attributes).sort()).toEqual(['adminService', 'service']);
     // an agent run through a portal is in that portal and names it; the portal carries its access list
-    expect(ns.entityTypes.Agent.memberOfTypes).toEqual(['Project', 'Portal']);
+    // (and through a Slack / Teams deployment: it is in that deployment and names it; the deployment carries the same access list)
+    expect(ns.entityTypes.Agent.memberOfTypes).toEqual(['Project', 'Portal', 'ChannelDeployment']);
     // ...and the session an agent is asked about: who started it, and whom the agent accepts as an approver
-    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'approvers', 'key', 'owners', 'portal', 'service', 'tags']);
+    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'approvers', 'channelDeployment', 'key', 'owners', 'portal', 'service', 'tags']);
     expect(ns.entityTypes.Agent.shape.attributes.owners).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' }, required: false });
     expect(ns.entityTypes.Agent.shape.attributes.approvers).toMatchObject({ type: 'String', required: false });
     expect(ns.entityTypes.Agent.shape.attributes.portal).toMatchObject({ type: 'Entity', name: 'Portal', required: false });
@@ -144,6 +145,12 @@ describe('generated schema', () => {
     expect(context.test).toMatchObject({ type: 'Boolean', required: false });
     expect(ns.entityTypes.Portal.shape.attributes.allowedUsers).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' } });
     expect(ns.entityTypes.Portal.shape.attributes.allowedGroups).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'Group' } });
+    // a deployment's list is the same three attributes - no embed, no network boundary
+    const deployment = ns.entityTypes.ChannelDeployment.shape.attributes;
+    expect(Object.keys(deployment).sort()).toEqual(['adminService', 'allowedGroups', 'allowedUsers', 'key', 'mode', 'service', 'tags']);
+    for (const name of ['mode', 'allowedUsers', 'allowedGroups']) expect(deployment[name].required).toBe(false);
+    expect(deployment.allowedUsers).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' } });
+    expect(ns.entityTypes.Agent.shape.attributes.channelDeployment).toMatchObject({ type: 'Entity', name: 'ChannelDeployment', required: false });
   });
 
   it('the six managed policies parse and type-check against it (0 validation errors)', () => {

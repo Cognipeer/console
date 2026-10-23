@@ -27,6 +27,7 @@ const MODULE_LABELS: Record<string, string> = {
   sso: 'Single Sign-On (OIDC)',
   ldap: 'LDAP Directory',
   portals: 'Portals',
+  channels: 'Channels',
   health: 'Entity Health',
   cost: 'Cost & Optimization',
   'data-retention': 'Data Retention',

@@ -20,6 +20,7 @@ export function isCallerSignal(signal: string): boolean {
 export const CHANNEL_OPTIONS = [
   { value: 'dashboard', label: 'Dashboard' },
   { value: 'portal', label: 'Portal' },
+  { value: 'messaging', label: 'Slack / Teams' },
   { value: 'api', label: 'API' },
   { value: 'embed', label: 'Embed' },
   { value: 'a2a', label: 'A2A' },
