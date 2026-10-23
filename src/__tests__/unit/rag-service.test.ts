@@ -45,6 +45,7 @@ import {
   getRagModuleById,
   listRagModules,
   listRagDocuments,
+  listRagDocumentsPage,
   getRagDocument,
   indexPendingRagDocument,
   ingestDocument,
@@ -451,6 +452,32 @@ describe('RAG Service', () => {
   });
 
   // ─── Document CRUD ─────────────────────────────────────────────────
+
+  describe('listRagDocumentsPage', () => {
+    it('pages with clamped bounds, filters the count the same way, and drops inline source', async () => {
+      db.listRagDocuments.mockResolvedValue([{ ...mockDocument, sourceText: 'inline text' }]);
+      db.countRagDocuments.mockResolvedValue(41);
+      const page = await listRagDocumentsPage(
+        DB_NAME,
+        'my-rag',
+        { projectId: 'p1', search: 'doc', status: 'indexed' },
+        { limit: 5000, offset: -3 },
+      );
+      expect(db.listRagDocuments).toHaveBeenCalledWith('my-rag', {
+        projectId: 'p1', search: 'doc', status: 'indexed', limit: 100, offset: 0,
+      });
+      expect(db.countRagDocuments).toHaveBeenCalledWith('my-rag', 'p1', { status: 'indexed', search: 'doc' });
+      expect(page).toMatchObject({ total: 41, limit: 100, offset: 0 });
+      expect(page.documents[0].sourceText).toBeUndefined();
+    });
+
+    it('defaults to a page of 25', async () => {
+      db.listRagDocuments.mockResolvedValue([]);
+      db.countRagDocuments.mockResolvedValue(0);
+      const page = await listRagDocumentsPage(DB_NAME, 'my-rag', {});
+      expect(page.limit).toBe(25);
+    });
+  });
 
   describe('listRagDocuments', () => {
     it('returns documents for a module', async () => {

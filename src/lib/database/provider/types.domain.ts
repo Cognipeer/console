@@ -1635,6 +1635,19 @@ export interface IRagChunkConfig {
 export type RagDocumentStatus = 'pending' | 'processing' | 'indexed' | 'failed';
 
 /**
+ * Filters of a document list. `limit`/`offset` page the result (newest first);
+ * without `limit` the whole module comes back, which is what the background
+ * jobs (re-index, export) rely on.
+ */
+export interface RagDocumentListFilters {
+  projectId?: string;
+  status?: RagDocumentStatus;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
  * One vector similarity query, recorded for the index analytics panel
  * (query volume, latency, score, filter usage).
  */

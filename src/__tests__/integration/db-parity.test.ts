@@ -2604,6 +2604,34 @@ describeForEachProvider('RAG module teardown + shared index accounting', (getDb)
     createdBy: 'tester',
   });
 
+  it('pages and counts documents with the same filters, without repeating a row', async () => {
+    const db = getDb();
+    for (let i = 0; i < 7; i += 1) {
+      await db.createRagDocument({
+        tenantId,
+        projectId: 'proj-1',
+        ragModuleKey: 'km-paged',
+        fileName: `${i % 2 === 0 ? 'report' : 'notes'}-${i}.txt`,
+        status: i === 6 ? 'failed' : 'indexed',
+        createdBy: 'tester',
+      });
+    }
+
+    const seen: string[] = [];
+    for (let offset = 0; offset < 9; offset += 3) {
+      const page = await db.listRagDocuments('km-paged', { projectId: 'proj-1', limit: 3, offset });
+      expect(page.length).toBe(offset < 6 ? 3 : 1);
+      seen.push(...page.map((d) => String(d._id)));
+    }
+    expect(new Set(seen).size).toBe(7);
+
+    expect(await db.countRagDocuments('km-paged', 'proj-1')).toBe(7);
+    expect(await db.countRagDocuments('km-paged', 'proj-1', { search: 'report' })).toBe(4);
+    expect(await db.countRagDocuments('km-paged', 'proj-1', { status: 'failed' })).toBe(1);
+    const searched = await db.listRagDocuments('km-paged', { projectId: 'proj-1', search: 'notes', limit: 2, offset: 2 });
+    expect(searched).toHaveLength(1);
+  });
+
   it('cascades documents and chunks by module key and reports what it removed', async () => {
     const db = getDb();
 
