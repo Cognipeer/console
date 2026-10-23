@@ -477,6 +477,33 @@ export interface AppConfig {
   };
 
   /**
+   * Central log retention (src/lib/retention, docs/guide/data-retention.md):
+   * one queue-driven sweep ages out every registered log collection by its
+   * data class. Durations here are the deployment defaults; a tenant policy
+   * may change them within each class's range.
+   */
+  retention: {
+    /** Off = no scheduled sweep and no manual purge. */
+    enabled: boolean;
+    /** Scheduled sweeps only count what they would remove (manual purges still act). */
+    dryRun: boolean;
+    /** Seconds between scheduled sweeps (min 60). */
+    intervalSeconds: number;
+    /** Wall-clock budget of one sweep job before it hands the rest to a follow-up job (10..840 s). */
+    budgetSeconds: number;
+    /** Rows deleted or redacted per statement (50..5000). */
+    batchSize: number;
+    /** A shortened duration takes effect this many hours after it is saved (0..168; 0 = at once). */
+    shortenDelayHours: number;
+    /** The audit class floor no tenant setting or manual purge can go below (min 30). */
+    auditMinDays: number;
+    /** How long destruction records (audit rows of service `retention`) are kept (min 1095). */
+    recordsDays: number;
+    /** Deployment default per data class (`RETENTION_<CLASS>_DAYS`); unset = the class's built-in default. */
+    classDays: Partial<Record<'content' | 'telemetry' | 'trace' | 'jobs' | 'metrics' | 'alerts' | 'audit' | 'usage' | 'results', number>>;
+  };
+
+  /**
    * MCP gateway bounds (docs/guide/configuration.md, "MCP Gateway"): how much a
    * failed tool call and an MCP server's request log keep, how many SSE streams
    * the process holds, and what the public (unauthenticated) endpoints accept.
@@ -619,6 +646,26 @@ function publicRateConfig(source: ConfigSource) {
   return {
     rateLimitPerMinute,
     endpointRateLimitPerMinute: endpointRate >= 0 ? endpointRate : rateLimitPerMinute * ENDPOINT_RATE_FACTOR,
+  };
+}
+
+function retentionConfig(source: ConfigSource): AppConfig['retention'] {
+  const classDays: AppConfig['retention']['classDays'] = {};
+  for (const id of ['content', 'telemetry', 'trace', 'jobs', 'metrics', 'alerts', 'audit', 'usage', 'results'] as const) {
+    const days = positiveInt(source, `RETENTION_${id.toUpperCase()}_DAYS`, 0);
+    if (days > 0) classDays[id] = days;
+  }
+  return {
+    enabled: bool(source, 'RETENTION_ENGINE_ENABLED', true),
+    // Upgrades must not start deleting data unannounced: an operator turns the sweep on.
+    dryRun: bool(source, 'RETENTION_DRY_RUN', true),
+    intervalSeconds: Math.max(int(source, 'RETENTION_INTERVAL_SECONDS', 3600), 60),
+    budgetSeconds: Math.min(Math.max(int(source, 'RETENTION_BUDGET_SECONDS', 240), 10), 840),
+    batchSize: Math.min(Math.max(int(source, 'RETENTION_BATCH_SIZE', 500), 50), 5000),
+    shortenDelayHours: Math.min(Math.max(int(source, 'RETENTION_SHORTEN_DELAY_HOURS', 24), 0), 168),
+    auditMinDays: Math.max(int(source, 'RETENTION_AUDIT_MIN_DAYS', 365), 30),
+    recordsDays: Math.max(int(source, 'RETENTION_RECORDS_DAYS', 1095), 1095),
+    classDays,
   };
 }
 
@@ -976,6 +1023,8 @@ function buildConfig(source: ConfigSource): AppConfig {
       autoDisableHours: Math.max(int(source, 'WEBHOOK_AUTO_DISABLE_HOURS', 72), 1),
       deliveryRetentionDays: Math.max(int(source, 'WEBHOOK_DELIVERY_RETENTION_DAYS', 30), 1),
     },
+
+    retention: retentionConfig(source),
 
     mcp: {
       errorMessageMaxChars: Math.max(int(source, 'MCP_ERROR_MESSAGE_MAX_CHARS', 8 * 1024), 256),

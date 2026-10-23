@@ -1722,8 +1722,46 @@ export interface RealtimeSessionLogDelta {
 
 // `iam_identities` is kept by the SQLite provider only: one small document per account that is of kind `external` or holds an
 // external identity, addressed by the user id (the users table has no column for either; MongoDB keeps both on the user).
-export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta', 'iam_delegations', 'iam_identities'] as const;
+// `retention_policies` rides the same store: one document per tenant (src/lib/retention/policy.ts).
+export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta', 'iam_delegations', 'iam_identities', 'retention_policies'] as const;
 export type IamCollectionName = typeof IAM_COLLECTIONS[number];
+
+// ── Retention primitives (src/lib/retention) ─────────────────────────────
+// The retention engine deletes and redacts rows of any registered log
+// collection through these few generic operations. Collection and field names
+// always come from the code registry (src/lib/retention/targets.ts), never from
+// a request; the SQLite provider still refuses anything that is not a plain
+// identifier.
+
+/** A value condition on one field (status guards: never delete a running job). */
+export interface RetentionWhere {
+  field: string;
+  in?: Array<string | number | boolean>;
+  notIn?: Array<string | number | boolean>;
+}
+
+export interface RetentionFilter {
+  /** The row's age field (Date or ISO string on MongoDB, ISO string on SQLite). */
+  timeField: string;
+  /** Rows strictly older than this. */
+  before: Date;
+  /** Rows at or after this (a redaction watermark: everything older is already done). */
+  after?: Date;
+  /** Project scoping; needs `projectField`. */
+  projectField?: string;
+  projectIn?: string[];
+  projectNotIn?: string[];
+  where?: RetentionWhere[];
+}
+
+/**
+ * A content field to clear. `null` removes it ($unset / NULL); `empty` writes ''
+ * for columns the SQLite schema declares NOT NULL.
+ */
+export interface RetentionRedactField {
+  field: string;
+  clearTo: 'null' | 'empty';
+}
 
 export interface IIamDoc {
   id: string;

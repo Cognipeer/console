@@ -130,6 +130,8 @@ import type {
   BetaAccessCodeStatus,
   IIamDoc,
   IamCollectionName,
+  RetentionFilter,
+  RetentionRedactField,
   IamPage,
   IamPageRequest,
   IamUserQuery,
@@ -1181,6 +1183,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   claimSchedulerSlot(key: string, expiresAt: Date): Promise<boolean>;
   /** Retention: removes claims whose expiresAt is before `olderThan`; returns the number removed. */
   cleanupSchedulerClaims(olderThan: Date): Promise<number>;
+
+  // ── Retention primitives (tenant-specific; src/lib/retention) ──
+  // `collection` and every field name come from the retention registry. A
+  // collection or table that does not exist yet counts as empty.
+  /** Rows matching the filter (a preview of what a sweep would remove). */
+  retentionCount(collection: string, filter: RetentionFilter): Promise<number>;
+  /** Deletes up to `limit` matching rows; returns the number deleted. */
+  retentionDeleteBatch(collection: string, filter: RetentionFilter, limit: number): Promise<number>;
+  /** Clears the content fields of up to `limit` matching rows that still hold any of them; returns the number changed. */
+  retentionRedactBatch(collection: string, filter: RetentionFilter, fields: RetentionRedactField[], limit: number): Promise<number>;
+  /** Rows matching the filter that still hold content in any of `fields` (the redaction preview). */
+  retentionCountRedactable(collection: string, filter: RetentionFilter, fields: RetentionRedactField[]): Promise<number>;
+  /** The distinct non-empty values of `field` among up to `limit` matching rows (the parent ids of a cascade). */
+  retentionSelectValues(collection: string, filter: RetentionFilter, field: string, limit: number): Promise<string[]>;
+  /** Deletes every row whose `field` is one of `values`; returns the number deleted. */
+  retentionDeleteWhereIn(collection: string, field: string, values: string[]): Promise<number>;
 
   // ── Agent triggers (tenant-specific) ──
   createAgentTrigger(record: NewAgentTrigger): Promise<IAgentTrigger>;

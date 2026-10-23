@@ -266,6 +266,8 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/responses', service: 'models' },
   { prefix: '/api/client/v1/embeddings', service: 'models' },
   { prefix: '/api/audit', service: 'audit' },
+  // Central log retention: policy and purge are administration of the audit trail's own lifetime.
+  { prefix: '/api/retention', service: 'audit' },
   { prefix: '/api/users', service: 'members' },
   { prefix: '/api/groups', service: 'members' },
   { prefix: '/api/resources', service: 'resources' },
