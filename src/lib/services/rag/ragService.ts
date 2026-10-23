@@ -17,7 +17,7 @@ import {
 import { getDatabase, type DatabaseProvider } from '@/lib/database';
 
 const logger = createLogger('rag');
-import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument } from '@/lib/database';
+import type { IRagModule, IRagQueryLog, IRagChunk, IRagChunkConfig, IRagDocument, RagDocumentStatus } from '@/lib/database';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
 import { handleChatCompletion, handleEmbeddingRequest } from '@/lib/services/models/inferenceService';
 import {
@@ -733,6 +733,50 @@ export async function listRagDocuments(
     documents[i] = withoutInlineSource(documents[i]);
   }
   return documents;
+}
+
+export interface RagDocumentPage {
+  documents: RagDocument[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Page size bounds of a document list; the largest page keeps one response well under a few MB. */
+export const RAG_DOCUMENT_PAGE_DEFAULT = 25;
+export const RAG_DOCUMENT_PAGE_MAX = 100;
+
+/**
+ * One page of a module's documents (newest first) plus the total that matches
+ * the same filters, so a caller can render a pager without a second request.
+ * Unlike `listRagDocuments` this never loads the whole corpus.
+ */
+export async function listRagDocumentsPage(
+  tenantDbName: string,
+  ragModuleKey: string,
+  filters: { projectId?: string; status?: RagDocumentStatus; search?: string },
+  page: { limit?: number; offset?: number } = {},
+): Promise<RagDocumentPage> {
+  const limit = Math.min(
+    Math.max(1, Math.floor(page.limit ?? RAG_DOCUMENT_PAGE_DEFAULT)),
+    RAG_DOCUMENT_PAGE_MAX,
+  );
+  const offset = Math.max(0, Math.floor(page.offset ?? 0));
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const [rows, total] = await Promise.all([
+    db.listRagDocuments(ragModuleKey, { ...filters, limit, offset }),
+    db.countRagDocuments(ragModuleKey, filters.projectId, {
+      status: filters.status,
+      search: filters.search,
+    }),
+  ]);
+  return {
+    documents: rows.map((row) => withoutInlineSource(row)),
+    total,
+    limit,
+    offset,
+  };
 }
 
 export async function getRagDocument(

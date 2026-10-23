@@ -173,6 +173,7 @@ import type {
   ModelCategory,
   ModelProviderType,
   ProviderDomain,
+  RagDocumentListFilters,
   RagDocumentStatus,
   ToolSourceType,
   ToolStatus,
@@ -1384,9 +1385,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IRagDocument | null>;
   listRagDocuments(
     ragModuleKey: string,
-    filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+    filters?: RagDocumentListFilters,
   ): Promise<IRagDocument[]>;
-  countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number>;
+  countRagDocuments(
+    ragModuleKey: string,
+    projectId?: string,
+    filters?: Pick<RagDocumentListFilters, 'status' | 'search'>,
+  ): Promise<number>;
 
   // ── RAG Chunk operations (tenant-specific) ──
   bulkInsertRagChunks(

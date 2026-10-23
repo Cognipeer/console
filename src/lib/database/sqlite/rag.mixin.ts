@@ -9,7 +9,7 @@ import type {
   IRagDocument,
   IRagChunk,
   IRagQueryLog,
-  RagDocumentStatus,
+  RagDocumentListFilters,
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
@@ -335,7 +335,7 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
 
     async listRagDocuments(
       ragModuleKey: string,
-      filters?: { projectId?: string; status?: RagDocumentStatus; search?: string },
+      filters?: RagDocumentListFilters,
     ): Promise<IRagDocument[]> {
       const db = this.getTenantDb();
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
@@ -349,16 +349,29 @@ export function RagMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TB
       if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
       if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
 
+      // rowid breaks createdAt ties so a page boundary never repeats or drops a row.
+      let paging = '';
+      if (filters?.limit !== undefined) {
+        paging = ' LIMIT @limit OFFSET @offset';
+        params.limit = filters.limit;
+        params.offset = filters.offset ?? 0;
+      }
       const rows = db.prepare(
-        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC`,
+        `SELECT * FROM ${TABLES.ragDocuments} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC, rowid DESC${paging}`,
       ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapDocRow(r));
     }
 
-    async countRagDocuments(ragModuleKey: string, projectId?: string): Promise<number> {
+    async countRagDocuments(
+      ragModuleKey: string,
+      projectId?: string,
+      filters?: Pick<RagDocumentListFilters, 'status' | 'search'>,
+    ): Promise<number> {
       const db = this.getTenantDb();
       const clauses: string[] = ['ragModuleKey = @ragModuleKey'];
       const params: Record<string, unknown> = { ragModuleKey };
+      if (filters?.status) { clauses.push('status = @status'); params.status = filters.status; }
+      if (filters?.search) { clauses.push(this.likeAny(['fileName'], '@search')); params.search = this.likePattern(filters.search); }
       if (projectId) {
         const scopeFilter = this.buildProjectScopeFilter(projectId);
         clauses.push(scopeFilter.clause);

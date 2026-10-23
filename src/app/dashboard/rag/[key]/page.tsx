@@ -27,15 +27,16 @@ import {
   TextInput,
   ThemeIcon,
   Tooltip,
-  ActionIcon,
   Box,
   Accordion,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
+import { useDebouncedValue } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import {
   IconArrowLeft,
   IconCheck,
@@ -321,6 +322,12 @@ export default function RagModuleDetailPage() {
 
   /* documents */
   const [documents, setDocuments] = useState<RagDocumentView[]>([]);
+  const [docTotal, setDocTotal] = useState(0);
+  const [docPage, setDocPage] = useState(1);
+  const [docPageSize, setDocPageSize] = useState(25);
+  const [docSearch, setDocSearch] = useState('');
+  const [docStatus, setDocStatus] = useState('all');
+  const [debouncedDocSearch] = useDebouncedValue(docSearch.trim(), 300);
   const [docsLoading, setDocsLoading] = useState(false);
   const [docsError, setDocsError] = useState<string | null>(null);
   const [ingesting, setIngesting] = useState(false);
@@ -424,12 +431,29 @@ export default function RagModuleDetailPage() {
     if (!moduleKey) return;
     if (!silent) setDocsLoading(true);
     try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/documents`, { cache: 'no-store' });
+      const params = new URLSearchParams({
+        limit: String(docPageSize),
+        offset: String((docPage - 1) * docPageSize),
+      });
+      if (debouncedDocSearch) params.set('search', debouncedDocSearch);
+      if (docStatus !== 'all') params.set('status', docStatus);
+      const res = await fetch(
+        `/api/rag/modules/${encodeURIComponent(moduleKey)}/documents?${params.toString()}`,
+        { cache: 'no-store' },
+      );
       if (!res.ok) {
         throw new Error(`Failed to load documents (HTTP ${res.status})`);
       }
       const data = await res.json();
+      const total = typeof data.total === 'number' ? data.total : (data.documents ?? []).length;
+      // Deleting the last row of the last page leaves that page empty; step back
+      // instead of showing "no documents" over a module that still has some.
+      if ((data.documents ?? []).length === 0 && total > 0 && docPage > 1) {
+        setDocPage(Math.max(1, Math.ceil(total / docPageSize)));
+        return;
+      }
       setDocuments(data.documents ?? []);
+      setDocTotal(total);
       setDocsError(null);
     } catch (e) {
       console.error('[rag docs]', e);
@@ -439,7 +463,7 @@ export default function RagModuleDetailPage() {
     } finally {
       setDocsLoading(false);
     }
-  }, [moduleKey]);
+  }, [moduleKey, docPage, docPageSize, debouncedDocSearch, docStatus]);
 
   const loadUsage = useCallback(async () => {
     if (!moduleKey) return;
@@ -499,11 +523,16 @@ export default function RagModuleDetailPage() {
     void loadModule('initial');
   }, [loadModule]);
 
+  // Paging and searching refetch only the document list; usage and insights
+  // describe the whole module and do not change with the page.
   useEffect(() => {
     void loadDocuments();
+  }, [loadDocuments]);
+
+  useEffect(() => {
     void loadUsage();
     void loadInsights();
-  }, [loadDocuments, loadUsage, loadInsights]);
+  }, [loadUsage, loadInsights]);
 
   /* ── Re-index runs ────────────────────────────────────────────────────── */
 
@@ -717,16 +746,70 @@ export default function RagModuleDetailPage() {
     }
   };
 
+  const docColumns: DataGridColumn<RagDocumentView>[] = [
+    {
+      key: 'fileName',
+      label: 'File Name',
+      render: (doc) => (
+        <Group gap="sm" wrap="nowrap">
+          <ThemeIcon size={28} radius="md" variant="light" color="cyan">
+            <IconFileText size={15} />
+          </ThemeIcon>
+          <Text size="sm" fw={500} lineClamp={1}>{doc.fileName}</Text>
+        </Group>
+      ),
+    },
+    {
+      key: 'chunks',
+      label: 'Chunks',
+      align: 'center',
+      width: 90,
+      // A document still being ingested has no count yet; 0 would read as
+      // "this file produced nothing".
+      render: (doc) => (
+        <Badge
+          variant={typeof doc.chunkCount === 'number' ? 'filled' : 'light'}
+          color={typeof doc.chunkCount === 'number' ? 'orange' : 'gray'}
+          size="md"
+          radius="sm"
+        >
+          {doc.chunkCount ?? '—'}
+        </Badge>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (doc) => (
+        <>
+          <Badge variant="light" color={statusColor(doc.status)} size="sm">{doc.status}</Badge>
+          {doc.errorMessage && <Text size="xs" c="red" mt={2}>{doc.errorMessage}</Text>}
+        </>
+      ),
+    },
+    {
+      key: 'indexedAt',
+      label: 'Indexed At',
+      render: (doc) => <Text size="xs" c="dimmed">{formatDate(doc.lastIndexedAt)}</Text>,
+    },
+    {
+      key: 'createdAt',
+      label: 'Created',
+      render: (doc) => <Text size="xs" c="dimmed">{formatDate(doc.createdAt)}</Text>,
+    },
+  ];
+
   /**
    * The whole-module rebuild is a server-side run now. It used to be a
    * sequential loop of one POST per document from this tab, which died with the
    * tab and left half the module on the old configuration.
    */
   const handleReindexAll = async () => {
-    if (!moduleKey || documents.length === 0) return;
+    const reindexCount = mod?.totalDocuments ?? docTotal;
+    if (!moduleKey || reindexCount === 0) return;
     const ok = await confirm({
       title: tSafe('reindexAll.title'),
-      message: tSafe('reindexAll.message', { count: documents.length }),
+      message: tSafe('reindexAll.message', { count: reindexCount }),
       confirmLabel: tSafe('reindexAll.confirm'),
       tone: 'warning',
     });
@@ -1385,7 +1468,11 @@ export default function RagModuleDetailPage() {
               <Group justify="space-between" mb="md">
                 <div>
                   <Text fw={600} size="lg">Documents</Text>
-                  <Text size="sm" c="dimmed">{documents.length} document(s) in this module</Text>
+                  <Text size="sm" c="dimmed">
+                    {debouncedDocSearch
+                      ? `${docTotal} document(s) match "${debouncedDocSearch}"`
+                      : `${docTotal} document(s) in this module`}
+                  </Text>
                 </div>
                 <Group gap="xs">
                   <Tooltip label="Download every document's source text as JSONL" withArrow>
@@ -1394,7 +1481,7 @@ export default function RagModuleDetailPage() {
                       size="xs"
                       leftSection={exporting ? <Loader size={12} /> : <IconDownload size={14} />}
                       onClick={() => void handleExport()}
-                      disabled={exporting || docsLoading || documents.length === 0}
+                      disabled={exporting || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
                     >
                       Export
                     </Button>
@@ -1430,121 +1517,91 @@ export default function RagModuleDetailPage() {
                       size="xs"
                       leftSection={<IconRefresh size={14} />}
                       onClick={() => void handleReindexAll()}
-                      disabled={Boolean(reindex.activeRun) || docsLoading || documents.length === 0}
+                      disabled={Boolean(reindex.activeRun) || docsLoading || (mod.totalDocuments ?? docTotal) === 0}
                       loading={reindex.busy}
                     >
                       {reindex.activeRun ? 'Re-index running…' : 'Re-index All'}
                     </Button>
                   </Tooltip>
-                  <Button
-                    variant="light"
-                    size="xs"
-                    leftSection={docsLoading ? <Loader size={12} /> : <IconRefresh size={14} />}
-                    onClick={() => void loadDocuments()}
-                    disabled={docsLoading}
-                  >
-                    Refresh
-                  </Button>
                 </Group>
               </Group>
 
-              {docsLoading ? (
-                <Center py="xl"><Loader size="sm" color="violet" /></Center>
-              ) : docsError ? (
+              {docsError ? (
                 <InlineLoadError message={docsError} onRetry={() => void loadDocuments()} />
-              ) : documents.length === 0 ? (
-                <Center py="xl">
-                  <Stack gap="sm" align="center">
-                    <ThemeIcon size={64} radius="xl" variant="light" color="gray">
-                      <IconFileText size={32} />
-                    </ThemeIcon>
-                    <Text size="sm" c="dimmed">No documents yet. Ingest your first document above.</Text>
-                  </Stack>
-                </Center>
               ) : (
-                <Box style={{ overflow: 'hidden', borderRadius: 'var(--mantine-radius-md)' }}>
-                  <Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
-                    <Table.Thead style={{ backgroundColor: 'var(--mantine-color-gray-0)' }}>
-                      <Table.Tr>
-                        <Table.Th>File Name</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Chunks</Table.Th>
-                        <Table.Th>Status</Table.Th>
-                        <Table.Th>Indexed At</Table.Th>
-                        <Table.Th>Created</Table.Th>
-                        <Table.Th style={{ textAlign: 'center' }}>Actions</Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {documents.map((doc) => (
-                        <Table.Tr key={doc._id}>
-                          <Table.Td>
-                            <Group gap="sm">
-                              <ThemeIcon size={32} radius="md" variant="light" color="cyan">
-                                <IconFileText size={16} />
-                              </ThemeIcon>
-                              <Text size="sm" fw={500}>{doc.fileName}</Text>
-                            </Group>
-                          </Table.Td>
-                          <Table.Td>
-                            <Center>
-                              {/* A document still being ingested has no count yet;
-                                  0 would read as "this file produced nothing". */}
-                              <Badge
-                                variant={typeof doc.chunkCount === 'number' ? 'filled' : 'light'}
-                                color={typeof doc.chunkCount === 'number' ? 'orange' : 'gray'}
-                                size="md"
-                                radius="sm"
-                              >
-                                {doc.chunkCount ?? '—'}
-                              </Badge>
-                            </Center>
-                          </Table.Td>
-                          <Table.Td>
-                            <Badge variant="light" color={statusColor(doc.status)} size="sm">
-                              {doc.status}
-                            </Badge>
-                            {doc.errorMessage && (
-                              <Text size="xs" c="red" mt={2}>{doc.errorMessage}</Text>
-                            )}
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">{formatDate(doc.lastIndexedAt)}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Text size="xs" c="dimmed">{formatDate(doc.createdAt)}</Text>
-                          </Table.Td>
-                          <Table.Td>
-                            <Center>
-                              <Group gap={4}>
-                                <Tooltip label="Re-ingest document" withArrow>
-                                  <ActionIcon
-                                    variant="light"
-                                    color="violet"
-                                    radius="md"
-                                    loading={reingestingDocId === doc._id}
-                                    onClick={() => void handleReingestDocument(doc)}
-                                  >
-                                    <IconRefresh size={16} />
-                                  </ActionIcon>
-                                </Tooltip>
-                                <Tooltip label="Delete document" withArrow>
-                                  <ActionIcon
-                                    variant="light"
-                                    color="red"
-                                    radius="md"
-                                    onClick={() => void handleDeleteDocument(doc)}
-                                  >
-                                    <IconTrash size={16} />
-                                  </ActionIcon>
-                                </Tooltip>
-                              </Group>
-                            </Center>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </Box>
+                <DataGrid<RagDocumentView>
+                  records={documents}
+                  rowKey={(doc) => doc._id}
+                  loading={docsLoading}
+                  columns={docColumns}
+                  search={{
+                    value: docSearch,
+                    onChange: (value) => {
+                      setDocSearch(value);
+                      setDocPage(1);
+                    },
+                    placeholder: 'Search by file name…',
+                  }}
+                  filters={[
+                    {
+                      value: docStatus,
+                      onChange: (value) => {
+                        setDocStatus(value);
+                        setDocPage(1);
+                      },
+                      ariaLabel: 'Filter by status',
+                      width: 150,
+                      options: [
+                        { value: 'all', label: 'All statuses' },
+                        { value: 'indexed', label: 'Indexed' },
+                        { value: 'processing', label: 'Processing' },
+                        { value: 'pending', label: 'Pending' },
+                        { value: 'failed', label: 'Failed' },
+                      ],
+                    },
+                  ]}
+                  rowActions={(doc) => [
+                    {
+                      id: 'reingest',
+                      label: 'Re-ingest',
+                      icon: <IconRefresh size={14} />,
+                      disabled: reingestingDocId === doc._id,
+                      onClick: () => void handleReingestDocument(doc),
+                    },
+                    {
+                      id: 'delete',
+                      label: 'Delete',
+                      icon: <IconTrash size={14} />,
+                      color: 'red',
+                      onClick: () => void handleDeleteDocument(doc),
+                    },
+                  ]}
+                  onRefresh={() => void loadDocuments()}
+                  refreshing={docsLoading}
+                  empty={{
+                    icon: <IconFileText size={28} />,
+                    title: debouncedDocSearch || docStatus !== 'all' ? 'No document matches' : 'No documents yet',
+                    description: debouncedDocSearch || docStatus !== 'all'
+                      ? 'Try a different search or status filter.'
+                      : 'Ingest your first document above.',
+                  }}
+                  pagination={{
+                    page: docPage,
+                    onPageChange: setDocPage,
+                    pageSize: docPageSize,
+                    onPageSizeChange: (size) => {
+                      setDocPageSize(size);
+                      setDocPage(1);
+                    },
+                    pageSizeOptions: [10, 25, 50, 100],
+                    total: docTotal,
+                  }}
+                  footerLeft={
+                    docTotal === 0
+                      ? undefined
+                      : `${(docPage - 1) * docPageSize + 1}–${Math.min(docPage * docPageSize, docTotal)} of ${docTotal}`
+                  }
+                />
               )}
             </Paper>
           </Stack>

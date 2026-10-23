@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import type { IRagChunkConfig, IRagDocument, IRagModule, IUser } from '@/lib/database';
+import type { IRagChunkConfig, IRagDocument, IRagModule, IUser, RagDocumentStatus } from '@/lib/database';
 import {
   aggregateRagQueryScoreDistribution,
   countRagQueryLogs,
@@ -14,7 +14,7 @@ import {
   getRagModule,
   ingestDocument,
   ingestFile,
-  listRagDocuments,
+  listRagDocumentsPage,
   listRagModules,
   listRagQueryLogs,
   queryRag,
@@ -43,6 +43,8 @@ import {
 import { VectorFilterError } from '@/lib/providers';
 
 const logger = createLogger('api:rag');
+
+const DOCUMENT_STATUSES: readonly RagDocumentStatus[] = ['pending', 'processing', 'indexed', 'failed'];
 
 function decodeFileData(payload: string): Buffer {
   if (payload.startsWith('data:')) {
@@ -431,13 +433,28 @@ export const ragApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { key } = request.params as { key: string };
-      const query = (request.query ?? {}) as { search?: string };
-      const documents = await listRagDocuments(session.tenantDbName, key, {
-        projectId,
-        search: query.search,
-      });
+      const query = (request.query ?? {}) as {
+        search?: string;
+        status?: string;
+        limit?: string;
+        offset?: string;
+      };
+      const status = DOCUMENT_STATUSES.includes(query.status as RagDocumentStatus)
+        ? (query.status as RagDocumentStatus)
+        : undefined;
+      const limit = Number.parseInt(query.limit ?? '', 10);
+      const offset = Number.parseInt(query.offset ?? '', 10);
+      const page = await listRagDocumentsPage(
+        session.tenantDbName,
+        key,
+        { projectId, search: query.search?.trim() || undefined, status },
+        {
+          limit: Number.isFinite(limit) ? limit : undefined,
+          offset: Number.isFinite(offset) ? offset : undefined,
+        },
+      );
 
-      return reply.code(200).send({ documents });
+      return reply.code(200).send(page);
     } catch (error) {
       logger.error('List RAG documents error', { error });
       return sendProjectContextError(reply, error)
