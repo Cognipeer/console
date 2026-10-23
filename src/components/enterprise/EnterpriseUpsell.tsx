@@ -29,6 +29,7 @@ const MODULE_LABELS: Record<string, string> = {
   portals: 'Portals',
   health: 'Entity Health',
   cost: 'Cost & Optimization',
+  'data-retention': 'Data Retention',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {

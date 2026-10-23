@@ -341,6 +341,62 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
 const ensured = new Set<string>();
 const inFlight = new Map<string, Promise<void>>();
 
+/**
+ * The retention engine (src/lib/retention) selects expired rows by their age
+ * field alone, in batches; without an index leading on that field every batch
+ * (and every preview count) is a collection scan. One ascending index per
+ * engine target, added only where no manifest index already leads on the
+ * field; retention-registry-coverage.test.ts keeps the list in step with the
+ * registry. `incidents` is left out: a handful of rows per alert, and its
+ * mixin owns the collection's index set (mongodb-index-manifest-entity-health).
+ */
+export const RETENTION_AGE_INDEXES: ReadonlyArray<readonly [collection: string, field: string]> = [
+  ['model_usage_logs', 'createdAt'],
+  ['guardrail_evaluation_logs', 'createdAt'],
+  ['mcp_request_logs', 'createdAt'],
+  ['tool_request_logs', 'createdAt'],
+  ['rag_query_logs', 'createdAt'],
+  ['reranker_run_logs', 'createdAt'],
+  ['websearch_run_logs', 'createdAt'],
+  ['vector_query_logs', 'timestamp'],
+  ['agent_tracing_sessions', 'createdAt'],
+  ['agent_tracing_threads', 'updatedAt'],
+  ['browser_session_events', 'createdAt'],
+  ['browser_sessions', 'createdAt'],
+  ['crawl_results', 'createdAt'],
+  ['browser_flow_runs', 'createdAt'],
+  ['batch_job_items', 'createdAt'],
+  ['ocr_job_items', 'createdAt'],
+  ['vector_migration_logs', 'createdAt'],
+  ['rag_reindex_runs', 'createdAt'],
+  ['evaluation_runs', 'createdAt'],
+  ['redteam_runs', 'createdAt'],
+  ['analysis_runs', 'createdAt'],
+  ['prescription_reports', 'createdAt'],
+  ['alert_events', 'firedAt'],
+  ['inference_server_metrics', 'createdAt'],
+  ['gpu_fleet_events', 'createdAt'],
+  ['usage_daily', 'day'],
+  ['audit_logs', 'createdAt'],
+  ['config_audit_logs', 'createdAt'],
+  ['mcp_audit_logs', 'createdAt'],
+  // Enterprise collections (registered by the overlay); existence-guarded, so nothing happens in community.
+  ['realtime_sessions', 'createdAt'],
+  ['realtime_session_turns', 'createdAt'],
+  ['sandbox_events', 'receivedAt'],
+  ['sandbox_commands', 'issuedAt'],
+  ['gpu_fleet_commands', 'issuedAt'],
+  ['portal_audit', 'createdAt'],
+  ['health_digest_runs', 'createdAt'],
+  ['prompt_optimization_runs', 'createdAt'],
+];
+
+for (const [collection, field] of RETENTION_AGE_INDEXES) {
+  const list = (TENANT_DB_INDEXES[collection] ??= []);
+  const leads = list.some((def) => typeof def.key === 'object' && !Array.isArray(def.key) && Object.keys(def.key)[0] === field);
+  if (!leads) list.push({ key: { [field]: 1 }, options: { name: `idx_retention_${field}` } });
+}
+
 function isNotConnected(error: unknown): boolean {
   return error instanceof Error && /not connected|MongoNotConnected/i.test(error.message);
 }

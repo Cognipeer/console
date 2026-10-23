@@ -285,6 +285,14 @@ function buildPrimers(): Record<string, Mock> {
     })),
     cleanupAgentTriggerDeliveryRetention: vi.fn().mockResolvedValue({ deletedCount: 0 }),
     deleteAgentTriggerDeliveries: vi.fn().mockResolvedValue(0),
+
+    // Retention primitives (src/lib/retention): nothing to age out.
+    retentionCount: vi.fn().mockResolvedValue(0),
+    retentionCountRedactable: vi.fn().mockResolvedValue(0),
+    retentionDeleteBatch: vi.fn().mockResolvedValue(0),
+    retentionRedactBatch: vi.fn().mockResolvedValue(0),
+    retentionSelectValues: vi.fn().mockResolvedValue([]),
+    retentionDeleteWhereIn: vi.fn().mockResolvedValue(0),
   };
 }
 

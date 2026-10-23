@@ -161,6 +161,26 @@ export class BullMQQueueProvider implements QueueProvider {
     return this.localConsumerLogicalNames.has(queueName);
   }
 
+  async schedule<T extends QueuePayload>(
+    schedulerId: string,
+    queueName: string,
+    jobName: string,
+    payload: T,
+    opts: { everyMs: number },
+  ): Promise<void> {
+    const queue = this.getOrCreateQueue(this.resolveBullMQQueueName(queueName));
+    // The scheduler lives in Redis: every node upserting the same id keeps one schedule, not one per node.
+    await queue.upsertJobScheduler(
+      sanitizeBullmqJobId(schedulerId)!,
+      { every: Math.max(1_000, Math.floor(opts.everyMs)) },
+      {
+        name: jobName,
+        data: payload,
+        opts: { attempts: 1, removeOnComplete: { age: 3_600 }, removeOnFail: { age: 24 * 3_600 } },
+      },
+    );
+  }
+
   // ── Internals ─────────────────────────────────────────────────────
 
   private createConnection(role: string): Redis {

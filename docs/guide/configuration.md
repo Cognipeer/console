@@ -358,6 +358,22 @@ Health views, alert rules and reports for agents, models, knowledge bases, MCP s
 
 OTLP sessions are closed earlier than the stale window: one that has been quiet for 10 minutes (or the stale window, whichever is shorter) is finalized as `success` or `error` instead of `abandoned`. The 10 minutes are fixed.
 
+### Data Retention
+
+How long logs are kept and how the central retention engine runs. See [Data Retention](/guide/data-retention) for the data classes, presets and the settings screen.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RETENTION_ENGINE_ENABLED` | Scheduled sweeps; with `false` only a manual purge runs | `true` |
+| `RETENTION_DRY_RUN` | Sweeps only count what they would delete. Turn off after checking `npm run retention:inventory` | `true` |
+| `RETENTION_INTERVAL_SECONDS` | How often the cluster-wide tick queues one sweep per tenant (minimum `60`) | `3600` |
+| `RETENTION_BUDGET_SECONDS` | How long one sweep slice runs before it queues its continuation (`10`–`840`) | `240` |
+| `RETENTION_BATCH_SIZE` | Rows per delete or redact batch (`50`–`5000`) | `500` |
+| `RETENTION_SHORTEN_DELAY_HOURS` | A shortened duration applies this many hours after it is saved (`0`–`168`) | `24` |
+| `RETENTION_AUDIT_MIN_DAYS` | Floor for the `audit` class (minimum `30`) | `365` |
+| `RETENTION_RECORDS_DAYS` | How long destruction records are kept (minimum `1095`) | `1095` |
+| `RETENTION_<CLASS>_DAYS` | Deployment default for one class: `CONTENT`, `TELEMETRY`, `TRACE`, `JOBS`, `METRICS`, `ALERTS`, `AUDIT`, `USAGE`, `RESULTS` | the class default |
+
 ### Logging
 
 | Variable | Description | Default |

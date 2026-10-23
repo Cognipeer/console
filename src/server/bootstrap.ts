@@ -51,6 +51,7 @@ import {
   startEntityMetricsRollup,
   stopEntityMetricsRollup,
 } from '@/lib/services/entityMetrics/entityMetricsRollup';
+import { startRetentionScheduler } from '@/lib/retention/scheduler';
 import { startAnalysisScheduler } from '@/lib/services/analysis/analysisScheduler';
 import { startRedTeamScheduler } from '@/lib/services/redteam/redTeamScheduler';
 import { enterpriseReconcilers , enterpriseQueueConsumers } from '@/enterprise/registry';
@@ -390,6 +391,8 @@ async function runBootstrap(): Promise<void> {
     // the collection is empty in the community edition.
     ...enterpriseQueueConsumers.map((start) => start()),
     startAnalysisRunQueueConsumer(),
+    // Central log retention: the cluster-wide tick and the "clean now" purges.
+    startRetentionScheduler(),
   ]), 'Queue consumer registration failed; cluster routing limited');
 
   // Index migrations interrupted by a restart resume from their persisted

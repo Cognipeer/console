@@ -875,6 +875,20 @@
       "settings": true
     },
     {
+      "id": "data-retention",
+      "href": "/dashboard/data-retention",
+      "icon": "IconTrashX",
+      "category": "admin",
+      "navLabelKey": "dataRetention",
+      "navDescriptionKey": "dataRetentionDescription",
+      "tags": ["retention", "logs", "privacy", "gdpr", "kvkk"],
+      "searchKeywords": ["retention", "data retention", "delete logs", "purge", "clean", "gdpr", "kvkk", "saklama", "veri saklama", "imha", "log silme", "temizle"],
+      "tenantAdminOnly": true,
+      "settings": true,
+      "requiresEnterprise": true,
+      "enterpriseModule": "data-retention"
+    },
+    {
       "id": "iam",
       "href": "/dashboard/iam",
       "icon": "IconShield",

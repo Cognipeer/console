@@ -65,6 +65,7 @@ import { clientVectorApiPlugin } from './plugins/client-vector';
 import { clientWebSearchApiPlugin } from './plugins/client-websearch';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
 import { auditApiPlugin } from './plugins/audit';
+import { retentionApiPlugin } from './plugins/retention';
 import { webhooksApiPlugin } from './plugins/webhooks';
 import { automationsApiPlugin } from './plugins/automations';
 import { browserApiPlugin } from './plugins/browser';
@@ -529,6 +530,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(agentTemplatesApiPlugin);
   await app.register(alertsApiPlugin);
   await app.register(auditApiPlugin);
+  await app.register(retentionApiPlugin);
   await app.register(authApiPlugin);
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);

@@ -11,6 +11,7 @@ import type { DatabaseProvider } from './provider.interface';
 
 // Base class & mixins
 import { MongoDBProviderBase } from './mongodb/base';
+import type { Constructor } from './mongodb/types';
 import { TenantMixin } from './mongodb/tenant.mixin';
 import { UserMixin } from './mongodb/user.mixin';
 import { ProjectMixin } from './mongodb/project.mixin';
@@ -51,6 +52,7 @@ import { UsageRollupMixin } from './mongodb/usage.mixin';
 import { EntityMetricsMixin } from './mongodb/entity-metrics.mixin';
 import { AlertStateMixin } from './mongodb/alert-state.mixin';
 import { SchedulerClaimMixin } from './mongodb/scheduler-claim.mixin';
+import { RetentionMixin } from './mongodb/retention.mixin';
 import { AgentTriggerMixin } from './mongodb/agent-trigger.mixin';
 import { AlertChannelLibraryMixin } from './mongodb/alert-channel-library.mixin';
 import { ExternalModelPricingMixin } from './mongodb/external-model-pricing.mixin';
@@ -92,7 +94,13 @@ const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
-const PricingBase = AgentTriggerMixin(SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkBase))));
+// A named instance type here caps how deep the checker walks the mixin chain:
+// past ~50 nested mixins the composed class fails with "type instantiation is
+// excessively deep" (TS2589). Same seam as the SQLite provider.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- an interface (not an alias) is what caps the depth
+interface BulkInstance extends InstanceType<typeof BulkBase> {}
+const BulkFlat: Constructor<BulkInstance> = BulkBase;
+const PricingBase = AgentTriggerMixin(RetentionMixin(SchedulerClaimMixin(WebhookMixin(ExternalModelPricingMixin(BulkFlat)))));
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry
 // stays in the community edition; cluster orchestration/admin is enterprise.

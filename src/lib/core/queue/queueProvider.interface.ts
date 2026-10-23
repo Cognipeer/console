@@ -108,4 +108,17 @@ export interface QueueProvider {
 
   /** Whether the current process owns a local consumer for `queueName`. */
   hasLocalConsumer(queueName: string): boolean;
+
+  /**
+   * Publishes `jobName` to `queueName` every `everyMs`, once for the whole
+   * cluster (a BullMQ job scheduler; a timer in the memory driver). Calling it
+   * again with the same `schedulerId` replaces the schedule.
+   */
+  schedule<T extends QueuePayload>(
+    schedulerId: string,
+    queueName: string,
+    jobName: string,
+    payload: T,
+    opts: { everyMs: number },
+  ): Promise<void>;
 }

@@ -22,6 +22,7 @@
     "check-setup": "node scripts/check-setup.js",
     "seed:beta-codes": "node --import tsx scripts/seed-beta-codes.ts",
     "backfill:usage-daily": "node --import tsx scripts/backfill-usage-daily.ts",
+    "retention:inventory": "node --import tsx scripts/retention-inventory.ts",
     "backfill:trace-usage": "node --import tsx scripts/backfill-trace-usage.ts",
     "backfill:trace-fields": "node --import tsx scripts/backfill-trace-fields.ts",
     "backfill:rag-project-ids": "node --import tsx scripts/backfill-rag-document-project-ids.ts",

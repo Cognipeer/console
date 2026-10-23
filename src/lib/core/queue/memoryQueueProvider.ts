@@ -51,6 +51,7 @@ export class MemoryQueueProvider implements QueueProvider {
   private readonly dedup = new Map<string, string>(); // dedupKey → jobId
   private readonly defaults: { attempts: number; backoffMs: number };
   private sweepTimer: NodeJS.Timeout | null = null;
+  private readonly schedules = new Map<string, NodeJS.Timeout>();
   private shuttingDown = false;
 
   constructor(defaults: { attempts: number; backoffMs: number }) {
@@ -68,6 +69,8 @@ export class MemoryQueueProvider implements QueueProvider {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    for (const timer of this.schedules.values()) clearInterval(timer);
+    this.schedules.clear();
     for (const list of this.queues.values()) {
       for (const job of list) {
         job.reject?.(new Error('Queue shutting down'));
@@ -135,6 +138,22 @@ export class MemoryQueueProvider implements QueueProvider {
 
   hasLocalConsumer(queueName: string): boolean {
     return this.consumers.has(queueName);
+  }
+
+  async schedule<T extends QueuePayload>(
+    schedulerId: string,
+    queueName: string,
+    jobName: string,
+    payload: T,
+    opts: { everyMs: number },
+  ): Promise<void> {
+    const existing = this.schedules.get(schedulerId);
+    if (existing) clearInterval(existing);
+    const timer = setInterval(() => {
+      this.enqueue(queueName, jobName, { ...payload }, { attempts: 1, dedupKey: `schedule:${schedulerId}` });
+    }, Math.max(1_000, Math.floor(opts.everyMs)));
+    timer.unref();
+    this.schedules.set(schedulerId, timer);
   }
 
   // ── Internals ─────────────────────────────────────────────────────

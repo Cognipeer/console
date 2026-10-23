@@ -212,6 +212,7 @@ export default defineConfig({
           items: [
             { text: 'Licensing', link: '/guide/licensing' },
             { text: 'Security', link: '/guide/security' },
+            { text: 'Data Retention', link: '/guide/data-retention' },
             { text: 'Release Notes', link: '/releases/' },
             { text: 'Contributing', link: '/contributing' },
           ],
