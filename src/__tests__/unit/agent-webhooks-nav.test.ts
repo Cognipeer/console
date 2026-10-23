@@ -60,7 +60,7 @@ const activeAt = (pathname: string) => agentItems.filter((entry) => (entry.match
 
 describe('the Agents sub-nav', () => {
   it('gains Webhooks after Skills, pointing at the new address, in the viewer’s language', () => {
-    expect(agentItems.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills', 'webhooks', 'sessions-active', 'sessions-all']);
+    expect(agentItems.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills', 'webhooks', 'channels', 'sessions-active', 'sessions-all']);
     expect(item('webhooks')).toMatchObject({
       label: 'Webhooks',
       labelKey: 'webhooks',
@@ -79,6 +79,9 @@ describe('the Agents sub-nav', () => {
     expect(activeAt('/dashboard/agents/skills')).toEqual(['skills']);
     // The list no longer claims the webhooks page.
     expect(activeAt('/dashboard/agents/webhooks')).toEqual(['webhooks']);
+    // ...nor the Channels pages (list and a connection's detail).
+    expect(activeAt('/dashboard/agents/channels')).toEqual(['channels']);
+    expect(activeAt('/dashboard/agents/channels/64f0c0ffee')).toEqual(['channels']);
     // ...nor the project-wide Sessions pages, which have entries of their own.
     expect(activeAt('/dashboard/agents/sessions')).toEqual(['sessions-all']);
   });
@@ -87,7 +90,7 @@ describe('the Agents sub-nav', () => {
     const allowed = visibleSubNavItems(agentItems, () => true)!;
     expect(allowed.map((entry) => entry.id)).toContain('webhooks');
     const denied = visibleSubNavItems(agentItems, (service) => service !== 'webhooks')!;
-    expect(denied.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills', 'sessions-active', 'sessions-all']);
+    expect(denied.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills', 'channels', 'sessions-active', 'sessions-all']);
     expect(visibleSubNavItems(undefined, () => false)).toBeUndefined();
   });
 

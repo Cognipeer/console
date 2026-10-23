@@ -35,7 +35,7 @@ import { isSessionResourceAction, RUNTIME_ENFORCED_ACTIONS, type ActionDefinitio
 import { agentSessionResource, DEFAULT_AGENT_APPROVERS, portalAgentSessionResource } from './agentEntities';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
 import { preparsePolicySet, statefulIsAuthorized, type CedarDecision } from './cedar';
-import type { IamRequestContext } from './context';
+import { isRuntimeIamChannel, type IamRequestContext } from './context';
 import { buildAuthorizeCall, buildPolicyRecord, forbidsOf } from './engine';
 import type { IamPrincipal, IamResource } from './entities';
 import { guardForbidErrors } from './forbidGuard';
@@ -394,16 +394,16 @@ async function enumeratePrincipals(tenant: IamTenant, spec: PolicySpec | null, c
 /** An address inside the first range (the range's own base address). */
 const firstAddress = (cidr: string | undefined): string | undefined => (cidr ? cidr.split('/')[0] : undefined);
 
-/** The portal runtime's own actions (`portal.use`, `agent.invoke`): asked in the portal channel and nowhere else. */
+/** The actions only a runtime asks (`portal.use`, `agent.invoke`): asked in the portal or messaging channel and nowhere else. */
 const isPortalOnlyAction = (id: string): boolean => {
   const channels = RUNTIME_ENFORCED_ACTIONS[id];
-  return !!channels && channels.length > 0 && channels.every((c) => c === 'portal');
+  return !!channels && channels.length > 0 && channels.every(isRuntimeIamChannel);
 };
 
 function contextFor(spec: PolicySpec | null, type: 'user' | 'token', action?: ActionDefinition): IamRequestContext {
   const cond = spec?.conditions;
   // The portal runtime asks its two actions in the portal channel (unless the draft says it only concerns others).
-  const portalAsked = !!action && isPortalOnlyAction(action.id) && isRuntimeEnforced(action.id) && (!cond?.channels?.length || cond.channels.includes('portal'));
+  const portalAsked = !!action && isPortalOnlyAction(action.id) && isRuntimeEnforced(action.id, 'portal') && (!cond?.channels?.length || cond.channels.includes('portal'));
   const channel = portalAsked ? 'portal' : cond?.channels?.[0] ?? (type === 'token' ? 'api' : 'dashboard');
   let now: Date | undefined;
   if (cond?.validFrom || cond?.validUntil) {
@@ -623,7 +623,7 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
           action: action.id,
           resource,
           // The portal runtime never sends a project; everything else runs in the one the person would be in.
-          context: { ...context, projectId: context.channel === 'portal' && isRuntimeEnforced(action.id, 'portal') ? undefined : context.projectId ?? ev.principal.contextProjectId },
+          context: { ...context, projectId: isRuntimeIamChannel(context.channel) && isRuntimeEnforced(action.id, context.channel) ? undefined : context.projectId ?? ev.principal.contextProjectId },
         },
         tenant.tenantDbName,
       );

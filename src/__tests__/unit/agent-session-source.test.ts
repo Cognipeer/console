@@ -8,7 +8,7 @@ describe('agent session source', () => {
     });
 
     it('keeps real traffic read-only', () => {
-        for (const source of ['api', 'a2a', 'trigger', 'evaluation', 'redteam', 'portal']) {
+        for (const source of ['api', 'a2a', 'trigger', 'evaluation', 'redteam', 'portal', 'slack', 'teams']) {
             expect(isContinuableSession(source)).toBe(false);
         }
     });
@@ -17,6 +17,8 @@ describe('agent session source', () => {
         expect(sessionSourceLabel('api')).toBe('API');
         expect(sessionSourceLabel('a2a')).toBe('A2A');
         expect(sessionSourceLabel('portal')).toBe('Portal');
+        expect(sessionSourceLabel('slack')).toBe('Slack');
+        expect(sessionSourceLabel('teams')).toBe('Teams');
         expect(sessionSourceLabel(undefined)).toBe('unknown source');
         expect(sessionSourceLabel('something-new')).toBe('something-new');
     });

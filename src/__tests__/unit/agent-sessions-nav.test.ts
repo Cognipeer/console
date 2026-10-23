@@ -107,6 +107,8 @@ describe('the Sessions entries of the Agents sub-nav', () => {
     expect(activeAt('/dashboard/agents/64f0c0ffee')).toEqual(['list']);
     expect(activeAt('/dashboard/agents')).toEqual(['list']);
     expect(activeAt('/dashboard/agents/webhooks')).toEqual(['webhooks']);
+    expect(activeAt('/dashboard/agents/channels')).toEqual(['channels']);
+    expect(activeAt('/dashboard/agents/channels/64f0c0ffee')).toEqual(['channels']);
     expect(activeAt('/dashboard/agents/tools')).toEqual(['tools']);
     expect(activeAt('/dashboard/agents/skills')).toEqual(['skills']);
   });

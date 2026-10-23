@@ -76,6 +76,11 @@
  *                                            runtime marks `context.embedded`: the host application vouched
  *                                            for that person with a signed token the portal verified
  *
+ * MESSAGING - `managed:messaging:*`, `@managed("messaging")`: the same two rules for an agent run from Slack or
+ * Microsoft Teams (channel `messaging`), read from the ACCESS LIST of the agent's deployment on the connection
+ * (ChannelDeployment entity, messagingEntities.ts): the list grants `agent.invoke` to people, a boundary forbid
+ * refuses everyone it does not name (see MESSAGING_POLICIES below).
+ *
  * AGENTS - `managed:agent:*`, `@managed("agent")`: who may answer a pending TOOL APPROVAL
  * (`agent.approve`: allow, deny, edit the arguments, remember for the session - and, as a side
  * effect, cancel somebody's open request) is decided by the SESSION the answer is about. The
@@ -171,14 +176,16 @@ export const PORTAL_POLICY_IDS = {
 /**
  * "The requester is on this portal's access list", for a Portal entity expression `x` (`resource`, `resource.portal`), laid out for reading.
  * The last line is the embed setting: a portal that takes `any_verified` embedded people admits a request the runtime marks `context.embedded`.
+ * `embed: false` leaves that line out: the access list of a messaging deployment (`resource.channelDeployment`), which has no embed.
  */
-function onAccessList(x: string, indent: string): string {
+function onAccessList(x: string, indent: string, embed = true): string {
   return [
     `${x} has mode && (`,
     `${indent}  ${x}.mode == "all"`,
     `${indent}  || (${x} has allowedUsers && principal in ${x}.allowedUsers)`,
     `${indent}  || (${x} has allowedGroups && principal in ${x}.allowedGroups)`,
-    `${indent}  || (${x} has embedAccess && ${x}.embedAccess == "any_verified" && context has channel && context.channel == "portal" && context has embedded && context.embedded == true)`,
+    // A deployment of the messaging channel has no embed: its list is the three lines above and nothing else.
+    ...(embed ? [`${indent}  || (${x} has embedAccess && ${x}.embedAccess == "any_verified" && context has channel && context.channel == "portal" && context has embedded && context.embedded == true)`] : []),
     `${indent})`,
   ].join('\n');
 }
@@ -268,6 +275,42 @@ when {
 };`,
 });
 
+export const MESSAGING_POLICY_IDS = {
+  agent: 'managed:messaging:agent',
+  agentBoundary: 'managed:messaging:agent-boundary',
+} as const;
+
+/**
+ * MESSAGING - `managed:messaging:*`, `@managed("messaging")`: who may talk to an agent from Slack or Microsoft Teams is
+ * decided by the ACCESS LIST of the agent's deployment on the connection, exactly like a portal's: the ChannelDeployment
+ * entity carries it as attributes (messagingEntities.ts), the agent run through it is `in` it and names it in
+ * `channelDeployment`. Only `agent.invoke` is asked in this channel.
+ *
+ *   messaging:agent            the list GRANTS `agent.invoke` (channel `messaging`) to people, never to tokens
+ *   messaging:agent-boundary   forbids everyone the list does not name, so no RBAC level and no custom permit
+ *                              opens an agent the list does not (a workspace owner who is not on the list is
+ *                              refused too, and a request that names no deployment is refused)
+ *
+ * Custom forbids still restrict on top, like on a portal. There is no test session and no network boundary here.
+ */
+export const MESSAGING_POLICIES: Readonly<Record<string, string>> = Object.freeze({
+  [MESSAGING_POLICY_IDS.agent]: `@managed("messaging")
+permit (principal is User, action == Action::"agent.invoke", resource is Agent)
+when {
+  context has channel && context.channel == "messaging"
+  && resource has channelDeployment
+  && ${onAccessList('resource.channelDeployment', '  ', false)}
+};`,
+  [MESSAGING_POLICY_IDS.agentBoundary]: `@managed("messaging")
+forbid (principal, action == Action::"agent.invoke", resource is Agent)
+when { context has channel && context.channel == "messaging" }
+unless {
+  principal is User
+  && resource has channelDeployment
+  && ${onAccessList('resource.channelDeployment', '  ', false)}
+};`,
+});
+
 export const AGENT_POLICY_IDS = {
   approve: 'managed:agent:approve',
   approveToken: 'managed:agent:approve-token',
@@ -310,11 +353,12 @@ when {
 };`,
 });
 
-/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal access rules and the agent approval rules. */
+/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal and messaging access rules and the agent approval rules. */
 export const ALL_MANAGED_POLICIES: Readonly<Record<string, string>> = Object.freeze({
   ...MANAGED_POLICIES,
   ...BOUNDARY_POLICIES,
   ...PORTAL_POLICIES,
+  ...MESSAGING_POLICIES,
   ...AGENT_POLICIES,
 });
 
@@ -322,7 +366,7 @@ export function isManagedPolicyId(id: string): boolean {
   return id.startsWith('managed:');
 }
 
-export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal' | 'agent';
+export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
 
 export interface ManagedPolicyInfo {
   /** Cedar policy id (`managed:rbac:user-read`). */
@@ -346,6 +390,7 @@ export function listManagedPolicies(): ManagedPolicyInfo[] {
 function managedGroupOf(id: string): ManagedPolicyGroup {
   if (id.startsWith('managed:boundary:')) return 'boundary';
   if (id.startsWith('managed:portal:')) return 'portal';
+  if (id.startsWith('managed:messaging:')) return 'messaging';
   if (id.startsWith('managed:agent:')) return 'agent';
   return 'rbac';
 }

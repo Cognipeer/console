@@ -22,6 +22,9 @@
  *      is reached from those only, a workspace owner or admin may open a portal in a marked
  *      test session while a member who sets the flag gains nothing, and a portal that takes
  *      every verified embedded person admits one only when the runtime marks the request,
+ *      an agent run from Slack or Teams (channel `messaging`) is run by the people the access list
+ *      of its deployment names and by nobody else - a workspace owner who is not listed, an API token
+ *      and a request that names no deployment included,
  *      and looking at / acting on somebody else's session is governed by the level
  *      groups (a reader looks, a writer acts, nobody without `agents` does) -
  *      with no evaluation error from any managed rule.
@@ -35,6 +38,7 @@ import type { IamRequestContext } from './context';
 import { tokenPrincipal, userPrincipal, type IamPrincipal, type IamResource } from './entities';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
 import { agentSessionResource, portalAgentSessionResource } from './agentEntities';
+import { messagingAgentResource, type MessagingDeploymentSubject } from './messagingEntities';
 import { portalAgentResource, portalResource, type PortalSubject } from './portalEntities';
 import { ensureSchemaPreparsed, validateAgainstSchema } from './schemaState';
 
@@ -76,6 +80,12 @@ const CANNED_EMBED_PORTAL: PortalSubject = {
   access: { ...CANNED_PORTAL.access, embedded: 'any_verified' },
 };
 
+/** A deployment of an agent on a Slack / Teams connection that admits one person and one group. */
+const CANNED_DEPLOYMENT: MessagingDeploymentSubject = {
+  id: 'iam-selftest-deployment',
+  access: { mode: 'selected', userIds: ['iam-selftest-listed'], groupIds: ['iam-selftest-group'] },
+};
+
 function cannedDecisions(): CannedDecision[] {
   const admin = userPrincipal({ userId: 'iam-selftest-admin', user: { role: 'admin' } });
   const member = userPrincipal({ userId: 'iam-selftest-member', user: { role: 'user' } });
@@ -88,6 +98,10 @@ function cannedDecisions(): CannedDecision[] {
   const portal = portalResource(CANNED_PORTAL);
   const agent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_PORTAL);
   const inPortal: IamRequestContext = { channel: 'portal' };
+  const inMessaging: IamRequestContext = { channel: 'messaging' };
+  const chatAgent = messagingAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_DEPLOYMENT);
+  const chatAgentForAll = messagingAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, { id: 'iam-selftest-deployment-all', access: { mode: 'all', userIds: [], groupIds: [] } });
+  const owner = userPrincipal({ userId: 'iam-selftest-owner', user: { role: 'owner' } });
   const netPortal = portalResource(CANNED_NETWORK_PORTAL);
   const netAgent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_NETWORK_PORTAL);
   const embedPortal = portalResource(CANNED_EMBED_PORTAL);
@@ -155,6 +169,14 @@ function cannedDecisions(): CannedDecision[] {
     { name: 'and runs its agents', principal: member, action: 'agent.invoke', service: 'agents', resource: embedAgent, context: { channel: 'portal', embedded: true }, expect: true },
     { name: 'but not when the request is not marked embedded', principal: member, action: 'portal.use', service: 'portals', resource: embedPortal, context: inPortal, expect: false },
     { name: 'nor in a portal that keeps the access list', principal: member, action: 'portal.use', service: 'portals', resource: portal, context: { channel: 'portal', embedded: true }, expect: false },
+    { name: 'a listed person runs an agent from Slack or Teams', principal: listed, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: true },
+    { name: 'a member of a listed group does too', principal: grouped, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: true },
+    { name: 'a member who is not listed does not', principal: member, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: false },
+    { name: 'nor an admin who is not listed', principal: admin, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: false },
+    { name: 'nor a workspace owner who is not listed', principal: owner, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: false },
+    { name: 'a token does not, whoever owns it', principal: listedOwnersToken, action: 'agent.invoke', service: 'agents', resource: chatAgent, context: inMessaging, expect: false },
+    { name: 'a deployment open to everyone admits a member', principal: member, action: 'agent.invoke', service: 'agents', resource: chatAgentForAll, context: inMessaging, expect: true },
+    { name: 'an agent that names no deployment is refused, listed or not', principal: listed, action: 'agent.invoke', service: 'agents', resource: { kind: 'resource', type: 'agent', id: 'iam-selftest-agent', service: 'agents', projectId: 'iam-selftest-project' }, context: inMessaging, expect: false },
   ];
 }
 

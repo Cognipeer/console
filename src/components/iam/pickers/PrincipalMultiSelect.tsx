@@ -10,6 +10,8 @@ import { usePrincipalSearch } from './usePrincipalSearch';
 interface PrincipalMultiSelectProps {
   type: IamPrincipalType;
   label?: ReactNode;
+  /** The accessible name when the visible label sits outside the picker (e.g. a FormShell `FormField`). */
+  ariaLabel?: string;
   description?: ReactNode;
   placeholder?: string;
   value: PrincipalRef[];
@@ -22,6 +24,7 @@ interface PrincipalMultiSelectProps {
 export default function PrincipalMultiSelect({
   type,
   label,
+  ariaLabel,
   description,
   placeholder,
   value,
@@ -51,6 +54,7 @@ export default function PrincipalMultiSelect({
   return (
     <MultiSelect
       label={label}
+      aria-label={ariaLabel}
       description={description}
       placeholder={value.length === 0 ? (placeholder ?? t('pickers.searchPlaceholder')) : undefined}
       data={data}

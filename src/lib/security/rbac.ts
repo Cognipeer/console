@@ -51,6 +51,7 @@ export type PermissionService =
   | 'sso'
   | 'ldap'
   | 'portals'
+  | 'channels'
   | 'resources'
   | 'iam'
   | 'webhooks';
@@ -153,6 +154,10 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // tenant-admin decision. End-user portal ACCESS is not an RBAC service — see
   // the note on ROUTE_PREFIXES below.
   { id: 'portals', label: 'Portals', description: 'Chat portals that expose selected agents to chosen people, with their access lists and usage statistics.', category: 'admin', adminService: true },
+  // Admin surface of Agent Channels (connect agents to Slack and Microsoft Teams). adminService:
+  // choosing which agents answer in which workspace, and for whom, is a tenant-admin decision.
+  // Who may talk to a deployed agent is decided by IAM (channel 'messaging'), not by this service.
+  { id: 'channels', label: 'Channels', description: 'Connect agents to Slack and Microsoft Teams', category: 'admin', adminService: true },
   // Read-only, tenant-wide inventory across ALL projects (and tenant-wide rows).
   // adminService on purpose: it deliberately ignores the active project, so it
   // must not default to anyone below owner/admin.
@@ -341,6 +346,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/cluster', service: 'cluster' },
   { prefix: '/api/portals', service: 'portals' },
+  // Admin API only. '/api/channel-identities' (self-service links) and '/api/public/channels'
+  // (Bot Framework webhook, JWT-verified in the handler) are deliberately not mapped.
+  { prefix: '/api/channels', service: 'channels' },
   { prefix: '/api/iam', service: 'iam' },
   { prefix: '/api/webhooks', service: 'webhooks' },
 ];

@@ -7,6 +7,9 @@
  *  - opening a portal and running an agent through one, by the portal runtime
  *    (resourceAuthz.ts) - an enterprise feature: the `portal` channel exists only
  *    where the overlay registered the portal resolver (@/enterprise/iam-portal);
+ *  - running an agent from Slack or Microsoft Teams, by the messaging runtime - an enterprise
+ *    feature too: the `messaging` channel exists only where the overlay registered the
+ *    messaging resolver (@/enterprise/iam-messaging);
  *  - answering an approval, and looking at / acting on a session somebody else
  *    started, by the agent routes of the dashboard and the API - community code,
  *    always there; their `portal` channel (approvals) is the portal runtime's and
@@ -20,6 +23,7 @@
  * Server only (it reads that registration). The static table is actions.ts.
  */
 
+import { hasIamMessagingResolver } from '@/enterprise/iam-messaging';
 import { hasIamPortalResolver } from '@/enterprise/iam-portal';
 import { RUNTIME_ENFORCED_ACTIONS } from './actions';
 import type { IamChannel } from './context';
@@ -28,8 +32,9 @@ import type { IamChannel } from './context';
 export function enforcedChannelsOf(actionId: string): IamChannel[] {
   const channels = RUNTIME_ENFORCED_ACTIONS[actionId];
   if (!channels) return [];
-  const portal = hasIamPortalResolver();
-  return channels.filter((channel) => channel !== 'portal' || portal);
+  const present: Partial<Record<IamChannel, boolean>> = { portal: hasIamPortalResolver(), messaging: hasIamMessagingResolver() };
+  // A channel without an entry here (dashboard, api) is always there.
+  return channels.filter((channel) => present[channel] ?? true);
 }
 
 /**

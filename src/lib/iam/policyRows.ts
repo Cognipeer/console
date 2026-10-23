@@ -19,7 +19,7 @@ export interface ManagedPolicyView {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`). */
   nameKey: string;
   descriptionKey: string;
-  group: 'rbac' | 'boundary' | 'portal' | 'agent';
+  group: 'rbac' | 'boundary' | 'portal' | 'messaging' | 'agent';
   effect: 'permit' | 'forbid';
   cedar: string;
 }
@@ -104,6 +104,14 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   'managed:portal:test-agent': {
     name: 'Workspace owners and admins can try a portal\'s agents as a test',
     description: 'In a marked test session, a workspace owner or admin can run the agents a portal offers even when its access list does not name them. Conversations of a test session are flagged and left out of the portal\'s statistics.',
+  },
+  'managed:messaging:agent': {
+    name: 'People on a deployment\'s access list can use its agent in Slack and Teams',
+    description: 'In Slack or Microsoft Teams, a person may talk to an agent when the access list of its deployment on that connection names them or one of their groups, or when the deployment is open to everyone in the workspace. The list is edited on the deployment; no rule is stored per deployment.',
+  },
+  'managed:messaging:agent-boundary': {
+    name: 'Only the access list runs agents in Slack and Teams',
+    description: 'In Slack or Microsoft Teams, nobody can run an agent unless the access list of its deployment admits them, whatever their role or any allow rule says (a workspace owner who is not on the list is not let in either, and API tokens never are). Deny rules can still block people who are on the list.',
   },
   'managed:agent:approve': {
     name: 'People who may approve an agent\'s tool calls',

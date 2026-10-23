@@ -59,7 +59,7 @@ const texts = (values: readonly unknown[] | null | undefined): string[] =>
   (Array.isArray(values) ? values : []).filter((v): v is string => typeof v === 'string' && v !== '');
 
 /** The access list as Portal attributes, cut down to the requester's slice when that is what the size calls for. */
-function accessAttrs(access: PortalAccessInput, requester?: PortalRequester): Record<string, unknown> {
+export function accessAttrs(access: PortalAccessInput, requester?: PortalRequester): Record<string, unknown> {
   // Anything that is not exactly 'all' is 'selected': a list we cannot read admits only who it names.
   const mode = access?.mode === 'all' ? 'all' : 'selected';
   let userIds = texts(access?.userIds);

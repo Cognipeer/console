@@ -285,6 +285,8 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
     () =>
       (catalog?.channels ?? [])
         .filter((c) => !(c === 'portal' && form.principalType === 'token'))
+        // The Slack / Teams runtime is decided by a deployment's access list, which the check does not rebuild (yet).
+        .filter((c) => c !== 'messaging')
         .map((c) => ({ value: c, label: labels.channel(c) })),
     [catalog, labels, form.principalType],
   );

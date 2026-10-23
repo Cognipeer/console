@@ -27,7 +27,7 @@
  *   tenant_id   the workspace; project_id when the call belongs to a project
  *   email, name the person's profile, when set
  *   idp, idp_sub the SSO subject, for an OIDC / SAML account (LDAP DNs are not sent)
- *   src         the channel: portal, api, mcp, a2a, playground, realtime, trigger, console
+ *   src         the channel: portal, messaging, api, mcp, a2a, playground, realtime, trigger, console
  *   via         how Console knew the person: session, api_token, delegated, trigger
  *   act         `{ sub: "agent:<key>" }` when an agent makes the call (RFC 8693 actor)
  *
@@ -69,7 +69,7 @@ const TENANT_CACHE_TTL_MS = 5 * 60_000;
 const MAX_CACHED_ENTRIES = 2_000;
 
 export type ConsoleIdentitySource =
-  | 'portal' | 'api' | 'mcp' | 'a2a' | 'playground' | 'realtime' | 'trigger' | 'console';
+  | 'portal' | 'messaging' | 'api' | 'mcp' | 'a2a' | 'playground' | 'realtime' | 'trigger' | 'console';
 
 export type ConsoleIdentityVia = 'session' | 'api_token' | 'delegated' | 'trigger';
 
@@ -213,7 +213,7 @@ export function consoleIdentityAudience(url: string): string {
 // ── who the call is for ──────────────────────────────────────────────────
 
 const SOURCES = new Set<ConsoleIdentitySource>([
-  'portal', 'api', 'mcp', 'a2a', 'playground', 'realtime', 'trigger', 'console',
+  'portal', 'messaging', 'api', 'mcp', 'a2a', 'playground', 'realtime', 'trigger', 'console',
 ]);
 
 /**

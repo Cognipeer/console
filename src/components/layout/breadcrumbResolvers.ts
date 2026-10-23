@@ -163,7 +163,13 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     buildUrl: (id) => `/api/agents/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'agent'),
     // Pages of the Agents menu, not agent ids.
-    excludeValues: ['new', 'webhooks', 'sessions', 'skills', 'tools', 'templates'],
+    excludeValues: ['new', 'webhooks', 'channels', 'sessions', 'skills', 'tools', 'templates'],
+  }),
+  createStandardResolver({
+    // A Slack / Teams connection of the Agents › Channels page (Enterprise).
+    path: ['agents', 'channels'],
+    buildUrl: (id) => `/api/channels/connections/${encodeURIComponent(id)}`,
+    pickLabel: (b) => wrappedName(b, 'connection'),
   }),
   createStandardResolver({
     path: ['portals'],

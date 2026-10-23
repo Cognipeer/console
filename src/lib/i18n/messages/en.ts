@@ -1,4 +1,9 @@
 import { accountPageEn } from './accountPage.en';
+import { agentChannelsEn } from './agentChannels.en';
+import { agentChannelsDeployEn } from './agentChannelsDeploy.en';
+import { agentChannelsLinkEn } from './agentChannelsLink.en';
+import { agentChannelsListEn } from './agentChannelsList.en';
+import { agentChannelsSetupEn } from './agentChannelsSetup.en';
 import { agentTemplatesEn } from './agentTemplates.en';
 import { alertsEn, incidentsEn } from './alerts.en';
 import { analyticsDashboardsEn } from './analyticsDashboards.en';
@@ -351,6 +356,8 @@ export const en = {
     tokensDescription: 'Create and manage API access tokens',
     webhooks: 'Webhooks',
     webhooksDescription: 'Send signed events to your own endpoints',
+    agentChannels: 'Channels',
+    agentChannelsDescription: 'Connect agents to Slack and Microsoft Teams',
     agentSessions: 'Sessions',
     agentSessionsActive: 'Active',
     agentSessionsAll: 'All',
@@ -478,6 +485,7 @@ export const en = {
     providers: 'Providers',
     tokens: 'API Tokens',
     webhooks: 'Webhooks',
+    channels: 'Channels',
     license: 'License',
     sso: 'Single Sign-On',
     ldap: 'LDAP Directory',
@@ -1236,6 +1244,7 @@ export const en = {
       sso: 'Single Sign-On',
       ldap: 'LDAP Directory',
       portals: 'Portals',
+      channels: 'Channels',
       resources: 'Resource Registry',
       iam: 'Authorization Engine',
       webhooks: 'Webhooks',
@@ -1350,6 +1359,14 @@ export const en = {
         name: 'Workspace owners and admins can try a portal\'s agents as a test',
         description: 'In a marked test session, a workspace owner or admin can run the agents a portal offers even when its access list does not name them. Conversations of a test session are flagged and left out of the portal\'s statistics.',
       },
+      'messaging-agent': {
+        name: 'People on a deployment\'s access list can use its agent in Slack and Teams',
+        description: 'In Slack or Microsoft Teams, a person may talk to an agent when the access list of its deployment on that connection names them or one of their groups, or when the deployment is open to everyone in the workspace. The list is edited on the deployment; no rule is stored per deployment.',
+      },
+      'messaging-agent-boundary': {
+        name: 'Only the access list runs agents in Slack and Teams',
+        description: 'In Slack or Microsoft Teams, nobody can run an agent unless the access list of its deployment admits them, whatever their role or any allow rule says (a workspace owner who is not on the list is not let in either, and API tokens never are). Deny rules can still block people who are on the list.',
+      },
       'agent-approve': {
         name: 'People who may approve an agent\'s tool calls',
         description: 'A person may approve a tool call of an agent session (allow, deny, edit the arguments, remember it for the session) when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule. Having Write access to Agents is not enough on its own; your own allow rules can appoint more approvers, such as a compliance group.',
@@ -1388,6 +1405,14 @@ export const en = {
   directorySync: directorySyncEn,
   projectTabs: projectTabsEn,
   accountPage: accountPageEn,
+  // Agents in Slack and Microsoft Teams (Enterprise): one file per screen, spread together (agentChannels*.en.ts).
+  agentChannels: {
+    ...agentChannelsEn,
+    ...agentChannelsListEn,
+    ...agentChannelsSetupEn,
+    ...agentChannelsDeployEn,
+    ...agentChannelsLinkEn,
+  },
   iamPrincipals: {
     segments: {
       label: 'Principal type',
@@ -1712,6 +1737,8 @@ export const en = {
         portalUsePolicy: 'Denied {who} opening portal "{resource}" by policy "{policies}"',
         portalInvoke: 'Denied {who} running agent "{resource}" in a portal because they are not on its access list',
         portalInvokePolicy: 'Denied {who} running agent "{resource}" in a portal by policy "{policies}"',
+        messagingInvoke: 'Denied {who} running agent "{resource}" from Slack or Teams because they are not on its access list',
+        messagingInvokePolicy: 'Denied {who} running agent "{resource}" from Slack or Teams by policy "{policies}"',
         approve: 'Denied {who} approving a tool call of agent "{resource}" because no rule appoints them',
         approvePolicy: 'Denied {who} approving a tool call of agent "{resource}" by policy "{policies}"',
         approveInPortal: 'Denied {who} approving a tool call of agent "{resource}" in portal "{portal}" because no rule appoints them',
@@ -2550,6 +2577,7 @@ export const en = {
       dashboard: 'Dashboard',
       api: 'API',
       portal: 'Portal',
+      messaging: 'Slack and Teams',
     },
     effects: {
       permit: 'Allow',
@@ -2643,6 +2671,8 @@ export const en = {
       boundariesHelp: 'Limits that no allow can exceed.',
       portalBased: 'Portals',
       portalHelp: 'Who may open a portal and run agents in it is decided by the portal access list. These rules read that list, so no rule is stored per portal. Deny rules can still block people.',
+      messagingBased: 'Slack and Teams',
+      messagingHelp: 'Who may run an agent from Slack or Microsoft Teams is decided by the access list of its deployment on the connection. These rules read that list, so no rule is stored per deployment. Deny rules can still block people.',
       agentBased: 'Agent approvals',
       agentHelp: 'Who may approve a tool call of an agent session is decided by the session\'s owner and the agent\'s "who can approve" setting. These rules read both, so no rule is stored per agent. Your own allow rules can appoint more approvers, and deny rules can block people.',
       badge: 'Built-in',
@@ -2658,6 +2688,7 @@ export const en = {
       advanced: 'Specific actions',
       advancedHint: 'Invoke an agent, run a tool, query a knowledge module… The Access check evaluates all of these. Only the ones marked "Checked in portals" or "Checked on agent requests" are enforced today; the request gates do not enforce the rest yet.',
       enforcedInPortal: 'Checked in portals',
+      enforcedInMessaging: 'Checked in Slack and Teams',
       enforcedInAgents: 'Checked on agent requests',
       selected: 'Selected actions ({count})',
       nothingSelected: 'Nothing selected yet.',
@@ -2925,6 +2956,10 @@ export const en = {
         boundary: 'The portal access list does not admit this person, and nothing else can open a portal or run its agents.',
         network: 'The portal can only be used from its listed networks, and this address is not one of them (or no address was available).',
         test: 'A workspace owner or admin is trying the portal out in a test session.',
+      },
+      messagingReason: {
+        list: 'The access list of the deployment admits this person.',
+        boundary: 'The access list of the deployment does not admit this person, and nothing else can run an agent from Slack or Teams.',
       },
       approvalReason: {
         rule: 'This person started the session, the agent accepts them as an approver, or one of your allow rules appoints them.',
@@ -7283,6 +7318,7 @@ export const en = {
       'ai-app-gateway': 'AI App Gateways',
       'prompt-optimizer': 'Prompt optimizations',
       'portal': 'Portals',
+      'channel-deployment': 'Channel deployments',
     },
   },
   iamLimits: {

@@ -49,12 +49,12 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(22);
+    expect(ids.length).toBe(24);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
-      // a portal rule is not about a level: it is the portal's access list; an approval rule is the session's owner and the agent's setting
-      if (id.startsWith('managed:portal:') || id.startsWith('managed:agent:')) expect(parsed.level, id).toBeNull();
+      // a portal or messaging rule is not about a level: it is the access list; an approval rule is the session's owner and the agent's setting
+      if (id.startsWith('managed:portal:') || id.startsWith('managed:messaging:') || id.startsWith('managed:agent:')) expect(parsed.level, id).toBeNull();
       else expect(parsed.level, id).not.toBeNull();
     }
   });

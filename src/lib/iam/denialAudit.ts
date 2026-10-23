@@ -11,11 +11,11 @@
  * reads this one too - the denials feed (`metadata.iamEnforce`), the decision lookup
  * (`metadata.decisionId`) and the Access check replay.
  *
- *   service  'portals' (the portal runtime asked) | 'agents' (an agent route)   action 'read' | 'write' (the level of the action)
+ *   service  'portals' (the portal runtime asked) | 'channels' (the Slack / Teams runtime asked) | 'agents' (an agent route)   action 'read' | 'write' (the level of the action)
  *   actor    the person; for a token the owner AND the token (`apiTokenId`, actorType 'api_token')
  *   event    the action id    outcome 'denied'   statusCode 403 (503 when the engine could not decide)
  *   metadata { iamEnforce, code, decisionId, action, channel, resourceType, resourceId, resourceName?,
- *              portalId?, portalKey?, portalName?, ownerId?, approvers?, contextProjectId?, source, reasons[<=10],
+ *              portalId?, portalKey?, portalName?, deploymentId?, connectionId?, ownerId?, approvers?, contextProjectId?, source, reasons[<=10],
  *              policyIds[<=10], policyNames?, contextIp? }
  *
  * Fire-and-forget: the refusal must not wait for, or fail on, the audit write. It
@@ -52,6 +52,9 @@ export interface ResourceDenialEntry {
   portalKey?: string;
   /** The portal's display name (portal channel); the row names it apart from the resource, which is the agent. */
   portalName?: string;
+  /** The deployment (and its connection) an action was asked through (messaging channel); the replay needs the deployment. */
+  deploymentId?: string;
+  connectionId?: string;
   /** The project the request ran in (dashboard / API). */
   projectId?: string;
   /** The request was a TEST SESSION / came through an EMBED: part of the question, so a replay must ask it the same way. */
@@ -90,11 +93,13 @@ export function auditLevelOf(action: string): 'read' | 'write' {
 const SERVICE_OF_TYPE: Readonly<Record<string, string>> = { 'file-bucket': 'files' };
 
 /**
- * The service a refusal is filed under: the portals' for anything the portal runtime asked, else the service of
+ * The service a refusal is filed under: the portals' for anything the portal runtime asked, the channels' for the
+ * Slack / Teams runtime, else the service of
  * the resource the action is about (the agents' for the agent routes, the Document Store's for a bucket).
  */
 export function auditServiceOf(channel: string, action?: string): string {
   if (channel === 'portal') return 'portals';
+  if (channel === 'messaging') return 'channels';
   return (action && SERVICE_OF_TYPE[action.split('.')[0]]) || 'agents';
 }
 
@@ -147,6 +152,8 @@ async function write(entry: ResourceDenialEntry): Promise<void> {
       ...(entry.portalId ? { portalId: entry.portalId } : {}),
       ...(entry.portalKey ? { portalKey: entry.portalKey.slice(0, 120) } : {}),
       ...(entry.portalName ? { portalName: entry.portalName.slice(0, 200) } : {}),
+      ...(entry.deploymentId ? { deploymentId: entry.deploymentId } : {}),
+      ...(entry.connectionId ? { connectionId: entry.connectionId } : {}),
       ...(entry.projectId ? { contextProjectId: entry.projectId } : {}),
       ...(entry.contextTest ? { contextTest: true } : {}),
       ...(entry.contextEmbedded ? { contextEmbedded: true } : {}),

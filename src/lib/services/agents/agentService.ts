@@ -3402,7 +3402,7 @@ export async function checkAgentModel(
  * existed carry no source. `portal` is end-user traffic through an enterprise
  * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'trigger' | 'evaluation' | 'redteam' | 'portal' | 'slack' | 'teams';
 
 export async function createConversation(
     tenantDbName: string,

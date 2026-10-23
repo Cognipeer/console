@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export type RoutingChannel =
   | 'dashboard'
   | 'portal'
+  | 'messaging'
   | 'api'
   | 'embed'
   | 'a2a'
@@ -23,6 +24,7 @@ export type RoutingChannel =
 export const ROUTING_CHANNELS: readonly RoutingChannel[] = [
   'dashboard',
   'portal',
+  'messaging',
   'api',
   'embed',
   'a2a',
@@ -97,6 +99,7 @@ function stripUndefined(context: RoutingCallerContext): RoutingCallerContext {
 export function channelFromSource(source: string | undefined): RoutingChannel | undefined {
   switch (source) {
     case 'portal':
+    case 'messaging':
     case 'a2a':
     case 'playground':
     case 'api':
